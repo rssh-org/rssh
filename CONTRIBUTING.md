@@ -113,10 +113,43 @@ The release APK requires a signing keystore. See `src-tauri/gen/android/key.prop
 
 ### iOS
 
-iOS release packaging runs on GitHub Actions; no signing certificate is required
-on a contributor's machine. Before enabling it, register the identifier from
-`src-tauri/tauri.conf.json` (`com.rssh.app` by default) as an explicit App ID.
-The registered Bundle ID and the Tauri `identifier` must match exactly.
+For a local device build, add an Apple ID under **Xcode > Settings > Accounts**,
+connect and trust the iPhone, and enable Developer Mode. For a new account or
+device, initialize the generated project once:
+
+```bash
+APPLE_DEVELOPMENT_TEAM=XXXXXXXXXX \
+./build-ios.sh --open
+```
+
+In Xcode, select the app target, enable **Automatically manage signing**, choose
+the Personal Team and connected iPhone, then Run once. This one-time step is
+required because Tauri 2.11 can update provisioning assets but cannot register a
+new device from its CLI build.
+
+After the device is registered, build the IPA with the Personal Team ID:
+
+```bash
+APPLE_DEVELOPMENT_TEAM=XXXXXXXXXX ./build-ios.sh
+```
+
+The script uses Xcode automatic signing and the `debugging` export method by
+default. A free Personal Team profile normally expires after seven days, so the
+app must then be rebuilt and reinstalled. The Apple ID and password are read by
+Xcode from the local account and must not be passed to the script. Development
+builds use `com.rssh.app.dev.<TEAM_ID>` to avoid colliding with the release App
+ID. Override it only when necessary:
+
+```bash
+APPLE_DEVELOPMENT_TEAM=XXXXXXXXXX \
+IOS_BUNDLE_IDENTIFIER=com.example.rssh.dev \
+./build-ios.sh
+```
+
+iOS release packaging runs on GitHub Actions. Before enabling it, register the
+identifier from `src-tauri/tauri.conf.json` (`com.rssh.app` by default) as an
+explicit App ID. The registered Bundle ID and the Tauri `identifier` must match
+exactly.
 
 Configure these GitHub Actions secrets with the manual signing material:
 

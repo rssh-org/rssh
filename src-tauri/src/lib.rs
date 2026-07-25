@@ -1,5 +1,6 @@
 mod ai;
 mod commands;
+#[cfg(desktop)]
 pub use commands::cli::CLI_VERSION;
 pub mod crypto;
 pub mod db;

@@ -10,7 +10,7 @@
 
 [![Release](https://img.shields.io/github/v/release/shihuili1218/rssh)](https://github.com/shihuili1218/rssh/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/shihuili1218/rssh/total)](https://github.com/shihuili1218/rssh/releases)
-![Platforms](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux%20·%20Android-555)
+![Platforms](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux%20·%20Android·%20iOS-555)
 [![License](https://img.shields.io/github/license/shihuili1218/rssh)](LICENSE)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/shihuili1218/rssh)
 
@@ -63,18 +63,18 @@
 
 从 [Releases](https://github.com/shihuili1218/rssh/releases) 下载：
 
-| 平台                  | 文件                                   | 备注              |
-|---------------------|--------------------------------------|-----------------|
-| macOS Apple Silicon | `rssh-{ver}-macos-aarch64.dmg`       |                 |
-| macOS Intel         | `rssh-{ver}-macos-x86_64.dmg`        |                 |
-| Linux (deb)         | `rssh-{ver}-linux-x86_64.deb`        | Debian/Ubuntu   |
-| Linux (rpm)         | `rssh-{ver}-linux-x86_64.rpm`        | Fedora/RHEL     |
-| Linux (AppImage)    | `rssh-{ver}-linux-x86_64.AppImage`   | 任意发行版           |
-| Windows             | `rssh-{ver}-windows-x86_64.msi`      | 静默安装：`msiexec /i` |
-| Windows             | `rssh-{ver}-windows-x86_64-setup.exe` | 图形安装器           |
-| Windows             | `rssh-{ver}-windows-x86_64-portable.zip` | 免安装 GUI + CLI  |
-| Android             | `rssh-{ver}-android-universal.apk`   |                 |
-| iOS                 |                                      | 无官方构建；需自行打包      |
+| 平台                  | 文件                                       | 备注                     |
+|---------------------|------------------------------------------|------------------------|
+| macOS Apple Silicon | `rssh-{ver}-macos-aarch64.dmg`           |                        |
+| macOS Intel         | `rssh-{ver}-macos-x86_64.dmg`            |                        |
+| Linux (deb)         | `rssh-{ver}-linux-x86_64.deb`            | Debian/Ubuntu          |
+| Linux (rpm)         | `rssh-{ver}-linux-x86_64.rpm`            | Fedora/RHEL            |
+| Linux (AppImage)    | `rssh-{ver}-linux-x86_64.AppImage`       | 任意发行版                  |
+| Windows             | `rssh-{ver}-windows-x86_64.msi`          | 静默安装：`msiexec /i`      |
+| Windows             | `rssh-{ver}-windows-x86_64-setup.exe`    | 图形安装器                  |
+| Windows             | `rssh-{ver}-windows-x86_64-portable.zip` | 免安装 GUI + CLI          |
+| Android             | `rssh-{ver}-android-universal.apk`       |                        |
+| iOS                 |                                          | AppStore,由@paradoxie维护 |
 
 ### IntelliJ / JetBrains 插件
 

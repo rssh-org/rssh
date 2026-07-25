@@ -5,6 +5,7 @@
 # Tauri build output: capability JSON schemas + resolved ACL manifests.
 # build.rs regenerates them on every build and nothing in the tree reads them.
 /src-tauri/gen/schemas/
+/src-tauri/gen/apple/
 
 # Node
 /node_modules/

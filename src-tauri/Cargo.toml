@@ -54,7 +54,6 @@ include_dir = { version = "0.7", optional = true }
 russh-sftp = "2"
 
 # HTTP + crypto
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream", "system-proxy"] }
 base64 = "0.22"
 # 配置备份/同步走 Argon2id（KDF）+ ChaCha20-Poly1305（AEAD），
 # 标准 RustCrypto 实现；不再手搓。getrandom 用于生成 salt + nonce。
@@ -79,6 +78,12 @@ tree-sitter = "0.26.9"
 tree-sitter-bash = "0.25.1"
 fontdb = "0.23.0"
 url = "2.5.8"
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "rustls-tls-webpki-roots", "stream", "system-proxy"] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream", "system-proxy"] }
 
 # Raw termios access for the serial `xany` (IXANY) flag — the serialport crate
 # doesn't expose it. Only the Unix desktop targets compile the serial module.

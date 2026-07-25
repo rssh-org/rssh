@@ -68,6 +68,7 @@ jobs:
           IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
           IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
           IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
+          IOS_EXPORT_METHOD: app-store-connect
           REQUESTED_BUILD_NUMBER: ${{ inputs.build_number }}
         run: |
           BUILD_NUMBER="${REQUESTED_BUILD_NUMBER:-${GITHUB_RUN_NUMBER}}"

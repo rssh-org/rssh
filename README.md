@@ -10,7 +10,7 @@
 
 [![Release](https://img.shields.io/github/v/release/shihuili1218/rssh)](https://github.com/shihuili1218/rssh/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/shihuili1218/rssh/total)](https://github.com/shihuili1218/rssh/releases)
-![Platforms](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux%20·%20Android-555)
+![Platforms](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux%20·%20Android·%20iOS-555)
 [![License](https://img.shields.io/github/license/shihuili1218/rssh)](LICENSE)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/shihuili1218/rssh)
 
@@ -63,18 +63,18 @@ Every command and its output become a block with a color-coded left edge. In a t
 
 Download from [Releases](https://github.com/shihuili1218/rssh/releases):
 
-| Platform            | File                                  | Notes                        |
-|---------------------|---------------------------------------|------------------------------|
-| macOS Apple Silicon | `rssh-{ver}-macos-aarch64.dmg`        |                              |
-| macOS Intel         | `rssh-{ver}-macos-x86_64.dmg`         |                              |
-| Linux (deb)         | `rssh-{ver}-linux-x86_64.deb`         | Debian/Ubuntu                |
-| Linux (rpm)         | `rssh-{ver}-linux-x86_64.rpm`         | Fedora/RHEL                  |
-| Linux (AppImage)    | `rssh-{ver}-linux-x86_64.AppImage`    | Any distro                   |
-| Windows             | `rssh-{ver}-windows-x86_64.msi`       | Silent install: `msiexec /i` |
-| Windows             | `rssh-{ver}-windows-x86_64-setup.exe` | GUI installer                |
-| Windows             | `rssh-{ver}-windows-x86_64-portable.zip` | Portable GUI + CLI        |
-| Android             | `rssh-{ver}-android-universal.apk`    |                              |
-| iOS                 |                                       | No official build; build it yourself |
+| Platform            | File                                     | Notes                        |
+|---------------------|------------------------------------------|------------------------------|
+| macOS Apple Silicon | `rssh-{ver}-macos-aarch64.dmg`           |                              |
+| macOS Intel         | `rssh-{ver}-macos-x86_64.dmg`            |                              |
+| Linux (deb)         | `rssh-{ver}-linux-x86_64.deb`            | Debian/Ubuntu                |
+| Linux (rpm)         | `rssh-{ver}-linux-x86_64.rpm`            | Fedora/RHEL                  |
+| Linux (AppImage)    | `rssh-{ver}-linux-x86_64.AppImage`       | Any distro                   |
+| Windows             | `rssh-{ver}-windows-x86_64.msi`          | Silent install: `msiexec /i` |
+| Windows             | `rssh-{ver}-windows-x86_64-setup.exe`    | GUI installer                |
+| Windows             | `rssh-{ver}-windows-x86_64-portable.zip` | Portable GUI + CLI           |
+| Android             | `rssh-{ver}-android-universal.apk`       |                              |
+| iOS                 |                                          | AppStore, by @paradoxie      |
 
 ### IntelliJ / JetBrains plugin
 
