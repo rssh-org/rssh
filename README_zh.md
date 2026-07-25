@@ -74,7 +74,7 @@
 | Windows             | `rssh-{ver}-windows-x86_64-setup.exe`    | 图形安装器                  |
 | Windows             | `rssh-{ver}-windows-x86_64-portable.zip` | 免安装 GUI + CLI          |
 | Android             | `rssh-{ver}-android-universal.apk`       |                        |
-| iOS                 |                                          | AppStore,由@paradoxie维护 |
+| iOS                 |                                          | AppStore，由 [@paradoxie](https://github.com/paradoxie) 维护 |
 
 ### IntelliJ / JetBrains 插件
 

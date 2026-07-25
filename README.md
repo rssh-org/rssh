@@ -74,7 +74,7 @@ Download from [Releases](https://github.com/shihuili1218/rssh/releases):
 | Windows             | `rssh-{ver}-windows-x86_64-setup.exe`    | GUI installer                |
 | Windows             | `rssh-{ver}-windows-x86_64-portable.zip` | Portable GUI + CLI           |
 | Android             | `rssh-{ver}-android-universal.apk`       |                              |
-| iOS                 |                                          | AppStore, by @paradoxie      |
+| iOS                 |                                          | AppStore, by [@paradoxie](https://github.com/paradoxie) |
 
 ### IntelliJ / JetBrains plugin
 
