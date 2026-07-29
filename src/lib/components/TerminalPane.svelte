@@ -20,7 +20,7 @@
     import {readViewportSnapshot, readViewportText} from "../terminal/viewport-snapshot.ts";
     import {createFoldStore, type FoldStore} from "../terminal/folds.ts";
     import {createPaintScheduler, type PaintScheduler} from "../terminal/paint-scheduler.ts";
-    import {createTerminalWriteBatcher, type TerminalWriteBatcher} from "../terminal/write-batcher.ts";
+
     import {extractBlocksText} from "../terminal/block-content.ts";
     import {setupTouchScroll} from "../terminal/touch-scroll.ts";
     import {setupXtermIme229Workaround} from "../terminal/xterm-ime-229-workaround.ts";
@@ -105,7 +105,6 @@
         promptText: string,
         opts: { echo: boolean; onSubmit: (value: string) => void; onCancel: () => void },
     ): IDisposable {
-        writeBatcher?.flush();
         terminal.write(`\r\n${promptText}`);
 
         let buffer = "";
@@ -220,7 +219,6 @@
     let blockTracker: CommandBlockTracker | undefined;
     let foldStore: FoldStore | undefined;
     let paintScheduler: PaintScheduler | undefined;
-    let writeBatcher: TerminalWriteBatcher | undefined;
     let paintTick = $state(0);
     let isAltBuffer = $state(false);
 
@@ -242,8 +240,7 @@
     }
 
     function writeRawOutput(raw: Uint8Array) {
-        if (writeBatcher) writeBatcher.write(raw);
-        else terminal.write(raw);
+        terminal.write(raw);
     }
 
     // 右键菜单状态。null = 不显示。
@@ -595,7 +592,6 @@
     }
     function announceDisconnected(reason?: string) {
         if (destroyed || disconnected) return;
-        writeBatcher?.flush();
         disconnected = true;
         if (reason) terminal.write(`\r\n\x1b[31m${reason}\x1b[0m\r\n`);
         terminal.write("\r\n\x1b[31m--- Disconnected ---\x1b[0m\r\n");
@@ -1157,7 +1153,6 @@
             } catch (e: any) {
                 clearSshPromptUi();
                 if (!isCurrent()) return false;
-                writeBatcher?.flush();
                 terminal.write(`\x1b[31mConnection failed: ${e}\x1b[0m\r\n`);
                 terminal.write("\x1b[90mPress any key to reconnect.\x1b[0m\r\n");
                 disconnected = true;
@@ -1502,9 +1497,6 @@
             enabled: keymap.isMac && !app.isMobile,
         });
         terminal.unicode.activeVersion = "11";
-        writeBatcher = createTerminalWriteBatcher({
-            write: (data) => terminal.write(data),
-        });
         // Keyword highlighting lives here: a decoration layer over the parsed
         // cell grid. The reactive $effect above feeds it the compiled rules.
         highlightDecorator = new HighlightDecorator(terminal);
@@ -1779,7 +1771,6 @@
         ime229WorkaroundCleanup = undefined;
         mobileKeyboardCleanup?.();
         mobileTouchScrollCleanup?.();
-        writeBatcher?.dispose();
         paintScheduler?.dispose();
         foldStore?.dispose();
         blockTracker?.dispose();
