@@ -157,10 +157,7 @@ describe("fwd: handler", () => {
           {
             id: "f1",
             name: "tunnel",
-            type: "local",
-            local_port: 8080,
-            remote_host: "10.0.0.1",
-            remote_port: 80,
+            rules: [{ type: "local", local_port: 8080, remote_host: "10.0.0.1", remote_port: 80 }],
             profile_id: "p1",
           },
         ];
@@ -176,10 +173,7 @@ describe("fwd: handler", () => {
     expect(arg.type).toBe("forward");
     expect(arg.label).toBe("tunnel");
     expect(arg.meta.forwardId).toBe("f1");
-    expect(arg.meta.forwardType).toBe("local");
-    expect(arg.meta.localPort).toBe("8080");
-    expect(arg.meta.remoteHost).toBe("10.0.0.1");
-    expect(arg.meta.remotePort).toBe("80");
+    expect(arg.meta.ruleCount).toBe("1");
     expect(arg.meta.profileName).toBe("prod");
     // tab id 形态：fwd:<id>:<timestamp>
     expect(arg.id).toMatch(/^fwd:f1:\d+$/);

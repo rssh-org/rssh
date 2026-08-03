@@ -4,11 +4,13 @@ use serde_json::json;
 
 use crate::error::{error_chain, AppError, AppResult};
 use crate::sync::metadata::SyncMetadata;
-use crate::sync::remote::RemoteBackup;
+use crate::sync::remote::{BackupNamespace, RemoteBackup};
 
 const API_BASE: &str = "https://api.github.com";
 const BACKUP_FILE: &str = "rssh_backup.json";
 const METADATA_FILE: &str = "rssh_backup.meta.json";
+const CURRENT_BACKUP_FILE: &str = "rssh_backup.v25.json";
+const CURRENT_METADATA_FILE: &str = "rssh_backup.v25.meta.json";
 
 /// GitHub 配置同步。
 pub struct GitHubSync {
@@ -124,6 +126,13 @@ impl GitHubSync {
         Ok(())
     }
 
+    fn files(namespace: BackupNamespace) -> (&'static str, &'static str) {
+        match namespace {
+            BackupNamespace::Current => (CURRENT_BACKUP_FILE, CURRENT_METADATA_FILE),
+            BackupNamespace::Legacy => (BACKUP_FILE, METADATA_FILE),
+        }
+    }
+
     /// 推送配置 JSON 到 GitHub。
     pub async fn push(&self, json_content: &str) -> AppResult<()> {
         self.push_file(BACKUP_FILE, json_content, "Update RSSH config")
@@ -132,7 +141,11 @@ impl GitHubSync {
 
     /// 从 GitHub 拉取配置 JSON。
     pub async fn pull(&self) -> AppResult<String> {
-        let url = format!("{}?ref={}", self.contents_url(BACKUP_FILE), self.branch);
+        self.pull_file(BACKUP_FILE).await
+    }
+
+    async fn pull_file(&self, file_name: &str) -> AppResult<String> {
+        let url = format!("{}?ref={}", self.contents_url(file_name), self.branch);
 
         let resp = self
             .client
@@ -178,7 +191,11 @@ impl GitHubSync {
 
     /// 拉取明文同步元数据。旧版远端没有该文件时返回 `None`；其他错误仍向上返回。
     pub async fn pull_metadata(&self) -> AppResult<Option<SyncMetadata>> {
-        let url = format!("{}?ref={}", self.contents_url(METADATA_FILE), self.branch);
+        self.pull_metadata_file(METADATA_FILE).await
+    }
+
+    async fn pull_metadata_file(&self, file_name: &str) -> AppResult<Option<SyncMetadata>> {
+        let url = format!("{}?ref={}", self.contents_url(file_name), self.branch);
         let resp = self
             .client
             .get(&url)
@@ -240,20 +257,31 @@ impl GitHubSync {
 
 #[async_trait::async_trait]
 impl RemoteBackup for GitHubSync {
-    async fn read_payload(&self) -> AppResult<String> {
-        self.pull().await
+    async fn read_payload(&self, namespace: BackupNamespace) -> AppResult<String> {
+        self.pull_file(Self::files(namespace).0).await
     }
 
-    async fn read_metadata(&self) -> AppResult<Option<SyncMetadata>> {
-        self.pull_metadata().await
+    async fn read_metadata(&self, namespace: BackupNamespace) -> AppResult<Option<SyncMetadata>> {
+        self.pull_metadata_file(Self::files(namespace).1).await
     }
 
-    async fn write_payload(&self, content: &str) -> AppResult<()> {
-        self.push(content).await
+    async fn write_payload(&self, namespace: BackupNamespace, content: &str) -> AppResult<()> {
+        self.push_file(Self::files(namespace).0, content, "Update RSSH config")
+            .await
     }
 
-    async fn write_metadata(&self, metadata: &SyncMetadata) -> AppResult<()> {
-        self.push_metadata(metadata).await
+    async fn write_metadata(
+        &self,
+        namespace: BackupNamespace,
+        metadata: &SyncMetadata,
+    ) -> AppResult<()> {
+        let content = metadata.to_json()?;
+        self.push_file(
+            Self::files(namespace).1,
+            &content,
+            "Update RSSH config metadata",
+        )
+        .await
     }
 }
 

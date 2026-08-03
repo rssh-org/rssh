@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
@@ -142,8 +143,8 @@ pub struct SshHandler {
     port: u16,
     known_hosts_path: PathBuf,
     key_mismatch: Arc<StdMutex<bool>>,
-    /// Sender for forwarded channels from remote port forwarding.
-    forwarded_channels: Arc<StdMutex<Option<mpsc::UnboundedSender<russh::Channel<client::Msg>>>>>,
+    /// Remote listening port -> consumer for forwarded channels on that port.
+    forwarded_channels: ForwardedChannelRouter,
     /// Surface TOFU fingerprints / known_hosts write errors back to the user.
     log: LogFn,
     /// 终端可达性上下文：有则未知主机走 xterm 内 yes/no/指纹确认；
@@ -158,15 +159,26 @@ impl client::Handler for SshHandler {
         &mut self,
         channel: russh::Channel<client::Msg>,
         _connected_address: &str,
-        _connected_port: u32,
+        connected_port: u32,
         _originator_address: &str,
         _originator_port: u32,
-        _session: &mut client::Session,
+        session: &mut client::Session,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        if let Ok(guard) = self.forwarded_channels.lock() {
-            if let Some(tx) = guard.as_ref() {
-                let _ = tx.send(channel);
-            }
+        let channel_id = channel.id();
+        let delivered = self
+            .forwarded_channels
+            .lock()
+            .ok()
+            .and_then(|router| {
+                router
+                    .routes
+                    .get(&connected_port)
+                    .or(router.pending.as_ref())
+                    .cloned()
+            })
+            .is_some_and(|tx| tx.send(channel).is_ok());
+        if !delivered {
+            let _ = session.close(channel_id);
         }
         async { Ok(()) }
     }
@@ -232,6 +244,10 @@ impl client::Handler for SshHandler {
         &mut self,
         reason: client::DisconnectReason<Self::Error>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        if let Ok(mut router) = self.forwarded_channels.lock() {
+            router.routes.clear();
+            router.pending = None;
+        }
         async move {
             match reason {
                 client::DisconnectReason::ReceivedDisconnect(info) => {
@@ -378,9 +394,13 @@ async fn handle_key_mismatch(
     Ok(true)
 }
 
-/// Shared forwarded-channel sender, settable from outside.
-pub type ForwardedChannelSender =
-    Arc<StdMutex<Option<mpsc::UnboundedSender<russh::Channel<client::Msg>>>>>;
+#[derive(Default)]
+pub struct ForwardedChannelRoutes {
+    pub routes: HashMap<u32, mpsc::UnboundedSender<russh::Channel<client::Msg>>>,
+    pub pending: Option<mpsc::UnboundedSender<russh::Channel<client::Msg>>>,
+}
+
+pub type ForwardedChannelRouter = Arc<StdMutex<ForwardedChannelRoutes>>;
 
 /// The constant context for dialing one SSH endpoint: everything that stays the
 /// same across every hop of a bastion chain. Only `host`/`port` (and the relayed
@@ -402,9 +422,9 @@ fn new_handler(
     known_hosts_path: PathBuf,
     log: LogFn,
     prompt_ctx: Option<AuthCtx>,
-) -> (SshHandler, Arc<StdMutex<bool>>, ForwardedChannelSender) {
+) -> (SshHandler, Arc<StdMutex<bool>>, ForwardedChannelRouter) {
     let mismatch = Arc::new(StdMutex::new(false));
-    let fwd_channels: ForwardedChannelSender = Arc::new(StdMutex::new(None));
+    let fwd_channels: ForwardedChannelRouter = Arc::new(StdMutex::new(Default::default()));
     let handler = SshHandler {
         host: host.to_string(),
         port,
@@ -472,7 +492,7 @@ pub async fn ssh_connect_with_forward(
     ctx: DialCtx,
     host: String,
     port: u16,
-) -> AppResult<(client::Handle<SshHandler>, ForwardedChannelSender)> {
+) -> AppResult<(client::Handle<SshHandler>, ForwardedChannelRouter)> {
     let DialCtx {
         config,
         known_hosts_path,
@@ -506,7 +526,7 @@ pub async fn ssh_connect_stream<S>(
     stream: S,
     host: String,
     port: u16,
-) -> AppResult<(client::Handle<SshHandler>, ForwardedChannelSender)>
+) -> AppResult<(client::Handle<SshHandler>, ForwardedChannelRouter)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -552,7 +572,7 @@ pub async fn establish_via_chain(
     timeout_secs: u64,
     log: LogFn,
     ctx: Option<&AuthCtx>,
-) -> AppResult<(client::Handle<SshHandler>, ForwardedChannelSender)> {
+) -> AppResult<(client::Handle<SshHandler>, ForwardedChannelRouter)> {
     if bastion_chain.is_empty() {
         let target_host = target_profile.host.clone();
         let target_port = target_profile.port;

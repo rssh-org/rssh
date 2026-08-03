@@ -2,7 +2,7 @@ use serde_json::json;
 use tauri::State;
 
 use crate::error::{locked, AppError, AppResult};
-use crate::models::{Credential, Forward, ForwardType, Profile};
+use crate::models::{Credential, Forward, Profile};
 use crate::ssh::forward as fwd;
 use crate::state::{AppState, SessionKind, SessionOwner};
 
@@ -100,15 +100,9 @@ pub async fn forward_start_impl(
         known_hosts_path,
         timeout_secs,
     };
-    let kind = f.forward_type;
-    let handle = crate::ssh::client::run_blocking_ssh(move || async move {
-        match kind {
-            ForwardType::Local => fwd::start_local(f, target).await,
-            ForwardType::Remote => fwd::start_remote(f, target).await,
-            ForwardType::Dynamic => fwd::start_dynamic(f, target).await,
-        }
-    })
-    .await?;
+    let handle =
+        crate::ssh::client::run_blocking_ssh(move || async move { fwd::start(f, target).await })
+            .await?;
     reservation.activate(crate::commands::lifecycle::ReadySession::Forward(handle))?;
 
     Ok(active_id)

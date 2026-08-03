@@ -191,12 +191,15 @@ fn runtime_completion_reads_named_resources() {
     let forward = Forward {
         id: "forward-id".into(),
         name: "Forward Database".into(),
-        forward_type: ForwardType::Local,
-        local_port: 5432,
-        remote_host: "database.internal".into(),
-        remote_port: 5432,
         profile_id: profile.id,
         group_id: None,
+        legacy_projection: false,
+        rules: vec![rssh_lib::models::ForwardRule {
+            forward_type: ForwardType::Local,
+            local_port: 5432,
+            remote_host: "database.internal".into(),
+            remote_port: 5432,
+        }],
     };
     rssh_lib::db::forward::insert(&db, &forward).expect("insert forward");
     drop(db);

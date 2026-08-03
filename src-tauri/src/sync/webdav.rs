@@ -6,10 +6,12 @@ use url::Url;
 
 use crate::error::{error_chain, AppError, AppResult};
 use crate::sync::metadata::SyncMetadata;
-use crate::sync::remote::RemoteBackup;
+use crate::sync::remote::{BackupNamespace, RemoteBackup};
 
 const BACKUP_FILE: &str = "rssh_backup.enc";
 const METADATA_FILE: &str = "rssh_backup.meta.json";
+const CURRENT_BACKUP_FILE: &str = "rssh_backup.v25.enc";
+const CURRENT_METADATA_FILE: &str = "rssh_backup.v25.meta.json";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ERROR_BODY_LEN: usize = 2048;
 
@@ -136,6 +138,13 @@ impl WebDavSync {
         ))
     }
 
+    fn files(namespace: BackupNamespace) -> (&'static str, &'static str) {
+        match namespace {
+            BackupNamespace::Current => (CURRENT_BACKUP_FILE, CURRENT_METADATA_FILE),
+            BackupNamespace::Legacy => (BACKUP_FILE, METADATA_FILE),
+        }
+    }
+
     /// 推送加密配置到 WebDAV。
     pub async fn push(&self, content: &str) -> AppResult<()> {
         self.put_file(BACKUP_FILE, content).await
@@ -222,20 +231,30 @@ impl WebDavSync {
 
 #[async_trait::async_trait]
 impl RemoteBackup for WebDavSync {
-    async fn read_payload(&self) -> AppResult<String> {
-        self.pull().await
+    async fn read_payload(&self, namespace: BackupNamespace) -> AppResult<String> {
+        self.get_file(Self::files(namespace).0)
+            .await?
+            .ok_or_else(|| AppError::other("webdav_not_found", json!({})))
     }
 
-    async fn read_metadata(&self) -> AppResult<Option<SyncMetadata>> {
-        self.pull_metadata().await
+    async fn read_metadata(&self, namespace: BackupNamespace) -> AppResult<Option<SyncMetadata>> {
+        let Some(content) = self.get_file(Self::files(namespace).1).await? else {
+            return Ok(None);
+        };
+        SyncMetadata::from_json(&content).map(Some)
     }
 
-    async fn write_payload(&self, content: &str) -> AppResult<()> {
-        self.put_file(BACKUP_FILE, content).await
+    async fn write_payload(&self, namespace: BackupNamespace, content: &str) -> AppResult<()> {
+        self.put_file(Self::files(namespace).0, content).await
     }
 
-    async fn write_metadata(&self, metadata: &SyncMetadata) -> AppResult<()> {
-        self.push_metadata(metadata).await
+    async fn write_metadata(
+        &self,
+        namespace: BackupNamespace,
+        metadata: &SyncMetadata,
+    ) -> AppResult<()> {
+        let content = metadata.to_json()?;
+        self.put_file(Self::files(namespace).1, &content).await
     }
 }
 

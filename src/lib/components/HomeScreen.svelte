@@ -14,6 +14,7 @@
   import { errMsg, locale, t } from "../i18n/index.svelte.ts";
   import { toast } from "../stores/toast.svelte.ts";
   import { createHomeRefresh } from "./home-refresh.ts";
+  import { forwardDetail } from "./connection-list.ts";
   import AppIcon from "./AppIcon.svelte";
   import {
     connectionIconName,
@@ -137,7 +138,7 @@
     }),
     ...forwards.map((f): HomeItem => ({
       kind: "forward", id: `forward:${f.id}`, name: f.name,
-      sub: `:${f.local_port} → ${f.remote_host}:${f.remote_port}`,
+      sub: forwardDetail(f),
       icon: connectionIconName("forward"),
       iconClass: "fwd", groupId: f.group_id ?? null,
       pinProfileId: null, open: () => openForward(f),
@@ -339,10 +340,7 @@
       id, type: "forward", label: f.name,
       meta: {
         forwardId: f.id, name: f.name,
-        forwardType: f.type,
-        localPort: String(f.local_port),
-        remoteHost: f.remote_host,
-        remotePort: String(f.remote_port),
+        ruleCount: String(f.rules.length),
         profileName: fp?.name ?? "?",
       },
     });

@@ -151,15 +151,26 @@ pub fn cmd_edit_forward(conn: &CliCtx, name: &str) -> AppResult<()> {
         .find(|f| f.name.eq_ignore_ascii_case(name))
         .unwrap_or_else(|| die(format!("Forward '{name}' not found")));
 
+    if f.rules.len() != 1 {
+        return Err(AppError::config(
+            "cli_forward_edit_multiple_rules",
+            serde_json::json!({ "count": f.rules.len() }),
+        ));
+    }
+
     let mut updated = f.clone();
     updated.name = prompt_default("Name", &f.name);
-    updated.local_port = prompt_default("Local port", &f.local_port.to_string())
+    let rule = updated
+        .rules
+        .first_mut()
+        .ok_or_else(|| AppError::config("fwd_rules_empty", serde_json::json!({})))?;
+    rule.local_port = prompt_default("Local port", &rule.local_port.to_string())
         .parse()
-        .unwrap_or(f.local_port);
-    updated.remote_host = prompt_default("Remote host", &f.remote_host);
-    updated.remote_port = prompt_default("Remote port", &f.remote_port.to_string())
+        .unwrap_or(rule.local_port);
+    rule.remote_host = prompt_default("Remote host", &rule.remote_host);
+    rule.remote_port = prompt_default("Remote port", &rule.remote_port.to_string())
         .parse()
-        .unwrap_or(f.remote_port);
+        .unwrap_or(rule.remote_port);
 
     rssh_lib::db::forward::update(conn, &updated)?;
     println!("Forward '{}' updated.", updated.name);

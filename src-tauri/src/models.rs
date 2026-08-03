@@ -219,20 +219,108 @@ pub enum ForwardType {
     Dynamic,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Forward {
-    pub id: String,
-    pub name: String,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForwardRule {
     #[serde(rename = "type")]
     pub forward_type: ForwardType,
     pub local_port: u16,
     pub remote_host: String,
     pub remote_port: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct Forward {
+    pub id: String,
+    pub name: String,
     pub profile_id: String,
     /// Optional group membership — shares the same `groups` table as profiles.
-    /// `#[serde(default)]` keeps older exported payloads (no group_id) importable.
-    #[serde(default)]
+    /// Older exported payloads without group_id deserialize through ForwardWire.
     pub group_id: Option<String>,
+    pub rules: Vec<ForwardRule>,
+    /// Payloads from older clients contain only the first-rule projection.
+    /// Their updates must not erase additional rules they cannot represent.
+    pub legacy_projection: bool,
+}
+
+impl Serialize for Forward {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::{Error, SerializeStruct};
+
+        let first = self
+            .rules
+            .first()
+            .ok_or_else(|| S::Error::custom("forward requires at least one rule"))?;
+        let mut state = serializer.serialize_struct("Forward", 9)?;
+        state.serialize_field("id", &self.id)?;
+        state.serialize_field("name", &self.name)?;
+        // DEPRECATED(v25 compatibility): first-rule projection for pre-v25
+        // clients. Remove these four fields together with ForwardWire's legacy
+        // fallback once unsupported clients can no longer write sync payloads.
+        state.serialize_field("type", &first.forward_type)?;
+        state.serialize_field("local_port", &first.local_port)?;
+        state.serialize_field("remote_host", &first.remote_host)?;
+        state.serialize_field("remote_port", &first.remote_port)?;
+        state.serialize_field("profile_id", &self.profile_id)?;
+        state.serialize_field("group_id", &self.group_id)?;
+        state.serialize_field("rules", &self.rules)?;
+        state.end()
+    }
+}
+
+#[derive(Deserialize)]
+struct ForwardWire {
+    id: String,
+    name: String,
+    profile_id: String,
+    #[serde(default)]
+    group_id: Option<String>,
+    rules: Option<Vec<ForwardRule>>,
+    // DEPRECATED(v25 compatibility): pre-v25 payloads stored one rule inline.
+    // Remove with the serializer projection after the sync compatibility window.
+    #[serde(rename = "type")]
+    forward_type: Option<ForwardType>,
+    local_port: Option<u16>,
+    remote_host: Option<String>,
+    remote_port: Option<u16>,
+}
+
+impl<'de> Deserialize<'de> for Forward {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ForwardWire::deserialize(deserializer)?;
+        let legacy_projection = wire.rules.is_none();
+        let rules = if let Some(rules) = wire.rules {
+            rules
+        } else {
+            vec![ForwardRule {
+                forward_type: wire
+                    .forward_type
+                    .ok_or_else(|| serde::de::Error::missing_field("type"))?,
+                local_port: wire
+                    .local_port
+                    .ok_or_else(|| serde::de::Error::missing_field("local_port"))?,
+                remote_host: wire
+                    .remote_host
+                    .ok_or_else(|| serde::de::Error::missing_field("remote_host"))?,
+                remote_port: wire
+                    .remote_port
+                    .ok_or_else(|| serde::de::Error::missing_field("remote_port"))?,
+            }]
+        };
+        Ok(Self {
+            id: wire.id,
+            name: wire.name,
+            profile_id: wire.profile_id,
+            group_id: wire.group_id,
+            rules,
+            legacy_projection,
+        })
+    }
 }
 
 /// Saved serial console — a peer of `Profile`/`Forward`. No secret, no FK: just

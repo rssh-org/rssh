@@ -85,10 +85,14 @@ export interface Credential {
   type: string; secret: string | null; save_to_remote: boolean;
   passphrase: string | null;
 }
+export interface ForwardRule {
+  type: "local" | "remote" | "dynamic";
+  local_port: number; remote_host: string; remote_port: number;
+}
 export interface Forward {
-  id: string; name: string; type: string;
-  local_port: number; remote_host: string; remote_port: number; profile_id: string;
+  id: string; name: string; profile_id: string;
   group_id: string | null;
+  rules: ForwardRule[];
 }
 export interface SerialProfile {
   id: string; name: string; port: string;

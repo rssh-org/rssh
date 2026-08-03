@@ -78,15 +78,22 @@ pub fn cmd_list_forwards(conn: &CliCtx) -> AppResult<()> {
             .find(|p| p.id == f.profile_id)
             .map(|p| p.name.as_str())
             .unwrap_or("?");
-        let arrow = match f.forward_type {
-            ForwardType::Local => {
-                format!("-L {} → {}:{}", f.local_port, f.remote_host, f.remote_port)
-            }
-            ForwardType::Remote => {
-                format!("-R {} → {}:{}", f.remote_port, f.remote_host, f.local_port)
-            }
-            ForwardType::Dynamic => format!("-D {}", f.local_port),
-        };
+        let arrow = f
+            .rules
+            .iter()
+            .map(|rule| match rule.forward_type {
+                ForwardType::Local => format!(
+                    "-L {} → {}:{}",
+                    rule.local_port, rule.remote_host, rule.remote_port
+                ),
+                ForwardType::Remote => format!(
+                    "-R {} → {}:{}",
+                    rule.remote_port, rule.remote_host, rule.local_port
+                ),
+                ForwardType::Dynamic => format!("-D {}", rule.local_port),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         println!("{} ({}) via {}", f.name, arrow, pname);
     }
     Ok(())

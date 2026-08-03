@@ -95,26 +95,36 @@ fn open_forward(conn: &CliCtx, name: &str) -> AppResult<()> {
     )?;
 
     let mut cmd = Command::new("ssh");
-    cmd.arg("-N");
+    cmd.arg("-N").arg("-o").arg("ExitOnForwardFailure=yes");
 
-    let (flag, fwd_arg) = match fwd.forward_type {
-        ForwardType::Local => (
-            "-L",
-            format!("{}:{}:{}", fwd.local_port, fwd.remote_host, fwd.remote_port),
-        ),
-        ForwardType::Remote => (
-            "-R",
-            format!("{}:{}:{}", fwd.remote_port, fwd.remote_host, fwd.local_port),
-        ),
-        ForwardType::Dynamic => ("-D", format!("{}", fwd.local_port)),
-    };
-    cmd.arg(flag).arg(&fwd_arg);
+    let mut descriptions = Vec::with_capacity(fwd.rules.len());
+    for rule in &fwd.rules {
+        let (flag, arg) = match rule.forward_type {
+            ForwardType::Local => (
+                "-L",
+                format!(
+                    "{}:{}:{}",
+                    rule.local_port, rule.remote_host, rule.remote_port
+                ),
+            ),
+            ForwardType::Remote => (
+                "-R",
+                format!(
+                    "{}:{}:{}",
+                    rule.remote_port, rule.remote_host, rule.local_port
+                ),
+            ),
+            ForwardType::Dynamic => ("-D", rule.local_port.to_string()),
+        };
+        cmd.arg(flag).arg(&arg);
+        descriptions.push(format!("{flag} {arg}"));
+    }
 
     let key_files = build_ssh_command(&mut cmd, conn, &profile, &cred)?;
 
     cmd.arg(&profile.host);
 
-    println!("Forwarding {} {} ...", flag, fwd_arg);
+    println!("Forwarding {} ...", descriptions.join(", "));
     let status = cmd
         .status()
         .unwrap_or_else(|e| die(format!("Failed to run ssh: {e}")));

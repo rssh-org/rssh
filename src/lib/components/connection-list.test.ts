@@ -31,8 +31,8 @@ describe("connection list grouping", () => {
     const items = buildConnectionItems({
       profiles: [{ id: "ssh-1", name: "API", host: "api", port: 22, group_id: "prod" }],
       forwards: [{
-        id: "fwd-1", name: "DB tunnel", type: "local", local_port: 5432,
-        remote_host: "db", remote_port: 5432, profile_id: "ssh-1", group_id: "prod",
+        id: "fwd-1", name: "DB tunnel", profile_id: "ssh-1", group_id: "prod",
+        rules: [{ type: "local", local_port: 5432, remote_host: "db", remote_port: 5432 }],
       }],
       serialProfiles: [{
         id: "serial-1", name: "Console", port: "/dev/ttyUSB0", baud_rate: 115200,
@@ -54,16 +54,19 @@ describe("connection list grouping", () => {
     const items = buildConnectionItems({
       profiles: [{ id: "ssh-1", name: "Gateway", host: "gateway", port: 22, group_id: null }],
       forwards: [
-        { id: "local", name: "Local", type: "local", local_port: 9000, remote_host: "target", remote_port: 7000, profile_id: "ssh-1", group_id: null },
-        { id: "remote", name: "Remote", type: "remote", local_port: 9000, remote_host: "target", remote_port: 7000, profile_id: "ssh-1", group_id: null },
-        { id: "dynamic", name: "SOCKS", type: "dynamic", local_port: 1080, remote_host: "unused", remote_port: 0, profile_id: "ssh-1", group_id: null },
+        { id: "local", name: "Local", rules: [
+          { type: "local", local_port: 9000, remote_host: "target", remote_port: 7000 },
+          { type: "dynamic", local_port: 1080, remote_host: "unused", remote_port: 0 },
+        ], profile_id: "ssh-1", group_id: null },
+        { id: "remote", name: "Remote", rules: [{ type: "remote", local_port: 9000, remote_host: "target", remote_port: 7000 }], profile_id: "ssh-1", group_id: null },
+        { id: "dynamic", name: "SOCKS", rules: [{ type: "dynamic", local_port: 1080, remote_host: "unused", remote_port: 0 }], profile_id: "ssh-1", group_id: null },
       ],
       serialProfiles: [],
       telnetProfiles: [],
     });
 
     expect(items.filter((item) => item.kind === "forward").map((item) => item.detail)).toEqual([
-      "-L 9000 → target:7000 · via Gateway",
+      "-L 9000 → target:7000, -D 1080 · via Gateway",
       "-R 7000 → target:9000 · via Gateway",
       "-D 1080 · via Gateway",
     ]);

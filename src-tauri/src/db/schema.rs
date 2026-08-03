@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppResult;
 
-const SCHEMA_VERSION: u32 = 24;
+const SCHEMA_VERSION: u32 = 25;
 
 fn column_exists(conn: &Connection, table: &str, col: &str) -> AppResult<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
@@ -57,6 +57,8 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
                 id           TEXT PRIMARY KEY,
                 name         TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 profile_id   TEXT NOT NULL,
+                -- DEPRECATED(v25 compatibility): first-rule projection.
+                -- New code stores the authoritative rules in forward_rules.
                 type         TEXT NOT NULL DEFAULT 'local',
                 local_port   INTEGER NOT NULL,
                 remote_host  TEXT NOT NULL,
@@ -509,6 +511,78 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
         )?;
     }
 
+    if version < 25 && table_exists(conn, "forwards")? {
+        // DEPRECATED(v25 compatibility): the legacy columns and triggers below
+        // keep pre-v25 binaries working. Remove them in one migration only after
+        // every supported version reads/writes forward_rules and all supported
+        // databases have crossed v25.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS forward_rules (
+                 forward_id  TEXT NOT NULL,
+                 position    INTEGER NOT NULL,
+                 type        TEXT NOT NULL,
+                 local_port  INTEGER NOT NULL,
+                 remote_host TEXT NOT NULL,
+                 remote_port INTEGER NOT NULL,
+                 PRIMARY KEY (forward_id, position),
+                 FOREIGN KEY (forward_id) REFERENCES forwards(id) ON DELETE CASCADE
+             );
+             INSERT INTO forward_rules
+                 (forward_id, position, type, local_port, remote_host, remote_port)
+             SELECT id, 0, type, local_port, remote_host, remote_port
+             FROM forwards
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM forward_rules WHERE forward_id = forwards.id
+             );
+
+             CREATE TRIGGER IF NOT EXISTS forwards_legacy_insert
+             AFTER INSERT ON forwards
+             WHEN NOT EXISTS (SELECT 1 FROM forward_rules WHERE forward_id = NEW.id)
+             BEGIN
+               INSERT INTO forward_rules
+                   (forward_id, position, type, local_port, remote_host, remote_port)
+               VALUES (NEW.id, 0, NEW.type, NEW.local_port, NEW.remote_host, NEW.remote_port);
+             END;
+
+             CREATE TRIGGER IF NOT EXISTS forwards_legacy_update
+             AFTER UPDATE OF type, local_port, remote_host, remote_port ON forwards
+             BEGIN
+               UPDATE forward_rules
+               SET type = NEW.type,
+                   local_port = NEW.local_port,
+                   remote_host = NEW.remote_host,
+                   remote_port = NEW.remote_port
+               WHERE forward_id = NEW.id AND position = 0;
+               SELECT CASE WHEN EXISTS (
+                 SELECT 1
+                 FROM forward_rules AS first_rule
+                 JOIN forward_rules AS other
+                   ON other.forward_id = first_rule.forward_id
+                  AND other.position != first_rule.position
+                 WHERE first_rule.forward_id = NEW.id
+                   AND first_rule.position = 0
+                   AND (
+                     (first_rule.type IN ('local', 'dynamic')
+                       AND first_rule.local_port != 0
+                       AND other.type IN ('local', 'dynamic')
+                       AND other.local_port = first_rule.local_port)
+                     OR
+                     (first_rule.type = 'remote'
+                       AND first_rule.remote_port != 0
+                       AND other.type = 'remote'
+                       AND other.remote_port = first_rule.remote_port)
+                   )
+               ) THEN RAISE(ABORT, 'duplicate forward listen port') END;
+             END;
+
+             CREATE TRIGGER IF NOT EXISTS forwards_legacy_delete
+             AFTER DELETE ON forwards
+             BEGIN
+               DELETE FROM forward_rules WHERE forward_id = OLD.id;
+             END;",
+        )?;
+    }
+
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -519,6 +593,71 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_25_moves_existing_forward_to_rule_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE forwards (
+                 id TEXT PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 profile_id TEXT NOT NULL,
+                 type TEXT NOT NULL,
+                 local_port INTEGER NOT NULL,
+                 remote_host TEXT NOT NULL,
+                 remote_port INTEGER NOT NULL,
+                 group_id TEXT
+             );
+             INSERT INTO forwards VALUES
+                 ('f1', 'db', 'p1', 'remote', 5432, 'localhost', 9000, NULL);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 24u32).unwrap();
+
+        migrate(&conn).unwrap();
+
+        let rule: (String, u32, String, u32) = conn
+            .query_row(
+                "SELECT type, local_port, remote_host, remote_port FROM forward_rules WHERE forward_id = 'f1' AND position = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(rule, ("remote".into(), 5432, "localhost".into(), 9000));
+
+        conn.execute(
+            "UPDATE forwards SET type = 'local', local_port = 8080 WHERE id = 'f1'",
+            [],
+        )
+        .unwrap();
+        let updated: (String, u32) = conn
+            .query_row(
+                "SELECT type, local_port FROM forward_rules WHERE forward_id = 'f1' AND position = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(updated, ("local".into(), 8080));
+
+        conn.execute(
+            "INSERT INTO forward_rules
+                 (forward_id, position, type, local_port, remote_host, remote_port)
+             VALUES ('f1', 1, 'dynamic', 9000, '127.0.0.1', 0)",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute("UPDATE forwards SET local_port = 9000 WHERE id = 'f1'", [],)
+            .is_err());
+        let unchanged: u32 = conn
+            .query_row(
+                "SELECT local_port FROM forward_rules WHERE forward_id = 'f1' AND position = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unchanged, 8080);
+    }
 
     #[test]
     fn migration_21_escapes_plain_text_highlights() {

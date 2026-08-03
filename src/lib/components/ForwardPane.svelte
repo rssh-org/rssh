@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { errMsg } from "../i18n/index.svelte.ts";
+  import { t, errMsg } from "../i18n/index.svelte.ts";
 
   let { tabId, meta = {} }: {
     tabId: string;
@@ -15,6 +15,9 @@
   let bytesRx = $state(0);
   let connections = $state(0);
   let pollTimer = 0;
+  let connectGeneration = 0;
+  let stopGeneration = 0;
+  let destroyed = false;
 
   function formatBytes(b: number): string {
     if (b < 1024) return `${b} B`;
@@ -25,14 +28,22 @@
 
   async function pollStats() {
     if (!activeId || status !== "active") return;
+    const id = activeId;
     try {
       const s = await invoke<{ bytes_tx: number; bytes_rx: number; connections: number }>(
-        "forward_stats", { activeId }
+        "forward_stats", { activeId: id }
       );
+      if (destroyed || activeId !== id || status !== "active") return;
       bytesTx = s.bytes_tx;
       bytesRx = s.bytes_rx;
       connections = s.connections;
-    } catch { /* forward may have stopped */ }
+    } catch (e: any) {
+      if (destroyed || activeId !== id) return;
+      stopPolling();
+      activeId = null;
+      status = "error";
+      errorMsg = errMsg(e);
+    }
   }
 
   function startPolling() {
@@ -47,14 +58,21 @@
   onMount(connect);
 
   async function connect() {
+    const generation = ++connectGeneration;
     status = "connecting";
     errorMsg = "";
     bytesTx = 0; bytesRx = 0; connections = 0;
     try {
-      activeId = await invoke<string>("forward_start", { forwardId: meta.forwardId });
+      const startedId = await invoke<string>("forward_start", { forwardId: meta.forwardId });
+      if (destroyed || generation !== connectGeneration) {
+        await invoke("forward_stop", { activeId: startedId }).catch(() => {});
+        return;
+      }
+      activeId = startedId;
       status = "active";
       startPolling();
     } catch (e: any) {
+      if (destroyed || generation !== connectGeneration) return;
       status = "error";
       errorMsg = errMsg(e);
     }
@@ -62,62 +80,62 @@
 
   async function stop() {
     if (!activeId) return;
+    const generation = ++stopGeneration;
+    const id = activeId;
+    status = "connecting";
     stopPolling();
     try {
-      await invoke("forward_stop", { activeId });
+      await invoke("forward_stop", { activeId: id });
+      if (destroyed || generation !== stopGeneration) return;
       status = "stopped";
-      activeId = null;
-    } catch (e: any) { errorMsg = errMsg(e); }
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    if ((status === "error" || status === "stopped") && e.key.length === 1) {
-      connect();
+      if (activeId === id) activeId = null;
+    } catch (e: any) {
+      if (destroyed || generation !== stopGeneration) return;
+      errorMsg = errMsg(e);
+      status = "active";
+      startPolling();
     }
   }
 
   onDestroy(() => {
+    destroyed = true;
+    connectGeneration++;
+    stopGeneration++;
     stopPolling();
-    if (activeId) invoke("forward_stop", { activeId }).catch(() => {});
+    const id = activeId;
+    activeId = null;
+    if (id) invoke("forward_stop", { activeId: id }).catch(() => {});
   });
 
-  const isRemote = $derived(meta.forwardType === "remote");
-  const isDynamic = $derived(meta.forwardType === "dynamic");
-  const dirLabel = $derived(isDynamic ? "SOCKS5" : isRemote ? "Remote" : "Local");
-  const arrow = $derived(
-    isDynamic ? `SOCKS5 proxy on localhost:${meta.localPort}`
-    : isRemote ? `remote:${meta.localPort} \u2192 localhost:${meta.remotePort}`
-    : `localhost:${meta.localPort} \u2192 ${meta.remoteHost}:${meta.remotePort}`);
+  const ruleCount = $derived(Number(meta.ruleCount ?? "1"));
 </script>
-
-<svelte:window onkeydown={handleKeydown} />
 
 <div class="forward-pane">
   <div class="card surface-raised">
     <div class="header">
-      <span class="type-badge" class:remote={isRemote}>{dirLabel}</span>
+      <span class="type-badge">SSH</span>
       <h3>{meta.name ?? "Port Forward"}</h3>
     </div>
 
-    <div class="route">{arrow}</div>
-    <div class="via">via {meta.profileName ?? meta.host}</div>
+    <div class="route">{t("forward.rule_count", { count: ruleCount })}</div>
+    <div class="via">{t("forward.via", { profile: meta.profileName ?? meta.host ?? "?" })}</div>
 
     <div class="status-area">
       {#if status === "connecting"}
-        <span class="indicator connecting"></span> <span class="status-text">Connecting...</span>
+        <span class="indicator connecting"></span> <span class="status-text">{t("common.connecting")}</span>
       {:else if status === "active"}
-        <span class="indicator active"></span> <span class="status-text">Active</span>
+        <span class="indicator active"></span> <span class="status-text">{t("forward.status_active")}</span>
       {:else if status === "error"}
-        <span class="indicator error"></span> <span class="status-text">Error</span>
+        <span class="indicator error"></span> <span class="status-text">{t("forward.status_error")}</span>
       {:else}
-        <span class="indicator stopped"></span> <span class="status-text">Stopped</span>
+        <span class="indicator stopped"></span> <span class="status-text">{t("forward.status_stopped")}</span>
       {/if}
     </div>
 
     {#if status === "active"}
       <div class="stats">
         <div class="stat">
-          <span class="stat-label">Connections</span>
+          <span class="stat-label">{t("forward.active_connections")}</span>
           <span class="stat-value">{connections}</span>
         </div>
         <div class="stat">
@@ -137,10 +155,9 @@
 
     <div class="actions">
       {#if status === "active"}
-        <button class="btn-stop" onclick={stop}>Stop</button>
+        <button class="btn-stop" onclick={stop}>{t("forward.stop")}</button>
       {:else if status === "error" || status === "stopped"}
-        <button class="btn-reconnect" onclick={connect}>Reconnect</button>
-        <div class="hint">Press any key to reconnect</div>
+        <button class="btn-reconnect" onclick={connect}>{t("common.reconnect")}</button>
       {/if}
     </div>
   </div>
@@ -190,11 +207,6 @@
     background: var(--accent-soft);
     color: var(--accent);
     flex-shrink: 0;
-  }
-
-  .type-badge.remote {
-    background: color-mix(in srgb, var(--magenta) 15%, transparent);
-    color: var(--magenta);
   }
 
   .route {
@@ -312,8 +324,4 @@
     color: var(--bg);
   }
 
-  .hint {
-    font-size: 11px;
-    color: var(--text-dim);
-  }
 </style>

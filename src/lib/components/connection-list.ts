@@ -36,10 +36,7 @@ interface ProfileSource extends GroupedSource {
 }
 
 interface ForwardSource extends GroupedSource {
-  type: string;
-  local_port: number;
-  remote_host: string;
-  remote_port: number;
+  rules: Array<{ type: string; local_port: number; remote_host: string; remote_port: number }>;
   profile_id: string;
 }
 
@@ -97,12 +94,12 @@ export function buildConnectionItems(sources: ConnectionSources): ConnectionList
   ];
 }
 
-function forwardDetail(forward: ForwardSource): string {
-  if (forward.type === "dynamic") return `-D ${forward.local_port}`;
-  if (forward.type === "remote") {
-    return `-R ${forward.remote_port} → ${forward.remote_host}:${forward.local_port}`;
-  }
-  return `-L ${forward.local_port} → ${forward.remote_host}:${forward.remote_port}`;
+export function forwardDetail(forward: ForwardSource): string {
+  return forward.rules.map((rule) => {
+    if (rule.type === "dynamic") return `-D ${rule.local_port}`;
+    if (rule.type === "remote") return `-R ${rule.remote_port} → ${rule.remote_host}:${rule.local_port}`;
+    return `-L ${rule.local_port} → ${rule.remote_host}:${rule.remote_port}`;
+  }).join(", ");
 }
 
 export function groupConnectionItems(

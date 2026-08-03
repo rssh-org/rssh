@@ -1,7 +1,7 @@
 //! `rssh <profile|credential|forward> add` —— 交互式新增。
 
 use rssh_lib::error::{AppError, AppResult};
-use rssh_lib::models::{Credential, CredentialType, Forward, ForwardType, Profile};
+use rssh_lib::models::{Credential, CredentialType, Forward, ForwardRule, ForwardType, Profile};
 
 use crate::ctx::CliCtx;
 use crate::helpers::{
@@ -149,12 +149,15 @@ pub fn cmd_add_forward(conn: &CliCtx) -> AppResult<()> {
     let f = Forward {
         id: uuid::Uuid::new_v4().to_string(),
         name,
-        forward_type: ft,
-        local_port,
-        remote_host,
-        remote_port,
         profile_id,
         group_id: None,
+        legacy_projection: false,
+        rules: vec![ForwardRule {
+            forward_type: ft,
+            local_port,
+            remote_host,
+            remote_port,
+        }],
     };
     rssh_lib::db::forward::insert(conn, &f)?;
     println!("Forward '{}' created.", f.name);

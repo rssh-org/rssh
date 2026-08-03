@@ -60,8 +60,7 @@ async function openForward(name: string, ctx: OscReporter) {
     id: tid, type: "forward", label: f.name,
     meta: {
       forwardId: f.id, name: f.name,
-      forwardType: f.type, localPort: String(f.local_port),
-      remoteHost: f.remote_host, remotePort: String(f.remote_port),
+      ruleCount: String(f.rules?.length ?? 1),
       profileName,
     },
   });
