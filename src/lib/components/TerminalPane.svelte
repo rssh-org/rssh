@@ -1672,6 +1672,7 @@
 
         // Connect
         if (destroyed) return;
+        const generation = connectGeneration + 1;
         const initialOk = await connectAndWire();
         if (destroyed || connectGeneration !== generation) return;
         if (!initialOk) {
