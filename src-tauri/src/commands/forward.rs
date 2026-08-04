@@ -4,7 +4,7 @@ use tauri::State;
 use crate::error::{locked, AppError, AppResult};
 use crate::models::{Credential, Forward, Profile};
 use crate::ssh::forward as fwd;
-use crate::state::{AppState, SessionKind, SessionOwner};
+use crate::state::{AppState, SessionKind, SessionOwner, SessionPhase};
 
 #[tauri::command]
 pub fn list_forwards(state: State<AppState>) -> Result<Vec<Forward>, AppError> {
@@ -110,14 +110,131 @@ pub async fn forward_start_impl(
 
 #[tauri::command]
 pub fn forward_stats(
+    window: tauri::Window,
     state: State<'_, AppState>,
     active_id: String,
 ) -> AppResult<fwd::ForwardStats> {
+    forward_stats_impl(
+        &state,
+        &SessionOwner::Window(window.label().to_owned()),
+        active_id,
+    )
+}
+
+pub fn forward_stats_impl(
+    state: &AppState,
+    owner: &SessionOwner,
+    active_id: String,
+) -> AppResult<fwd::ForwardStats> {
+    let sessions = locked(&state.lifecycle_sessions)?;
+    let record = sessions
+        .get(&active_id)
+        .ok_or_else(|| AppError::not_found("fwd_not_found", json!({})))?;
+    if record.kind != SessionKind::Forward || record.phase != SessionPhase::Ready {
+        return Err(AppError::not_found("fwd_not_found", json!({})));
+    }
+    if &record.owner != owner {
+        return Err(AppError::config(
+            "session_owner_mismatch",
+            json!({ "id": active_id }),
+        ));
+    }
     let forwards = locked(&state.active_forwards)?;
     let handle = forwards
         .get(&active_id)
         .ok_or_else(|| AppError::not_found("fwd_not_found", json!({})))?;
     Ok(handle.stats())
+}
+
+async fn forward_rule_command_impl(
+    state: &AppState,
+    owner: &SessionOwner,
+    active_id: String,
+    rule_index: usize,
+    start: bool,
+) -> AppResult<()> {
+    let response = {
+        let sessions = locked(&state.lifecycle_sessions)?;
+        let record = sessions
+            .get(&active_id)
+            .ok_or_else(|| AppError::not_found("fwd_not_found", json!({ "id": active_id })))?;
+        if record.kind != SessionKind::Forward || record.phase != SessionPhase::Ready {
+            return Err(AppError::not_found(
+                "fwd_not_found",
+                json!({ "id": active_id }),
+            ));
+        }
+        if &record.owner != owner {
+            return Err(AppError::config(
+                "session_owner_mismatch",
+                json!({ "id": active_id }),
+            ));
+        }
+        let forwards = locked(&state.active_forwards)?;
+        let handle = forwards
+            .get(&active_id)
+            .ok_or_else(|| AppError::not_found("fwd_not_found", json!({})))?;
+        if start {
+            handle.request_rule_start(rule_index)?
+        } else {
+            handle.request_rule_stop(rule_index)?
+        }
+    };
+    response
+        .await
+        .map_err(|_| AppError::ssh("fwd_session_closed", json!({})))?
+}
+
+#[tauri::command]
+pub async fn forward_rule_start(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    active_id: String,
+    rule_index: usize,
+) -> AppResult<()> {
+    forward_rule_command_impl(
+        &state,
+        &SessionOwner::Window(window.label().to_owned()),
+        active_id,
+        rule_index,
+        true,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn forward_rule_stop(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    active_id: String,
+    rule_index: usize,
+) -> AppResult<()> {
+    forward_rule_command_impl(
+        &state,
+        &SessionOwner::Window(window.label().to_owned()),
+        active_id,
+        rule_index,
+        false,
+    )
+    .await
+}
+
+pub async fn forward_rule_start_impl(
+    state: &AppState,
+    owner: &SessionOwner,
+    active_id: String,
+    rule_index: usize,
+) -> AppResult<()> {
+    forward_rule_command_impl(state, owner, active_id, rule_index, true).await
+}
+
+pub async fn forward_rule_stop_impl(
+    state: &AppState,
+    owner: &SessionOwner,
+    active_id: String,
+    rule_index: usize,
+) -> AppResult<()> {
+    forward_rule_command_impl(state, owner, active_id, rule_index, false).await
 }
 
 #[tauri::command]

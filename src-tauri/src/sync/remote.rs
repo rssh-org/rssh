@@ -52,8 +52,8 @@ pub fn prepare_backup(
 }
 
 /// Current clients use an isolated namespace that old clients cannot truncate.
-/// The legacy mirror remains readable by old clients, but is never authoritative
-/// once a current metadata file exists.
+/// A newer legacy snapshot is merged on top of the current snapshot so old-client
+/// updates survive without replacing multi-rule data they cannot represent.
 pub async fn publish(
     remote: &dyn RemoteBackup,
     encrypted_payload: &str,
@@ -299,6 +299,58 @@ mod tests {
             ["current", "truncated-by-old-client"]
         );
         assert_eq!(fetched.metadata, Some(metadata(99)));
+    }
+
+    #[test]
+    fn applying_newer_legacy_payload_preserves_current_extra_rules() {
+        let db = Db::open_in_memory().unwrap();
+        let secrets = MemSecrets::default();
+        let data_dir = tempfile::tempdir().unwrap();
+        let current = serde_json::json!({
+            "version": 1,
+            "forwards": [{
+                "id": "f1", "name": "mixed", "profile_id": "p1",
+                "type": "local", "local_port": 8080,
+                "remote_host": "db.internal", "remote_port": 5432,
+                "rules": [
+                    { "type": "local", "local_port": 8080, "remote_host": "db.internal", "remote_port": 5432 },
+                    { "type": "dynamic", "local_port": 1080, "remote_host": "127.0.0.1", "remote_port": 0 }
+                ]
+            }]
+        });
+        let legacy = serde_json::json!({
+            "version": 1,
+            "forwards": [{
+                "id": "f1", "name": "renamed", "profile_id": "p1",
+                "type": "local", "local_port": 8081,
+                "remote_host": "new-db.internal", "remote_port": 5432
+            }]
+        });
+
+        apply_fetched_backup(
+            &db,
+            &secrets,
+            data_dir.path(),
+            FetchedBackup {
+                encrypted_payloads: vec![
+                    crate::crypto::encrypt(&current.to_string(), "pw").unwrap(),
+                    crate::crypto::encrypt(&legacy.to_string(), "pw").unwrap(),
+                ],
+                metadata: Some(metadata(2)),
+            },
+            "pw",
+        )
+        .unwrap();
+
+        let forward = crate::db::forward::get(&db, "f1").unwrap();
+        assert_eq!(forward.name, "renamed");
+        assert_eq!(forward.rules.len(), 2);
+        assert_eq!(forward.rules[0].local_port, 8081);
+        assert_eq!(
+            forward.rules[1].forward_type,
+            crate::models::ForwardType::Dynamic
+        );
+        assert_eq!(forward.rules[1].local_port, 1080);
     }
 
     #[test]

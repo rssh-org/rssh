@@ -45,6 +45,12 @@ fn validate_rules(rules: &[ForwardRule]) -> AppResult<()> {
     let mut local_ports = HashSet::new();
     let mut remote_ports = HashSet::new();
     for rule in rules {
+        if rule.forward_type != ForwardType::Dynamic && rule.remote_host.trim().is_empty() {
+            return Err(AppError::config(
+                "fwd_remote_host_empty",
+                serde_json::json!({}),
+            ));
+        }
         let invalid_target = match rule.forward_type {
             ForwardType::Local => rule.remote_port == 0,
             ForwardType::Remote => rule.local_port == 0,
@@ -428,6 +434,18 @@ mod tests {
         assert_eq!(
             insert(&db, &duplicate).unwrap_err().code(),
             "fwd_duplicate_listen_port"
+        );
+    }
+
+    #[test]
+    fn insert_rejects_empty_remote_host() {
+        let db = Db::open_in_memory().unwrap();
+        let mut invalid = mk("f1", "invalid", ForwardType::Local);
+        invalid.rules[0].remote_host = "  ".into();
+
+        assert_eq!(
+            insert(&db, &invalid).unwrap_err().code(),
+            "fwd_remote_host_empty"
         );
     }
 }

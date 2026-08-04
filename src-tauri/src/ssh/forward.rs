@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use russh::Disconnect;
 use serde::Serialize;
@@ -37,25 +38,25 @@ pub struct ForwardHandle {
     /// holding the SSH `Handle` — russh never sends the `SSH_MSG_DISCONNECT`
     /// and the server leaks a half-open session until TCP keepalive expires.
     disconnect: Arc<Notify>,
-    pub bytes_tx: Arc<AtomicU64>,
-    pub bytes_rx: Arc<AtomicU64>,
-    pub connections: Arc<AtomicU32>,
+    rules: Vec<Arc<RuleControl>>,
+    commands: tokio::sync::mpsc::UnboundedSender<RuleCommand>,
+    connected: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ForwardHandle {
     fn from_task(
         task: tokio::task::JoinHandle<()>,
         disconnect: Arc<Notify>,
-        bytes_tx: Arc<AtomicU64>,
-        bytes_rx: Arc<AtomicU64>,
-        connections: Arc<AtomicU32>,
+        rules: Vec<Arc<RuleControl>>,
+        commands: tokio::sync::mpsc::UnboundedSender<RuleCommand>,
+        connected: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self {
             abort: Some(task.abort_handle()),
             disconnect,
-            bytes_tx,
-            bytes_rx,
-            connections,
+            rules,
+            commands,
+            connected,
         }
     }
 
@@ -88,6 +89,83 @@ pub struct ForwardStats {
     pub bytes_tx: u64,
     pub bytes_rx: u64,
     pub connections: u32,
+    pub connected: bool,
+    pub rules: Vec<ForwardRuleStats>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardRuleStatus {
+    Starting,
+    Active,
+    Stopped,
+    Error,
+    StoppingError,
+}
+
+#[derive(Serialize)]
+pub struct ForwardRuleStats {
+    pub index: usize,
+    pub rule: ForwardRule,
+    pub status: ForwardRuleStatus,
+    pub bytes_tx: u64,
+    pub bytes_rx: u64,
+    pub connections: u32,
+    pub effective_port: Option<u32>,
+    pub error: Option<String>,
+}
+
+struct RuleState {
+    status: ForwardRuleStatus,
+    effective_port: Option<u32>,
+    error: Option<String>,
+}
+
+struct RuleControl {
+    rule: ForwardRule,
+    bytes_tx: Arc<AtomicU64>,
+    bytes_rx: Arc<AtomicU64>,
+    connections: Arc<AtomicU32>,
+    state: Mutex<RuleState>,
+}
+
+impl RuleControl {
+    fn new(rule: ForwardRule) -> Self {
+        Self {
+            rule,
+            bytes_tx: Arc::new(AtomicU64::new(0)),
+            bytes_rx: Arc::new(AtomicU64::new(0)),
+            connections: Arc::new(AtomicU32::new(0)),
+            state: Mutex::new(RuleState {
+                status: ForwardRuleStatus::Starting,
+                effective_port: None,
+                error: None,
+            }),
+        }
+    }
+
+    fn set_state(
+        &self,
+        status: ForwardRuleStatus,
+        effective_port: Option<u32>,
+        error: Option<String>,
+    ) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.status = status;
+        state.effective_port = effective_port;
+        state.error = error;
+    }
+}
+
+enum RuleCommand {
+    Start {
+        index: usize,
+        reply: tokio::sync::oneshot::Sender<AppResult<()>>,
+    },
+    Stop {
+        index: usize,
+        reply: tokio::sync::oneshot::Sender<AppResult<()>>,
+    },
 }
 
 /// Bind a local-forward listener on loopback for both families. IPv4
@@ -124,11 +202,62 @@ async fn accept_opt(
 
 impl ForwardHandle {
     pub fn stats(&self) -> ForwardStats {
+        let rules: Vec<_> = self
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(index, control)| {
+                let state = control.state.lock().unwrap_or_else(|e| e.into_inner());
+                ForwardRuleStats {
+                    index,
+                    rule: control.rule.clone(),
+                    status: state.status,
+                    bytes_tx: control.bytes_tx.load(Ordering::Relaxed),
+                    bytes_rx: control.bytes_rx.load(Ordering::Relaxed),
+                    connections: control.connections.load(Ordering::Relaxed),
+                    effective_port: state.effective_port,
+                    error: state.error.clone(),
+                }
+            })
+            .collect();
         ForwardStats {
-            bytes_tx: self.bytes_tx.load(Ordering::Relaxed),
-            bytes_rx: self.bytes_rx.load(Ordering::Relaxed),
-            connections: self.connections.load(Ordering::Relaxed),
+            bytes_tx: rules.iter().map(|rule| rule.bytes_tx).sum(),
+            bytes_rx: rules.iter().map(|rule| rule.bytes_rx).sum(),
+            connections: rules.iter().map(|rule| rule.connections).sum(),
+            connected: self.connected.load(Ordering::Relaxed),
+            rules,
         }
+    }
+
+    pub fn request_rule_start(
+        &self,
+        index: usize,
+    ) -> AppResult<tokio::sync::oneshot::Receiver<AppResult<()>>> {
+        self.request_rule_command(index, true)
+    }
+
+    pub fn request_rule_stop(
+        &self,
+        index: usize,
+    ) -> AppResult<tokio::sync::oneshot::Receiver<AppResult<()>>> {
+        self.request_rule_command(index, false)
+    }
+
+    fn request_rule_command(
+        &self,
+        index: usize,
+        start: bool,
+    ) -> AppResult<tokio::sync::oneshot::Receiver<AppResult<()>>> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let command = if start {
+            RuleCommand::Start { index, reply }
+        } else {
+            RuleCommand::Stop { index, reply }
+        };
+        self.commands
+            .send(command)
+            .map_err(|_| AppError::ssh("fwd_session_closed", json!({})))?;
+        Ok(response)
     }
 }
 
@@ -183,11 +312,13 @@ async fn connect_authed(
 }
 
 type SharedHandle = Arc<russh::client::Handle<client::SshHandler>>;
+const SOCKS5_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 enum PreparedRule {
     Local(ForwardRule, TcpListener, Option<TcpListener>),
     Remote(
         ForwardRule,
+        u32,
         tokio::sync::mpsc::UnboundedReceiver<russh::Channel<russh::client::Msg>>,
     ),
     Dynamic(ForwardRule, TcpListener, Option<TcpListener>),
@@ -200,13 +331,39 @@ async fn bridge(
     rx: Arc<AtomicU64>,
     conns: Arc<AtomicU32>,
 ) {
+    struct ConnectionGuard(Arc<AtomicU32>);
+    impl Drop for ConnectionGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    let _connection = ConnectionGuard(conns);
     let (mut tcp_r, mut tcp_w) = tokio::io::split(tcp_stream);
     let (mut ssh_r, mut ssh_w) = tokio::io::split(ssh_stream);
     let _ = tokio::join!(
         counted_copy(&mut tcp_r, &mut ssh_w, &tx),
         counted_copy(&mut ssh_r, &mut tcp_w, &rx),
     );
-    conns.fetch_sub(1, Ordering::Relaxed);
+}
+
+async fn accept_connection(
+    listener: &TcpListener,
+    listener6: &Option<TcpListener>,
+    port: u16,
+) -> TcpStream {
+    loop {
+        let result = tokio::select! {
+            result = listener.accept() => result,
+            result = accept_opt(listener6) => result,
+        };
+        match result {
+            Ok((stream, _)) => return stream,
+            Err(error) => {
+                log::warn!("forward listener on port {port} failed to accept: {error}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
 }
 
 async fn run_local_rule(
@@ -217,30 +374,36 @@ async fn run_local_rule(
     tx: Arc<AtomicU64>,
     rx: Arc<AtomicU64>,
     conns: Arc<AtomicU32>,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
 ) {
+    let mut tasks = tokio::task::JoinSet::new();
     loop {
-        let tcp_stream = tokio::select! {
-            res = listener.accept() => match res { Ok((s, _)) => s, Err(_) => break },
-            res = accept_opt(&listener6) => match res { Ok((s, _)) => s, Err(_) => break },
-        };
-        let channel = handle
-            .channel_open_direct_tcpip(
-                &rule.remote_host,
-                rule.remote_port as u32,
-                "127.0.0.1",
-                rule.local_port as u32,
-            )
-            .await;
-        let Ok(channel) = channel else { continue };
-        conns.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(bridge(
-            tcp_stream,
-            channel.into_stream(),
-            tx.clone(),
-            rx.clone(),
-            conns.clone(),
-        ));
+        tokio::select! {
+            _ = &mut stop => break,
+            tcp_stream = accept_connection(&listener, &listener6, rule.local_port) => {
+                let handle = handle.clone();
+                let rule = rule.clone();
+                let tx = tx.clone();
+                let rx = rx.clone();
+                let conns = conns.clone();
+                tasks.spawn(async move {
+                    let Ok(channel) = handle
+                        .channel_open_direct_tcpip(
+                            &rule.remote_host,
+                            rule.remote_port as u32,
+                            "127.0.0.1",
+                            rule.local_port as u32,
+                        )
+                        .await else { return };
+                    conns.fetch_add(1, Ordering::Relaxed);
+                    bridge(tcp_stream, channel.into_stream(), tx, rx, conns).await;
+                });
+            }
+            _ = tasks.join_next(), if !tasks.is_empty() => {}
+        }
     }
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
 }
 
 async fn run_remote_rule(
@@ -249,10 +412,12 @@ async fn run_remote_rule(
     tx: Arc<AtomicU64>,
     rx: Arc<AtomicU64>,
     conns: Arc<AtomicU32>,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
 ) {
     let mut tasks = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
+            _ = &mut stop => break,
             message = channels.recv() => {
                 let Some(channel) = message else { break };
                 let target = rule.remote_host.clone();
@@ -382,29 +547,224 @@ async fn run_dynamic_rule(
     tx: Arc<AtomicU64>,
     rx: Arc<AtomicU64>,
     conns: Arc<AtomicU32>,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
 ) {
+    let mut tasks = tokio::task::JoinSet::new();
     loop {
-        let mut tcp_stream = tokio::select! {
-            res = listener.accept() => match res { Ok((s, _)) => s, Err(_) => break },
-            res = accept_opt(&listener6) => match res { Ok((s, _)) => s, Err(_) => break },
-        };
-        let (host, port) = match socks5_handshake(&mut tcp_stream).await {
-            Ok(target) => target,
-            Err(_) => continue,
-        };
-        let channel = handle
-            .channel_open_direct_tcpip(&host, port as u32, "127.0.0.1", rule.local_port as u32)
-            .await;
-        let Ok(channel) = channel else { continue };
-        conns.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(bridge(
-            tcp_stream,
-            channel.into_stream(),
-            tx.clone(),
-            rx.clone(),
-            conns.clone(),
-        ));
+        tokio::select! {
+            _ = &mut stop => break,
+            tcp_stream = accept_connection(&listener, &listener6, rule.local_port) => {
+                let handle = handle.clone();
+                let tx = tx.clone();
+                let rx = rx.clone();
+                let conns = conns.clone();
+                let local_port = rule.local_port;
+                tasks.spawn(async move {
+                    let mut tcp_stream = tcp_stream;
+                    let Ok(Ok((host, port))) = tokio::time::timeout(
+                        SOCKS5_HANDSHAKE_TIMEOUT,
+                        socks5_handshake(&mut tcp_stream),
+                    ).await else { return };
+                    let Ok(channel) = handle
+                        .channel_open_direct_tcpip(&host, port as u32, "127.0.0.1", local_port as u32)
+                        .await else { return };
+                    conns.fetch_add(1, Ordering::Relaxed);
+                    bridge(tcp_stream, channel.into_stream(), tx, rx, conns).await;
+                });
+            }
+            _ = tasks.join_next(), if !tasks.is_empty() => {}
+        }
     }
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+}
+
+async fn prepare_remote_rule(
+    rule: ForwardRule,
+    handle: &russh::client::Handle<client::SshHandler>,
+    routes: &client::ForwardedChannelRouter,
+) -> AppResult<PreparedRule> {
+    let requested_port = rule.remote_port as u32;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    if requested_port != 0 {
+        {
+            let mut guard = locked(routes)?;
+            if guard.routes.contains_key(&requested_port) {
+                return Err(AppError::config(
+                    "fwd_duplicate_remote_port",
+                    json!({ "port": requested_port }),
+                ));
+            }
+            guard.routes.insert(requested_port, tx.clone());
+        }
+        if let Err(error) = handle.tcpip_forward("", requested_port).await {
+            locked(routes)?.routes.remove(&requested_port);
+            return Err(AppError::ssh(
+                "ssh_tcpip_forward_failed",
+                json!({ "err": error.to_string() }),
+            ));
+        }
+        return Ok(PreparedRule::Remote(rule, requested_port, rx));
+    }
+
+    {
+        let mut guard = locked(routes)?;
+        if guard.pending.is_some() {
+            return Err(AppError::config(
+                "fwd_multiple_dynamic_remote_ports",
+                json!({}),
+            ));
+        }
+        guard.pending = Some(tx.clone());
+    }
+    match handle.tcpip_forward("", 0).await {
+        Ok(bound_port) => {
+            let mut guard = locked(routes)?;
+            guard.pending = None;
+            guard.routes.insert(bound_port, tx);
+            Ok(PreparedRule::Remote(rule, bound_port, rx))
+        }
+        Err(error) => {
+            locked(routes)?.pending = None;
+            Err(AppError::ssh(
+                "ssh_tcpip_forward_failed",
+                json!({ "err": error.to_string() }),
+            ))
+        }
+    }
+}
+
+async fn prepare_rule(
+    rule: ForwardRule,
+    handle: &russh::client::Handle<client::SshHandler>,
+    routes: &client::ForwardedChannelRouter,
+) -> AppResult<PreparedRule> {
+    match rule.forward_type {
+        ForwardType::Local => bind_loopback(rule.local_port)
+            .await
+            .map(|(v4, v6)| PreparedRule::Local(rule, v4, v6)),
+        ForwardType::Dynamic => bind_loopback(rule.local_port)
+            .await
+            .map(|(v4, v6)| PreparedRule::Dynamic(rule, v4, v6)),
+        ForwardType::Remote => prepare_remote_rule(rule, handle, routes).await,
+    }
+}
+
+struct RunningRule {
+    generation: u64,
+    task: Option<tokio::task::JoinHandle<()>>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    remote_port: Option<u32>,
+}
+
+fn completion_matches(
+    running: &HashMap<usize, RunningRule>,
+    index: usize,
+    generation: u64,
+) -> bool {
+    running
+        .get(&index)
+        .is_some_and(|runtime| runtime.generation == generation && runtime.task.is_some())
+}
+
+fn spawn_rule(
+    index: usize,
+    generation: u64,
+    runtime: PreparedRule,
+    handle: SharedHandle,
+    control: Arc<RuleControl>,
+    completed: tokio::sync::mpsc::UnboundedSender<(usize, u64)>,
+) -> RunningRule {
+    let tx = control.bytes_tx.clone();
+    let rx = control.bytes_rx.clone();
+    let conns = control.connections.clone();
+    let (stop, stop_rx) = tokio::sync::oneshot::channel();
+    let (future, effective_port, remote_port): (
+        std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+        Option<u32>,
+        Option<u32>,
+    ) = match runtime {
+        PreparedRule::Local(rule, v4, v6) => {
+            let port = v4.local_addr().ok().map(|address| address.port() as u32);
+            (
+                Box::pin(run_local_rule(rule, v4, v6, handle, tx, rx, conns, stop_rx)),
+                port,
+                None,
+            )
+        }
+        PreparedRule::Dynamic(rule, v4, v6) => {
+            let port = v4.local_addr().ok().map(|address| address.port() as u32);
+            (
+                Box::pin(run_dynamic_rule(
+                    rule, v4, v6, handle, tx, rx, conns, stop_rx,
+                )),
+                port,
+                None,
+            )
+        }
+        PreparedRule::Remote(rule, port, channels) => (
+            Box::pin(run_remote_rule(rule, channels, tx, rx, conns, stop_rx)),
+            Some(port),
+            Some(port),
+        ),
+    };
+    control.set_state(ForwardRuleStatus::Active, effective_port, None);
+    let task = tokio::spawn(async move {
+        future.await;
+        let _ = completed.send((index, generation));
+    });
+    RunningRule {
+        generation,
+        task: Some(task),
+        stop: Some(stop),
+        remote_port,
+    }
+}
+
+async fn stop_running_rule(
+    index: usize,
+    running: &mut HashMap<usize, RunningRule>,
+    controls: &[Arc<RuleControl>],
+    handle: &russh::client::Handle<client::SshHandler>,
+    routes: &client::ForwardedChannelRouter,
+) -> AppResult<()> {
+    let Some(mut runtime) = running.remove(&index) else {
+        controls
+            .get(index)
+            .ok_or_else(|| AppError::not_found("fwd_rule_not_found", json!({ "index": index })))?
+            .set_state(ForwardRuleStatus::Stopped, None, None);
+        return Ok(());
+    };
+    if let Some(stop) = runtime.stop.take() {
+        let _ = stop.send(());
+    }
+    if let Some(task) = runtime.task.take() {
+        let _ = task.await;
+    }
+    controls[index].connections.store(0, Ordering::Relaxed);
+    if let Some(port) = runtime.remote_port {
+        locked(routes)?.routes.remove(&port);
+        if let Err(error) = handle.cancel_tcpip_forward("", port).await {
+            controls[index].set_state(
+                ForwardRuleStatus::StoppingError,
+                None,
+                Some(
+                    AppError::ssh(
+                        "ssh_cancel_tcpip_forward_failed",
+                        json!({ "err": error.to_string() }),
+                    )
+                    .to_string(),
+                ),
+            );
+            running.insert(index, runtime);
+            return Err(AppError::ssh(
+                "ssh_cancel_tcpip_forward_failed",
+                json!({ "err": error.to_string() }),
+            ));
+        }
+    }
+    controls[index].set_state(ForwardRuleStatus::Stopped, None, None);
+    Ok(())
 }
 
 pub async fn start(forward: Forward, target: ConnTarget) -> AppResult<ForwardHandle> {
@@ -412,129 +772,171 @@ pub async fn start(forward: Forward, target: ConnTarget) -> AppResult<ForwardHan
         return Err(AppError::config("fwd_rules_empty", json!({})));
     }
     let (handle, routes) = connect_authed(target).await?;
+    let controls: Vec<_> = forward
+        .rules
+        .iter()
+        .cloned()
+        .map(RuleControl::new)
+        .map(Arc::new)
+        .collect();
     let mut prepared = Vec::with_capacity(forward.rules.len());
 
-    for rule in forward.rules {
-        let result = match rule.forward_type {
-            ForwardType::Local => bind_loopback(rule.local_port)
-                .await
-                .map(|(v4, v6)| PreparedRule::Local(rule, v4, v6)),
-            ForwardType::Dynamic => bind_loopback(rule.local_port)
-                .await
-                .map(|(v4, v6)| PreparedRule::Dynamic(rule, v4, v6)),
-            ForwardType::Remote => {
-                let requested_port = rule.remote_port as u32;
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                if requested_port != 0 {
-                    let mut guard = locked(&routes)?;
-                    if guard.routes.contains_key(&requested_port) {
-                        Err(AppError::config(
-                            "fwd_duplicate_remote_port",
-                            json!({ "port": requested_port }),
-                        ))
-                    } else {
-                        guard.routes.insert(requested_port, tx.clone());
-                        drop(guard);
-                        match handle.tcpip_forward("", requested_port).await {
-                            Ok(_) => Ok(PreparedRule::Remote(rule, rx)),
-                            Err(error) => {
-                                locked(&routes)?.routes.remove(&requested_port);
-                                Err(AppError::ssh(
-                                    "ssh_tcpip_forward_failed",
-                                    json!({ "err": error.to_string() }),
-                                ))
-                            }
-                        }
-                    }
-                } else {
-                    {
-                        let mut guard = locked(&routes)?;
-                        if guard.pending.replace(tx.clone()).is_some() {
-                            return Err(AppError::config(
-                                "fwd_multiple_dynamic_remote_ports",
-                                json!({}),
-                            ));
-                        }
-                    }
-                    match handle.tcpip_forward("", 0).await {
-                        Ok(bound_port) => {
-                            let mut guard = locked(&routes)?;
-                            guard.pending = None;
-                            guard.routes.insert(bound_port, tx);
-                            Ok(PreparedRule::Remote(rule, rx))
-                        }
-                        Err(error) => {
-                            locked(&routes)?.pending = None;
-                            Err(AppError::ssh(
-                                "ssh_tcpip_forward_failed",
-                                json!({ "err": error.to_string() }),
-                            ))
-                        }
-                    }
-                }
-            }
-        };
-        match result {
-            Ok(runtime) => prepared.push(runtime),
+    for (index, rule) in forward.rules.into_iter().enumerate() {
+        match prepare_rule(rule, &handle, &routes).await {
+            Ok(runtime) => prepared.push((index, runtime)),
             Err(error) => {
-                let _ = handle
-                    .disconnect(Disconnect::ByApplication, "rssh forward startup failed", "")
-                    .await;
-                return Err(error);
+                controls[index].set_state(ForwardRuleStatus::Error, None, Some(error.to_string()))
             }
         }
     }
 
-    let bytes_tx = Arc::new(AtomicU64::new(0));
-    let bytes_rx = Arc::new(AtomicU64::new(0));
-    let connections = Arc::new(AtomicU32::new(0));
     let disconnect = Arc::new(Notify::new());
     let disconnect_task = disconnect.clone();
     let shared = Arc::new(handle);
     let task_handle = shared.clone();
-    let tx = bytes_tx.clone();
-    let rx = bytes_rx.clone();
-    let conns = connections.clone();
+    let task_controls = controls.clone();
+    let connected = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let task_connected = connected.clone();
+    let (commands, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (completed, mut completed_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let task = tokio::spawn(async move {
-        let mut tasks = tokio::task::JoinSet::new();
-        for runtime in prepared {
-            match runtime {
-                PreparedRule::Local(rule, v4, v6) => tasks.spawn(run_local_rule(
-                    rule,
-                    v4,
-                    v6,
+        let mut running = HashMap::new();
+        let mut generation = 0u64;
+        for (index, runtime) in prepared {
+            generation += 1;
+            running.insert(
+                index,
+                spawn_rule(
+                    index,
+                    generation,
+                    runtime,
                     task_handle.clone(),
-                    tx.clone(),
-                    rx.clone(),
-                    conns.clone(),
-                )),
-                PreparedRule::Remote(rule, channels) => tasks.spawn(run_remote_rule(
-                    rule,
-                    channels,
-                    tx.clone(),
-                    rx.clone(),
-                    conns.clone(),
-                )),
-                PreparedRule::Dynamic(rule, v4, v6) => tasks.spawn(run_dynamic_rule(
-                    rule,
-                    v4,
-                    v6,
-                    task_handle.clone(),
-                    tx.clone(),
-                    rx.clone(),
-                    conns.clone(),
-                )),
-            };
+                    task_controls[index].clone(),
+                    completed.clone(),
+                ),
+            );
         }
+        let mut transport_check = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
             tokio::select! {
                 _ = disconnect_task.notified() => break,
-                _ = tasks.join_next() => break,
+                _ = transport_check.tick() => {
+                    if task_handle.is_closed() {
+                        task_connected.store(false, Ordering::Relaxed);
+                        for (index, mut runtime) in running.drain() {
+                            if let Some(stop) = runtime.stop.take() {
+                                let _ = stop.send(());
+                            }
+                            if let Some(task) = runtime.task.take() {
+                                let _ = task.await;
+                            }
+                            task_controls[index].connections.store(0, Ordering::Relaxed);
+                            task_controls[index].set_state(
+                                ForwardRuleStatus::Error,
+                                None,
+                                Some(AppError::ssh("ssh_disconnected", json!({})).to_string()),
+                            );
+                        }
+                        break;
+                    }
+                }
+                Some((index, completed_generation)) = completed_rx.recv() => {
+                    if !completion_matches(&running, index, completed_generation) {
+                        continue;
+                    }
+                    let Some(runtime) = running.remove(&index) else { continue };
+                    if let Some(port) = runtime.remote_port {
+                        if let Ok(mut router) = locked(&routes) {
+                            router.routes.remove(&port);
+                        }
+                        if let Err(error) = task_handle.cancel_tcpip_forward("", port).await {
+                            task_controls[index].set_state(
+                                ForwardRuleStatus::StoppingError,
+                                None,
+                                Some(AppError::ssh(
+                                    "ssh_cancel_tcpip_forward_failed",
+                                    json!({ "err": error.to_string() }),
+                                ).to_string()),
+                            );
+                            running.insert(index, RunningRule {
+                                task: None,
+                                stop: None,
+                                ..runtime
+                            });
+                            continue;
+                        }
+                    }
+                    task_controls[index].connections.store(0, Ordering::Relaxed);
+                    task_controls[index].set_state(
+                        ForwardRuleStatus::Error,
+                        None,
+                        Some(AppError::ssh("fwd_rule_stopped_unexpectedly", json!({})).to_string()),
+                    );
+                }
+                Some(command) = command_rx.recv() => {
+                    match command {
+                        RuleCommand::Start { index, reply } => {
+                            let result = if let Some(runtime) = running.get(&index) {
+                                if runtime.task.is_some() {
+                                    Ok(())
+                                } else {
+                                    Err(AppError::config("fwd_rule_stop_pending", json!({ "index": index })))
+                                }
+                            } else if let Some(control) = task_controls.get(index) {
+                                control.set_state(ForwardRuleStatus::Starting, None, None);
+                                match prepare_rule(control.rule.clone(), &task_handle, &routes).await {
+                                    Ok(runtime) => {
+                                        generation += 1;
+                                        running.insert(
+                                            index,
+                                            spawn_rule(
+                                                index,
+                                                generation,
+                                                runtime,
+                                                task_handle.clone(),
+                                                control.clone(),
+                                                completed.clone(),
+                                            ),
+                                        );
+                                        Ok(())
+                                    }
+                                    Err(error) => {
+                                        control.set_state(
+                                            ForwardRuleStatus::Error,
+                                            None,
+                                            Some(error.to_string()),
+                                        );
+                                        Err(error)
+                                    }
+                                }
+                            } else {
+                                Err(AppError::not_found("fwd_rule_not_found", json!({ "index": index })))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        RuleCommand::Stop { index, reply } => {
+                            let result = stop_running_rule(
+                                index,
+                                &mut running,
+                                &task_controls,
+                                &task_handle,
+                                &routes,
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                    }
+                }
             }
         }
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
+        for mut runtime in running.into_values() {
+            if let Some(stop) = runtime.stop.take() {
+                let _ = stop.send(());
+            }
+            if let Some(task) = runtime.task.take() {
+                let _ = task.await;
+            }
+        }
         if let Ok(mut router) = locked(&routes) {
             router.routes.clear();
             router.pending = None;
@@ -542,14 +944,11 @@ pub async fn start(forward: Forward, target: ConnTarget) -> AppResult<ForwardHan
         let _ = task_handle
             .disconnect(Disconnect::ByApplication, "rssh forward stopped", "")
             .await;
+        task_connected.store(false, Ordering::Relaxed);
     });
 
     Ok(ForwardHandle::from_task(
-        task,
-        disconnect,
-        bytes_tx,
-        bytes_rx,
-        connections,
+        task, disconnect, controls, commands, connected,
     ))
 }
 
@@ -569,6 +968,80 @@ mod tests {
         }
     }
 
+    fn test_handle(task: tokio::task::JoinHandle<()>, disconnect: Arc<Notify>) -> ForwardHandle {
+        let (commands, _commands_rx) = tokio::sync::mpsc::unbounded_channel();
+        ForwardHandle::from_task(
+            task,
+            disconnect,
+            Vec::new(),
+            commands,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
+    }
+
+    #[tokio::test]
+    async fn stats_aggregate_independent_rule_snapshots() {
+        let first = Arc::new(RuleControl::new(ForwardRule {
+            forward_type: ForwardType::Local,
+            local_port: 8080,
+            remote_host: "db".into(),
+            remote_port: 5432,
+        }));
+        let second = Arc::new(RuleControl::new(ForwardRule {
+            forward_type: ForwardType::Dynamic,
+            local_port: 1080,
+            remote_host: "127.0.0.1".into(),
+            remote_port: 0,
+        }));
+        first.bytes_tx.store(12, Ordering::Relaxed);
+        first.bytes_rx.store(34, Ordering::Relaxed);
+        first.connections.store(2, Ordering::Relaxed);
+        first.set_state(ForwardRuleStatus::Active, Some(8080), None);
+        second.bytes_tx.store(5, Ordering::Relaxed);
+        second.set_state(ForwardRuleStatus::Stopped, None, None);
+        let task = tokio::spawn(std::future::pending::<()>());
+        let (commands, _commands_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = ForwardHandle::from_task(
+            task,
+            Arc::new(Notify::new()),
+            vec![first, second],
+            commands,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        );
+
+        let stats = handle.stats();
+
+        assert_eq!(stats.bytes_tx, 17);
+        assert_eq!(stats.bytes_rx, 34);
+        assert_eq!(stats.connections, 2);
+        assert_eq!(stats.rules[0].index, 0);
+        assert_eq!(stats.rules[0].status, ForwardRuleStatus::Active);
+        assert_eq!(stats.rules[1].index, 1);
+        assert_eq!(stats.rules[1].status, ForwardRuleStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn completion_only_matches_the_current_running_generation() {
+        let mut running = HashMap::new();
+        let task = tokio::spawn(std::future::pending::<()>());
+        running.insert(
+            0,
+            RunningRule {
+                generation: 2,
+                task: Some(task),
+                stop: None,
+                remote_port: None,
+            },
+        );
+
+        assert!(!completion_matches(&running, 0, 1));
+        assert!(completion_matches(&running, 0, 2));
+
+        let runtime = running.get_mut(&0).unwrap();
+        runtime.task.take().unwrap().abort();
+        assert!(!completion_matches(&running, 0, 2));
+    }
+
     #[tokio::test]
     async fn dropping_handle_aborts_background_task() {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -578,13 +1051,7 @@ mod tests {
             let _ = started_tx.send(());
             std::future::pending::<()>().await;
         });
-        let handle = ForwardHandle::from_task(
-            task,
-            Arc::new(Notify::new()),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU32::new(0)),
-        );
+        let handle = test_handle(task, Arc::new(Notify::new()));
 
         started_rx.await.unwrap();
         drop(handle);
@@ -602,13 +1069,7 @@ mod tests {
             .build()
             .unwrap();
         let task = runtime.spawn(std::future::pending::<()>());
-        let handle = ForwardHandle::from_task(
-            task,
-            Arc::new(Notify::new()),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU32::new(0)),
-        );
+        let handle = test_handle(task, Arc::new(Notify::new()));
 
         handle.stop();
     }
@@ -626,13 +1087,7 @@ mod tests {
             disconnect_task.notified().await;
             let _ = finished_tx.send(());
         });
-        let handle = ForwardHandle::from_task(
-            task,
-            disconnect,
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU32::new(0)),
-        );
+        let handle = test_handle(task, disconnect);
 
         started_rx.await.unwrap();
         handle.stop();

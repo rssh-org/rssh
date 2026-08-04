@@ -689,11 +689,9 @@ fn dispatch(
         }
         "forward_stats" => {
             let active_id: String = arg(&args, "activeId")?;
-            let forwards = locked(&state.active_forwards).map_err(err_value)?;
-            let handle = forwards
-                .get(&active_id)
-                .ok_or_else(|| json!("fwd_not_found"))?;
-            ok(Ok::<_, AppError>(handle.stats()))
+            ok(crate::commands::forward::forward_stats_impl(
+                state, owner, active_id,
+            ))
         }
 
         // ---- CLI: PATH-based status; install is host-managed in embedded mode ----
@@ -1252,6 +1250,20 @@ async fn dispatch_async(
             state,
             owner.clone(),
             arg(&args, "forwardId")?,
+        )
+        .await),
+        "forward_rule_start" => ok(crate::commands::forward::forward_rule_start_impl(
+            state,
+            owner,
+            arg(&args, "activeId")?,
+            arg(&args, "ruleIndex")?,
+        )
+        .await),
+        "forward_rule_stop" => ok(crate::commands::forward::forward_rule_stop_impl(
+            state,
+            owner,
+            arg(&args, "activeId")?,
+            arg(&args, "ruleIndex")?,
         )
         .await),
 

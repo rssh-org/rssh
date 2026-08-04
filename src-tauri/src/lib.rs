@@ -198,6 +198,8 @@ pub fn run() {
             // forward active
             commands::forward::forward_start,
             commands::forward::forward_stats,
+            commands::forward::forward_rule_start,
+            commands::forward::forward_rule_stop,
             commands::forward::forward_stop,
             // dynamic discovery
             commands::discovery::list_dynamic_discovery_sources,

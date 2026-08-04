@@ -1,4 +1,4 @@
-import type { ConnectionKind } from "../stores/app.svelte.ts";
+import type { ConnectionKind, ForwardRule } from "../stores/app.svelte.ts";
 
 export type { ConnectionKind };
 
@@ -36,7 +36,7 @@ interface ProfileSource extends GroupedSource {
 }
 
 interface ForwardSource extends GroupedSource {
-  rules: Array<{ type: string; local_port: number; remote_host: string; remote_port: number }>;
+  rules: ForwardRule[];
   profile_id: string;
 }
 

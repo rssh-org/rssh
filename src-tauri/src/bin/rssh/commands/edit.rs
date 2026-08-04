@@ -3,6 +3,7 @@
 use rssh_lib::error::{AppError, AppResult};
 use rssh_lib::models::CredentialType;
 
+use crate::commands::add::prompt_forward_rule;
 use crate::ctx::CliCtx;
 use crate::helpers::{
     confirm, die, load_cred_secrets, prompt_default, read_multiline, read_password,
@@ -151,26 +152,21 @@ pub fn cmd_edit_forward(conn: &CliCtx, name: &str) -> AppResult<()> {
         .find(|f| f.name.eq_ignore_ascii_case(name))
         .unwrap_or_else(|| die(format!("Forward '{name}' not found")));
 
-    if f.rules.len() != 1 {
-        return Err(AppError::config(
-            "cli_forward_edit_multiple_rules",
-            serde_json::json!({ "count": f.rules.len() }),
-        ));
-    }
-
     let mut updated = f.clone();
     updated.name = prompt_default("Name", &f.name);
-    let rule = updated
-        .rules
-        .first_mut()
-        .ok_or_else(|| AppError::config("fwd_rules_empty", serde_json::json!({})))?;
-    rule.local_port = prompt_default("Local port", &rule.local_port.to_string())
-        .parse()
-        .unwrap_or(rule.local_port);
-    rule.remote_host = prompt_default("Remote host", &rule.remote_host);
-    rule.remote_port = prompt_default("Remote port", &rule.remote_port.to_string())
-        .parse()
-        .unwrap_or(rule.remote_port);
+    updated.rules.clear();
+    for (index, rule) in f.rules.iter().enumerate() {
+        println!("Rule {}:", index + 1);
+        if confirm("Keep this rule?", true) {
+            updated.rules.push(prompt_forward_rule(Some(rule)));
+        }
+    }
+    while updated.rules.is_empty() || confirm("Add another forwarding rule?", false) {
+        if updated.rules.is_empty() {
+            println!("A forward requires at least one rule.");
+        }
+        updated.rules.push(prompt_forward_rule(None));
+    }
 
     rssh_lib::db::forward::update(conn, &updated)?;
     println!("Forward '{}' updated.", updated.name);

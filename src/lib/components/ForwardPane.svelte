@@ -14,6 +14,21 @@
   let bytesTx = $state(0);
   let bytesRx = $state(0);
   let connections = $state(0);
+  type RuleStatus = "starting" | "active" | "stopped" | "error" | "stopping_error";
+  type RuleStats = {
+    index: number;
+    rule: { type: "local" | "remote" | "dynamic"; local_port: number; remote_host: string; remote_port: number };
+    status: RuleStatus;
+    bytes_tx: number;
+    bytes_rx: number;
+    connections: number;
+    effective_port: number | null;
+    error: string | null;
+  };
+  type ForwardStats = { bytes_tx: number; bytes_rx: number; connections: number; connected: boolean; rules: RuleStats[] };
+  let rules = $state<RuleStats[]>([]);
+  let rulePending = $state<Record<number, boolean>>({});
+  let pollGeneration = 0;
   let pollTimer = 0;
   let connectGeneration = 0;
   let stopGeneration = 0;
@@ -29,16 +44,27 @@
   async function pollStats() {
     if (!activeId || status !== "active") return;
     const id = activeId;
+    const generation = ++pollGeneration;
     try {
-      const s = await invoke<{ bytes_tx: number; bytes_rx: number; connections: number }>(
+      const s = await invoke<ForwardStats>(
         "forward_stats", { activeId: id }
       );
-      if (destroyed || activeId !== id || status !== "active") return;
+      if (destroyed || activeId !== id || status !== "active" || generation !== pollGeneration) return;
       bytesTx = s.bytes_tx;
       bytesRx = s.bytes_rx;
       connections = s.connections;
+      rules = s.rules;
+      errorMsg = "";
+      if (!s.connected) {
+        stopPolling();
+        await invoke("forward_stop", { activeId: id }).catch(() => {});
+        if (destroyed || activeId !== id || generation !== pollGeneration) return;
+        activeId = null;
+        status = "error";
+        errorMsg = t("error.ssh_disconnected");
+      }
     } catch (e: any) {
-      if (destroyed || activeId !== id) return;
+      if (destroyed || activeId !== id || generation !== pollGeneration) return;
       stopPolling();
       activeId = null;
       status = "error";
@@ -70,12 +96,58 @@
       }
       activeId = startedId;
       status = "active";
+      await pollStats();
       startPolling();
     } catch (e: any) {
       if (destroyed || generation !== connectGeneration) return;
       status = "error";
       errorMsg = errMsg(e);
     }
+  }
+
+  async function toggleRule(rule: RuleStats) {
+    if (!activeId || rulePending[rule.index]) return;
+    const id = activeId;
+    const start = rule.status === "stopped" || rule.status === "error";
+    rulePending[rule.index] = true;
+    if (start) {
+      rules = rules.map((item) => item.index === rule.index
+        ? { ...item, status: "starting", error: null }
+        : item);
+    }
+    try {
+      await invoke(start ? "forward_rule_start" : "forward_rule_stop", {
+        activeId: id,
+        ruleIndex: rule.index,
+      });
+      await pollStats();
+      errorMsg = "";
+    } catch (e: any) {
+      if (!destroyed && activeId === id) {
+        errorMsg = errMsg(e);
+        await pollStats();
+      }
+    } finally {
+      rulePending[rule.index] = false;
+    }
+  }
+
+  function ruleLabel(rule: RuleStats): string {
+    const port = rule.effective_port ?? (rule.rule.type === "remote" ? rule.rule.remote_port : rule.rule.local_port);
+    if (rule.rule.type === "dynamic") return `SOCKS5 127.0.0.1:${port}`;
+    if (rule.rule.type === "remote") return `remote:${port} → ${rule.rule.remote_host}:${rule.rule.local_port}`;
+    return `127.0.0.1:${port} → ${rule.rule.remote_host}:${rule.rule.remote_port}`;
+  }
+
+  function ruleType(rule: RuleStats): string {
+    return rule.rule.type === "local" ? "-L" : rule.rule.type === "remote" ? "-R" : "-D";
+  }
+
+  function ruleToggleLabel(rule: RuleStats): string {
+    const action = rule.status === "stopped" || rule.status === "error"
+      ? t("forward.start")
+      : t("forward.stop");
+    return `${action}: ${ruleLabel(rule)}`;
   }
 
   async function stop() {
@@ -101,13 +173,14 @@
     destroyed = true;
     connectGeneration++;
     stopGeneration++;
+    pollGeneration++;
     stopPolling();
     const id = activeId;
     activeId = null;
     if (id) invoke("forward_stop", { activeId: id }).catch(() => {});
   });
 
-  const ruleCount = $derived(Number(meta.ruleCount ?? "1"));
+  const ruleCount = $derived(rules.length || Number(meta.ruleCount ?? "1"));
 </script>
 
 <div class="forward-pane">
@@ -117,8 +190,10 @@
       <h3>{meta.name ?? "Port Forward"}</h3>
     </div>
 
-    <div class="route">{t("forward.rule_count", { count: ruleCount })}</div>
-    <div class="via">{t("forward.via", { profile: meta.profileName ?? meta.host ?? "?" })}</div>
+    <div class="summary-line">
+      <span>{t("forward.rule_count", { count: ruleCount })}</span>
+      <span>{t("forward.via", { profile: meta.profileName ?? meta.host ?? "?" })}</span>
+    </div>
 
     <div class="status-area">
       {#if status === "connecting"}
@@ -147,10 +222,41 @@
           <span class="stat-value">{formatBytes(bytesRx)}</span>
         </div>
       </div>
+
+      <div class="rule-list">
+        {#each rules as rule (rule.index)}
+          <article class="rule-card" class:rule-off={rule.status === "stopped"} class:rule-error={rule.status === "error" || rule.status === "stopping_error"}>
+            <div class="rule-head">
+              <span class="rule-type">{ruleType(rule)}</span>
+              <code>{ruleLabel(rule)}</code>
+              <button
+                type="button"
+                class="rule-toggle"
+                class:on={rule.status === "active" || rule.status === "starting"}
+                role="switch"
+                aria-checked={rule.status === "active" || rule.status === "starting"}
+                aria-label={ruleToggleLabel(rule)}
+                disabled={rulePending[rule.index] || rule.status === "starting"}
+                onclick={() => toggleRule(rule)}
+              ><span></span></button>
+            </div>
+            <div class="rule-status" role="status" aria-live="polite">
+              <span class="indicator" class:active={rule.status === "active"} class:connecting={rule.status === "starting"} class:error={rule.status === "error"} class:stopped={rule.status === "stopped"}></span>
+              <span>{t(`forward.status_${rule.status}`)}</span>
+              {#if rule.error}<span class="rule-error-text">{errMsg(rule.error)}</span>{/if}
+            </div>
+            <div class="rule-stats">
+              <span>{t("forward.active_connections")} <b>{rule.connections}</b></span>
+              <span>TX <b>{formatBytes(rule.bytes_tx)}</b></span>
+              <span>RX <b>{formatBytes(rule.bytes_rx)}</b></span>
+            </div>
+          </article>
+        {/each}
+      </div>
     {/if}
 
     {#if errorMsg}
-      <div class="error-msg">{errorMsg}</div>
+      <div class="error-msg" role="alert">{errorMsg}</div>
     {/if}
 
     <div class="actions">
@@ -167,7 +273,7 @@
   .forward-pane {
     height: 100%;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
     padding: 24px;
   }
@@ -177,8 +283,9 @@
     border: 1px solid var(--divider);
     border-radius: 12px;
     padding: calc(28px * var(--density)) calc(32px * var(--density));
-    min-width: 340px;
-    max-width: 420px;
+    width: min(760px, 100%);
+    max-height: 100%;
+    overflow: auto;
     display: flex;
     flex-direction: column;
     gap: calc(12px * var(--density));
@@ -209,20 +316,14 @@
     flex-shrink: 0;
   }
 
-  .route {
-    font-family: monospace;
-    font-size: 13px;
-    color: var(--text);
-    background: var(--bg);
-    padding: 8px 12px;
-    border-radius: 6px;
-    text-align: center;
-  }
-
-  .via {
+  .summary-line {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
     font-size: 12px;
     color: var(--text-sub);
-    text-align: center;
+    border-bottom: 1px solid var(--divider);
+    padding-bottom: 10px;
   }
 
   .status-area {
@@ -286,6 +387,43 @@
     color: var(--text);
   }
 
+  .rule-list { display: grid; gap: 10px; }
+  .rule-card {
+    padding: 12px;
+    border: 1px solid var(--divider);
+    border-left: 3px solid var(--success);
+    border-radius: 7px;
+    background: var(--bg);
+  }
+  .rule-card.rule-off { border-left-color: var(--text-dim); opacity: 0.78; }
+  .rule-card.rule-error { border-left-color: var(--error); }
+  .rule-head { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; }
+  .rule-head code { color: var(--text); overflow-wrap: anywhere; }
+  .rule-type {
+    font: 700 11px monospace;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: 3px;
+    padding: 2px 5px;
+  }
+  .rule-toggle {
+    width: 44px;
+    height: 28px;
+    padding: 5px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--text-dim);
+    cursor: pointer;
+  }
+  .rule-toggle span { display: block; width: 14px; height: 14px; border-radius: 50%; background: var(--bg); transition: transform 150ms ease; }
+  .rule-toggle.on { background: var(--success); }
+  .rule-toggle.on span { transform: translateX(16px); }
+  .rule-toggle:disabled { cursor: wait; opacity: 0.65; }
+  .rule-status { display: flex; align-items: center; gap: 6px; margin-top: 9px; font-size: 11px; color: var(--text-sub); }
+  .rule-error-text { color: var(--error); margin-left: auto; }
+  .rule-stats { display: flex; gap: 18px; margin-top: 8px; font: 10px monospace; color: var(--text-dim); }
+  .rule-stats b { color: var(--text); font-weight: 600; }
+
   .error-msg {
     font-size: 12px;
     color: var(--error);
@@ -322,6 +460,13 @@
   .btn-reconnect {
     background: var(--accent);
     color: var(--bg);
+  }
+
+  @media (max-width: 600px) {
+    .forward-pane { padding: 12px; }
+    .card { padding: 16px; }
+    .summary-line, .rule-stats { flex-wrap: wrap; }
+    .rule-head { grid-template-columns: auto 1fr auto; }
   }
 
 </style>

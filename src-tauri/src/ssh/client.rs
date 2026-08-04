@@ -178,6 +178,7 @@ impl client::Handler for SshHandler {
             })
             .is_some_and(|tx| tx.send(channel).is_ok());
         if !delivered {
+            log::warn!("no forward route for remote port {connected_port}; closing channel");
             let _ = session.close(channel_id);
         }
         async { Ok(()) }
