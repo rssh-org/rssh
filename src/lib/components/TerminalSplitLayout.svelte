@@ -101,6 +101,7 @@
         {#if node.kind === "leaf"}
             {@const tab = app.tabs().find((candidate) => candidate.id === node.tabId)}
             {#if tab && app.isTerminalTabType(tab.type)}
+                {#key tab.id}
                 <section
                     class="pane"
                     class:active={activePaneId === tab.id}
@@ -141,6 +142,7 @@
                         />
                     </div>
                 </section>
+                {/key}
             {/if}
         {:else}
             {@const firstRenderable = isRenderableLayout(node.first)}
