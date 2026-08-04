@@ -35,3 +35,5 @@ commit：85a5d93（实现提交；本报告随后单独提交）
 - 后续修复 commit：7f68016，恢复 TerminalPane 的 connectGeneration/destroyed/disconnected 生命周期状态声明；修复后 `npm run build` 仍 exit 0。
 
 - 后续修复 commit：d1bfaf5，恢复 onMount 中 `const generation = connectGeneration + 1`；修复后 `npm run build` exit 0。
+
+- 后续修复 commit：545891f，TerminalSplitLayout leaf 增加 `{#key tab.id}`，跨 workspace 复用布局位置时确保 TerminalPane 按真实 tab 身份销毁/重建；修复后 `npm run build` exit 0。
