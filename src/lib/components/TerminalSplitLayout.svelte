@@ -102,10 +102,19 @@
             {@const tab = app.tabs().find((candidate) => candidate.id === node.tabId)}
             {#if tab && app.isTerminalTabType(tab.type)}
                 {#key tab.id}
-                <section
+                <div
                     class="pane"
                     class:active={activePaneId === tab.id}
+                    role="button"
+                    tabindex="0"
+                    aria-label={`Activate ${tab.label}`}
                     onclick={() => onActivate(tab.id)}
+                    onkeydown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            onActivate(tab.id);
+                        }
+                    }}
                     oncontextmenu={(event) => {
                         event.stopPropagation();
                         onContextMenu(event, tab.id);
@@ -141,7 +150,7 @@
                             {onInitialConnectionFailure}
                         />
                     </div>
-                </section>
+                </div>
                 {/key}
             {/if}
         {:else}
