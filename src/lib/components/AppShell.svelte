@@ -45,9 +45,18 @@
     let menuCtx = $state<{ x: number; y: number; tab: Tab } | null>(null);
     let pinnedMenu = $state<{ x: number; y: number } | null>(null);
     let pinned = $state(false);
+    let pendingPaneSources = $state<Record<string, string>>({});
     const bypassStartupReconcile = !!window.__rssh_clone || !!window.__rssh_ai_handoff;
     let resourcePanesAllowed = $state(bypassStartupReconcile);
     let navigationLoad = 0;
+    $effect(() => {
+        const tabs = app.tabs();
+        for (const paneId of Object.keys(pendingPaneSources)) {
+            if (!tabs.some((tab) => tab.id === paneId) || app.sessionIdForTab(paneId)) {
+                delete pendingPaneSources[paneId];
+            }
+        }
+    });
 
     async function refreshNavigationData() {
         const current = ++navigationLoad;
@@ -83,10 +92,14 @@
         const tab = app.tabs().find(t => t.id === id);
         if (!tab || tab.type === "home") return;
         if (app.confirmCloseTab()) { closingTab = tab; return; }
+        delete pendingPaneSources[id];
         app.closeTab(id);
     }
     function confirmCloseTab() {
-        if (closingTab) app.closeTab(closingTab.id);
+        if (closingTab) {
+            delete pendingPaneSources[closingTab.id];
+            app.closeTab(closingTab.id);
+        }
         closingTab = null;
     }
 
@@ -749,6 +762,7 @@
         if (!app.isTerminalTabType(tab.type) || tab.type === "serial") return;
         const workspaceId = tab.workspaceId ?? tab.id;
         if (!app.isTerminalWorkspace(workspaceId)) return;
+        const sourcePaneId = tab.id;
         if (tab.paneOf) app.setActivePane(tab.id);
         else app.setActiveWorkspace(workspaceId);
 
@@ -762,7 +776,9 @@
         try {
             const paneId = app.addPane(workspaceId, side, newTab);
             if (!paneId) throw new Error(t("toast.error.add"));
+            pendingPaneSources[paneId] = sourcePaneId;
         } catch (error) {
+            delete pendingPaneSources[newId];
             // addPane is synchronous, but keep rollback here so a future store
             // implementation cannot leave a hidden tab after a failed connect.
             if (app.tabs().some((candidate) => candidate.id === newId)) app.closePane(newId);
@@ -952,7 +968,18 @@
             toast.error(errMsg(error));
             return false;
         }
+        const sourcePaneId = pendingPaneSources[tabId];
+        const workspaceId = tab.workspaceId;
         app.closePane(tabId);
+        delete pendingPaneSources[tabId];
+        if (
+            sourcePaneId
+            && workspaceId
+            && app.activeWorkspaceId() === workspaceId
+            && app.paneIdsForWorkspace(workspaceId).includes(sourcePaneId)
+        ) {
+            app.setActivePane(sourcePaneId);
+        }
         toast.error(errMsg(error));
         return true;
     }
