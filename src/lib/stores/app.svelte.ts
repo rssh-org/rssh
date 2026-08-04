@@ -668,6 +668,16 @@ export function unregisterTerminalArrowSender() { _terminalArrowSender = null; }
 export function sendArrow(dir: ArrowDir, mod: number) { _terminalArrowSender?.(dir, mod); }
 
 /* ─── Per-tab terminal copy/paste controls ─── */
+export interface TerminalResourceStats {
+  tabId: string;
+  cols: number;
+  rows: number;
+  bufferLength: number;
+  scrollback: number;
+  imageStorageLimitMb: number;
+  imagePixelLimit: number;
+}
+
 interface TerminalControls {
   getSelection(): string;
   paste(text: string): void;
@@ -683,7 +693,9 @@ interface TerminalControls {
   /** Read-only text of the visible viewport, one string per row, for the
    *  hover preview. Optional, same as readViewport. */
   readViewportText?(): string[] | null;
+  readResourceStats?(): TerminalResourceStats;
 }
+
 const _terminalControls = new Map<string, TerminalControls>();
 export function registerTerminalControls(tabId: string, controls: TerminalControls) {
   _terminalControls.set(tabId, controls);
@@ -720,6 +732,21 @@ export function readTerminalViewport(tabId: string): ViewportSnapshot | null {
  *  null if unavailable. Reuses the tab's existing terminal buffer. */
 export function readTerminalViewportText(tabId: string): string[] | null {
   return _terminalControls.get(tabId)?.readViewportText?.() ?? null;
+}
+/** Read-only resource configuration and buffer size for a tab, or null when
+ *  the tab is not registered or does not expose resource stats. */
+export function readTerminalResourceStats(tabId: string): TerminalResourceStats | null {
+  return _terminalControls.get(tabId)?.readResourceStats?.() ?? null;
+}
+
+/** Read-only resource snapshots in stable tab-id order. */
+export function terminalResourceSnapshot(): TerminalResourceStats[] {
+  return [..._terminalControls.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .flatMap(([, controls]) => {
+      const stats = controls.readResourceStats?.();
+      return stats ? [stats] : [];
+    });
 }
 
 /* ─── Session registry (for broadcast) ─── */

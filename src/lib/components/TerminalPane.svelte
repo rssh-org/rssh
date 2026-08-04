@@ -1454,11 +1454,16 @@
     let unsubscribeFont: (() => void) | null = null;
 
     onMount(async () => {
+        const TERMINAL_SCROLLBACK = 1000;
+        const IMAGE_STORAGE_LIMIT_MB = app.isMobile ? 32 : 128;
+        const IMAGE_PIXEL_LIMIT = app.isMobile ? 4_000_000 : 16_000_000;
+
         terminal = new Terminal({
             cursorBlink: true,
             fontSize: theme.termFontSize(),
             fontFamily: theme.currentTermFontStack(),
             allowProposedApi: true,
+            scrollback: TERMINAL_SCROLLBACK,
             /*
             // When an app enables mouse tracking (zellij/tmux/vim), xterm hands
             // drags to that app instead of selecting text. Holding a modifier
@@ -1487,8 +1492,8 @@
             sixelSupport: true,
             sixelScrolling: true,
             iipSupport: true,
-            storageLimit: app.isMobile ? 32 : 128,
-            pixelLimit: app.isMobile ? 4_000_000 : 16_000_000,
+            storageLimit: IMAGE_STORAGE_LIMIT_MB,
+            pixelLimit: IMAGE_PIXEL_LIMIT,
         }));
         terminal.open(containerEl);
         ime229WorkaroundCleanup = setupXtermIme229Workaround({
@@ -1534,7 +1539,19 @@
             focus: () => terminal.focus(),
             readViewport: () => readViewportSnapshot(terminal),
             readViewportText: () => readViewportText(terminal),
+            readResourceStats: () => ({
+                tabId,
+                cols: terminal.cols,
+                rows: terminal.rows,
+                bufferLength: terminal.buffer.active.length,
+                scrollback: TERMINAL_SCROLLBACK,
+                imageStorageLimitMb: IMAGE_STORAGE_LIMIT_MB,
+                imagePixelLimit: IMAGE_PIXEL_LIMIT,
+            }),
         });
+        if (import.meta.env.DEV) {
+            console.debug("[rssh] terminal resources", app.terminalResourceSnapshot());
+        }
 
         // Copy-on-select (left-button mouseup) + right-click action (capture
         // phase — required so preventDefault can suppress the native menu before
