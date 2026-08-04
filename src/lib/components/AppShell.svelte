@@ -338,11 +338,6 @@
         });
     });
 
-    let retainedTerminalWorkspaceId = $state<string | null>(null);
-    $effect(() => {
-        const workspaceId = app.activeWorkspaceId();
-        if (app.isTerminalWorkspace(workspaceId)) retainedTerminalWorkspaceId = workspaceId;
-    });
 
     $effect(() => {
         const workspace = app.workspaceTabs().find((tab) => tab.id === app.activeWorkspaceId())
@@ -360,16 +355,8 @@
         // overlay, not a route.
     });
 
-    let terminalWorkspaceId = $derived(
-        app.isTerminalWorkspace(app.activeWorkspaceId())
-            ? app.activeWorkspaceId()
-            : retainedTerminalWorkspaceId,
-    );
-    let terminalLayout = $derived(
-        terminalWorkspaceId ? app.layoutForWorkspace(terminalWorkspaceId) : null,
-    );
-    let terminalLayoutVisible = $derived(
-        !app.settingsActive() && app.isTerminalWorkspace(app.activeWorkspaceId()),
+    let terminalWorkspaceTabs = $derived(
+        app.workspaceTabs().filter((tab) => app.isTerminalWorkspace(tab.id)),
     );
     let activeRouteTab = $derived(
         app.activeWorkspaceId() === "home"
@@ -1217,25 +1204,28 @@
             </aside>
         {/if}
         <div class="main-area">
-            <div
-                class="pane terminal-layout-pane"
-                class:visible={terminalLayoutVisible && resourcePanesAllowed && !!terminalLayout}
-                role="presentation"
-            >
-                {#if resourcePanesAllowed && terminalLayout}
-                    <TerminalSplitLayout
-                        layout={terminalLayout}
-                        activePaneId={app.activePaneId()}
-                        onActivate={(tabId) => app.setActivePane(tabId)}
-                        onResize={(path, ratio) => {
-                            if (terminalWorkspaceId) app.resizeLayoutPath(terminalWorkspaceId, path, ratio);
-                        }}
-                        onClose={closeTerminalPane}
-                        onContextMenu={openPaneContextMenu}
-                        onInitialConnectionFailure={handleInitialConnectionFailure}
-                    />
-                {/if}
-            </div>
+            {#each terminalWorkspaceTabs as workspace (workspace.id)}
+                {@const layout = app.layoutForWorkspace(workspace.id)}
+                <div
+                    class="pane terminal-layout-pane"
+                    class:visible={!app.settingsActive() && workspace.id === app.activeWorkspaceId() && resourcePanesAllowed && !!layout}
+                    role="presentation"
+                >
+                    {#if resourcePanesAllowed && layout}
+                        <TerminalSplitLayout
+                            {layout}
+                            activePaneId={workspace.id === app.activeWorkspaceId() ? app.activePaneId() : workspace.id}
+                            onActivate={(tabId) => {
+                                if (workspace.id === app.activeWorkspaceId()) app.setActivePane(tabId);
+                            }}
+                            onResize={(path, ratio) => app.resizeLayoutPath(workspace.id, path, ratio)}
+                            onClose={closeTerminalPane}
+                            onContextMenu={openPaneContextMenu}
+                            onInitialConnectionFailure={handleInitialConnectionFailure}
+                        />
+                    {/if}
+                </div>
+            {/each}
 
             {#if app.settingsActive()}
                 <div class="pane visible">
