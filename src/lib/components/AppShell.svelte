@@ -941,6 +941,10 @@
         const tab = app.tabs().find((candidate) => candidate.id === tabId);
         if (tab) openCtxMenu(e, tab);
     }
+    function openRouteContextMenu(e: MouseEvent, tab: Tab | undefined) {
+        if (app.isMobile || !tab) return;
+        openCtxMenu(e, tab);
+    }
 
     function handleInitialConnectionFailure(tabId: string, error: unknown): boolean {
         const tab = app.tabs().find((candidate) => candidate.id === tabId);
@@ -1211,15 +1215,15 @@
                     <SettingsLayout/>
                 </div>
             {:else if activeRouteTab?.type === "home"}
-                <div class="pane visible">
+                <div class="pane visible" role="presentation" oncontextmenu={(event) => openRouteContextMenu(event, activeRouteTab)}>
                     <HomeScreen/>
                 </div>
             {:else if activeRouteTab?.type === "forward" && resourcePanesAllowed}
-                <div class="pane visible">
+                <div class="pane visible" role="presentation" oncontextmenu={(event) => openRouteContextMenu(event, activeRouteTab)}>
                     <ForwardPane tabId={activeRouteTab.id} meta={activeRouteTab.meta ?? {}}/>
                 </div>
             {:else if activeRouteTab?.type === "edit"}
-                <div class="pane visible">
+                <div class="pane visible" role="presentation" oncontextmenu={(event) => openRouteContextMenu(event, activeRouteTab)}>
                     <EditPane tabId={activeRouteTab.id} />
                 </div>
             {/if}
