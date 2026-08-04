@@ -201,6 +201,11 @@
     let fitAddon: FitAddon;
     let searchAddon: SearchAddon;
     let sessionId = $state<string | null>(null);
+    // `connectAndWire` crosses several awaits. The generation guards the whole
+    // component flow; ReservedSessionAttempt owns the finer Pending/Ready state.
+    let connectGeneration = 0;
+    let destroyed = false;
+    let disconnected = $state(false);
     // Initial split panes are removed when their first connect attempt fails;
     // reconnect attempts must never trigger that cleanup.
     let initialConnection = true;
