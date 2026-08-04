@@ -97,10 +97,6 @@ pub struct AppState {
     /// 进程退出即丢，绝不落盘。值用 `Zeroizing<String>` 包裹，drop 时擦写底层字节，
     /// 减少内存 dump / swap 中残留明文的窗口。
     pub passphrase_cache: Mutex<HashMap<String, zeroize::Zeroizing<String>>>,
-    /// Windows bound to move together by directional "open in new window":
-    /// dragging one drags the rest. Desktop-only (mobile is single-window).
-    #[cfg(desktop)]
-    pub window_groups: Mutex<crate::commands::window::WindowGroups>,
     /// AI 排障会话表（ai_session_id → DiagnoseSession）
     pub ai_sessions: Mutex<HashMap<String, DiagnoseSession>>,
     /// AI actors intentionally keep `tab_id` reuse semantics, so ownership is

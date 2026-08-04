@@ -1289,8 +1289,6 @@ mod tests {
             passphrase_waiters: Mutex::new(HashMap::new()),
             host_key_waiters: Mutex::new(HashMap::new()),
             passphrase_cache: Mutex::new(HashMap::new()),
-            #[cfg(desktop)]
-            window_groups: Mutex::new(crate::commands::window::WindowGroups::default()),
             ai_sessions: Mutex::new(HashMap::new()),
             ai_session_owners: Arc::new(Mutex::new(HashMap::new())),
             ai_remote_shell_cache: Mutex::new(HashMap::new()),
