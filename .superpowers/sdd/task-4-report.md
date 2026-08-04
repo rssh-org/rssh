@@ -20,7 +20,7 @@ commit：a0912bf（feat: add recursive terminal split layout）
 ## 复审修复
 - 无效或缺失 leaf 先通过 `isRenderableLayout` 判断；split 仅在双分支有效时渲染，否则折叠到唯一有效分支，双无效不输出任何节点或 separator。
 - active resize 已拒绝第二个 pointerdown；pointerup/pointercancel 仅清理与当前 `pointerId` 相同的事件。
-- 修复提交：待提交。
+- 修复提交：51a9e52（fix: handle invalid terminal split branches）。
 - 修复后 `npm run build`：通过；warnings 与前次相同且均来自既有代码。
 
 ## 疑虑
