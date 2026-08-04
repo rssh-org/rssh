@@ -986,7 +986,6 @@ const zh: Messages = {
   "shortcuts.open_sftp": "打开 SFTP（SSH 会话）",
   "shortcuts.toggle_ai": "切换 AI 面板",
   "shortcuts.reconnect_disconnect": "断开后重连",
-  "shortcuts.reconnect_error": "出错 / 停止后重连",
   // 快捷键自定义
   "shortcuts.customize.fixed": "固定（不可修改）",
   "shortcuts.customize.record": "修改",

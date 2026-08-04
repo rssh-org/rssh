@@ -983,7 +983,6 @@ const en = {
   "shortcuts.open_sftp": "Open SFTP (SSH session)",
   "shortcuts.toggle_ai": "Toggle AI panel",
   "shortcuts.reconnect_disconnect": "Reconnect after disconnect",
-  "shortcuts.reconnect_error": "Reconnect after error/stop",
   // Shortcut customization
   "shortcuts.customize.fixed": "Fixed (not customizable)",
   "shortcuts.customize.record": "Change",

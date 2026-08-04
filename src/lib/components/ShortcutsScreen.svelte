@@ -34,7 +34,6 @@
     ["↑ ↓ ← →", t("shortcuts.select_card")],
     ["Enter", t("shortcuts.connect_card")],
     ["Any key", t("shortcuts.reconnect_disconnect")],
-    ["Any key", t("shortcuts.reconnect_error")],
   ]);
 
   let recordingId = $state<ActionId | null>(null);
