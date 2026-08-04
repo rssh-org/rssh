@@ -1,7 +1,7 @@
 # 任务 4 报告
 
 状态：已完成
-commit：875af97（feat: add recursive terminal split layout）
+commit：a0912bf（feat: add recursive terminal split layout）
 
 ## 构建结果
 - `npm run build`：通过，Vite production build 完成。
