@@ -45,3 +45,5 @@ commit：85a5d93（实现提交；本报告随后单独提交）
 - 后续修复 commit：fe9d945，维护 newPaneId→sourcePaneId pending map；初次失败 closePane 后仅当 source 仍在当前 workspace layout 时恢复 active pane，成功连接/正常关闭自动清理 pending；静态 grep 与 `npm run build` 均通过。
 
 - 后续修复 commit：63bde93，为每个 terminal workspace 常驻 keyed TerminalSplitLayout，非活动 workspace 仅 CSS 隐藏；activePaneId、activate、resize 仅作用于当前 workspace。`npm run build` 通过，聚焦 `npm run test -- src/lib/stores/app.svelte.test.ts` 为 34/34 通过。
+
+- 后续修复 commit：252b584，将 terminal pane wrapper 设为可聚焦 `role="button"`，支持 Enter/Space 激活并保留 close/contextmenu；组件专属 a11y warning 消失，`npm run build` exit 0。
