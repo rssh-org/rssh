@@ -26,7 +26,7 @@ commit：85a5d93（实现提交；本报告随后单独提交）
 
 
 ## 复审修复
-- 修复 commit：待提交（本次修复）。
+- 修复 commit：0507b0a（本报告更新随后单独提交）。
 - `TerminalSplitLayout.svelte` 的 leaf 将真实 tabId 传给 pane-specific context callback；AppShell 不再从父级 activePaneId 推断右键目标。
 - `TerminalPane.svelte` 对 serial/telnet/local/SSH 初次连接失败统一执行一次性 callback；reconnect 明确关闭 initial 标记，因此重连失败不会删除既有 pane。
 - AppShell 对失败 hidden pane 调用 `closePane` 并复用 `toast.error(errMsg(error))`；root pane 只提示，不删除。
