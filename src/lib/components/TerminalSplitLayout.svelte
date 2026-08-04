@@ -46,7 +46,7 @@
             const tab = app.tabs().find((candidate) => candidate.id === node.tabId);
             return !!tab && app.isTerminalTabType(tab.type);
         }
-        return isRenderableLayout(node.first) && isRenderableLayout(node.second);
+        return isRenderableLayout(node.first) || isRenderableLayout(node.second);
     }
 
     function handleResizeMove(event: PointerEvent) {

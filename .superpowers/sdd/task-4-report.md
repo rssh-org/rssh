@@ -22,6 +22,7 @@ commit：a0912bf（feat: add recursive terminal split layout）
 - active resize 已拒绝第二个 pointerdown；pointerup/pointercancel 仅清理与当前 `pointerId` 相同的事件。
 - 修复提交：51a9e52（fix: handle invalid terminal split branches）。
 - 修复后 `npm run build`：通过；warnings 与前次相同且均来自既有代码。
+- 嵌套 split 的可渲染判定按“任一后代有效”递归，避免外层预检误丢失内部唯一有效 pane。
 
 ## 疑虑
 - 仅按任务要求运行 `npm run build`，未运行项目级测试套件、formatter 或 lint。
