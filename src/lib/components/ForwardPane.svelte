@@ -195,61 +195,69 @@
 </script>
 
 <div class="forward-pane">
-  <div class="card surface-raised">
-    <div class="header">
-      <span class="type-badge">SSH</span>
-      <h3>{meta.name ?? "Port Forward"}</h3>
-    </div>
+  <div class="forward-content">
+    <section class="card surface-raised summary-card">
+      <div class="summary-head">
+        <div class="header">
+          <span class="type-badge">SSH</span>
+          <div>
+            <h3>{meta.name ?? "Port Forward"}</h3>
+            <div class="summary-meta">
+              <span>{t("forward.rule_count", { count: ruleCount })}</span>
+              <span>{t("forward.via", { profile: meta.profileName ?? meta.host ?? "?" })}</span>
+            </div>
+          </div>
+        </div>
+        <div class="status-area" role="status" aria-live="polite">
+          {#if status === "connecting"}
+            <span class="indicator connecting"></span> <span class="status-text">{t("common.connecting")}</span>
+          {:else if status === "active"}
+            <span class="indicator active"></span> <span class="status-text">{t("forward.status_active")}</span>
+          {:else if status === "error"}
+            <span class="indicator error"></span> <span class="status-text">{t("forward.status_error")}</span>
+          {:else}
+            <span class="indicator stopped"></span> <span class="status-text">{t("forward.status_stopped")}</span>
+          {/if}
+        </div>
+      </div>
 
-    <div class="summary-line">
-      <span>{t("forward.rule_count", { count: ruleCount })}</span>
-      <span>{t("forward.via", { profile: meta.profileName ?? meta.host ?? "?" })}</span>
-    </div>
-
-    <div class="status-area">
-      {#if status === "connecting"}
-        <span class="indicator connecting"></span> <span class="status-text">{t("common.connecting")}</span>
-      {:else if status === "active"}
-        <span class="indicator active"></span> <span class="status-text">{t("forward.status_active")}</span>
-      {:else if status === "error"}
-        <span class="indicator error"></span> <span class="status-text">{t("forward.status_error")}</span>
-      {:else}
-        <span class="indicator stopped"></span> <span class="status-text">{t("forward.status_stopped")}</span>
-      {/if}
-    </div>
-
-    {#if status === "active"}
-      <div class="stats">
+      <div class="stats summary-stats">
         <div class="stat">
           <span class="stat-label">{t("forward.active_connections")}</span>
           <span class="stat-value">{connections}</span>
         </div>
-        <div class="stat">
-          <span class="stat-label">TX</span>
-          <span class="stat-value">{formatBytes(bytesTx)}</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">RX</span>
-          <span class="stat-value">{formatBytes(bytesRx)}</span>
-        </div>
+        <div class="stat"><span class="stat-label">TX</span><span class="stat-value">{formatBytes(bytesTx)}</span></div>
+        <div class="stat"><span class="stat-label">RX</span><span class="stat-value">{formatBytes(bytesRx)}</span></div>
       </div>
 
-      <div class="rule-list">
+      {#if errorMsg}<div class="error-msg" role="alert">{errorMsg}</div>{/if}
+
+      <div class="actions">
+        {#if status === "active"}
+          <button class="btn-stop" onclick={stop}>{t("forward.stop")}</button>
+        {:else if status === "error" || status === "stopped"}
+          <button class="btn-reconnect" onclick={connect}>{t("common.reconnect")}</button>
+        {/if}
+      </div>
+    </section>
+
+    {#if rules.length > 0}
+      <div class="rule-grid">
         {#each rules as rule (rule.index)}
-          <article class="rule-card" class:rule-off={rule.status === "stopped"} class:rule-error={rule.status === "error" || rule.status === "stopping_error"}>
+          <article class="card surface-raised rule-card" class:rule-off={rule.status === "stopped"} class:rule-error={rule.status === "error" || rule.status === "stopping_error"}>
             <div class="rule-head">
               <span class="rule-type">{ruleType(rule)}</span>
               <code>{ruleLabel(rule)}</code>
-              <button
-                type="button"
-                class="rule-toggle"
-                class:on={rule.status === "active" || rule.status === "starting" || rule.status === "stopping_error"}
-                role="switch"
-                aria-checked={rule.status === "active" || rule.status === "starting" || rule.status === "stopping_error"}
-                aria-label={ruleToggleLabel(rule)}
-                disabled={rulePending[rule.index] || rule.status === "starting"}
-                onclick={() => toggleRule(rule)}
-              ><span></span></button>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  aria-label={ruleToggleLabel(rule)}
+                  checked={rule.status === "active" || rule.status === "starting" || rule.status === "stopping_error"}
+                  disabled={rulePending[rule.index] || rule.status === "starting"}
+                  onchange={() => toggleRule(rule)}
+                />
+                <span class="slider"></span>
+              </label>
             </div>
             <div class="rule-status" role="status" aria-live="polite">
               <span class="indicator" class:active={rule.status === "active"} class:connecting={rule.status === "starting"} class:error={rule.status === "error" || rule.status === "stopping_error"} class:stopped={rule.status === "stopped"}></span>
@@ -265,41 +273,39 @@
         {/each}
       </div>
     {/if}
-
-    {#if errorMsg}
-      <div class="error-msg" role="alert">{errorMsg}</div>
-    {/if}
-
-    <div class="actions">
-      {#if status === "active"}
-        <button class="btn-stop" onclick={stop}>{t("forward.stop")}</button>
-      {:else if status === "error" || status === "stopped"}
-        <button class="btn-reconnect" onclick={connect}>{t("common.reconnect")}</button>
-      {/if}
-    </div>
   </div>
 </div>
 
 <style>
   .forward-pane {
     height: 100%;
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
+    overflow: auto;
     padding: 24px;
   }
 
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--divider);
-    border-radius: 12px;
-    padding: calc(28px * var(--density)) calc(32px * var(--density));
+  .forward-content {
     width: min(760px, 100%);
-    max-height: 100%;
-    overflow: auto;
+    margin: 0 auto;
     display: flex;
     flex-direction: column;
-    gap: calc(12px * var(--density));
+    gap: 14px;
+  }
+
+  .summary-card, .rule-card {
+    padding: calc(18px * var(--density)) calc(20px * var(--density));
+  }
+
+  .summary-card {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .summary-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
   }
 
   .header {
@@ -327,20 +333,19 @@
     flex-shrink: 0;
   }
 
-  .summary-line {
+  .summary-meta {
     display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    font-size: 12px;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin-top: 4px;
+    font-size: 11px;
     color: var(--text-sub);
-    border-bottom: 1px solid var(--divider);
-    padding-bottom: 10px;
   }
 
   .status-area {
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-end;
     gap: 8px;
     padding: 4px 0;
   }
@@ -398,13 +403,9 @@
     color: var(--text);
   }
 
-  .rule-list { display: grid; gap: 10px; }
+  .rule-grid { display: grid; gap: 12px; }
   .rule-card {
-    padding: 12px;
-    border: 1px solid var(--divider);
     border-left: 3px solid var(--success);
-    border-radius: 7px;
-    background: var(--bg);
   }
   .rule-card.rule-off { border-left-color: var(--text-dim); opacity: 0.78; }
   .rule-card.rule-error { border-left-color: var(--error); }
@@ -417,19 +418,6 @@
     border-radius: 3px;
     padding: 2px 5px;
   }
-  .rule-toggle {
-    width: 44px;
-    height: 28px;
-    padding: 5px;
-    border: 0;
-    border-radius: 999px;
-    background: var(--text-dim);
-    cursor: pointer;
-  }
-  .rule-toggle span { display: block; width: 14px; height: 14px; border-radius: 50%; background: var(--bg); transition: transform 150ms ease; }
-  .rule-toggle.on { background: var(--success); }
-  .rule-toggle.on span { transform: translateX(16px); }
-  .rule-toggle:disabled { cursor: wait; opacity: 0.65; }
   .rule-status { display: flex; align-items: center; gap: 6px; margin-top: 9px; font-size: 11px; color: var(--text-sub); }
   .rule-error-text { color: var(--error); margin-left: auto; }
   .rule-stats { display: flex; gap: 18px; margin-top: 8px; font: 10px monospace; color: var(--text-dim); }
@@ -475,8 +463,10 @@
 
   @media (max-width: 600px) {
     .forward-pane { padding: 12px; }
-    .card { padding: 16px; }
-    .summary-line, .rule-stats { flex-wrap: wrap; }
+    .summary-card, .rule-card { padding: 16px; }
+    .summary-head { align-items: stretch; flex-direction: column; }
+    .status-area { justify-content: flex-start; }
+    .rule-stats { flex-wrap: wrap; }
     .rule-head { grid-template-columns: auto 1fr auto; }
   }
 
