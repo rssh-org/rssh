@@ -1,7 +1,7 @@
 # 任务 5 报告
 
 状态：已完成
-commit：5be66d0
+commit：85a5d93（实现提交；本报告随后单独提交）
 
 ## 构建结果
 - `npm run build`：通过（Vite production build，exit 0）。
