@@ -33,3 +33,5 @@ commit：85a5d93（实现提交；本报告随后单独提交）
 - 复审验证：`npm run build` 通过（exit 0）；仍仅有既有 a11y/chunk-size warnings，未运行整套测试、lint 或 formatter。
 
 - 后续修复 commit：7f68016，恢复 TerminalPane 的 connectGeneration/destroyed/disconnected 生命周期状态声明；修复后 `npm run build` 仍 exit 0。
+
+- 后续修复 commit：d1bfaf5，恢复 onMount 中 `const generation = connectGeneration + 1`；修复后 `npm run build` exit 0。
