@@ -22,7 +22,7 @@ commit：85a5d93（实现提交；本报告随后单独提交）
 - 顶层排序仅接受 workspaceTabs，隐藏 pane 不进入导航、快捷键或关闭入口。
 
 ## 疑虑
-- TerminalPane 的后端连接失败仍由其既有 reconnect UI 处理；AppShell 能对 addPane 同步失败执行 rollback/toast，但 store API 没有异步连接失败回调。
+- TerminalPane 组件已提供一次性 initial failure callback；reconnect 失败继续由既有 UI 处理，store API 本身仍不暴露异步连接失败回调，AppShell 只移除 hidden pane。
 
 
 ## 复审修复
