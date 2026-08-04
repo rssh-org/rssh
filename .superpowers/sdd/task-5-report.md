@@ -47,3 +47,5 @@ commit：85a5d93（实现提交；本报告随后单独提交）
 - 后续修复 commit：63bde93，为每个 terminal workspace 常驻 keyed TerminalSplitLayout，非活动 workspace 仅 CSS 隐藏；activePaneId、activate、resize 仅作用于当前 workspace。`npm run build` 通过，聚焦 `npm run test -- src/lib/stores/app.svelte.test.ts` 为 34/34 通过。
 
 - 后续修复 commit：252b584，将 terminal pane wrapper 设为可聚焦 `role="button"`，支持 Enter/Space 激活并保留 close/contextmenu；组件专属 a11y warning 消失，`npm run build` exit 0。
+
+- 后续修复 commit：84fe50b，pane onkeydown 首先要求 `currentTarget === target`，避免 xterm/close button 的 Enter/Space 冒泡触发 pane 激活；修复后 `npm run build` exit 0。
