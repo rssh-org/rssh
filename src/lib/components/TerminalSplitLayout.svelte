@@ -110,6 +110,7 @@
                     aria-label={`Activate ${tab.label}`}
                     onclick={() => onActivate(tab.id)}
                     onkeydown={(event) => {
+                        if (event.currentTarget !== event.target) return;
                         if (event.key === "Enter" || event.key === " ") {
                             event.preventDefault();
                             onActivate(tab.id);
