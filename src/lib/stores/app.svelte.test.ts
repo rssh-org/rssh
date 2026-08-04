@@ -470,3 +470,31 @@ describe("connectTelnetProfile", () => {
     expect(app.tabs()[1].meta?.echo_mode).toBe("on");
   });
 });
+describe("terminal workspaces", () => {
+  it("keeps split children out of the top-level tab list", async () => {
+    const app = await loadAppModule();
+    app.addTab({ id: "root", type: "local", label: "Root" });
+    const child = app.addPane("root", "right", { id: "child", type: "local", label: "Child" });
+    expect(child).toEqual("child");
+    expect(app.workspaceTabs().map((tab) => tab.id)).toEqual(["root"]);
+    expect(app.paneIdsForWorkspace("root")).toEqual(["child", "root"]);
+  });
+
+  it("removes a pane without destroying its sibling workspace", async () => {
+    const app = await loadAppModule();
+    app.addTab({ id: "root", type: "local", label: "Root" });
+    app.addPane("root", "right", { id: "child", type: "local", label: "Child" });
+    app.closePane("child");
+    expect(app.tabs().map((tab) => tab.id)).toContain("root");
+    expect(app.paneIdsForWorkspace("root")).toEqual(["root"]);
+  });
+
+  it("closing a workspace closes all hidden pane tabs", async () => {
+    const app = await loadAppModule();
+    app.addTab({ id: "root", type: "local", label: "Root" });
+    app.addPane("root", "right", { id: "child", type: "local", label: "Child" });
+    app.closeTab("root");
+    expect(app.tabs().map((tab) => tab.id)).not.toContain("root");
+    expect(app.tabs().map((tab) => tab.id)).not.toContain("child");
+  });
+});
