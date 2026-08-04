@@ -1096,6 +1096,7 @@
                 // localized sentence ("Telnet connect to {peer} failed: {err}");
                 // a hardcoded prefix would just duplicate it in English.
                 terminal.write(`\x1b[31m${errMsg(e)}\x1b[0m\r\n`);
+                terminal.write("\x1b[90mPress any key to reconnect.\x1b[0m\r\n");
                 disconnected = true;
                 reportInitialConnectionFailure(e);
                 return false;
