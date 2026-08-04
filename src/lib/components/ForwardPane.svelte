@@ -57,11 +57,17 @@
       errorMsg = "";
       if (!s.connected) {
         stopPolling();
-        await invoke("forward_stop", { activeId: id }).catch(() => {});
-        if (destroyed || activeId !== id || generation !== pollGeneration) return;
-        activeId = null;
-        status = "error";
-        errorMsg = t("error.ssh_disconnected");
+        try {
+          await invoke("forward_stop", { activeId: id });
+          if (destroyed || activeId !== id || generation !== pollGeneration) return;
+          activeId = null;
+          status = "error";
+          errorMsg = t("error.ssh_disconnected");
+        } catch (e: any) {
+          if (destroyed || activeId !== id || generation !== pollGeneration) return;
+          status = "error";
+          errorMsg = errMsg(e);
+        }
       }
     } catch (e: any) {
       if (destroyed || activeId !== id || generation !== pollGeneration) return;
@@ -89,6 +95,11 @@
     errorMsg = "";
     bytesTx = 0; bytesRx = 0; connections = 0;
     try {
+      if (activeId) {
+        await invoke("forward_stop", { activeId });
+        if (destroyed || generation !== connectGeneration) return;
+        activeId = null;
+      }
       const startedId = await invoke<string>("forward_start", { forwardId: meta.forwardId });
       if (destroyed || generation !== connectGeneration) {
         await invoke("forward_stop", { activeId: startedId }).catch(() => {});
@@ -97,7 +108,7 @@
       activeId = startedId;
       status = "active";
       await pollStats();
-      startPolling();
+      if (activeId === startedId && status === "active") startPolling();
     } catch (e: any) {
       if (destroyed || generation !== connectGeneration) return;
       status = "error";
@@ -232,16 +243,16 @@
               <button
                 type="button"
                 class="rule-toggle"
-                class:on={rule.status === "active" || rule.status === "starting"}
+                class:on={rule.status === "active" || rule.status === "starting" || rule.status === "stopping_error"}
                 role="switch"
-                aria-checked={rule.status === "active" || rule.status === "starting"}
+                aria-checked={rule.status === "active" || rule.status === "starting" || rule.status === "stopping_error"}
                 aria-label={ruleToggleLabel(rule)}
                 disabled={rulePending[rule.index] || rule.status === "starting"}
                 onclick={() => toggleRule(rule)}
               ><span></span></button>
             </div>
             <div class="rule-status" role="status" aria-live="polite">
-              <span class="indicator" class:active={rule.status === "active"} class:connecting={rule.status === "starting"} class:error={rule.status === "error"} class:stopped={rule.status === "stopped"}></span>
+              <span class="indicator" class:active={rule.status === "active"} class:connecting={rule.status === "starting"} class:error={rule.status === "error" || rule.status === "stopping_error"} class:stopped={rule.status === "stopped"}></span>
               <span>{t(`forward.status_${rule.status}`)}</span>
               {#if rule.error}<span class="rule-error-text">{errMsg(rule.error)}</span>{/if}
             </div>

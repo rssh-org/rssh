@@ -168,9 +168,7 @@ pub(crate) fn prompt_forward_rule(current: Option<&ForwardRule>) -> ForwardRule 
             ForwardType::Local => "8080".into(),
         }
     };
-    let local_port = prompt_default("Local port", &default_local_port)
-        .parse()
-        .unwrap_or(0);
+    let local_port = prompt_port("Local port", &default_local_port);
     if forward_type == ForwardType::Dynamic {
         return ForwardRule {
             forward_type,
@@ -194,8 +192,16 @@ pub(crate) fn prompt_forward_rule(current: Option<&ForwardRule>) -> ForwardRule 
         forward_type,
         local_port,
         remote_host: prompt_default("Remote host", default_host),
-        remote_port: prompt_default("Remote port", &default_remote_port)
-            .parse()
-            .unwrap_or(0),
+        remote_port: prompt_port("Remote port", &default_remote_port),
+    }
+}
+
+fn prompt_port(label: &str, default: &str) -> u16 {
+    loop {
+        let value = prompt_default(label, default);
+        match value.parse() {
+            Ok(port) => return port,
+            Err(_) => eprintln!("Invalid port '{value}'; enter a number from 0 to 65535."),
+        }
     }
 }
