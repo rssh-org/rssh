@@ -17,6 +17,12 @@ commit：a0912bf（feat: add recursive terminal split layout）
 - Pointer down 捕获指针，move 按当前 split 容器 rect 计算 ratio，up/cancel 清理 window 监听并释放 pointer capture；尺寸为 0 时不写状态。
 - pane root 与嵌套 split child 均设置 `min-width: 0`、`min-height: 0`、`overflow: hidden`；未复制 tab bar、快捷键或移动端分栏逻辑。
 
+## 复审修复
+- 无效或缺失 leaf 先通过 `isRenderableLayout` 判断；split 仅在双分支有效时渲染，否则折叠到唯一有效分支，双无效不输出任何节点或 separator。
+- active resize 已拒绝第二个 pointerdown；pointerup/pointercancel 仅清理与当前 `pointerId` 相同的事件。
+- 修复提交：待提交。
+- 修复后 `npm run build`：通过；warnings 与前次相同且均来自既有代码。
+
 ## 疑虑
 - 仅按任务要求运行 `npm run build`，未运行项目级测试套件、formatter 或 lint。
 - build 中的既有 a11y 与 chunk-size warnings 未因本组件产生，且未修改相关文件。

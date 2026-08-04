@@ -28,9 +28,9 @@
 
     let resizeState: ResizeState | null = null;
 
-    function stopResize() {
+    function stopResize(event?: PointerEvent) {
         const state = resizeState;
-        if (!state) return;
+        if (!state || (event && event.pointerId !== state.pointerId)) return;
 
         window.removeEventListener("pointermove", handleResizeMove);
         window.removeEventListener("pointerup", stopResize);
@@ -39,6 +39,14 @@
             state.separator.releasePointerCapture(state.pointerId);
         }
         resizeState = null;
+    }
+
+    function isRenderableLayout(node: TerminalLayout): boolean {
+        if (node.kind === "leaf") {
+            const tab = app.tabs().find((candidate) => candidate.id === node.tabId);
+            return !!tab && app.isTerminalTabType(tab.type);
+        }
+        return isRenderableLayout(node.first) && isRenderableLayout(node.second);
     }
 
     function handleResizeMove(event: PointerEvent) {
@@ -60,7 +68,7 @@
     }
 
     function startResize(event: PointerEvent, path: number[], direction: SplitDirection) {
-        if (event.button !== 0) return;
+        if (resizeState || event.button !== 0) return;
 
         const separator = event.currentTarget as HTMLElement;
         const container = separator.parentElement;
@@ -122,28 +130,36 @@
                 </section>
             {/if}
         {:else}
-            <div
-                class="split"
-                class:horizontal={node.direction === "horizontal"}
-                class:vertical={node.direction === "vertical"}
-                style={`--split-ratio: ${node.ratio};`}
-            >
-                <div class="split-child first">
-                    {@render renderLayout(node.first, [...path, 0])}
-                </div>
+            {@const firstRenderable = isRenderableLayout(node.first)}
+            {@const secondRenderable = isRenderableLayout(node.second)}
+            {#if firstRenderable && secondRenderable}
                 <div
-                    class="separator"
+                    class="split"
                     class:horizontal={node.direction === "horizontal"}
                     class:vertical={node.direction === "vertical"}
-                    role="separator"
-                    aria-label="Resize panes"
-                    aria-orientation={node.direction === "horizontal" ? "vertical" : "horizontal"}
-                    onpointerdown={(event) => startResize(event, path, node.direction)}
-                ></div>
-                <div class="split-child second">
-                    {@render renderLayout(node.second, [...path, 1])}
+                    style={`--split-ratio: ${node.ratio};`}
+                >
+                    <div class="split-child first">
+                        {@render renderLayout(node.first, [...path, 0])}
+                    </div>
+                    <div
+                        class="separator"
+                        class:horizontal={node.direction === "horizontal"}
+                        class:vertical={node.direction === "vertical"}
+                        role="separator"
+                        aria-label="Resize panes"
+                        aria-orientation={node.direction === "horizontal" ? "vertical" : "horizontal"}
+                        onpointerdown={(event) => startResize(event, path, node.direction)}
+                    ></div>
+                    <div class="split-child second">
+                        {@render renderLayout(node.second, [...path, 1])}
+                    </div>
                 </div>
-            </div>
+            {:else if firstRenderable}
+                {@render renderLayout(node.first, [...path, 0])}
+            {:else if secondRenderable}
+                {@render renderLayout(node.second, [...path, 1])}
+            {/if}
         {/if}
     {/snippet}
 
