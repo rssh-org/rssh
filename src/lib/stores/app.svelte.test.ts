@@ -477,7 +477,7 @@ describe("terminal workspaces", () => {
     const child = app.addPane("root", "right", { id: "child", type: "local", label: "Child" });
     expect(child).toEqual("child");
     expect(app.workspaceTabs().map((tab) => tab.id)).toEqual(["root"]);
-    expect(app.paneIdsForWorkspace("root")).toEqual(["child", "root"]);
+    expect(app.paneIdsForWorkspace("root")).toEqual(["root", "child"]);
   });
 
   it("removes a pane without destroying its sibling workspace", async () => {
@@ -496,5 +496,30 @@ describe("terminal workspaces", () => {
     app.closeTab("root");
     expect(app.tabs().map((tab) => tab.id)).not.toContain("root");
     expect(app.tabs().map((tab) => tab.id)).not.toContain("child");
+  });
+});
+
+describe("terminal workspace direction and MRU", () => {
+  it("orders the new pane according to each split side", async () => {
+    const app = await loadAppModule();
+    for (const [index, side] of (["left", "right", "top", "bottom"] as const).entries()) {
+      const rootId = `root-${index}`;
+      const childId = `child-${index}`;
+      app.addTab({ id: rootId, type: "local", label: rootId });
+      app.addPane(rootId, side, { id: childId, type: "local", label: childId });
+      expect(app.paneIdsForWorkspace(rootId)).toEqual(
+        side === "left" || side === "top" ? [childId, rootId] : [rootId, childId],
+      );
+    }
+  });
+
+  it("moves the focused workspace to the MRU front when adding a pane", async () => {
+    const app = await loadAppModule();
+    await app.setTabMru(true);
+    app.addTab({ id: "first", type: "local", label: "First" });
+    app.addTab({ id: "second", type: "local", label: "Second" });
+    app.setActiveTab("first");
+    app.addPane("second", "right", { id: "second-child", type: "local", label: "Second child" });
+    expect(app.tabs().map((tab) => tab.id)).toEqual(["home", "second", "first", "second-child"]);
   });
 });

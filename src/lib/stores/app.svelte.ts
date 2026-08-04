@@ -377,6 +377,17 @@ function directionForSide(side: PaneSide): SplitDirection {
   return side === "top" || side === "bottom" || side === "vertical" ? "vertical" : "horizontal";
 }
 
+function swapInsertedPane(layout: TerminalLayout, targetId: string, newId: string): TerminalLayout {
+  if (layout.kind === "leaf") return layout;
+  if (layout.first.kind === "leaf" && layout.first.tabId === newId && collectLeafIds(layout.second).includes(targetId)) {
+    return { ...layout, first: layout.second, second: layout.first };
+  }
+  const first = swapInsertedPane(layout.first, targetId, newId);
+  if (first !== layout.first) return { ...layout, first };
+  const second = swapInsertedPane(layout.second, targetId, newId);
+  return second === layout.second ? layout : { ...layout, second };
+}
+
 function resizeLayoutNode(layout: TerminalLayout, path: readonly number[], index: number, ratio: number): TerminalLayout {
   if (index === path.length) {
     return layout.kind === "split" ? { ...layout, ratio: normalizeRatio(ratio) } : layout;
@@ -408,7 +419,10 @@ export function addPane(workspaceId: string, side: PaneSide, tab: Tab): string |
   const targetId = _activeWorkspaceId === workspaceId && paneIdsForWorkspace(workspaceId).includes(_activePaneId)
     ? _activePaneId
     : workspaceId;
-  const nextLayout = addSplit(layout, targetId, tab.id, directionForSide(side), 0.5);
+  let nextLayout = addSplit(layout, targetId, tab.id, directionForSide(side), 0.5);
+  if (side === "right" || side === "bottom") {
+    nextLayout = swapInsertedPane(nextLayout, targetId, tab.id);
+  }
   if (nextLayout === layout) return null;
 
   const { workspaceId: _workspaceId, paneOf: _paneOf, ...tabWithoutPaneMetadata } = tab;
@@ -417,10 +431,9 @@ export function addPane(workspaceId: string, side: PaneSide, tab: Tab): string |
   ai.activateTab(pane.id);
   if (pane.type === "ssh") _sftpPanelWidthByTab[pane.id] = _sftpPanelDefaultWidth;
   _tabs.push(pane);
-  _activeWorkspaceId = workspaceId;
+  setActiveWorkspace(workspaceId);
   _activePaneId = pane.id;
   _activeTabId = pane.id;
-  _settingsActive = false;
   return pane.id;
 }
 
