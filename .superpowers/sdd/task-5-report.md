@@ -23,3 +23,11 @@ commit：85a5d93（实现提交；本报告随后单独提交）
 
 ## 疑虑
 - TerminalPane 的后端连接失败仍由其既有 reconnect UI 处理；AppShell 能对 addPane 同步失败执行 rollback/toast，但 store API 没有异步连接失败回调。
+
+
+## 复审修复
+- 修复 commit：待提交（本次修复）。
+- `TerminalSplitLayout.svelte` 的 leaf 将真实 tabId 传给 pane-specific context callback；AppShell 不再从父级 activePaneId 推断右键目标。
+- `TerminalPane.svelte` 对 serial/telnet/local/SSH 初次连接失败统一执行一次性 callback；reconnect 明确关闭 initial 标记，因此重连失败不会删除既有 pane。
+- AppShell 对失败 hidden pane 调用 `closePane` 并复用 `toast.error(errMsg(error))`；root pane 只提示，不删除。
+- 复审验证：`npm run build` 通过（exit 0）；仍仅有既有 a11y/chunk-size warnings，未运行整套测试、lint 或 formatter。

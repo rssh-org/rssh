@@ -936,9 +936,21 @@
 
         return sections;
     }
-    function openActivePaneContextMenu(e: MouseEvent) {
-        const tab = app.tabs().find((candidate) => candidate.id === app.activePaneId());
+    function openPaneContextMenu(e: MouseEvent, tabId: string) {
+        if (app.isMobile) return;
+        const tab = app.tabs().find((candidate) => candidate.id === tabId);
         if (tab) openCtxMenu(e, tab);
+    }
+
+    function handleInitialConnectionFailure(tabId: string, error: unknown): boolean {
+        const tab = app.tabs().find((candidate) => candidate.id === tabId);
+        if (!tab?.paneOf) {
+            toast.error(errMsg(error));
+            return false;
+        }
+        app.closePane(tabId);
+        toast.error(errMsg(error));
+        return true;
     }
 
     function closeTerminalPane(tabId: string) {
@@ -1178,7 +1190,6 @@
                 class="pane terminal-layout-pane"
                 class:visible={terminalLayoutVisible && resourcePanesAllowed && !!terminalLayout}
                 role="presentation"
-                oncontextmenu={app.isMobile ? undefined : openActivePaneContextMenu}
             >
                 {#if resourcePanesAllowed && terminalLayout}
                     <TerminalSplitLayout
@@ -1189,6 +1200,8 @@
                             if (terminalWorkspaceId) app.resizeLayoutPath(terminalWorkspaceId, path, ratio);
                         }}
                         onClose={closeTerminalPane}
+                        onContextMenu={openPaneContextMenu}
+                        onInitialConnectionFailure={handleInitialConnectionFailure}
                     />
                 {/if}
             </div>

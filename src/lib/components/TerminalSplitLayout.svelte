@@ -10,12 +10,16 @@
         onActivate,
         onResize,
         onClose,
+        onContextMenu,
+        onInitialConnectionFailure,
     }: {
         layout: TerminalLayout;
         activePaneId: string;
         onActivate: (tabId: string) => void;
         onResize: (path: number[], ratio: number) => void;
         onClose: (tabId: string) => void;
+        onContextMenu: (event: MouseEvent, tabId: string) => void;
+        onInitialConnectionFailure: (tabId: string, error: unknown) => boolean;
     } = $props();
 
     type ResizeState = {
@@ -101,6 +105,10 @@
                     class="pane"
                     class:active={activePaneId === tab.id}
                     onclick={() => onActivate(tab.id)}
+                    oncontextmenu={(event) => {
+                        event.stopPropagation();
+                        onContextMenu(event, tab.id);
+                    }}
                 >
                     <header class="pane-header">
                         <span class="pane-title">{tab.label}</span>
@@ -125,7 +133,12 @@
                         </button>
                     </header>
                     <div class="pane-content">
-                        <TerminalPane tabId={tab.id} tabType={tab.type} meta={tab.meta ?? {}} />
+                        <TerminalPane
+                            tabId={tab.id}
+                            tabType={tab.type}
+                            meta={tab.meta ?? {}}
+                            {onInitialConnectionFailure}
+                        />
                     </div>
                 </section>
             {/if}
