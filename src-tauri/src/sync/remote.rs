@@ -106,6 +106,7 @@ pub fn apply_fetched_backup(
 mod tests {
     use super::*;
     use crate::error::AppResult;
+    use crate::models::{ForwardRule, ForwardType};
     use crate::secret::SecretStore;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -197,6 +198,48 @@ mod tests {
 
         assert_eq!(fetched.encrypted_payload, "legacy-encrypted-payload");
         assert!(fetched.metadata.is_none());
+    }
+
+    #[test]
+    fn pull_maps_legacy_forward_to_one_rule() {
+        let db = Db::open_in_memory().unwrap();
+        let secrets = MemSecrets::default();
+        let data_dir = tempfile::tempdir().unwrap();
+        let legacy = serde_json::json!({
+            "version": 1,
+            "forwards": [{
+                "id": "f1",
+                "name": "database",
+                "profile_id": "p1",
+                "type": "local",
+                "local_port": 8080,
+                "remote_host": "db.internal",
+                "remote_port": 5432
+            }]
+        });
+        let encrypted = crate::crypto::encrypt(&legacy.to_string(), "pw").unwrap();
+
+        apply_fetched_backup(
+            &db,
+            &secrets,
+            data_dir.path(),
+            FetchedBackup {
+                encrypted_payload: encrypted,
+                metadata: None,
+            },
+            "pw",
+        )
+        .unwrap();
+
+        assert_eq!(
+            crate::db::forward::get(&db, "f1").unwrap().rules,
+            vec![ForwardRule {
+                forward_type: ForwardType::Local,
+                local_port: 8080,
+                remote_host: "db.internal".into(),
+                remote_port: 5432,
+            }]
+        );
     }
 
     #[test]

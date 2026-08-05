@@ -25,6 +25,7 @@
 
 use std::path::Path;
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::db::ai_command_blacklist::{self, BlacklistRow};
@@ -34,8 +35,8 @@ use crate::db::{
 };
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    Credential, DynamicDiscoverySource, Forward, Group, HighlightRule, Profile, SerialProfile,
-    Snippet, TelnetProfile,
+    Credential, DynamicDiscoverySource, Forward, ForwardRule, Group, HighlightRule, Profile,
+    SerialProfile, Snippet, TelnetProfile,
 };
 use crate::secret::{cred_secret_key, telnet_login_script_key, SecretStore};
 use crate::telnet_profile::{self as telnet_profiles, LoginScriptIntent};
@@ -48,6 +49,33 @@ pub struct ImportError {
     pub kind: &'static str,
     pub name: Option<String>,
     pub code: String,
+}
+
+#[derive(Deserialize)]
+struct LegacyForwardImport {
+    id: String,
+    name: String,
+    profile_id: String,
+    #[serde(default)]
+    group_id: Option<String>,
+    #[serde(flatten)]
+    rule: ForwardRule,
+}
+
+fn parse_forward_import(value: Value) -> serde_json::Result<Forward> {
+    if value.get("rules").is_some() {
+        return serde_json::from_value(value);
+    }
+
+    // One-way migration: old backups are readable, but new exports never emit
+    // the inline rule fields that old clients require.
+    serde_json::from_value::<LegacyForwardImport>(value).map(|legacy| Forward {
+        id: legacy.id,
+        name: legacy.name,
+        profile_id: legacy.profile_id,
+        group_id: legacy.group_id,
+        rules: vec![legacy.rule],
+    })
 }
 
 fn aggregate_failure(errs: Vec<ImportError>) -> AppError {
@@ -134,7 +162,7 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
     }
     if let Some(arr) = data["forwards"].as_array() {
         for item in arr {
-            match serde_json::from_value::<Forward>(item.clone()) {
+            match parse_forward_import(item.clone()) {
                 Ok(f) => {
                     if let Err(e) = forward::insert(db, &f) {
                         errors.push(ImportError {
