@@ -1,7 +1,13 @@
 <script lang="ts">
     import {onDestroy} from "svelte";
     import * as app from "../stores/app.svelte.ts";
-    import type {SplitDirection, TerminalLayout} from "../terminal/layout.ts";
+    import {
+        layoutLeaves,
+        normalizeRatio,
+        type LayoutLeaf,
+        type SplitDirection,
+        type TerminalLayout,
+    } from "../terminal/layout.ts";
     import TerminalPane from "./TerminalPane.svelte";
 
     let {
@@ -21,6 +27,17 @@
         onContextMenu: (event: MouseEvent, tabId: string) => void;
         onInitialConnectionFailure: (tabId: string, error: unknown) => boolean;
     } = $props();
+
+    type Bounds = Pick<LayoutLeaf, "left" | "top" | "width" | "height">;
+    type RenderedPane = { pane: LayoutLeaf; tab: app.Tab };
+
+    let paneLeaves = $derived.by((): RenderedPane[] => {
+        const tabs = app.tabs();
+        return layoutLeaves(layout).flatMap((pane) => {
+            const tab = tabs.find((candidate) => candidate.id === pane.tabId);
+            return tab && app.isTerminalTabType(tab.type) ? [{ pane, tab }] : [];
+        });
+    });
 
     type ResizeState = {
         separator: HTMLElement;
@@ -43,14 +60,6 @@
             state.separator.releasePointerCapture(state.pointerId);
         }
         resizeState = null;
-    }
-
-    function isRenderableLayout(node: TerminalLayout): boolean {
-        if (node.kind === "leaf") {
-            const tab = app.tabs().find((candidate) => candidate.id === node.tabId);
-            return !!tab && app.isTerminalTabType(tab.type);
-        }
-        return isRenderableLayout(node.first) || isRenderableLayout(node.second);
     }
 
     function handleResizeMove(event: PointerEvent) {
@@ -93,107 +102,102 @@
         window.addEventListener("pointercancel", stopResize);
     }
 
+    function boundsStyle(bounds: Bounds): string {
+        return `left:${bounds.left * 100}%;top:${bounds.top * 100}%;width:${bounds.width * 100}%;height:${bounds.height * 100}%;`;
+    }
+
     onDestroy(stopResize);
 </script>
 
 <div class="terminal-split-layout">
-    {#snippet renderLayout(node: TerminalLayout, path: number[])}
-        {#if node.kind === "leaf"}
-            {@const tab = app.tabs().find((candidate) => candidate.id === node.tabId)}
-            {#if tab && app.isTerminalTabType(tab.type)}
-                {#key tab.id}
-                <div
-                    class="pane"
-                    class:active={activePaneId === tab.id}
-                    role="button"
-                    tabindex="0"
-                    aria-label={`Activate ${tab.label}`}
-                    onclick={() => onActivate(tab.id)}
-                    onkeydown={(event) => {
-                        if (event.currentTarget !== event.target) return;
-                        if (event.key === "Enter" || event.key === " ") {
-                            event.preventDefault();
-                            onActivate(tab.id);
-                        }
-                    }}
-                    oncontextmenu={(event) => {
+    {#each paneLeaves as { pane, tab } (tab.id)}
+        <div
+            class="pane"
+            class:active={activePaneId === tab.id}
+            style={boundsStyle(pane)}
+            role="button"
+            tabindex="0"
+            aria-label={`Activate ${tab.label}`}
+            onclick={() => onActivate(tab.id)}
+            onkeydown={(event) => {
+                if (event.currentTarget !== event.target) return;
+                if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onActivate(tab.id);
+                }
+            }}
+            oncontextmenu={(event) => {
+                event.stopPropagation();
+                onContextMenu(event, tab.id);
+            }}
+        >
+            <header class="pane-header">
+                <span class="pane-title">{tab.label}</span>
+                <span
+                    class="session-status"
+                    class:connected={!!app.sessionIdForTab(tab.id)}
+                    class:disconnected={!app.sessionIdForTab(tab.id)}
+                >
+                    {app.sessionIdForTab(tab.id) ? "Connected" : "Disconnected"}
+                </span>
+                <button
+                    class="close-button"
+                    type="button"
+                    aria-label={`Close ${tab.label}`}
+                    title="Close pane"
+                    onclick={(event) => {
                         event.stopPropagation();
-                        onContextMenu(event, tab.id);
+                        onClose(tab.id);
                     }}
                 >
-                    <header class="pane-header">
-                        <span class="pane-title">{tab.label}</span>
-                        <span
-                            class="session-status"
-                            class:connected={!!app.sessionIdForTab(tab.id)}
-                            class:disconnected={!app.sessionIdForTab(tab.id)}
-                        >
-                            {app.sessionIdForTab(tab.id) ? "Connected" : "Disconnected"}
-                        </span>
-                        <button
-                            class="close-button"
-                            type="button"
-                            aria-label={`Close ${tab.label}`}
-                            title="Close pane"
-                            onclick={(event) => {
-                                event.stopPropagation();
-                                onClose(tab.id);
-                            }}
-                        >
-                            &times;
-                        </button>
-                    </header>
-                    <div class="pane-content">
-                        <TerminalPane
-                            tabId={tab.id}
-                            tabType={tab.type}
-                            meta={tab.meta ?? {}}
-                            {onInitialConnectionFailure}
-                        />
-                    </div>
-                </div>
-                {/key}
-            {/if}
-        {:else}
-            {@const firstRenderable = isRenderableLayout(node.first)}
-            {@const secondRenderable = isRenderableLayout(node.second)}
-            {#if firstRenderable && secondRenderable}
+                    &times;
+                </button>
+            </header>
+            <div class="pane-content">
+                <TerminalPane
+                    tabId={tab.id}
+                    tabType={tab.type}
+                    meta={tab.meta ?? {}}
+                    {onInitialConnectionFailure}
+                />
+            </div>
+        </div>
+    {/each}
+
+    {#snippet renderSplits(node: TerminalLayout, bounds: Bounds, path: number[])}
+        {#if node.kind === "split"}
+            {@const ratio = normalizeRatio(node.ratio)}
+            {@const firstBounds = node.direction === "horizontal"
+                ? { left: bounds.left, top: bounds.top, width: bounds.width * ratio, height: bounds.height }
+                : { left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height * ratio }}
+            {@const secondBounds = node.direction === "horizontal"
+                ? { left: bounds.left + bounds.width * ratio, top: bounds.top, width: bounds.width * (1 - ratio), height: bounds.height }
+                : { left: bounds.left, top: bounds.top + bounds.height * ratio, width: bounds.width, height: bounds.height * (1 - ratio) }}
+            <div class="split-region" style={boundsStyle(bounds)}>
                 <div
-                    class="split"
+                    class="separator"
                     class:horizontal={node.direction === "horizontal"}
                     class:vertical={node.direction === "vertical"}
-                    style={`--split-ratio: ${node.ratio};`}
-                >
-                    <div class="split-child first">
-                        {@render renderLayout(node.first, [...path, 0])}
-                    </div>
-                    <div
-                        class="separator"
-                        class:horizontal={node.direction === "horizontal"}
-                        class:vertical={node.direction === "vertical"}
-                        role="separator"
-                        aria-label="Resize panes"
-                        aria-orientation={node.direction === "horizontal" ? "vertical" : "horizontal"}
-                        onpointerdown={(event) => startResize(event, path, node.direction)}
-                    ></div>
-                    <div class="split-child second">
-                        {@render renderLayout(node.second, [...path, 1])}
-                    </div>
-                </div>
-            {:else if firstRenderable}
-                {@render renderLayout(node.first, [...path, 0])}
-            {:else if secondRenderable}
-                {@render renderLayout(node.second, [...path, 1])}
-            {/if}
+                    style={node.direction === "horizontal"
+                        ? `left:calc(${ratio * 100}% - 3px);top:0;width:6px;height:100%;`
+                        : `left:0;top:calc(${ratio * 100}% - 3px);width:100%;height:6px;`}
+                    role="separator"
+                    aria-label="Resize panes"
+                    aria-orientation={node.direction === "horizontal" ? "vertical" : "horizontal"}
+                    onpointerdown={(event) => startResize(event, path, node.direction)}
+                ></div>
+            </div>
+            {@render renderSplits(node.first, firstBounds, [...path, 0])}
+            {@render renderSplits(node.second, secondBounds, [...path, 1])}
         {/if}
     {/snippet}
 
-    {@render renderLayout(layout, [])}
+    {@render renderSplits(layout, { left: 0, top: 0, width: 1, height: 1 }, [])}
 </div>
 
 <style>
     .terminal-split-layout {
-        display: flex;
+        position: relative;
         width: 100%;
         height: 100%;
         min-width: 0;
@@ -201,45 +205,15 @@
         overflow: hidden;
     }
 
-    .split {
-        display: flex;
-        flex: 1 1 auto;
-        width: 100%;
-        height: 100%;
-        min-width: 0;
-        min-height: 0;
-        overflow: hidden;
-    }
-
-    .split.horizontal {
-        flex-direction: row;
-    }
-
-    .split.vertical {
-        flex-direction: column;
-    }
-
-    .split-child {
-        display: flex;
-        flex: calc(1 - var(--split-ratio)) 1 0;
-        min-width: 0;
-        min-height: 0;
-        overflow: hidden;
-    }
-
-    .split-child.first {
-        flex: var(--split-ratio) 1 0;
-    }
-
-    .split-child > :global(*) {
-        flex: 1 1 auto;
-        min-width: 0;
-        min-height: 0;
+    .split-region {
+        position: absolute;
+        pointer-events: none;
+        z-index: 2;
     }
 
     .separator {
-        flex: 0 0 6px;
-        z-index: 1;
+        position: absolute;
+        pointer-events: auto;
         touch-action: none;
         background: var(--divider);
     }
@@ -258,11 +232,9 @@
     }
 
     .pane {
+        position: absolute;
         display: flex;
-        flex: 1 1 auto;
         flex-direction: column;
-        width: 100%;
-        height: 100%;
         min-width: 0;
         min-height: 0;
         overflow: hidden;

@@ -76,3 +76,38 @@ export function collectLeafIds(layout: TerminalLayout): string[] {
   if (layout.kind === "leaf") return [layout.tabId];
   return [...collectLeafIds(layout.first), ...collectLeafIds(layout.second)];
 }
+
+
+export interface LayoutLeaf {
+  tabId: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** Flatten a split tree into stable keyed leaf records with normalized bounds. */
+export function layoutLeaves(layout: TerminalLayout): LayoutLeaf[] {
+  const leaves: LayoutLeaf[] = [];
+
+  function visit(node: TerminalLayout, left: number, top: number, width: number, height: number) {
+    if (node.kind === "leaf") {
+      leaves.push({ tabId: node.tabId, left, top, width, height });
+      return;
+    }
+
+    const ratio = normalizeRatio(node.ratio);
+    if (node.direction === "horizontal") {
+      const firstWidth = width * ratio;
+      visit(node.first, left, top, firstWidth, height);
+      visit(node.second, left + firstWidth, top, width - firstWidth, height);
+    } else {
+      const firstHeight = height * ratio;
+      visit(node.first, left, top, width, firstHeight);
+      visit(node.second, left, top + firstHeight, width, height - firstHeight);
+    }
+  }
+
+  visit(layout, 0, 0, 1, 1);
+  return leaves;
+}

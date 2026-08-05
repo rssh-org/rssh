@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addSplit,
   collectLeafIds,
+  layoutLeaves,
   leaf,
   normalizeRatio,
   removeLeaf,
@@ -48,5 +49,25 @@ describe("terminal layout", () => {
   it("keeps exact ratio boundaries", () => {
     expect(normalizeRatio(0.2)).toBe(0.2);
     expect(normalizeRatio(0.8)).toBe(0.8);
+  });
+  it("keeps existing pane identities stable when a split is added", () => {
+    const before = layoutLeaves(root);
+    const after = layoutLeaves(addSplit(root, "root", "right", "horizontal", 0.5));
+
+    expect(before.find((pane) => pane.tabId === "root")).toMatchObject({
+      tabId: "root",
+      left: 0,
+      top: 0,
+      width: 1,
+      height: 1,
+    });
+    expect(after.map((pane) => pane.tabId)).toEqual(["right", "root"]);
+    expect(after.find((pane) => pane.tabId === "root")).toMatchObject({
+      tabId: "root",
+      left: 0.5,
+      top: 0,
+      width: 0.5,
+      height: 1,
+    });
   });
 });
