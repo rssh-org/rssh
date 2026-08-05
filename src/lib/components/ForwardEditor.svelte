@@ -109,7 +109,7 @@
       <span class="rules-label">{t("forward.rules")}</span>
       <button type="button" class="btn btn-sm" onclick={() => rules.push(newRule(rules))}>{t("forward.rule_add")}</button>
     </div>
-    {#each rules as rule, index}
+    {#each rules as rule, index (rule)}
       <fieldset class="rule">
         <legend>{t("forward.rule")} {index + 1}</legend>
         <div class="rule-head">

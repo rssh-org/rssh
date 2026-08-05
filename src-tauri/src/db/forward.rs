@@ -59,19 +59,21 @@ fn validate_rules(rules: &[ForwardRule]) -> AppResult<()> {
         if invalid_target {
             return Err(AppError::config("fwd_invalid_port", serde_json::json!({})));
         }
-        let ports = if rule.forward_type == ForwardType::Remote {
-            &mut remote_ports
-        } else {
-            &mut local_ports
-        };
-        let port = if rule.forward_type == ForwardType::Remote {
-            rule.remote_port
-        } else {
-            rule.local_port
+        let (ports, port, error_code) = match rule.forward_type {
+            ForwardType::Remote => (
+                &mut remote_ports,
+                rule.remote_port,
+                "fwd_duplicate_remote_port",
+            ),
+            _ => (
+                &mut local_ports,
+                rule.local_port,
+                "fwd_duplicate_listen_port",
+            ),
         };
         if port != 0 && !ports.insert(port) {
             return Err(AppError::config(
-                "fwd_duplicate_listen_port",
+                error_code,
                 serde_json::json!({ "port": port }),
             ));
         }
@@ -97,7 +99,7 @@ pub fn get(db: &Db, id: &str) -> AppResult<Forward> {
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => {
-                crate::error::AppError::not_found("fwd_rule_not_found", serde_json::json!({}))
+                crate::error::AppError::not_found("fwd_not_found", serde_json::json!({}))
             }
             other => other.into(),
         })?;
@@ -307,7 +309,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         insert(&db, &mk("f1", "alpha", ForwardType::Local)).unwrap();
         delete(&db, "f1").unwrap();
-        assert_eq!(get(&db, "f1").unwrap_err().code(), "fwd_rule_not_found");
+        assert_eq!(get(&db, "f1").unwrap_err().code(), "fwd_not_found");
     }
 
     /// 防御 schema 漂移：DB 里出现未知 type 字符串时不能 panic，应退回 Local。
@@ -366,6 +368,24 @@ mod tests {
         assert_eq!(
             insert(&db, &duplicate).unwrap_err().code(),
             "fwd_duplicate_listen_port"
+        );
+    }
+
+    #[test]
+    fn insert_rejects_duplicate_remote_ports_with_remote_error() {
+        let db = Db::open_in_memory().unwrap();
+        let mut duplicate = mk("f1", "duplicate", ForwardType::Remote);
+        duplicate.rules[0].local_port = 1000;
+        duplicate.rules.push(ForwardRule {
+            forward_type: ForwardType::Remote,
+            local_port: 1001,
+            remote_host: "127.0.0.1".into(),
+            remote_port: duplicate.rules[0].remote_port,
+        });
+
+        assert_eq!(
+            insert(&db, &duplicate).unwrap_err().code(),
+            "fwd_duplicate_remote_port"
         );
     }
 

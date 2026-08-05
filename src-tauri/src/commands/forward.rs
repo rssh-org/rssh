@@ -126,12 +126,24 @@ pub fn forward_stats_impl(
     owner: &SessionOwner,
     active_id: String,
 ) -> AppResult<fwd::ForwardStats> {
+    with_ready_forward(state, owner, &active_id, |handle| Ok(handle.stats()))
+}
+
+fn with_ready_forward<T>(
+    state: &AppState,
+    owner: &SessionOwner,
+    active_id: &str,
+    f: impl FnOnce(&fwd::ForwardHandle) -> AppResult<T>,
+) -> AppResult<T> {
     let sessions = locked(&state.lifecycle_sessions)?;
     let record = sessions
-        .get(&active_id)
-        .ok_or_else(|| AppError::not_found("fwd_not_found", json!({})))?;
+        .get(active_id)
+        .ok_or_else(|| AppError::not_found("fwd_not_found", json!({ "id": active_id })))?;
     if record.kind != SessionKind::Forward || record.phase != SessionPhase::Ready {
-        return Err(AppError::not_found("fwd_not_found", json!({})));
+        return Err(AppError::not_found(
+            "fwd_not_found",
+            json!({ "id": active_id }),
+        ));
     }
     if &record.owner != owner {
         return Err(AppError::config(
@@ -141,9 +153,9 @@ pub fn forward_stats_impl(
     }
     let forwards = locked(&state.active_forwards)?;
     let handle = forwards
-        .get(&active_id)
-        .ok_or_else(|| AppError::not_found("fwd_not_found", json!({})))?;
-    Ok(handle.stats())
+        .get(active_id)
+        .ok_or_else(|| AppError::not_found("fwd_not_found", json!({ "id": active_id })))?;
+    f(handle)
 }
 
 async fn forward_rule_command_impl(
@@ -153,33 +165,13 @@ async fn forward_rule_command_impl(
     rule_index: usize,
     start: bool,
 ) -> AppResult<()> {
-    let response = {
-        let sessions = locked(&state.lifecycle_sessions)?;
-        let record = sessions
-            .get(&active_id)
-            .ok_or_else(|| AppError::not_found("fwd_not_found", json!({ "id": active_id })))?;
-        if record.kind != SessionKind::Forward || record.phase != SessionPhase::Ready {
-            return Err(AppError::not_found(
-                "fwd_not_found",
-                json!({ "id": active_id }),
-            ));
-        }
-        if &record.owner != owner {
-            return Err(AppError::config(
-                "session_owner_mismatch",
-                json!({ "id": active_id }),
-            ));
-        }
-        let forwards = locked(&state.active_forwards)?;
-        let handle = forwards
-            .get(&active_id)
-            .ok_or_else(|| AppError::not_found("fwd_not_found", json!({})))?;
+    let response = with_ready_forward(state, owner, &active_id, |handle| {
         if start {
-            handle.request_rule_start(rule_index)?
+            Ok(handle.request_rule_start(rule_index)?)
         } else {
-            handle.request_rule_stop(rule_index)?
+            Ok(handle.request_rule_stop(rule_index)?)
         }
-    };
+    })?;
     response
         .await
         .map_err(|_| AppError::ssh("fwd_session_closed", json!({})))?

@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { t, errMsg } from "../i18n/index.svelte.ts";
+  import { toast } from "../stores/toast.svelte.ts";
   import type { ForwardRule } from "../stores/app.svelte.ts";
 
   let { tabId, meta = {} }: {
@@ -135,7 +136,9 @@
       errorMsg = "";
     } catch (e: any) {
       if (!destroyed && activeId === id) {
-        errorMsg = errMsg(e);
+        const message = errMsg(e);
+        errorMsg = message;
+        toast.error(message);
         await pollStats();
       }
     } finally {
