@@ -240,4 +240,19 @@ describe("browser-environment commands (served locally, never over ws)", () => {
         ]);
         expect(fakeWindow.__RSSH_PICK__).toHaveBeenCalledWith("files");
     });
+
+    it("builds an SFTP save path from the host folder picker", async () => {
+        const { internals, ws } = installWithServer();
+        fakeWindow.__RSSH_PICK__ = vi.fn(async (kind: string) =>
+            kind === "folder" ? "/tmp/downloads" : null,
+        );
+
+        const picked = internals.invoke("sftp_pick_save_path", { defaultName: "report.txt" });
+        ws.open();
+        await Promise.resolve();
+
+        expect(fakeWindow.__RSSH_PICK__).toHaveBeenCalledWith("folder");
+        expect(ws.sent).toHaveLength(0);
+        await expect(picked).resolves.toBe("/tmp/downloads/report.txt");
+    });
 });

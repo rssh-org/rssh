@@ -383,10 +383,17 @@
                 });
                 notice = t("sftp.queued_n", { n: 1 });
             } else {
-                const saved = await invoke<string | null>("sftp_save_file", {
-                    sftpId, remotePath: entryPath(entry), defaultName: entry.name,
+                const localPath = await invoke<string | null>("sftp_pick_save_path", {
+                    defaultName: entry.name,
                 });
-                if (saved) notice = t("sftp.queued_n", { n: 1 });
+                if (!localPath) return;
+                await transfers.startDownload({
+                    sessionId: meta.sessionId,
+                    remotePath: entryPath(entry),
+                    localPath,
+                    sizeHint: entry.size,
+                });
+                notice = t("sftp.queued_n", { n: 1 });
             }
         } catch (err: any) {
             error = errMsg(err);

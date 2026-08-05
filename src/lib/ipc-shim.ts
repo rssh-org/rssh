@@ -147,6 +147,16 @@ export function installTauriShim(): void {
         );
     }
 
+    async function hostSavePath(defaultName: unknown): Promise<string | null> {
+        const picked = await hostPick("folder");
+        if (picked == null) return null;
+        const folder = String(picked);
+        const name = String(defaultName ?? "").split(/[\\/]/).pop() ?? "";
+        if (!folder || !name) return null;
+        const separator = folder.includes("\\") ? "\\" : "/";
+        return folder.replace(/[\\/]+$/, "") + separator + name;
+    }
+
     // Commands whose "backend" off-Tauri is the BROWSER itself, not the rssh
     // engine: clipboard, opening URLs / windows, native file dialogs. Served by
     // web APIs (or the host bridge) so they never hit the ws. Keeps INV-1 — the
@@ -187,6 +197,7 @@ export function installTauriShim(): void {
                 throw "popup_blocked";
             }
         },
+        sftp_pick_save_path: (a) => hostSavePath(a.defaultName),
         sftp_pick_folder: () => hostPick("folder"),
         sftp_pick_open_files: () => hostPick("files"),
         // Window-plugin commands: off-Tauri the app lives in an IDE tool window
