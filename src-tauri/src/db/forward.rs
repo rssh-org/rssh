@@ -92,7 +92,6 @@ pub fn get(db: &Db, id: &str) -> AppResult<Forward> {
                     profile_id: row.get(2)?,
                     group_id: row.get(3)?,
                     rules: Vec::new(),
-                    legacy_projection: false,
                 })
             },
         )
@@ -117,7 +116,6 @@ pub fn list(db: &Db) -> AppResult<Vec<Forward>> {
             profile_id: row.get(2)?,
             group_id: row.get(3)?,
             rules: Vec::new(),
-            legacy_projection: false,
         })
     })?;
     let mut forwards = rows.collect::<Result<Vec<_>, _>>()?;
@@ -131,43 +129,19 @@ pub fn list(db: &Db) -> AppResult<Vec<Forward>> {
 fn write(conn: &rusqlite::Connection, f: &Forward, update_only: bool) -> AppResult<()> {
     validate_name(&f.name)?;
     validate_rules(&f.rules)?;
-    let first = f.rules.first().expect("validated non-empty forward rules");
-
-    if f.legacy_projection {
-        let mut combined = rules(conn, &f.id)?;
-        if let Some(current_first) = combined.first_mut() {
-            *current_first = first.clone();
-            validate_rules(&combined)?;
-        }
-    } else {
-        // Remove old rules before updating the legacy projection. Otherwise the
-        // compatibility trigger can observe a transient conflict with rules
-        // that this full update is about to replace.
-        conn.execute(
-            "DELETE FROM forward_rules WHERE forward_id = ?1",
-            params![f.id],
-        )?;
-    }
 
     if update_only {
         conn.execute(
-            "UPDATE forwards SET name=?1, profile_id=?2, type=?3, local_port=?4, remote_host=?5, remote_port=?6, group_id=?7 WHERE id=?8",
-            params![f.name, f.profile_id, type_str(first.forward_type), first.local_port as u32, first.remote_host, first.remote_port as u32, f.group_id, f.id],
+            "UPDATE forwards SET name=?1, profile_id=?2, group_id=?3 WHERE id=?4",
+            params![f.name, f.profile_id, f.group_id, f.id],
         )?;
     } else {
         conn.execute(
-            "INSERT INTO forwards (id, name, profile_id, type, local_port, remote_host, remote_port, group_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
-             ON CONFLICT(id) DO UPDATE SET name=excluded.name, profile_id=excluded.profile_id, type=excluded.type, local_port=excluded.local_port, remote_host=excluded.remote_host, remote_port=excluded.remote_port, group_id=excluded.group_id",
-            params![f.id, f.name, f.profile_id, type_str(first.forward_type), first.local_port as u32, first.remote_host, first.remote_port as u32, f.group_id],
+            "INSERT INTO forwards (id, name, profile_id, group_id) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, profile_id=excluded.profile_id, group_id=excluded.group_id",
+            params![f.id, f.name, f.profile_id, f.group_id],
         )?;
     }
-    // DEPRECATED(v25 compatibility): old clients can update only rule 0 through
-    // the inline projection. Preserve newer rules they cannot represent.
-    if f.legacy_projection {
-        return Ok(());
-    }
-    // INSERT creates rule 0 through the legacy trigger. Replace that projection
-    // with the complete authoritative rule set.
     conn.execute(
         "DELETE FROM forward_rules WHERE forward_id = ?1",
         params![f.id],
@@ -224,7 +198,6 @@ mod tests {
             name: name.into(),
             profile_id: "p1".into(),
             group_id: None,
-            legacy_projection: false,
             rules: vec![ForwardRule {
                 forward_type: ft,
                 local_port: 8080,
@@ -301,70 +274,23 @@ mod tests {
     }
 
     #[test]
-    fn legacy_json_becomes_one_rule_and_export_keeps_projection() {
-        let legacy = serde_json::json!({
-            "id": "f1", "name": "legacy", "profile_id": "p1",
-            "type": "local", "local_port": 8080,
-            "remote_host": "host", "remote_port": 80
-        });
-        let f: Forward = serde_json::from_value(legacy).unwrap();
-        assert_eq!(f.rules.len(), 1);
-        let exported = serde_json::to_value(f).unwrap();
-        assert_eq!(exported["type"], "local");
-        assert_eq!(exported["rules"].as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn legacy_update_preserves_rules_it_cannot_represent() {
+    fn update_replaces_the_complete_rule_set() {
         let db = Db::open_in_memory().unwrap();
-        let mut current = mk("f1", "mixed", ForwardType::Local);
-        current.rules.push(ForwardRule {
-            forward_type: ForwardType::Remote,
-            local_port: 3000,
-            remote_host: "localhost".into(),
-            remote_port: 9000,
-        });
-        insert(&db, &current).unwrap();
-
-        let legacy: Forward = serde_json::from_value(serde_json::json!({
-            "id": "f1", "name": "renamed", "profile_id": "p1",
-            "type": "local", "local_port": 8081,
-            "remote_host": "new-host", "remote_port": 81
-        }))
-        .unwrap();
-        insert(&db, &legacy).unwrap();
-
-        let updated = get(&db, "f1").unwrap();
-        assert_eq!(updated.name, "renamed");
-        assert_eq!(updated.rules.len(), 2);
-        assert_eq!(updated.rules[0], legacy.rules[0]);
-        assert_eq!(updated.rules[1], current.rules[1]);
-    }
-
-    #[test]
-    fn legacy_update_rejects_conflict_with_preserved_rules() {
-        let db = Db::open_in_memory().unwrap();
-        let mut current = mk("f1", "mixed", ForwardType::Local);
-        current.rules.push(ForwardRule {
+        let mut original = mk("f1", "mixed", ForwardType::Local);
+        original.rules.push(ForwardRule {
             forward_type: ForwardType::Dynamic,
-            local_port: 9000,
+            local_port: 1080,
             remote_host: "127.0.0.1".into(),
             remote_port: 0,
         });
-        insert(&db, &current).unwrap();
+        insert(&db, &original).unwrap();
 
-        let legacy: Forward = serde_json::from_value(serde_json::json!({
-            "id": "f1", "name": "mixed", "profile_id": "p1",
-            "type": "local", "local_port": 9000,
-            "remote_host": "new-host", "remote_port": 81
-        }))
-        .unwrap();
+        let mut replacement = mk("f1", "mixed", ForwardType::Remote);
+        replacement.rules[0].local_port = 5432;
+        replacement.rules[0].remote_port = 9000;
+        update(&db, &replacement).unwrap();
 
-        assert_eq!(
-            insert(&db, &legacy).unwrap_err().code(),
-            "fwd_duplicate_listen_port"
-        );
-        assert_eq!(get(&db, "f1").unwrap().rules, current.rules);
+        assert_eq!(get(&db, "f1").unwrap().rules, replacement.rules);
     }
 
     #[test]
@@ -392,9 +318,15 @@ mod tests {
         {
             let conn = db.lock().unwrap();
             conn.execute(
-                "INSERT INTO forwards (id, name, profile_id, type, local_port, remote_host, remote_port) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params!["fx", "weird", "p1", "garbage_type", 1u32, "127.0.0.1", 80u32],
+                "INSERT INTO forwards (id, name, profile_id) VALUES (?1, ?2, ?3)",
+                params!["fx", "weird", "p1"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO forward_rules
+                     (forward_id, position, type, local_port, remote_host, remote_port)
+                 VALUES (?1, 0, ?2, ?3, ?4, ?5)",
+                params!["fx", "garbage_type", 1u32, "127.0.0.1", 80u32],
             )
             .unwrap();
         }

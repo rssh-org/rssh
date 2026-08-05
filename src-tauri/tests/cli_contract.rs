@@ -193,7 +193,6 @@ fn runtime_completion_reads_named_resources() {
         name: "Forward Database".into(),
         profile_id: profile.id,
         group_id: None,
-        legacy_projection: false,
         rules: vec![rssh_lib::models::ForwardRule {
             forward_type: ForwardType::Local,
             local_port: 5432,

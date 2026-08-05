@@ -135,7 +135,6 @@ pub fn cmd_add_forward(conn: &CliCtx) -> AppResult<()> {
         name,
         profile_id,
         group_id: None,
-        legacy_projection: false,
         rules,
     };
     rssh_lib::db::forward::insert(conn, &f)?;

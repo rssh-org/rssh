@@ -729,7 +729,6 @@ const en = {
   "error.fwd_rule_stop_pending": "Retry stopping this rule before starting it",
   "error.ssh_cancel_tcpip_forward_failed": "Failed to stop remote forwarding",
   "error.ssh_disconnected": "SSH connection closed",
-  "error.cli_forward_edit_multiple_rules": "This forward has {count} rules; edit it in the app",
   "error.fwd_multiple_dynamic_remote_ports": "Only one server-assigned remote port can start at a time",
   "error.host_missing": "Missing host",
   "error.username_missing": "Missing username",

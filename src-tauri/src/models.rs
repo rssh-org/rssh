@@ -228,99 +228,14 @@ pub struct ForwardRule {
     pub remote_port: u16,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Forward {
     pub id: String,
     pub name: String,
     pub profile_id: String,
     /// Optional group membership — shares the same `groups` table as profiles.
-    /// Older exported payloads without group_id deserialize through ForwardWire.
     pub group_id: Option<String>,
     pub rules: Vec<ForwardRule>,
-    /// Payloads from older clients contain only the first-rule projection.
-    /// Their updates must not erase additional rules they cannot represent.
-    pub legacy_projection: bool,
-}
-
-impl Serialize for Forward {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::{Error, SerializeStruct};
-
-        let first = self
-            .rules
-            .first()
-            .ok_or_else(|| S::Error::custom("forward requires at least one rule"))?;
-        let mut state = serializer.serialize_struct("Forward", 9)?;
-        state.serialize_field("id", &self.id)?;
-        state.serialize_field("name", &self.name)?;
-        // DEPRECATED(v25 compatibility): first-rule projection for pre-v25
-        // clients. Remove these four fields together with ForwardWire's legacy
-        // fallback once unsupported clients can no longer write sync payloads.
-        state.serialize_field("type", &first.forward_type)?;
-        state.serialize_field("local_port", &first.local_port)?;
-        state.serialize_field("remote_host", &first.remote_host)?;
-        state.serialize_field("remote_port", &first.remote_port)?;
-        state.serialize_field("profile_id", &self.profile_id)?;
-        state.serialize_field("group_id", &self.group_id)?;
-        state.serialize_field("rules", &self.rules)?;
-        state.end()
-    }
-}
-
-#[derive(Deserialize)]
-struct ForwardWire {
-    id: String,
-    name: String,
-    profile_id: String,
-    #[serde(default)]
-    group_id: Option<String>,
-    rules: Option<Vec<ForwardRule>>,
-    // DEPRECATED(v25 compatibility): pre-v25 payloads stored one rule inline.
-    // Remove with the serializer projection after the sync compatibility window.
-    #[serde(rename = "type")]
-    forward_type: Option<ForwardType>,
-    local_port: Option<u16>,
-    remote_host: Option<String>,
-    remote_port: Option<u16>,
-}
-
-impl<'de> Deserialize<'de> for Forward {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = ForwardWire::deserialize(deserializer)?;
-        let legacy_projection = wire.rules.is_none();
-        let rules = if let Some(rules) = wire.rules {
-            rules
-        } else {
-            vec![ForwardRule {
-                forward_type: wire
-                    .forward_type
-                    .ok_or_else(|| serde::de::Error::missing_field("type"))?,
-                local_port: wire
-                    .local_port
-                    .ok_or_else(|| serde::de::Error::missing_field("local_port"))?,
-                remote_host: wire
-                    .remote_host
-                    .ok_or_else(|| serde::de::Error::missing_field("remote_host"))?,
-                remote_port: wire
-                    .remote_port
-                    .ok_or_else(|| serde::de::Error::missing_field("remote_port"))?,
-            }]
-        };
-        Ok(Self {
-            id: wire.id,
-            name: wire.name,
-            profile_id: wire.profile_id,
-            group_id: wire.group_id,
-            rules,
-            legacy_projection,
-        })
-    }
 }
 
 /// Saved serial console — a peer of `Profile`/`Forward`. No secret, no FK: just
@@ -723,5 +638,49 @@ mod tests {
         .unwrap();
 
         assert_eq!(p.algorithms, SshAlgorithms::default());
+    }
+
+    #[test]
+    fn forward_uses_rules_only_json_contract() {
+        let forward = Forward {
+            id: "f1".into(),
+            name: "database".into(),
+            profile_id: "p1".into(),
+            group_id: None,
+            rules: vec![ForwardRule {
+                forward_type: ForwardType::Local,
+                local_port: 8080,
+                remote_host: "db.internal".into(),
+                remote_port: 5432,
+            }],
+        };
+
+        let json = serde_json::to_value(&forward).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": "f1",
+                "name": "database",
+                "profile_id": "p1",
+                "group_id": null,
+                "rules": [{
+                    "type": "local",
+                    "local_port": 8080,
+                    "remote_host": "db.internal",
+                    "remote_port": 5432
+                }]
+            })
+        );
+
+        let legacy = serde_json::json!({
+            "id": "f1",
+            "name": "database",
+            "profile_id": "p1",
+            "type": "local",
+            "local_port": 8080,
+            "remote_host": "db.internal",
+            "remote_port": 5432
+        });
+        assert!(serde_json::from_value::<Forward>(legacy).is_err());
     }
 }

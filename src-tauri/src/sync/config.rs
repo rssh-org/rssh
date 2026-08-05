@@ -22,11 +22,6 @@
 //! ```
 //! A missing top-level key means "that category was not synced" → the
 //! corresponding local table is left untouched.
-//!
-//! Forward `type` / `local_port` / `remote_host` / `remote_port` are deprecated
-//! pre-v25 compatibility fields containing rule 0. `rules` is authoritative.
-//! Remove the projection and legacy import fallback together after old clients
-//! are no longer allowed to write supported sync targets.
 
 use std::path::Path;
 

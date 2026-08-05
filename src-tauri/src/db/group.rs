@@ -174,8 +174,8 @@ pub fn clear_all(db: &Db) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{profile, settings};
-    use crate::models::Profile;
+    use crate::db::{forward, profile, settings};
+    use crate::models::{Forward, ForwardRule, ForwardType, Profile};
 
     fn mk_group(id: &str, name: &str) -> Group {
         Group {
@@ -400,14 +400,24 @@ mod tests {
     fn delete_clears_dependent_forward_serial_and_telnet_group_ids() {
         let db = Db::open_in_memory().unwrap();
         insert(&db, &mk_group("g1", "prod")).unwrap();
+        forward::insert(
+            &db,
+            &Forward {
+                id: "f1".into(),
+                name: "fwd1".into(),
+                profile_id: "p1".into(),
+                group_id: Some("g1".into()),
+                rules: vec![ForwardRule {
+                    forward_type: ForwardType::Local,
+                    local_port: 8080,
+                    remote_host: "127.0.0.1".into(),
+                    remote_port: 80,
+                }],
+            },
+        )
+        .unwrap();
         {
             let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO forwards (id, name, profile_id, type, local_port, remote_host, remote_port, group_id) \
-                 VALUES ('f1', 'fwd1', 'p1', 'local', 8080, '127.0.0.1', 80, 'g1')",
-                [],
-            )
-            .unwrap();
             conn.execute(
                 "INSERT INTO serial_profiles (id, name, port, group_id) \
                  VALUES ('s1', 'ser1', '/dev/ttyUSB0', 'g1')",

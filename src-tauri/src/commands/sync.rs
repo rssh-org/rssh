@@ -11,8 +11,8 @@ use crate::sync::config::read_sync_prefs;
 use crate::sync::config::{build_payload, ExportMode};
 use crate::sync::metadata::{load_local_metadata, refresh_local_metadata, SyncMetadata};
 use crate::sync::remote::{
-    apply_fetched_backup, fetch as fetch_remote, fetch_metadata, prepare_backup,
-    publish as publish_remote, RemoteBackup,
+    apply_fetched_backup, fetch as fetch_remote, prepare_backup, publish as publish_remote,
+    RemoteBackup,
 };
 use std::sync::Arc;
 
@@ -234,7 +234,7 @@ async fn probe_github(state: &AppState) -> ProviderProbe {
     };
 
     let mut observation = ProviderObservation::empty();
-    let remote = match fetch_metadata(&sync).await {
+    let remote = match sync.pull_metadata().await {
         Ok(remote) => remote,
         Err(err) => {
             observation.error = Some(err.to_string());
@@ -374,7 +374,7 @@ async fn probe_webdav(state: &AppState) -> ProviderProbe {
     };
 
     let mut observation = ProviderObservation::empty();
-    let remote = match fetch_metadata(&sync).await {
+    let remote = match sync.pull_metadata().await {
         Ok(remote) => remote,
         Err(err) => {
             observation.error = Some(err.to_string());
@@ -681,7 +681,6 @@ mod tests {
             name: format!("fwd-{id}"),
             profile_id: "p".into(),
             group_id: group.map(String::from),
-            legacy_projection: false,
             rules: vec![crate::models::ForwardRule {
                 forward_type: ForwardType::Local,
                 local_port: 8080,

@@ -732,7 +732,6 @@ const zh: Messages = {
   "error.fwd_rule_stop_pending": "请先重试停止此规则，再重新启动",
   "error.ssh_cancel_tcpip_forward_failed": "停止远程转发失败",
   "error.ssh_disconnected": "SSH 连接已关闭",
-  "error.cli_forward_edit_multiple_rules": "此转发包含 {count} 条规则，请在应用中编辑",
   "error.fwd_multiple_dynamic_remote_ports": "同一时间只能启动一个由服务器分配端口的远程规则",
   "error.host_missing": "缺少 host",
   "error.username_missing": "缺少 username",

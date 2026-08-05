@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { t, errMsg } from "../i18n/index.svelte.ts";
+  import type { ForwardRule } from "../stores/app.svelte.ts";
 
   let { tabId, meta = {} }: {
     tabId: string;
@@ -17,7 +18,7 @@
   type RuleStatus = "starting" | "active" | "stopped" | "error" | "stopping_error";
   type RuleStats = {
     index: number;
-    rule: { type: "local" | "remote" | "dynamic"; local_port: number; remote_host: string; remote_port: number };
+    rule: ForwardRule;
     status: RuleStatus;
     bytes_tx: number;
     bytes_rx: number;
@@ -72,7 +73,6 @@
     } catch (e: any) {
       if (destroyed || activeId !== id || generation !== pollGeneration) return;
       stopPolling();
-      activeId = null;
       status = "error";
       errorMsg = errMsg(e);
     }
