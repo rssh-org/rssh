@@ -111,6 +111,10 @@ rg 'reserve_resource|\.activate\(|reconcile_owner|close_owner' src-tauri/src/com
 rg 'dynamic_discovery_sources|DynamicDiscoveredTarget|connectDynamicTarget' src src-tauri/src
 ```
 
+### R13. Github/WebDav 配置同步的兼容规则
+如果修改了同步的payload，需要保证新客户端运行没有任何问题，比如旧配置是：{a,b,c,d}，新配置是：{a, b: {c, d}}，新客户端在第一次启动或者拉取旧配置是，需要将c,d映射到b里面
+而旧客户端，使用新配置，如果有问题不用管，即新客户端生成的配置是：{a, b: {c, d}}，而不是{a, b: {c, d}, c, d}
+
 ---
 
 ## 事实（Facts）— 文件 + 概念 + 核对命令
