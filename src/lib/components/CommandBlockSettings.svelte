@@ -442,35 +442,55 @@
   .split-mode-options {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
+    gap: 10px;
     margin: 10px 0 8px;
   }
   .split-mode-option {
     display: flex;
-    align-items: flex-start;
-    gap: 9px;
+    align-items: center;
+    gap: 10px;
     min-width: 0;
-    padding: 10px 12px;
-    border: 1px solid transparent;
-    border-radius: 6px;
+    padding: 10px;
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-sm);
     background: var(--bg);
-    box-shadow: var(--pressed);
-    color: inherit;
+    color: var(--text);
     font-family: inherit;
     text-align: left;
+    text-transform: none;
     cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
   }
-  .split-mode-option.active { border-color: var(--accent); }
-  .split-mode-option:disabled { cursor: not-allowed; opacity: 0.6; }
+  .split-mode-option:hover:not(:disabled) { background: var(--surface); }
+  .split-mode-option.active {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+    color: var(--accent);
+  }
   .split-mode-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .split-mode-option:disabled { cursor: default; opacity: 0.45; }
+  .split-mode-option.active:disabled { opacity: 1; }
   .split-mode-option span {
     display: flex;
     min-width: 0;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
-  .split-mode-option strong { color: var(--text); font-size: 12px; }
-  .split-mode-option small { color: var(--text-dim); font-size: 11px; line-height: 1.45; }
+  .split-mode-option strong {
+    overflow: hidden;
+    color: inherit;
+    font-size: 13px;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .split-mode-option small {
+    overflow: hidden;
+    color: var(--text-sub);
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .inline-error { margin-top: 8px; color: var(--error); font-size: 11px; line-height: 1.5; }
 
   /* 卡片内分隔线：负边距贯穿到卡片左右边缘。 */
@@ -627,7 +647,7 @@
     50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--error) 0%, transparent); }
   }
 
-  @media (max-width: 600px) {
+  @media (max-width: 480px) {
     .split-mode-options { grid-template-columns: 1fr; }
   }
 </style>
