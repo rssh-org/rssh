@@ -27,6 +27,7 @@ import {
   promptReplacementForTail,
   redactionRuleMatches,
   type CommandBlockRedactionSettings,
+  type CompiledCommandBlockRedaction,
   type CompiledCommandBlockRedactionRule,
 } from "./command-block-redaction";
 
@@ -54,6 +55,8 @@ export interface ImageCell {
 export interface ImageRow {
   blockId: number;
   blockColor: string;
+  /** xterm soft-wrap continuation; true means this row continues the previous. */
+  isWrapped: boolean;
   cells: ImageCell[];
 }
 
@@ -119,7 +122,7 @@ function styleAt(cells: ReadonlyArray<ImageCell>, offset: number): ImageCell | n
     if (offset < end) return cell;
     cursor = end;
   }
-  return cells.at(-1) ?? null;
+  return cells[cells.length - 1] ?? null;
 }
 
 /** Slice by UTF-16 text offsets while retaining cell styling. xterm normally
@@ -179,35 +182,84 @@ function applyRules(
   return rules.reduce<ImageCell[]>((current, rule) => applyRule(current, rule), [...cells]);
 }
 
+function redactWrappedPromptRows(
+  rows: ReadonlyArray<ImageRow>,
+  promptEnd: number,
+  redaction: CompiledCommandBlockRedaction,
+): ImageRow[] {
+  const promptStyle = styleAt(rows[0].cells, 0);
+  let remaining = promptEnd;
+
+  return rows.map((row, index) => {
+    if (remaining === 0) {
+      return { ...row, cells: applyRules(row.cells, redaction.rules) };
+    }
+
+    const text = rowText(row.cells);
+    const consumed = Math.min(remaining, text.length);
+    remaining -= consumed;
+    const tail = applyRules(
+      sliceCells(row.cells, consumed, text.length),
+      redaction.rules,
+    );
+    if (index !== 0) return { ...row, cells: tail };
+
+    const replacement = promptReplacementForTail(
+      redaction.promptReplacement,
+      remaining === 0 ? rowText(tail) : "",
+    );
+    return {
+      ...row,
+      cells: [
+        ...(promptStyle ? cellsFromText(replacement, promptStyle) : []),
+        ...tail,
+      ],
+    };
+  });
+}
+
 export function redactImageRows(
   rows: ReadonlyArray<ImageRow>,
   settings: CommandBlockRedactionSettings,
 ): ImageRow[] {
   const redaction = compileCommandBlockRedaction(settings);
   const seenBlocks = new Set<number>();
+  const out: ImageRow[] = [];
+  let index = 0;
 
-  return rows.map((row) => {
+  while (index < rows.length) {
+    const row = rows[index];
     const firstRow = !seenBlocks.has(row.blockId);
     seenBlocks.add(row.blockId);
-    const text = rowText(row.cells);
-    const promptEnd = commandBlockPromptEnd(text, firstRow, redaction);
-
-    if (promptEnd === null) {
-      return { ...row, cells: applyRules(row.cells, redaction.rules) };
+    if (!firstRow) {
+      out.push({ ...row, cells: applyRules(row.cells, redaction.rules) });
+      index++;
+      continue;
     }
 
-    const style = styleAt(row.cells, 0);
-    const tail = applyRules(
-      sliceCells(row.cells, promptEnd, text.length),
-      redaction.rules,
-    );
-    const tailText = rowText(tail);
-    const replacement = promptReplacementForTail(redaction.promptReplacement, tailText);
-    return {
-      ...row,
-      cells: [...(style ? cellsFromText(replacement, style) : []), ...tail],
-    };
-  });
+    let logicalEnd = index + 1;
+    while (
+      logicalEnd < rows.length &&
+      rows[logicalEnd].blockId === row.blockId &&
+      rows[logicalEnd].isWrapped
+    ) {
+      logicalEnd++;
+    }
+    const logicalRows = rows.slice(index, logicalEnd);
+    const logicalText = logicalRows.map((item) => rowText(item.cells)).join("");
+    const promptEnd = commandBlockPromptEnd(logicalText, true, redaction);
+    if (promptEnd === null) {
+      out.push(...logicalRows.map((item) => ({
+        ...item,
+        cells: applyRules(item.cells, redaction.rules),
+      })));
+    } else {
+      out.push(...redactWrappedPromptRows(logicalRows, promptEnd, redaction));
+    }
+    index = logicalEnd;
+  }
+
+  return out;
 }
 
 /* ───────────────────────── 数据抽取（纯函数，可测） ───────────────────────── */
@@ -241,7 +293,12 @@ export function extractImageRows(
         if (last.ch === " " && last.bg === defaultBg(theme)) cells.pop();
         else break;
       }
-      out.push({ blockId: block.id, blockColor: block.color, cells });
+      out.push({
+        blockId: block.id,
+        blockColor: block.color,
+        isWrapped: line.isWrapped,
+        cells,
+      });
     }
   }
   return out;

@@ -25,6 +25,11 @@ describe("detectPrompt", () => {
     expect(promptOf(line)).toBe(expected);
   });
 
+  it("stops at the first Starship marker when the command contains another", () => {
+    expect(promptOf("❯ git log --format='%s ➜ %d'")).toBe("❯");
+    expect(promptOf("~/src ❯ printf '➜'")).toBe("~/src ❯");
+  });
+
   it.each([
     "build > output.txt",
     "ERROR: request failed",

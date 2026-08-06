@@ -181,7 +181,7 @@ function rgbStringToInt(rgb: string): number {
   return 0;
 }
 
-function fakeLine(cells: SpecCell[]) {
+function fakeLine(cells: SpecCell[], isWrapped = false) {
   // 模拟 CJK：width=2 后跟一个 width=0
   const expanded: (IBufferCell | undefined)[] = [];
   for (const c of cells) {
@@ -196,7 +196,7 @@ function fakeLine(cells: SpecCell[]) {
   }
   return {
     length: expanded.length,
-    isWrapped: false,
+    isWrapped,
     getCell: (x: number) => expanded[x],
   };
 }
@@ -291,6 +291,15 @@ describe("extractImageRows", () => {
     expect(rows.map((r) => r.blockId)).toEqual([1, 2, 3]);
     expect(rows.map((r) => r.blockColor)).toEqual(["#111", "#222", "#333"]);
   });
+
+  it("preserves soft-wrap state for prompt recognition", () => {
+    const term = fakeTerm([
+      fakeLine([{ ch: "a", width: 1 }]),
+      fakeLine([{ ch: "b", width: 1 }], true),
+    ]);
+    const rows = extractImageRows(term, [fakeBlock(1, "#abc", 0, 1)]);
+    expect(rows.map((row) => row.isWrapped)).toEqual([false, true]);
+  });
 });
 
 /* ───────────────────────── redactImageRows ───────────────────────── */
@@ -307,8 +316,8 @@ function imageCells(text: string, fg = "#eeeeee"): ImageCell[] {
   }));
 }
 
-function imageRow(blockId: number, text: string): ImageRow {
-  return { blockId, blockColor: "#abc", cells: imageCells(text) };
+function imageRow(blockId: number, text: string, isWrapped = false): ImageRow {
+  return { blockId, blockColor: "#abc", isWrapped, cells: imageCells(text) };
 }
 
 function imageText(row: ImageRow): string {
@@ -343,8 +352,8 @@ describe("redactImageRows", () => {
       promptEnabled: true,
       promptReplacement: "anonymous@rssh",
       rules: [
-        { id: "ip", pattern: String.raw`\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`, replacement: "<IP>" },
-        { id: "secret", pattern: "secret", replacement: "$&-literal" },
+        { pattern: String.raw`\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`, replacement: "<IP>" },
+        { pattern: "secret", replacement: "$&-literal" },
       ],
     });
     expect(redacted.map(imageText)).toEqual([
@@ -357,7 +366,7 @@ describe("redactImageRows", () => {
     const [row] = redactImageRows([imageRow(1, "alice@prod:~$ id")], {
       promptEnabled: false,
       promptReplacement: "anonymous@rssh",
-      rules: [{ id: "host", pattern: "prod", replacement: "hidden" }],
+      rules: [{ pattern: "prod", replacement: "hidden" }],
     });
     expect(imageText(row)).toBe("alice@hidden:~$ id");
   });
@@ -369,6 +378,24 @@ describe("redactImageRows", () => {
       rules: [],
     });
     expect(imageText(row)).toBe("build > output.txt");
+  });
+
+  it("redacts a prompt split across soft-wrapped image rows", () => {
+    const redacted = redactImageRows([
+      imageRow(1, "alice@prod:~/"),
+      imageRow(1, "src$ id", true),
+      imageRow(1, "uid=1000"),
+    ], {
+      promptEnabled: true,
+      promptReplacement: "anonymous@rssh",
+      rules: [],
+    });
+
+    expect(redacted.map(imageText)).toEqual([
+      "anonymous@rssh",
+      " id",
+      "uid=1000",
+    ]);
   });
 
   it("keeps replacement styling and CJK display width", () => {
@@ -387,7 +414,7 @@ describe("redactImageRows", () => {
     expect(() => redactImageRows([imageRow(1, "$ id")], {
       promptEnabled: true,
       promptReplacement: "anonymous@rssh",
-      rules: [{ id: "bad", pattern: "(?P<name>x)", replacement: "<X>" }],
+      rules: [{ pattern: "(?P<name>x)", replacement: "<X>" }],
     })).toThrow();
   });
 });

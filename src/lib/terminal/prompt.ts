@@ -25,10 +25,11 @@ const PROMPT_PATTERNS: ReadonlyArray<RegExp> = [
   /^\[[^\]\r\n]{1,160}\][#$%>]/,
   // macOS' historical default: "host:directory user$".
   /^[A-Za-z0-9._-]{1,80}:[^#$%>\r\n]{0,120}\s+[A-Za-z0-9._-]{1,80}[#$%>]/,
-  // Powerline: the final segment separator marks the end of the prompt.
+  // Powerline: the final segment separator marks the end of the prompt. Keep
+  // this greedy so a multi-segment prompt is fully redacted.
   /^[^\r\n]{0,200}[\uE0B0\uE0B1]/,
   // Starship / oh-my-zsh symbolic prompts, alone or after a short status/path.
-  /^(?:[^\r\n]{1,160}\s)?[❯➜➤λ](?=\s|$)/,
+  /^(?:[^❯➜➤λ\r\n]{1,160}\s)?[❯➜➤λ](?=\s|$)/,
   // Versioned shell prompts such as "bash-5.2$".
   /^[A-Za-z][A-Za-z0-9._-]{0,60}[#$%>](?=\s|$)/,
   // Minimal POSIX prompts.

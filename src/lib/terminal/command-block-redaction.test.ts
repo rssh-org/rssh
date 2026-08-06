@@ -52,4 +52,12 @@ describe("redactCommandBlockTexts", () => {
       rules: [{ pattern: "(?P<name>x)", replacement: "<X>" }],
     })).toThrow();
   });
+
+  it("rejects a zero-width pattern instead of looping", () => {
+    expect(() => redactCommandBlockTexts(["$ id"], {
+      promptEnabled: true,
+      promptReplacement: "anonymous@rssh",
+      rules: [{ pattern: "x*", replacement: "<X>" }],
+    })).toThrow(/redact_zero_width_pattern/);
+  });
 });

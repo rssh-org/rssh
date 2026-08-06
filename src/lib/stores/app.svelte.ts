@@ -828,7 +828,6 @@ export async function setCommandBlockPromptRedactEnabled(value: boolean) {
     value: String(value),
   });
   _commandBlockRedaction.promptEnabled = value;
-  _commandBlockRedactionLoaded = true;
 }
 
 export async function setCommandBlockPromptReplacement(value: string) {
@@ -837,11 +836,14 @@ export async function setCommandBlockPromptReplacement(value: string) {
     value,
   });
   _commandBlockRedaction.promptReplacement = value;
-  _commandBlockRedactionLoaded = true;
 }
 
 export async function saveCommandBlockRedactRule(rule: CommandBlockRedactRule) {
-  await invoke("command_block_save_redact_rule", rule);
+  await invoke("command_block_save_redact_rule", {
+    id: rule.id,
+    pattern: rule.pattern,
+    replacement: rule.replacement,
+  });
   await loadCommandBlockRedaction(true);
 }
 
