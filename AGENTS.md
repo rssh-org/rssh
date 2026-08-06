@@ -56,7 +56,7 @@ rg 'secret_store|SecretStore' src-tauri/src
 
 ### R6. 不要建"分析文档" / "实施计划归档"
 
-工作流要求临时 `IMPLEMENTATION_PLAN.md` 时，用完即删。不要把过程记录沉淀成新的 `NOTES.md` / `ARCHITECTURE.md` / `DESIGN.md`；除非用户明确要长期文档，仓库导航就维护这一份。
+工作流要求临时 `IMPLEMENTATION_PLAN.md` / `DESIGN.md` 等文件时，用完即删，不要把过程记录沉淀下来；除非用户明确要长期文档。
 
 ### R7. Svelte 5 runes only
 
