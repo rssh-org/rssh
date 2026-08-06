@@ -53,7 +53,7 @@ rssh 押的是另一件事：
 
 ### 字节流 → 命令块
 
-每次按 Enter，rssh 在 `src/lib/terminal/command-blocks.ts` 里切一刀。每一刀之间的字节，被打包成 `CommandBlock` 对象：
+默认每次按 Enter，rssh 在 `src/lib/terminal/command-blocks.ts` 里切一刀；也可以选择在命令提交后识别返回的 shell Prompt 再切。每一刀之间的字节，被打包成 `CommandBlock` 对象：
 
 ```ts
 interface CommandBlock {
@@ -64,7 +64,7 @@ interface CommandBlock {
 }
 ```
 
-整个文件 117 行。规则一句话：**Enter 一刀切，切完每段一个对象。**
+默认规则一句话：**Enter 一刀切，切完每段一个对象。**Prompt 模式仍只在本地 xterm 已解析的当前逻辑行上工作，不要求远端安装 hook。
 
 不用在服务器上装 shell 集成（zsh hook、bash PROMPT_COMMAND 那一类）。第一次连上别人的堡垒机、别人的 k8s pod、别人的 Docker 容器，立刻就有色条 —— 因为这一刀不在远端切，在本地 xterm.js 数据流上切。
 

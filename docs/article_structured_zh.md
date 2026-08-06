@@ -18,9 +18,9 @@
 
 40 年了，所有终端都默认接受了"我只是 byte 渲染器"。
 
-## 最小的结构：每次 Enter 一刀
+## 最小的结构：默认每次 Enter 一刀
 
-rssh 不发明 shell 集成，不在服务器上装 hook，不解析 prompt 正则。它做的是终端能做的最小动作：
+rssh 不发明 shell 集成，也不在服务器上装 hook。默认模式只做终端能确定的最小动作；用户也可以显式选择本地 Prompt 正则识别，换取更符合 shell 命令结束位置的切分：
 
 **用户按 Enter，记一个 marker；下次按 Enter，前一个 marker 收尾，新一个 marker 开张。**
 

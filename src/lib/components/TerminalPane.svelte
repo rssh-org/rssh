@@ -1603,8 +1603,12 @@
             });
         }
 
-        // Command block tracker — marks Enter keypresses in normal buffer.
-        blockTracker = createCommandBlockTracker(terminal);
+        // A tracker keeps one split strategy for its complete lifetime. Changing
+        // the preference therefore affects new terminal panes without rewriting
+        // existing markers, folds, selections, or colored blocks.
+        const commandBlockSplitMode = await app.loadCommandBlockSplitMode();
+        if (destroyed) return;
+        blockTracker = createCommandBlockTracker(terminal, commandBlockSplitMode);
         blockTracker.onChange(() => {
             paintTick++;
             blockListRevision++;

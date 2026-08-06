@@ -41,7 +41,7 @@ rssh **不在服务器上做任何事**。命令块识别、染色、折叠、�
 
 ## 工作原理（前端 ~120 行）
 
-核心在 `src/lib/terminal/command-blocks.ts`，规则故意做得极简，没有"智能"过滤：
+核心在 `src/lib/terminal/command-blocks.ts`。默认规则故意做得极简，没有启发式过滤：
 
 ```ts
 // Rule 1: Enter in normal buffer → close previous block, open new one
@@ -60,6 +60,8 @@ term.buffer.onBufferChange(buf => {
   if (buf.type === "alternate") closeCurrent();
 });
 ```
+
+需要按真实 shell 命令完成位置切分时，可以在设置中选择 Prompt 模式。它只在启动后或用户提交命令后检查 xterm 已解析的当前逻辑行；候选行必须不同于刚提交的命令行，且识别出的 Prompt 后不能再有正文。识别一次后立即关闭检测，直到下一次 Enter 才重新等待。它仍然完全运行在本地，但自定义 Prompt 可能漏识别，形似 Prompt 的输出也可能误识别，所以默认仍是确定性的 Enter 模式。
 
 每个块靠 xterm.js 的 **`IMarker`** 追踪起止行：
 
@@ -126,11 +128,11 @@ unfold 流程：
 
 ## 一键开关
 
-设置 → 外观 → "命令块色条"，一键关。
+设置 → 高级 → 命令块，可以关闭侧栏或选择切分方式。
 
 ```
 [x] 显示命令块左侧色条
-[x] 命令块右键菜单（折叠 / 复制）
+[回车切分]  [Prompt 切分]
 ```
 
 不喜欢就关，零代价。

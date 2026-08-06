@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Settings persist through the Tauri backend (invoke). Unit tests have no
 // backend, so stub it to a no-op — we only assert in-memory tab ordering.
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => null) }));
+const invokeMock = vi.hoisted(() => vi.fn(async () => null as unknown));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 // The store transitively imports the AI store, which reads localStorage at
 // module load (loadPos). Node has no localStorage, so give the import an
@@ -12,6 +13,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => null) }));
 // Node < 21 has no navigator global, so stub a desktop UA — the MRU tests
 // don't exercise mobile behavior, any string is fine.
 beforeEach(() => {
+  invokeMock.mockReset();
+  invokeMock.mockResolvedValue(null);
   const store = new Map<string, string>();
   vi.stubGlobal("localStorage", {
     getItem: (k: string) => store.get(k) ?? null,
@@ -468,5 +471,44 @@ describe("connectTelnetProfile", () => {
     app.connectTelnetProfile(legacy);
 
     expect(app.tabs()[1].meta?.echo_mode).toBe("on");
+  });
+});
+
+describe("command block split mode", () => {
+  it("shares one in-flight load across terminals", async () => {
+    let resolveSetting!: (value: unknown) => void;
+    invokeMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSetting = resolve;
+    }));
+    const app = await loadAppModule();
+
+    const first = app.loadCommandBlockSplitMode();
+    const second = app.loadCommandBlockSplitMode();
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+
+    resolveSetting("prompt");
+    await expect(Promise.all([first, second])).resolves.toEqual(["prompt", "prompt"]);
+  });
+
+  it("loads prompt mode but falls back to Enter for an unknown stored value", async () => {
+    invokeMock.mockResolvedValueOnce("prompt");
+    let app = await loadAppModule();
+    expect(await app.loadCommandBlockSplitMode()).toBe("prompt");
+
+    invokeMock.mockResolvedValueOnce("future-mode");
+    app = await loadAppModule();
+    expect(await app.loadCommandBlockSplitMode()).toBe("enter");
+  });
+
+  it("persists a supported mode through the shared settings command", async () => {
+    const app = await loadAppModule();
+
+    await app.setCommandBlockSplitMode("prompt");
+
+    expect(app.commandBlockSplitMode()).toBe("prompt");
+    expect(invokeMock).toHaveBeenCalledWith("set_setting", {
+      key: "command_block_split_mode",
+      value: "prompt",
+    });
   });
 });

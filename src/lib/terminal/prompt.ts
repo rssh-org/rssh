@@ -3,9 +3,10 @@
  *
  * WindTerm takes the pragmatic route: shell-family regular expressions, not
  * OCR and not a second command-block protocol. We do the same. Detection is
- * deliberately anchored to column zero and callers should only inspect the
- * first visual row of a command block; that keeps ordinary output out of the
- * heuristic's input.
+ * deliberately anchored to column zero. Callers must provide a constrained
+ * boundary candidate — either a command block's first logical row or the
+ * current logical cursor row while the tracker is waiting for a prompt — and
+ * must never scan arbitrary output history with these patterns.
  */
 
 export interface PromptMatch {

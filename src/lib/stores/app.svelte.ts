@@ -6,8 +6,11 @@ import type {
   CommandBlockRedactionRule as RedactionRule,
   CommandBlockRedactionSettings as RedactionSettings,
 } from "../terminal/command-block-redaction.ts";
+import type { CommandBlockSplitMode } from "../terminal/command-blocks.ts";
 import type { ViewportSnapshot } from "../terminal/viewport-snapshot.ts";
 import { toast } from "./toast.svelte.ts";
+
+export type { CommandBlockSplitMode } from "../terminal/command-blocks.ts";
 
 /* ═══════════════════════════════════════════════════════
    Platform
@@ -723,6 +726,32 @@ function connectorTabType(spec: ConnectorSpec): Extract<TerminalTabType, Connect
 }
 
 /* ─── Terminal command block side-bar ─── */
+let _commandBlockSplitMode = $state<CommandBlockSplitMode>("enter");
+let _cbsmLoaded = false;
+let _cbsmLoad: Promise<CommandBlockSplitMode> | null = null;
+export function commandBlockSplitMode() { return _commandBlockSplitMode; }
+export async function loadCommandBlockSplitMode(): Promise<CommandBlockSplitMode> {
+  if (_cbsmLoaded) return _commandBlockSplitMode;
+  if (!_cbsmLoad) {
+    _cbsmLoad = (async () => {
+      try {
+        const value = await invoke<string | null>("get_setting", { key: "command_block_split_mode" });
+        _commandBlockSplitMode = value === "prompt" ? "prompt" : "enter";
+      } catch (error) {
+        console.warn("[settings] command-block split mode load failed:", error);
+      }
+      _cbsmLoaded = true;
+      return _commandBlockSplitMode;
+    })();
+  }
+  return _cbsmLoad;
+}
+export async function setCommandBlockSplitMode(value: CommandBlockSplitMode) {
+  await invoke("set_setting", { key: "command_block_split_mode", value });
+  _commandBlockSplitMode = value;
+  _cbsmLoaded = true;
+}
+
 let _commandBlockBar = $state(true);
 let _cbbLoaded = false;
 export function commandBlockBar() { return _commandBlockBar; }

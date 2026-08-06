@@ -408,3 +408,133 @@ describe("createCommandBlockTracker — hard reset (real xterm contract)", () =>
     term.dispose();
   });
 });
+
+describe("createCommandBlockTracker — prompt mode", () => {
+  const writeParsedP = (term: Terminal, data: string) =>
+    new Promise<void>((resolve) => {
+      const disposable = term.onWriteParsed(() => {
+        disposable.dispose();
+        resolve();
+      });
+      term.write(data);
+    });
+
+  it("opens the first block when the initial shell prompt is parsed", async () => {
+    const term = new Terminal({ allowProposedApi: true, scrollback: 1000 });
+    const tracker = createCommandBlockTracker(term, "prompt");
+
+    await writeParsedP(term, "alice@host:~$ ");
+
+    expect(tracker.blocks).toHaveLength(1);
+    expect(tracker.blocks[0].start.line).toBe(0);
+    expect(tracker.blocks[0].end).toBeNull();
+    tracker.dispose();
+    term.dispose();
+  });
+
+  it("starts the next block only when a prompt returns after Enter", async () => {
+    const term = new Terminal({ allowProposedApi: true, scrollback: 1000 });
+    const tracker = createCommandBlockTracker(term, "prompt");
+    await writeParsedP(term, "alice@host:~$ ");
+    await writeParsedP(term, "ls");
+
+    term.input("\r");
+    await writeParsedP(term, "\r\nfile-a\r\nalice@host:~$ ");
+
+    expect(tracker.blocks).toHaveLength(2);
+    expect(tracker.blocks[0].end?.line).toBe(1);
+    expect(tracker.blocks[1].start.line).toBe(2);
+    expect(tracker.blocks[1].end).toBeNull();
+    tracker.dispose();
+    term.dispose();
+  });
+
+  it("does not re-detect the submitted prompt line after an empty Enter", async () => {
+    const term = new Terminal({ allowProposedApi: true, scrollback: 1000 });
+    const tracker = createCommandBlockTracker(term, "prompt");
+    await writeParsedP(term, "alice@host:~$ ");
+
+    term.input("\r");
+    await writeParsedP(term, "\x1b[0m");
+
+    expect(tracker.blocks).toHaveLength(1);
+    await writeParsedP(term, "\r\nalice@host:~$ ");
+    expect(tracker.blocks).toHaveLength(2);
+    tracker.dispose();
+    term.dispose();
+  });
+
+  it("rejects prompt-looking command output after Enter", async () => {
+    const term = new Terminal({ allowProposedApi: true, scrollback: 1000 });
+    const tracker = createCommandBlockTracker(term, "prompt");
+    await writeParsedP(term, "alice@host:~$ ");
+    await writeParsedP(term, "printf fake");
+
+    term.input("\r");
+    await writeParsedP(term, "\r\n$ prompt-looking output");
+
+    expect(tracker.blocks).toHaveLength(1);
+    await writeParsedP(term, "\r\nalice@host:~$ ");
+    expect(tracker.blocks).toHaveLength(2);
+    tracker.dispose();
+    term.dispose();
+  });
+
+  it("anchors a soft-wrapped prompt at its first visual row", async () => {
+    const term = new Terminal({ cols: 12, rows: 5, allowProposedApi: true, scrollback: 1000 });
+    const tracker = createCommandBlockTracker(term, "prompt");
+
+    await writeParsedP(term, "alice@host:~$ ");
+
+    expect(term.buffer.active.cursorY).toBe(1);
+    expect(tracker.blocks).toHaveLength(1);
+    expect(tracker.blocks[0].start.line).toBe(0);
+    tracker.dispose();
+    term.dispose();
+  });
+
+  it("does not scan output again until the user submits Enter", async () => {
+    const term = new Terminal({ allowProposedApi: true, scrollback: 1000 });
+    const tracker = createCommandBlockTracker(term, "prompt");
+    await writeParsedP(term, "alice@host:~$ ");
+
+    await writeParsedP(term, "\r\n$ prompt-looking output");
+
+    expect(tracker.blocks).toHaveLength(1);
+    tracker.dispose();
+    term.dispose();
+  });
+
+  it("recognizes a fresh prompt after a hard terminal reset", async () => {
+    const term = new Terminal({ allowProposedApi: true, scrollback: 1000 });
+    const tracker = createCommandBlockTracker(term, "prompt");
+    await writeParsedP(term, "alice@host:~$ ");
+
+    await writeParsedP(term, "\x1bc");
+    await writeParsedP(term, "alice@host:~$ ");
+
+    expect(tracker.blocks).toHaveLength(1);
+    expect(tracker.blocks[0].start.line).toBe(0);
+    tracker.dispose();
+    term.dispose();
+  });
+
+  it("resumes prompt splitting after an alternate-buffer command exits", async () => {
+    const term = new Terminal({ allowProposedApi: true, scrollback: 1000 });
+    const tracker = createCommandBlockTracker(term, "prompt");
+    await writeParsedP(term, "alice@host:~$ ");
+    await writeParsedP(term, "less file");
+
+    term.input("\r");
+    await writeParsedP(term, "\r\n\x1b[?1049hpage one");
+    expect(term.buffer.active.type).toBe("alternate");
+    await writeParsedP(term, "\x1b[?1049l\r\nalice@host:~$ ");
+
+    expect(term.buffer.active.type).toBe("normal");
+    expect(tracker.blocks).toHaveLength(2);
+    expect(tracker.blocks[0].end).toBe(tracker.blocks[0].start);
+    expect(tracker.blocks[1].end).toBeNull();
+    tracker.dispose();
+    term.dispose();
+  });
+});

@@ -6,6 +6,9 @@
 
   let commandBlockBar = $state(true);
   let autoColorBlocks = $state(false);
+  let splitMode = $state<app.CommandBlockSplitMode>("enter");
+  let splitModeSaving = $state(false);
+  let splitModeNote = $state<string | null>(null);
   let promptEnabled = $state(true);
   let promptReplacement = $state("anonymous@rssh");
   let redactRules = $state<CommandBlockRedactRule[]>([]);
@@ -20,12 +23,14 @@
   let confirmRuleDeleteTimer: number | null = null;
 
   onMount(async () => {
-    const [bar, autoColor] = await Promise.all([
+    const [bar, autoColor, loadedSplitMode] = await Promise.all([
       app.loadCommandBlockBar(),
       app.loadAutoColorBlocks(),
+      app.loadCommandBlockSplitMode(),
     ]);
     commandBlockBar = bar;
     autoColorBlocks = autoColor;
+    splitMode = loadedSplitMode;
     try {
       applyRedaction(await app.loadCommandBlockRedaction(true));
       redactionReady = true;
@@ -52,6 +57,22 @@
 
   async function saveAutoColorBlocks() {
     await app.setAutoColorBlocks(autoColorBlocks);
+  }
+
+  async function selectSplitMode(value: app.CommandBlockSplitMode) {
+    if (splitModeSaving || value === splitMode) return;
+    const previous = splitMode;
+    splitMode = value;
+    splitModeSaving = true;
+    splitModeNote = null;
+    try {
+      await app.setCommandBlockSplitMode(value);
+    } catch (error) {
+      splitMode = previous;
+      splitModeNote = t("settings.shell.command_block_split_error", { error: errMsg(error) });
+    } finally {
+      splitModeSaving = false;
+    }
   }
 
   async function savePromptEnabled() {
@@ -175,6 +196,48 @@
     </div>
 
     {#if commandBlockBar}
+      <div class="card-divider"></div>
+      <fieldset class="split-mode-group" aria-describedby="command-block-split-desc command-block-split-note">
+        <legend class="cmd-block-title">{t("settings.shell.command_block_split")}</legend>
+        <div id="command-block-split-desc" class="cmd-block-desc">
+          {t("settings.shell.command_block_split_desc")}
+        </div>
+        <div class="split-mode-options">
+          <button
+            type="button"
+            class="split-mode-option"
+            class:active={splitMode === "enter"}
+            aria-pressed={splitMode === "enter"}
+            disabled={splitModeSaving}
+            onclick={() => selectSplitMode("enter")}
+          >
+            <span>
+              <strong>{t("settings.shell.command_block_split_enter")}</strong>
+              <small>{t("settings.shell.command_block_split_enter_desc")}</small>
+            </span>
+          </button>
+          <button
+            type="button"
+            class="split-mode-option"
+            class:active={splitMode === "prompt"}
+            aria-pressed={splitMode === "prompt"}
+            disabled={splitModeSaving}
+            onclick={() => selectSplitMode("prompt")}
+          >
+            <span>
+              <strong>{t("settings.shell.command_block_split_prompt")}</strong>
+              <small>{t("settings.shell.command_block_split_prompt_desc")}</small>
+            </span>
+          </button>
+        </div>
+        <div id="command-block-split-note" class="cmd-block-desc">
+          {t("settings.shell.command_block_split_new_sessions")}
+        </div>
+        {#if splitModeNote}
+          <div class="inline-error" role="alert">{splitModeNote}</div>
+        {/if}
+      </fieldset>
+
       <div class="card-divider"></div>
       <div class="cmd-block-head">
         <div class="cmd-block-head-body">
@@ -369,6 +432,47 @@
     line-height: 1.5;
   }
 
+  .split-mode-group {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .split-mode-group > .cmd-block-desc { margin-top: 4px; }
+  .split-mode-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin: 10px 0 8px;
+  }
+  .split-mode-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: var(--bg);
+    box-shadow: var(--pressed);
+    color: inherit;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .split-mode-option.active { border-color: var(--accent); }
+  .split-mode-option:disabled { cursor: not-allowed; opacity: 0.6; }
+  .split-mode-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .split-mode-option span {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .split-mode-option strong { color: var(--text); font-size: 12px; }
+  .split-mode-option small { color: var(--text-dim); font-size: 11px; line-height: 1.45; }
+  .inline-error { margin-top: 8px; color: var(--error); font-size: 11px; line-height: 1.5; }
+
   /* 卡片内分隔线：负边距贯穿到卡片左右边缘。 */
   .card-divider {
     height: 1px;
@@ -521,5 +625,9 @@
   @keyframes confirmPulse {
     0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--error) 45%, transparent); }
     50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--error) 0%, transparent); }
+  }
+
+  @media (max-width: 600px) {
+    .split-mode-options { grid-template-columns: 1fr; }
   }
 </style>

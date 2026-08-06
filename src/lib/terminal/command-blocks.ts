@@ -1,22 +1,32 @@
 /**
  * Command block tracker.
  *
- * Every time the user presses Enter in the terminal, a new command block
- * starts. Each block has a color (cycled from a palette) and a pair of
- * xterm markers (start + end) that follow the scrollback automatically.
+ * A command block starts at either a submitted Enter or a recognized shell
+ * prompt, according to the per-terminal split mode. Each block has a color
+ * (cycled from a palette) and a pair of xterm markers (start + end) that follow
+ * the scrollback automatically.
  *
- * Rules (deliberately simple — no heuristics, no "smart" filtering):
- *   1. On Enter in normal buffer → close previous block, open new one.
- *   2. On switching to alternate buffer (vim/top/less/tmux) → close current,
- *      do nothing until we're back in normal and user presses Enter again.
- *   3. When a start marker is disposed (scrollback trimmed), drop the block.
- *   4. On hard reset (RIS / ESC c), drop all blocks at once — xterm wipes the
+ * Rules:
+ *   1. Enter mode: Enter in normal buffer closes the previous block and opens
+ *      a new one. This remains the deterministic default.
+ *   2. Prompt mode: after startup or a submitted Enter, inspect only the
+ *      current logical cursor line after xterm parses output. The candidate
+ *      must be a new line containing only a recognized prompt; detection then
+ *      stays latched off until another Enter.
+ *   3. On switching to alternate buffer (vim/top/less/tmux) → close current
+ *      and ignore alternate-buffer writes. Prompt mode can finish an existing
+ *      wait when the normal buffer returns.
+ *   4. When a start marker is disposed (scrollback trimmed), drop the block.
+ *   5. On hard reset (RIS / ESC c), drop all blocks at once — xterm wipes the
  *      buffer without disposing our markers, so we must clear them ourselves.
  *
  * This module owns no DOM. A renderer (e.g. the overlay bar) subscribes
  * via `onChange` and redraws.
  */
 import type { Terminal, IMarker, IDisposable } from "@xterm/xterm";
+import { detectPrompt } from "./prompt";
+
+export type CommandBlockSplitMode = "enter" | "prompt";
 
 export interface CommandBlock {
   id: number;
@@ -37,7 +47,25 @@ function colorForIndex(i: number): string {
   return `hsl(${hue.toFixed(1)}, 65%, 58%)`;
 }
 
-export function createCommandBlockTracker(term: Terminal): CommandBlockTracker {
+function logicalLineAtCursor(term: Terminal): { text: string; startLine: number; startOffset: number } | null {
+  const buf = term.buffer.active;
+  const cursorAbs = buf.baseY + buf.cursorY;
+  let startAbs = cursorAbs;
+  while (startAbs > 0 && buf.getLine(startAbs)?.isWrapped) startAbs--;
+
+  let text = "";
+  for (let y = startAbs; y <= cursorAbs; y++) {
+    const line = buf.getLine(y);
+    if (!line) return null;
+    text += line.translateToString(true);
+  }
+  return { text, startLine: startAbs, startOffset: startAbs - cursorAbs };
+}
+
+export function createCommandBlockTracker(
+  term: Terminal,
+  splitMode: CommandBlockSplitMode = "enter",
+): CommandBlockTracker {
   const blocks: CommandBlock[] = [];
   const listeners = new Set<() => void>();
   let nextId = 1;
@@ -45,7 +73,22 @@ export function createCommandBlockTracker(term: Terminal): CommandBlockTracker {
 
   const emit = () => listeners.forEach(fn => fn());
 
-  const closeCurrent = () => {
+  let waitingForPrompt = splitMode === "prompt";
+  let submittedLine: IMarker | null = null;
+
+  const clearSubmittedLine = () => {
+    submittedLine?.dispose();
+    submittedLine = null;
+  };
+
+  const waitForReturnedPrompt = () => {
+    const line = logicalLineAtCursor(term);
+    clearSubmittedLine();
+    submittedLine = line ? term.registerMarker(line.startOffset) : null;
+    waitingForPrompt = true;
+  };
+
+  const closeCurrent = (endOffset = -1) => {
     const cur = blocks[blocks.length - 1];
     if (!cur || cur.end !== null) return;
     // Rule 2 close-on-switch: the active buffer is ALREADY the alternate one
@@ -59,13 +102,13 @@ export function createCommandBlockTracker(term: Terminal): CommandBlockTracker {
       cur.end = cur.start;
       return;
     }
-    // Normal buffer: mark one line above the new prompt. registerMarker(-1) =
-    // previous line. If that fails (cursor at top), fall back to current line.
-    cur.end = term.registerMarker(-1) ?? term.registerMarker(0);
+    // Normal buffer: mark the visual row immediately before the next block's
+    // logical start. If that fails at the buffer top, fall back to the cursor.
+    cur.end = term.registerMarker(endOffset) ?? term.registerMarker(0);
   };
 
-  const openNew = () => {
-    const start = term.registerMarker(0);
+  const openNew = (startOffset = 0) => {
+    const start = term.registerMarker(startOffset);
     if (!start) return; // can't mark — give up silently
     const id = nextId++;
     const block: CommandBlock = {
@@ -86,11 +129,18 @@ export function createCommandBlockTracker(term: Terminal): CommandBlockTracker {
     emit();
   };
 
+  const splitAt = (startOffset = 0) => {
+    closeCurrent(startOffset - 1);
+    openNew(startOffset);
+  };
+
   // Drop every block at once. Used on hard reset: the buffer is gone, so no
   // block corresponds to anything anymore. Snapshot-then-clear mirrors dispose():
   // start.dispose()'s onDispose does blocks.indexOf(block) — blocks already empty,
   // so it neither re-splices nor double-emits. One emit() at the end.
   const resetAll = () => {
+    clearSubmittedLine();
+    waitingForPrompt = splitMode === "prompt";
     if (blocks.length === 0) return;
     const snapshot = blocks.slice();
     blocks.length = 0;
@@ -101,19 +151,35 @@ export function createCommandBlockTracker(term: Terminal): CommandBlockTracker {
     emit();
   };
 
-  // Rule 1: Enter in normal buffer. Each `\r` = one new block (includes
-  // multiline pastes — pasted lines each get their own block by design).
+  // Enter mode splits on every `\r` (including multiline paste). Prompt mode
+  // merely rearms its output-side detector after the submitted command.
   disposables.push(
     term.onData((data: string) => {
       if (term.buffer.active.type === "alternate") return;
       for (const ch of data) {
         if (ch === "\r") {
-          closeCurrent();
-          openNew();
+          if (splitMode === "enter") splitAt();
+          else waitForReturnedPrompt();
         }
       }
     }),
   );
+
+  if (splitMode === "prompt") {
+    disposables.push(
+      term.onWriteParsed(() => {
+        if (!waitingForPrompt || term.buffer.active.type === "alternate") return;
+        const line = logicalLineAtCursor(term);
+        if (!line) return;
+        if (submittedLine && !submittedLine.isDisposed && submittedLine.line === line.startLine) return;
+        const prompt = detectPrompt(line.text);
+        if (!prompt || line.text.slice(prompt.end).trim().length > 0) return;
+        splitAt(line.startOffset);
+        waitingForPrompt = false;
+        clearSubmittedLine();
+      }),
+    );
+  }
 
   // Rule 2: buffer switch. Close on entering alternate; ignore return.
   disposables.push(
@@ -143,6 +209,7 @@ export function createCommandBlockTracker(term: Terminal): CommandBlockTracker {
     },
     dispose() {
       disposables.forEach(d => d.dispose());
+      clearSubmittedLine();
       // 用快照迭代：start.dispose() 的 onDispose 会 splice blocks，
       // 直接 forEach(blocks) 会跳过后续 index，导致 marker 泄漏。
       const snapshot = blocks.slice();
