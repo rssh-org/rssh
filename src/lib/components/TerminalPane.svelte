@@ -24,6 +24,7 @@
     import {extractBlocksText} from "../terminal/block-content.ts";
     import {setupTouchScroll} from "../terminal/touch-scroll.ts";
     import {setupXtermIme229Workaround} from "../terminal/xterm-ime-229-workaround.ts";
+    import {resetMouseTracking} from "../terminal/mouse-mode.ts";
     import {createReservedSessionAttempt} from "../terminal/reserved-session-attempt.ts";
     import {renderBlocksToBlob} from "../terminal/block-to-image.ts";
     import {inputNewline, normalizeIncoming, bytesToHex, parseHexInput, parseLoginScript, remapEditingKeys, normalizeOutgoing, type LoginStep} from "../terminal/serial-transforms.ts";
@@ -543,19 +544,21 @@
     // resize:null means the transport has no rows/cols (serial) → callers skip it.
     const TRANSPORT: Record<app.TerminalTabType, {
         write: string; resize: string | null; data: string; close: string; closeCmd: string;
+        shellForeground: string | null;
     }> = {
-        ssh:    { write: "ssh_write",    resize: "ssh_resize",    data: "ssh:data",    close: "ssh:close",    closeCmd: "ssh_disconnect" },
-        local:  { write: "pty_write",    resize: "pty_resize",    data: "pty:data",    close: "pty:close",    closeCmd: "pty_close" },
-        docker_exec:  { write: "pty_write", resize: "pty_resize", data: "pty:data", close: "pty:close", closeCmd: "pty_close" },
-        kubectl_exec: { write: "pty_write", resize: "pty_resize", data: "pty:data", close: "pty:close", closeCmd: "pty_close" },
-        serial: { write: "serial_write", resize: null,            data: "serial:data", close: "serial:close", closeCmd: "serial_close" },
-        telnet: { write: "telnet_write", resize: "telnet_resize", data: "telnet:data", close: "telnet:close", closeCmd: "telnet_close" },
+        ssh:    { write: "ssh_write",    resize: "ssh_resize",    data: "ssh:data",    close: "ssh:close",    closeCmd: "ssh_disconnect", shellForeground: null },
+        local:  { write: "pty_write",    resize: "pty_resize",    data: "pty:data",    close: "pty:close",    closeCmd: "pty_close", shellForeground: "pty:shell_foreground" },
+        docker_exec:  { write: "pty_write", resize: "pty_resize", data: "pty:data", close: "pty:close", closeCmd: "pty_close", shellForeground: null },
+        kubectl_exec: { write: "pty_write", resize: "pty_resize", data: "pty:data", close: "pty:close", closeCmd: "pty_close", shellForeground: null },
+        serial: { write: "serial_write", resize: null,            data: "serial:data", close: "serial:close", closeCmd: "serial_close", shellForeground: null },
+        telnet: { write: "telnet_write", resize: "telnet_resize", data: "telnet:data", close: "telnet:close", closeCmd: "telnet_close", shellForeground: null },
     };
     const writeCmd = $derived(TRANSPORT[tabType].write);
     const resizeCmd = $derived(TRANSPORT[tabType].resize);
     const dataEvent = $derived(TRANSPORT[tabType].data);
     const closeEvent = $derived(TRANSPORT[tabType].close);
     const closeCmd = $derived(TRANSPORT[tabType].closeCmd);
+    const shellForegroundEvent = $derived(TRANSPORT[tabType].shellForeground);
 
     // ── Stream (Tabby-style) input/output transforms, shared by serial and
     //    telnet. Driven by the saved profile's meta; null for ssh/local so those
@@ -906,6 +909,12 @@
                 // layer over the parsed grid (HighlightDecorator), not a byte rewrite.
                 writeRawOutput(raw);
             }));
+            if (shellForegroundEvent) {
+                listeners.push(await listen(`${shellForegroundEvent}:${sid}`, () => {
+                    if (!acceptsSessionEvent(sid)) return;
+                    resetMouseTracking(terminal);
+                }));
+            }
             if (isSsh) {
                 // Every connection-scoped event uses the reserved session id.
                 // A stable tab id cannot distinguish a queued event from the

@@ -12,12 +12,120 @@ use crate::error::{locked, AppError, AppResult};
 /// pushes them to its socket. `spawn` itself stays transport-agnostic.
 pub enum PtyOut {
     Data(Vec<u8>),
+    ShellForeground,
     Close,
 }
 
 /// Sink the reader thread invokes for each chunk. The `&str` is the session
 /// id, so one sink can serve any number of PTY sessions.
 pub type PtySink = Arc<dyn Fn(&str, PtyOut) + Send + Sync>;
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct ForegroundProcessState {
+    shell_pgrp: libc::pid_t,
+    foreground_pgrp: libc::pid_t,
+    shell_return_pending: bool,
+}
+
+#[cfg(unix)]
+impl ForegroundProcessState {
+    fn new(shell_pgrp: libc::pid_t) -> Self {
+        Self {
+            shell_pgrp,
+            foreground_pgrp: shell_pgrp,
+            shell_return_pending: false,
+        }
+    }
+
+    fn observe(&mut self, foreground_pgrp: libc::pid_t) -> bool {
+        let returned_to_shell =
+            self.foreground_pgrp != self.shell_pgrp && foreground_pgrp == self.shell_pgrp;
+        if foreground_pgrp != self.shell_pgrp {
+            self.shell_return_pending = false;
+        } else if returned_to_shell {
+            self.shell_return_pending = true;
+        }
+        self.foreground_pgrp = foreground_pgrp;
+        returned_to_shell
+    }
+
+    fn take_stale_mouse_report(&mut self, data: &[u8]) -> bool {
+        if !self.shell_return_pending || !is_xterm_mouse_report(data) {
+            return false;
+        }
+        self.shell_return_pending = false;
+        true
+    }
+}
+
+#[cfg(unix)]
+type ForegroundProcessTracker = Arc<Mutex<ForegroundProcessState>>;
+
+#[cfg(unix)]
+fn observe_foreground_process(
+    master: &Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    tracker: Option<&ForegroundProcessTracker>,
+) -> bool {
+    let Some(tracker) = tracker else {
+        return false;
+    };
+    let Some(pgrp) = master
+        .lock()
+        .ok()
+        .and_then(|master| master.process_group_leader())
+    else {
+        return false;
+    };
+    tracker
+        .lock()
+        .map(|mut state| state.observe(pgrp))
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn inspect_foreground_input(
+    master: &Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    tracker: Option<&ForegroundProcessTracker>,
+    data: &[u8],
+) -> (bool, bool) {
+    let Some(tracker) = tracker else {
+        return (false, false);
+    };
+    let Some(pgrp) = master
+        .lock()
+        .ok()
+        .and_then(|master| master.process_group_leader())
+    else {
+        return (false, false);
+    };
+    let Ok(mut state) = tracker.lock() else {
+        return (false, false);
+    };
+    let returned_to_shell = state.observe(pgrp);
+    let stale_mouse_report = state.take_stale_mouse_report(data);
+    (returned_to_shell || stale_mouse_report, stale_mouse_report)
+}
+
+#[cfg(unix)]
+fn is_xterm_mouse_report(data: &[u8]) -> bool {
+    if data.len() == 6 && data.starts_with(b"\x1b[M") {
+        return true;
+    }
+    if data.len() < 9 || !data.starts_with(b"\x1b[<") {
+        return false;
+    }
+    if !matches!(data.last(), Some(b'M' | b'm')) {
+        return false;
+    }
+
+    let mut params = data[3..data.len() - 1].split(|byte| *byte == b';');
+    (0..3).all(|_| {
+        params
+            .next()
+            .is_some_and(|param| !param.is_empty() && param.iter().all(u8::is_ascii_digit))
+    }) && params.next().is_none()
+}
 
 /// 子进程持有者：保证 PtyHandle 最后一份 clone 被 drop 时（tab 关闭 / session 结束），
 /// 显式 kill + wait 子 shell。否则 Box<dyn Child> 在 spawn() 返回后立刻 drop，
@@ -50,11 +158,31 @@ pub struct PtyHandle {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     shell_path: Arc<str>,
+    #[cfg(unix)]
+    session_id: Arc<str>,
+    #[cfg(unix)]
+    sink: PtySink,
+    #[cfg(unix)]
+    foreground_process: Option<ForegroundProcessTracker>,
     _reaper: Arc<ChildReaper>,
 }
 
 impl PtyHandle {
     pub fn write(&self, data: &[u8]) -> AppResult<()> {
+        #[cfg(unix)]
+        let (reset_mouse_tracking, stale_mouse_report) =
+            inspect_foreground_input(&self.master, self.foreground_process.as_ref(), data);
+        #[cfg(unix)]
+        if reset_mouse_tracking {
+            (self.sink)(&self.session_id, PtyOut::ShellForeground);
+        }
+        #[cfg(unix)]
+        if stale_mouse_report {
+            // This input was generated while xterm still believed the dead
+            // foreground program owned mouse tracking. It belongs to neither
+            // process, so do not hand it to the shell as printable text.
+            return Ok(());
+        }
         locked(&self.writer)?.write_all(data).map_err(|e| {
             AppError::pty("pty_op_failed", serde_json::json!({ "err": e.to_string() }))
         })
@@ -340,7 +468,7 @@ pub fn spawn(
     if !cfg!(target_os = "windows") {
         cmd.arg("-l");
     }
-    spawn_builder(session_id, cols, rows, sink, cmd, shell)
+    spawn_builder(session_id, cols, rows, sink, cmd, shell, true)
 }
 
 /// Start a specific local program under a PTY. Used by dynamic connectors such
@@ -365,7 +493,7 @@ pub fn spawn_command(
         cmd.arg(arg);
     }
     let program_label = program.to_string_lossy().into_owned();
-    spawn_builder(session_id, cols, rows, sink, cmd, program_label)
+    spawn_builder(session_id, cols, rows, sink, cmd, program_label, false)
 }
 
 fn spawn_builder(
@@ -375,6 +503,7 @@ fn spawn_builder(
     sink: PtySink,
     cmd: CommandBuilder,
     shell_path: String,
+    track_shell_foreground: bool,
 ) -> AppResult<(String, PtyHandle)> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -392,6 +521,17 @@ fn spawn_builder(
         .map_err(|e| AppError::pty("pty_op_failed", serde_json::json!({ "err": e.to_string() })))?;
     drop(pair.slave);
 
+    #[cfg(unix)]
+    let foreground_process = track_shell_foreground
+        .then(|| child.process_id())
+        .flatten()
+        .and_then(|pid| libc::pid_t::try_from(pid).ok())
+        .map(ForegroundProcessState::new)
+        .map(Mutex::new)
+        .map(Arc::new);
+    #[cfg(not(unix))]
+    let _ = track_shell_foreground;
+
     let reader = pair
         .master
         .try_clone_reader()
@@ -401,28 +541,140 @@ fn spawn_builder(
         .take_writer()
         .map_err(|e| AppError::pty("pty_op_failed", serde_json::json!({ "err": e.to_string() })))?;
 
+    let master = Arc::new(Mutex::new(pair.master));
+    let pty_id: Arc<str> = Arc::from(session_id.as_str());
     let handle = PtyHandle {
         writer: Arc::new(Mutex::new(writer)),
-        master: Arc::new(Mutex::new(pair.master)),
+        master: Arc::clone(&master),
         shell_path: Arc::from(shell_path.as_str()),
+        #[cfg(unix)]
+        session_id: Arc::clone(&pty_id),
+        #[cfg(unix)]
+        sink: Arc::clone(&sink),
+        #[cfg(unix)]
+        foreground_process: foreground_process.clone(),
         _reaper: Arc::new(ChildReaper {
             child: Mutex::new(Some(child)),
         }),
     };
 
     // 读取线程：PTY stdout → Tauri 事件
-    let pty_id = session_id.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         let mut reader = reader;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => sink(&pty_id, PtyOut::Data(buf[..n].to_vec())),
+                Ok(n) => {
+                    #[cfg(unix)]
+                    let returned_to_shell =
+                        observe_foreground_process(&master, foreground_process.as_ref());
+                    sink(&pty_id, PtyOut::Data(buf[..n].to_vec()));
+                    #[cfg(unix)]
+                    if returned_to_shell {
+                        // Queue the local reset after the bytes that exposed
+                        // this process-group transition. The pending flag above
+                        // still guards against older PTY bytes arriving later.
+                        sink(&pty_id, PtyOut::ShellForeground);
+                    }
+                }
             }
         }
         sink(&pty_id, PtyOut::Close);
     });
 
     Ok((session_id, handle))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn foreground_process_group(handle: &PtyHandle) -> Option<libc::pid_t> {
+        locked(&handle.master)
+            .ok()
+            .and_then(|master| master.process_group_leader())
+    }
+
+    fn wait_for_process_group(
+        handle: &PtyHandle,
+        predicate: impl Fn(libc::pid_t) -> bool,
+    ) -> libc::pid_t {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(pgrp) = foreground_process_group(handle) {
+                if predicate(pgrp) {
+                    return pgrp;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for foreground process group"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn foreground_state_reports_only_child_to_shell_transitions() {
+        let mut state = ForegroundProcessState::new(100);
+
+        assert!(!state.observe(100));
+        assert!(!state.observe(200));
+        assert!(!state.observe(201));
+        assert!(state.observe(100));
+        assert!(!state.observe(100));
+
+        assert!(!state.observe(300));
+        assert!(state.observe(100));
+    }
+
+    #[test]
+    fn shell_return_stays_pending_until_the_stale_mouse_report_is_discarded() {
+        let mut state = ForegroundProcessState::new(100);
+
+        assert!(!state.observe(200));
+        assert!(state.observe(100));
+        assert!(!state.take_stale_mouse_report(b"x"));
+        assert!(state.take_stale_mouse_report(b"\x1b[<35;104;61M"));
+        assert!(!state.take_stale_mouse_report(b"\x1b[<35;104;61M"));
+
+        assert!(!state.observe(300));
+        assert!(!state.take_stale_mouse_report(b"\x1b[<35;104;61M"));
+    }
+
+    #[test]
+    fn mouse_report_detection_does_not_swallow_other_terminal_input() {
+        assert!(is_xterm_mouse_report(b"\x1b[<35;104;61M"));
+        assert!(is_xterm_mouse_report(b"\x1b[<0;1;1m"));
+        assert!(is_xterm_mouse_report(b"\x1b[M !!"));
+
+        assert!(!is_xterm_mouse_report(b"\x1b[<35;104;61"));
+        assert!(!is_xterm_mouse_report(b"\x1b[<35;104M"));
+        assert!(!is_xterm_mouse_report(b"printf '\x1b[<35;104;61M'"));
+        assert!(!is_xterm_mouse_report(b"\x1b[A"));
+    }
+
+    #[test]
+    fn foreground_process_group_returns_to_shell_after_ctrl_c() {
+        let sink: PtySink = Arc::new(|_, _| {});
+        let (_, handle) = spawn(
+            "pgrp-test".to_string(),
+            80,
+            24,
+            sink,
+            Some("/bin/sh".to_string()),
+        )
+        .expect("spawn shell");
+
+        let shell_pgrp = wait_for_process_group(&handle, |_| true);
+        handle.write(b"sleep 30\r").expect("start foreground child");
+        let child_pgrp = wait_for_process_group(&handle, |pgrp| pgrp != shell_pgrp);
+        assert_ne!(child_pgrp, shell_pgrp);
+
+        handle.write(&[0x03]).expect("send Ctrl-C");
+        let returned_pgrp = wait_for_process_group(&handle, |pgrp| pgrp == shell_pgrp);
+        assert_eq!(returned_pgrp, shell_pgrp);
+    }
 }

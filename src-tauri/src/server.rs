@@ -414,6 +414,9 @@ fn dispatch(
                     PtyOut::Data(b) => {
                         json!({ "type": "event", "event": format!("pty:data:{id}"), "payload": b })
                     }
+                    PtyOut::ShellForeground => {
+                        json!({ "type": "event", "event": format!("pty:shell_foreground:{id}"), "payload": Value::Null })
+                    }
                     PtyOut::Close => {
                         json!({ "type": "event", "event": format!("pty:close:{id}"), "payload": Value::Null })
                     }

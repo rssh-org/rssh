@@ -28,6 +28,9 @@ pub fn pty_spawn(
         pty::PtyOut::Data(b) => {
             let _ = app.emit(&format!("pty:data:{id}"), b);
         }
+        pty::PtyOut::ShellForeground => {
+            let _ = app.emit(&format!("pty:shell_foreground:{id}"), ());
+        }
         pty::PtyOut::Close => {
             let _ = app.emit(&format!("pty:close:{id}"), ());
         }
@@ -125,6 +128,9 @@ pub fn pty_spawn_connector(
     let sink: pty::PtySink = std::sync::Arc::new(move |id: &str, out: pty::PtyOut| match out {
         pty::PtyOut::Data(b) => {
             let _ = app.emit(&format!("pty:data:{id}"), b);
+        }
+        pty::PtyOut::ShellForeground => {
+            let _ = app.emit(&format!("pty:shell_foreground:{id}"), ());
         }
         pty::PtyOut::Close => {
             let _ = app.emit(&format!("pty:close:{id}"), ());
