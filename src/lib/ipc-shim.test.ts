@@ -255,4 +255,17 @@ describe("browser-environment commands (served locally, never over ws)", () => {
         expect(ws.sent).toHaveLength(0);
         await expect(picked).resolves.toBe("/tmp/downloads/report.txt");
     });
+
+    it.each([
+        ["/tmp/a\\b", "/tmp/a\\b/report.txt"],
+        ["C:\\Downloads", "C:\\Downloads\\report.txt"],
+    ])("joins the save name using the host path style: %s", async (folder, expected) => {
+        const { internals } = installWithServer();
+        fakeWindow.__RSSH_PICK__ = vi.fn(async (kind: string) =>
+            kind === "folder" ? folder : null,
+        );
+
+        await expect(internals.invoke("sftp_pick_save_path", { defaultName: "report.txt" }))
+            .resolves.toBe(expected);
+    });
 });

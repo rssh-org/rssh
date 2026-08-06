@@ -153,7 +153,7 @@ export function installTauriShim(): void {
         const folder = String(picked);
         const name = String(defaultName ?? "").split(/[\\/]/).pop() ?? "";
         if (!folder || !name) return null;
-        const separator = folder.includes("\\") ? "\\" : "/";
+        const separator = /^(?:[A-Za-z]:[\\/]|\\\\)/.test(folder) ? "\\" : "/";
         return folder.replace(/[\\/]+$/, "") + separator + name;
     }
 
