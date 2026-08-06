@@ -21,7 +21,8 @@
     import {createFoldStore, type FoldStore} from "../terminal/folds.ts";
     import {createPaintScheduler, type PaintScheduler} from "../terminal/paint-scheduler.ts";
 
-    import {extractBlocksText} from "../terminal/block-content.ts";
+    import {extractBlockTexts, extractBlocksText} from "../terminal/block-content.ts";
+    import {redactCommandBlockTexts} from "../terminal/command-block-redaction.ts";
     import {setupTouchScroll} from "../terminal/touch-scroll.ts";
     import {setupXtermIme229Workaround} from "../terminal/xterm-ime-229-workaround.ts";
     import {createReservedSessionAttempt} from "../terminal/reserved-session-attempt.ts";
@@ -407,12 +408,15 @@
         if (!terminal || blocks.length === 0) return;
         // 传 foldStore：折叠块走 saved body，否则会被拉到 cursorAbs 把后续
         // 命令输出全卷进来（PR #24 reviewer 发现的 bug）
-        const text = extractBlocksText(terminal, blocks, foldStore);
-        if (!text) return;
+        const blockTexts = extractBlockTexts(terminal, blocks, foldStore);
+        if (blockTexts.length === 0) return;
         // arboard (not navigator.clipboard) so this process — not WebKitGTK —
         // owns the X11 CLIPBOARD selection. Otherwise a later arboard-based
         // paste (clipboard_read) deadlocks on its own WebView and times out.
         try {
+            const redaction = await app.loadCommandBlockRedaction(true);
+            const text = redactCommandBlockTexts(blockTexts, redaction).join("\n");
+            if (!text) return;
             await writeClipboard(text);
             clearBlockSelection();
         } catch (error) {
@@ -435,10 +439,16 @@
         const term = terminal;
         const fs = foldStore;
         try {
-            const pngPromise = renderBlocksToBlob(term, blocks, {}, fs).then((b) => {
-                if (!b) throw new Error("render produced no blob");
-                return b;
-            });
+            // Re-read the policy for each copy. This is infrequent, keeps sync
+            // imports immediately visible, and fails closed if DB/regex loading
+            // fails. ClipboardItem receives the promise while the user gesture
+            // is still active, so the async read does not break clipboard access.
+            const pngPromise = app.loadCommandBlockRedaction(true)
+                .then((redaction) => renderBlocksToBlob(term, blocks, {}, fs, redaction))
+                .then((blob) => {
+                    if (!blob) throw new Error("render produced no blob");
+                    return blob;
+                });
             navigator.clipboard
                 .write([new ClipboardItem({ "image/png": pngPromise })])
                 .then(() => clearBlockSelection())

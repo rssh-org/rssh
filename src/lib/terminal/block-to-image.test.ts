@@ -4,6 +4,9 @@ import {
   resolveFg,
   resolveBg,
   extractImageRows,
+  redactImageRows,
+  type ImageCell,
+  type ImageRow,
 } from "./block-to-image.ts";
 import type { ITheme, IBufferCell } from "@xterm/xterm";
 import type { CommandBlock } from "./command-blocks.ts";
@@ -287,5 +290,104 @@ describe("extractImageRows", () => {
     ]);
     expect(rows.map((r) => r.blockId)).toEqual([1, 2, 3]);
     expect(rows.map((r) => r.blockColor)).toEqual(["#111", "#222", "#333"]);
+  });
+});
+
+/* ───────────────────────── redactImageRows ───────────────────────── */
+
+function imageCells(text: string, fg = "#eeeeee"): ImageCell[] {
+  return Array.from(text, (ch) => ({
+    ch,
+    width: 1,
+    fg,
+    bg: "#111111",
+    bold: false,
+    italic: false,
+    underline: false,
+  }));
+}
+
+function imageRow(blockId: number, text: string): ImageRow {
+  return { blockId, blockColor: "#abc", cells: imageCells(text) };
+}
+
+function imageText(row: ImageRow): string {
+  return row.cells.map((cell) => cell.ch).join("");
+}
+
+describe("redactImageRows", () => {
+  it("replaces only the first-row prompt of every block and keeps commands", () => {
+    const rows = [
+      imageRow(1, "alice@prod:~/app$ ssh 10.0.0.1"),
+      imageRow(1, "alice@prod is output, not a prompt"),
+      imageRow(2, "PS C:\\Users\\Alice>Get-ChildItem"),
+    ];
+    const redacted = redactImageRows(rows, {
+      promptEnabled: true,
+      promptReplacement: "anonymous@rssh",
+      rules: [],
+    });
+    expect(redacted.map(imageText)).toEqual([
+      "anonymous@rssh ssh 10.0.0.1",
+      "alice@prod is output, not a prompt",
+      "anonymous@rssh Get-ChildItem",
+    ]);
+  });
+
+  it("applies independent regex rules to commands and output", () => {
+    const rows = [
+      imageRow(1, "$ curl 10.0.0.1/token"),
+      imageRow(1, "peer=10.2.3.4 token=secret"),
+    ];
+    const redacted = redactImageRows(rows, {
+      promptEnabled: true,
+      promptReplacement: "anonymous@rssh",
+      rules: [
+        { id: "ip", pattern: String.raw`\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`, replacement: "<IP>" },
+        { id: "secret", pattern: "secret", replacement: "$&-literal" },
+      ],
+    });
+    expect(redacted.map(imageText)).toEqual([
+      "anonymous@rssh curl <IP>/token",
+      "peer=<IP> token=$&-literal",
+    ]);
+  });
+
+  it("leaves the prompt to normal rules when prompt redaction is disabled", () => {
+    const [row] = redactImageRows([imageRow(1, "alice@prod:~$ id")], {
+      promptEnabled: false,
+      promptReplacement: "anonymous@rssh",
+      rules: [{ id: "host", pattern: "prod", replacement: "hidden" }],
+    });
+    expect(imageText(row)).toBe("alice@hidden:~$ id");
+  });
+
+  it("does not mistake ordinary first-row output for a prompt", () => {
+    const [row] = redactImageRows([imageRow(1, "build > output.txt")], {
+      promptEnabled: true,
+      promptReplacement: "anonymous@rssh",
+      rules: [],
+    });
+    expect(imageText(row)).toBe("build > output.txt");
+  });
+
+  it("keeps replacement styling and CJK display width", () => {
+    const row = imageRow(1, "$ id");
+    row.cells[0].fg = "#ff0000";
+    const [redacted] = redactImageRows([row], {
+      promptEnabled: true,
+      promptReplacement: "匿名",
+      rules: [],
+    });
+    expect(redacted.cells.slice(0, 2).map((cell) => cell.width)).toEqual([2, 2]);
+    expect(redacted.cells[0].fg).toBe("#ff0000");
+  });
+
+  it("fails closed when a synced rule is not valid JavaScript regex", () => {
+    expect(() => redactImageRows([imageRow(1, "$ id")], {
+      promptEnabled: true,
+      promptReplacement: "anonymous@rssh",
+      rules: [{ id: "bad", pattern: "(?P<name>x)", replacement: "<X>" }],
+    })).toThrow();
   });
 });

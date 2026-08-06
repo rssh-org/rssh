@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  extractBlockTexts,
   extractBlocksText,
   extractRangeLines,
   resolveBlockLines,
@@ -221,6 +222,20 @@ describe("extractBlocksText", () => {
       fakeBlock(1, 0, 1),
     ]);
     expect(text).toBe("$ pwd\n/tmp\n$ whoami\nlinus");
+  });
+
+  it("keeps multi-block boundaries available to copy-time policies", () => {
+    const term = fakeTerm([
+      lineFromSpec("$ pwd     "),
+      lineFromSpec("/tmp      "),
+      lineFromSpec("$ whoami  "),
+      lineFromSpec("linus     "),
+    ]);
+    const texts = extractBlockTexts(term, [
+      fakeBlock(2, 2, 3),
+      fakeBlock(1, 0, 1),
+    ]);
+    expect(texts).toEqual(["$ pwd\n/tmp", "$ whoami\nlinus"]);
   });
 
   it("merges wrapped output within a block", () => {

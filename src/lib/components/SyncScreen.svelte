@@ -38,6 +38,7 @@
         { key: "sync_include_snippets", label: "sync.categories.snippets" },
         { key: "sync_include_skills", label: "sync.categories.skills" },
         { key: "sync_include_ai_redact", label: "sync.categories.ai_redact" },
+        { key: "sync_include_command_block_redact", label: "sync.categories.command_block_redact" },
         { key: "sync_include_ai_blacklist", label: "sync.categories.ai_blacklist" },
         { key: "sync_include_ai", label: "sync.categories.ai" },
     ];

@@ -25,11 +25,12 @@
 
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::db::ai_command_blacklist::{self, BlacklistRow};
 use crate::db::ai_redact_rule::{self, RedactRuleRow};
+use crate::db::command_block_redact_rule;
 use crate::db::{
     credential, forward, group, highlight, profile, serial_profile, snippet, telnet_profile, Db,
 };
@@ -60,6 +61,25 @@ struct LegacyForwardImport {
     group_id: Option<String>,
     #[serde(flatten)]
     rule: ForwardRule,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CommandBlockRedaction {
+    prompt_enabled: bool,
+    prompt_replacement: String,
+    rules: Vec<command_block_redact_rule::RedactRuleRow>,
+}
+
+fn command_block_redaction(db: &Db) -> AppResult<CommandBlockRedaction> {
+    let prompt_enabled = crate::db::settings::get(db, "command_block_prompt_redact_enabled")?
+        .is_none_or(|value| value != "false");
+    let prompt_replacement = crate::db::settings::get(db, "command_block_prompt_replacement")?
+        .unwrap_or_else(|| "anonymous@rssh".into());
+    Ok(CommandBlockRedaction {
+        prompt_enabled,
+        prompt_replacement,
+        rules: command_block_redact_rule::list(db)?,
+    })
 }
 
 fn parse_forward_import(value: Value) -> serde_json::Result<Forward> {
@@ -327,6 +347,63 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
             }
         }
     }
+    // Command-block copy redaction is one category: prompt policy + independent
+    // rules. New payloads use the generic key; the old image-specific key stays
+    // readable for backups produced before text copying shared the policy. A
+    // missing category leaves local configuration untouched.
+    let command_block_redaction = data
+        .get("command_block_redaction")
+        .map(|value| ("command_block_redaction", value))
+        .or_else(|| {
+            data.get("command_block_image_redaction")
+                .map(|value| ("command_block_image_redaction", value))
+        });
+    if let Some((category, value)) = command_block_redaction {
+        match serde_json::from_value::<CommandBlockRedaction>(value.clone()) {
+            Ok(incoming) => {
+                if let Err(e) = crate::db::settings::set(
+                    db,
+                    "command_block_prompt_redact_enabled",
+                    if incoming.prompt_enabled {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                ) {
+                    errors.push(ImportError {
+                        kind: "command_block_prompt_redaction",
+                        name: None,
+                        code: e.code().to_string(),
+                    });
+                }
+                if let Err(e) = crate::db::settings::set(
+                    db,
+                    "command_block_prompt_replacement",
+                    &incoming.prompt_replacement,
+                ) {
+                    errors.push(ImportError {
+                        kind: "command_block_prompt_redaction",
+                        name: None,
+                        code: e.code().to_string(),
+                    });
+                }
+                for rule in incoming.rules {
+                    if let Err(e) = crate::commands::command_block::save_redact_rule(db, &rule) {
+                        errors.push(ImportError {
+                            kind: "command_block_redact_rule",
+                            name: Some(rule.id),
+                            code: e.code().to_string(),
+                        });
+                    }
+                }
+            }
+            Err(_) => errors.push(ImportError {
+                kind: category,
+                name: None,
+                code: "parse_failed".into(),
+            }),
+        }
+    }
     // ai_command_blacklist — identity = name; additive upsert (never deletes)
     if let Some(arr) = data["ai_command_blacklist"].as_array() {
         for item in arr {
@@ -473,6 +550,7 @@ pub struct SyncPrefs {
     highlights: bool,
     snippets: bool,
     ai_redact: bool,
+    command_block_redact: bool,
     ai_blacklist: bool,
     ai: bool,
     /// Group filter shared by profiles / forwards / serial_profiles.
@@ -519,6 +597,7 @@ pub fn read_sync_prefs(db: &Db) -> AppResult<SyncPrefs> {
         skills: flag("sync_include_skills")?,
         highlights: flag("sync_include_highlights")?,
         ai_redact: flag("sync_include_ai_redact")?,
+        command_block_redact: flag("sync_include_command_block_redact")?,
         ai_blacklist: flag("sync_include_ai_blacklist")?,
         snippets: flag("sync_include_snippets")?,
         ai: flag("sync_include_ai")?,
@@ -674,6 +753,12 @@ fn build_payload_inner(
     }
     if on(|p| p.ai_redact) {
         out.insert("ai_redact_rules".into(), to_val(ai_redact_rule::list(db)?)?);
+    }
+    if on(|p| p.command_block_redact) {
+        out.insert(
+            "command_block_redaction".into(),
+            to_val(command_block_redaction(db)?)?,
+        );
     }
     if on(|p| p.ai_blacklist) {
         out.insert(
@@ -1301,6 +1386,122 @@ mod tests {
             !rules.iter().any(|r| r.id == "bad"),
             "invalid regex not persisted"
         );
+    }
+
+    #[test]
+    fn local_export_includes_command_block_redaction() {
+        let (db, ss, dir) = fixture();
+        crate::db::settings::set(&db, "command_block_prompt_redact_enabled", "false").unwrap();
+        crate::db::settings::set(&db, "command_block_prompt_replacement", "masked-prompt").unwrap();
+
+        let out = build_payload(&db, &ss, dir.path(), &ExportMode::LocalBackup).unwrap();
+        let category = &out["command_block_redaction"];
+        assert_eq!(category["prompt_enabled"], false);
+        assert_eq!(category["prompt_replacement"], "masked-prompt");
+        assert_eq!(category["rules"].as_array().unwrap().len(), 8);
+        assert!(out.get("command_block_image_redaction").is_none());
+    }
+
+    #[test]
+    fn command_block_redaction_import_is_additive() {
+        let (db, ss, dir) = fixture();
+        let data = json!({
+            "version": 1,
+            "command_block_redaction": {
+                "prompt_enabled": false,
+                "prompt_replacement": "remote-prompt",
+                "rules": [{"id": "remote", "pattern": "secret", "replacement": "<X>"}]
+            }
+        });
+
+        merge_import(&db, &ss, dir.path(), &data).unwrap();
+
+        assert_eq!(
+            crate::db::settings::get(&db, "command_block_prompt_redact_enabled")
+                .unwrap()
+                .as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            crate::db::settings::get(&db, "command_block_prompt_replacement")
+                .unwrap()
+                .as_deref(),
+            Some("remote-prompt")
+        );
+        let rules = command_block_redact_rule::list(&db).unwrap();
+        assert_eq!(rules.len(), 9, "existing defaults are not deleted");
+        assert!(rules.iter().any(|rule| rule.id == "remote"));
+    }
+
+    #[test]
+    fn legacy_command_block_image_redaction_import_is_supported() {
+        let (db, ss, dir) = fixture();
+        let data = json!({
+            "version": 1,
+            "command_block_image_redaction": {
+                "prompt_enabled": false,
+                "prompt_replacement": "legacy-prompt",
+                "rules": []
+            }
+        });
+
+        merge_import(&db, &ss, dir.path(), &data).unwrap();
+
+        assert_eq!(
+            crate::db::settings::get(&db, "command_block_prompt_replacement")
+                .unwrap()
+                .as_deref(),
+            Some("legacy-prompt")
+        );
+    }
+
+    #[test]
+    fn old_payload_keeps_local_command_block_redaction() {
+        let (db, ss, dir) = fixture();
+        crate::db::settings::set(&db, "command_block_prompt_replacement", "local-prompt").unwrap();
+        command_block_redact_rule::delete(&db, "ip-10").unwrap();
+
+        merge_import(&db, &ss, dir.path(), &json!({"version": 1})).unwrap();
+
+        assert_eq!(
+            crate::db::settings::get(&db, "command_block_prompt_replacement")
+                .unwrap()
+                .as_deref(),
+            Some("local-prompt")
+        );
+        assert!(!command_block_redact_rule::list(&db)
+            .unwrap()
+            .iter()
+            .any(|rule| rule.id == "ip-10"));
+    }
+
+    #[test]
+    fn command_block_redaction_import_rejects_invalid_rule() {
+        let (db, ss, dir) = fixture();
+        let data = json!({
+            "version": 1,
+            "command_block_redaction": {
+                "prompt_enabled": true,
+                "prompt_replacement": "anonymous@rssh",
+                "rules": [{"id": "bad", "pattern": "(", "replacement": "<X>"}]
+            }
+        });
+
+        merge_import(&db, &ss, dir.path(), &data).unwrap_err();
+        assert!(!command_block_redact_rule::list(&db)
+            .unwrap()
+            .iter()
+            .any(|rule| rule.id == "bad"));
+    }
+
+    #[test]
+    fn remote_push_can_omit_command_block_redaction() {
+        let (db, ss, dir) = fixture();
+        crate::db::settings::set(&db, "sync_include_command_block_redact", "0").unwrap();
+        let prefs = read_sync_prefs(&db).unwrap();
+
+        let out = build_payload(&db, &ss, dir.path(), &ExportMode::RemotePush(prefs)).unwrap();
+        assert!(out.get("command_block_redaction").is_none());
     }
 
     #[test]

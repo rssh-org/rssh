@@ -34,36 +34,12 @@ pub fn list(db: &Db) -> AppResult<Vec<RedactRuleRecord>> {
         .collect())
 }
 
-/// 一个正则能否**零宽匹配**（匹配空串，或只由 `^`/`$`/`\b` 等断言构成）。
-/// 这类规则在 `replace_all` 时会在每个位置插入 replacement，造成灾难性的
-/// over-replacement / 文本膨胀。`Regex::new` 不拦这些（它们语法合法），所以 save
-/// 时单独用 regex-syntax 的 `minimum_len()` 判最小匹配长度，==0 即零宽。
-fn matches_empty(pattern: &str) -> bool {
-    regex_syntax::Parser::new()
-        .parse(pattern)
-        // parse 失败的分支走不到（上游 Regex::new 已校验过可编译）；兜底视为非零宽，
-        // 不误拒一条引擎接受的规则。
-        .map(|hir| hir.properties().minimum_len() == Some(0))
-        .unwrap_or(false)
-}
-
 /// 保存（新增或编辑）。两道 fail-fast 校验，绝不让坏规则入库 —— 否则建会话时
 /// `compiled()` 会静默跳过它，用户以为脱敏生效其实没生效，这才是真正危险的 false sense。
 ///   1. 正则可编译（坏语法 → redact_invalid_regex）
 ///   2. 非零宽匹配（`""`/`^`/`a*`/`\b` 等 → redact_zero_width_pattern）
 pub fn save(db: &Db, rec: &RedactRuleRecord) -> AppResult<()> {
-    RedactRule::new(&rec.pattern, &rec.replacement).map_err(|e| {
-        AppError::config(
-            "redact_invalid_regex",
-            json!({ "pattern": rec.pattern, "error": e.to_string() }),
-        )
-    })?;
-    if matches_empty(&rec.pattern) {
-        return Err(AppError::config(
-            "redact_zero_width_pattern",
-            json!({ "pattern": rec.pattern }),
-        ));
-    }
+    crate::redaction::validate_pattern(&rec.pattern)?;
     ai_redact_rule::upsert(
         db,
         &ai_redact_rule::RedactRuleRow {

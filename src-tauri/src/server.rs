@@ -358,6 +358,23 @@ fn dispatch(
             };
             ok(r)
         }
+        "command_block_list_redact_rules" => {
+            ok(crate::commands::command_block::list_redact_rules(&state.db))
+        }
+        "command_block_save_redact_rule" => ok(crate::commands::command_block::save_redact_rule(
+            &state.db,
+            &crate::db::command_block_redact_rule::RedactRuleRow {
+                id: arg(&args, "id")?,
+                pattern: arg(&args, "pattern")?,
+                replacement: arg(&args, "replacement")?,
+            },
+        )),
+        "command_block_delete_redact_rule" => {
+            ok(crate::commands::command_block::delete_redact_rule(
+                &state.db,
+                &arg::<String>(&args, "id")?,
+            ))
+        }
         "set_sync_auto_pull" => ok(crate::commands::sync::set_sync_auto_pull_impl(
             state,
             arg(&args, "provider")?,

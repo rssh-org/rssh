@@ -729,6 +729,7 @@ mod tests {
             "highlights",
             "snippets",
             "ai_redact_rules",
+            "command_block_redaction",
             "ai_command_blacklist",
             "ai",
         ] {

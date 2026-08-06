@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppResult;
 
-const SCHEMA_VERSION: u32 = 25;
+const SCHEMA_VERSION: u32 = 26;
 
 fn column_exists(conn: &Connection, table: &str, col: &str) -> AppResult<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
@@ -542,6 +542,43 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
         }
     }
 
+    if version < 26 {
+        // Command-block copy redaction starts as a snapshot of the user's current AI
+        // redaction rules. From this point on the two rule sets are independent.
+        // INSERT .. SELECT avoids a second hard-coded copy of the defaults and
+        // also preserves edits made by users upgrading from an older schema.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS settings (
+                 key   TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS ai_redact_rules (
+                 id          TEXT PRIMARY KEY,
+                 pattern     TEXT NOT NULL,
+                 replacement TEXT NOT NULL,
+                 created_at  INTEGER NOT NULL DEFAULT 0,
+                 updated_at  INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS command_block_redact_rules (
+                 id          TEXT PRIMARY KEY,
+                 pattern     TEXT NOT NULL,
+                 replacement TEXT NOT NULL,
+                 created_at  INTEGER NOT NULL DEFAULT 0,
+                 updated_at  INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO command_block_redact_rules
+                 (id, pattern, replacement, created_at, updated_at)
+             SELECT id, pattern, replacement, created_at, updated_at
+             FROM ai_redact_rules
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM command_block_redact_rules
+             );
+             INSERT OR IGNORE INTO settings (key, value) VALUES
+                 ('command_block_prompt_redact_enabled', 'true'),
+                 ('command_block_prompt_replacement', 'anonymous@rssh');",
+        )?;
+    }
+
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -552,6 +589,84 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_26_seeds_command_block_redaction_defaults() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        migrate(&conn).unwrap();
+
+        let rules: Vec<(String, String, String)> = conn
+            .prepare(
+                "SELECT id, pattern, replacement
+                 FROM command_block_redact_rules
+                 ORDER BY created_at, id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rules.len(), 8);
+        assert_eq!(rules[0].0, "ip-10");
+        assert_eq!(rules[7].0, "hex");
+
+        let enabled: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'command_block_prompt_redact_enabled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let replacement: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'command_block_prompt_replacement'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(enabled, "true");
+        assert_eq!(replacement, "anonymous@rssh");
+    }
+
+    #[test]
+    fn migration_26_snapshots_the_users_current_ai_rules() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute_batch(
+            "DROP TABLE command_block_redact_rules;
+             DELETE FROM settings WHERE key IN (
+                 'command_block_prompt_redact_enabled',
+                 'command_block_prompt_replacement'
+             );
+             DELETE FROM ai_redact_rules WHERE id = 'ip-10';
+             UPDATE ai_redact_rules
+             SET replacement = '<CUSTOM>'
+             WHERE id = 'aws-key';
+             INSERT INTO ai_redact_rules
+                 (id, pattern, replacement, created_at, updated_at)
+             VALUES ('user-rule', 'private', '<PRIVATE>', 100, 100);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 25u32).unwrap();
+
+        migrate(&conn).unwrap();
+
+        let rules: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT id, replacement FROM command_block_redact_rules ORDER BY created_at, id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(!rules.iter().any(|(id, _)| id == "ip-10"));
+        assert!(rules
+            .iter()
+            .any(|(id, replacement)| id == "aws-key" && replacement == "<CUSTOM>"));
+        assert!(rules.iter().any(|(id, _)| id == "user-rule"));
+    }
 
     #[test]
     fn migration_25_moves_existing_forward_to_rule_table() {

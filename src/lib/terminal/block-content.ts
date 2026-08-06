@@ -89,16 +89,25 @@ export function extractBlocksText(
   blocks: ReadonlyArray<CommandBlock>,
   foldStore?: FoldLookup,
 ): string {
+  return extractBlockTexts(term, blocks, foldStore).join("\n");
+}
+
+/** 抽取纯文本但保留块边界，供需要逐块处理 Prompt 的复制策略使用。 */
+export function extractBlockTexts(
+  term: Terminal,
+  blocks: ReadonlyArray<CommandBlock>,
+  foldStore?: FoldLookup,
+): string[] {
   const sorted = [...blocks]
     .filter((b) => !b.start.isDisposed)
     .sort((a, b) => a.id - b.id);
-  if (sorted.length === 0) return "";
+  if (sorted.length === 0) return [];
   const parts: string[] = [];
   for (const block of sorted) {
     const lines = resolveBlockLines(term, block, foldStore);
     parts.push(linesToLogicalText(lines).join("\n"));
   }
-  return parts.join("\n");
+  return parts;
 }
 
 /** IBufferLine 数组 → 逻辑行字符串数组。处理软换行合并、CJK、行末 trim。 */

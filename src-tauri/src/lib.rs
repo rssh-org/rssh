@@ -8,6 +8,7 @@ pub mod emitter;
 pub mod error;
 pub mod migration;
 pub mod models;
+mod redaction;
 pub mod secret;
 mod ssh;
 pub use ssh::bastion;
@@ -221,6 +222,9 @@ pub fn run() {
             commands::settings::read_recording,
             commands::settings::secret_backend,
             commands::settings::list_fonts,
+            commands::command_block::command_block_list_redact_rules,
+            commands::command_block::command_block_save_redact_rule,
+            commands::command_block::command_block_delete_redact_rule,
             // SSH session
             commands::session::ssh_connect,
             commands::session::ssh_write,

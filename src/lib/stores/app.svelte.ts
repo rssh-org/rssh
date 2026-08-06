@@ -2,6 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import * as ai from "../ai/store.svelte.ts";
 import { errMsg } from "../i18n/index.svelte.ts";
 import { isIOS, isMobile } from "../platform.ts";
+import type {
+  CommandBlockRedactionRule as RedactionRule,
+  CommandBlockRedactionSettings as RedactionSettings,
+} from "../terminal/command-block-redaction.ts";
 import type { ViewportSnapshot } from "../terminal/viewport-snapshot.ts";
 import { toast } from "./toast.svelte.ts";
 
@@ -759,6 +763,91 @@ export async function setAutoColorBlocks(v: boolean) {
   _autoColorBlocks = v;
   _acbLoaded = true;
   await invoke("set_setting", { key: "command_block_auto_color", value: String(v) });
+}
+
+/* ─── Command-block copy redaction ─── */
+export interface CommandBlockRedactRule extends RedactionRule {
+  id: string;
+}
+
+export interface CommandBlockRedactionSettings extends RedactionSettings {
+  rules: CommandBlockRedactRule[];
+}
+
+let _commandBlockRedaction = $state<CommandBlockRedactionSettings>({
+  promptEnabled: true,
+  promptReplacement: "anonymous@rssh",
+  rules: [],
+});
+let _commandBlockRedactionLoaded = false;
+let _commandBlockRedactionLoad: Promise<CommandBlockRedactionSettings> | null = null;
+
+function commandBlockRedactionValue(): CommandBlockRedactionSettings {
+  return {
+    promptEnabled: _commandBlockRedaction.promptEnabled,
+    promptReplacement: _commandBlockRedaction.promptReplacement,
+    rules: _commandBlockRedaction.rules.map((rule) => ({ ...rule })),
+  };
+}
+
+export function commandBlockRedaction(): CommandBlockRedactionSettings {
+  return commandBlockRedactionValue();
+}
+
+export async function loadCommandBlockRedaction(
+  force = false,
+): Promise<CommandBlockRedactionSettings> {
+  if (!force && _commandBlockRedactionLoaded) return commandBlockRedactionValue();
+  if (_commandBlockRedactionLoad) return _commandBlockRedactionLoad;
+
+  _commandBlockRedactionLoad = (async () => {
+    const [enabled, replacement, rules] = await Promise.all([
+      invoke<string | null>("get_setting", { key: "command_block_prompt_redact_enabled" }),
+      invoke<string | null>("get_setting", { key: "command_block_prompt_replacement" }),
+      invoke<CommandBlockRedactRule[]>("command_block_list_redact_rules"),
+    ]);
+    _commandBlockRedaction = {
+      promptEnabled: enabled !== "false",
+      promptReplacement: replacement ?? "anonymous@rssh",
+      rules,
+    };
+    _commandBlockRedactionLoaded = true;
+    return commandBlockRedactionValue();
+  })();
+
+  try {
+    return await _commandBlockRedactionLoad;
+  } finally {
+    _commandBlockRedactionLoad = null;
+  }
+}
+
+export async function setCommandBlockPromptRedactEnabled(value: boolean) {
+  await invoke("set_setting", {
+    key: "command_block_prompt_redact_enabled",
+    value: String(value),
+  });
+  _commandBlockRedaction.promptEnabled = value;
+  _commandBlockRedactionLoaded = true;
+}
+
+export async function setCommandBlockPromptReplacement(value: string) {
+  await invoke("set_setting", {
+    key: "command_block_prompt_replacement",
+    value,
+  });
+  _commandBlockRedaction.promptReplacement = value;
+  _commandBlockRedactionLoaded = true;
+}
+
+export async function saveCommandBlockRedactRule(rule: CommandBlockRedactRule) {
+  await invoke("command_block_save_redact_rule", rule);
+  await loadCommandBlockRedaction(true);
+}
+
+export async function deleteCommandBlockRedactRule(id: string) {
+  await invoke("command_block_delete_redact_rule", { id });
+  await loadCommandBlockRedaction(true);
 }
 
 /* ─── Copy selected terminal text on selection ─── */

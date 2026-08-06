@@ -1,5 +1,6 @@
 #[cfg(desktop)]
 pub mod cli;
+pub mod command_block;
 pub mod discovery;
 pub mod external;
 pub mod forward;

@@ -2,6 +2,7 @@ pub mod ai_command_blacklist;
 pub mod ai_conversation;
 pub mod ai_redact_rule;
 pub mod ai_skill;
+pub mod command_block_redact_rule;
 pub mod credential;
 pub mod forward;
 pub mod group;
