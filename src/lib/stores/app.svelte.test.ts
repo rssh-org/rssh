@@ -511,7 +511,7 @@ describe("command block split mode", () => {
       kind: "error",
       message: "settings unavailable",
     }));
-    for (const item of toasts()) dismiss(item.id);
+    for (const item of [...toasts()]) dismiss(item.id);
   });
 
   it("persists a supported mode through the shared settings command", async () => {
