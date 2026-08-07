@@ -1724,6 +1724,7 @@
         const visible = app.commandBlockBar();
         if (!visible) foldStore?.unfoldAll();
         fitTerminal();
+        if (visible) foldStore?.enforceAutoFold();
     });
 
     // Focus terminal + register writer when this tab becomes active.
