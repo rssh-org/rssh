@@ -206,6 +206,9 @@
         <div id="command-block-split-desc" class="cmd-block-desc">
           {t("settings.shell.command_block_split_desc")}
         </div>
+        <div id="command-block-split-note" class="cmd-block-desc">
+          {t("settings.shell.command_block_split_new_sessions")}
+        </div>
         <div class="split-mode-options">
           <button
             type="button"
@@ -233,9 +236,6 @@
               <small>{t("settings.shell.command_block_split_prompt_desc")}</small>
             </span>
           </button>
-        </div>
-        <div id="command-block-split-note" class="cmd-block-desc">
-          {t("settings.shell.command_block_split_new_sessions")}
         </div>
         {#if splitModeNote}
           <div class="inline-error" role="alert">{splitModeNote}</div>
