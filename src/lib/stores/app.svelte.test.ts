@@ -500,6 +500,20 @@ describe("command block split mode", () => {
     expect(await app.loadCommandBlockSplitMode()).toBe("enter");
   });
 
+  it("reports a load failure while retaining the Enter fallback", async () => {
+    invokeMock.mockRejectedValueOnce(new Error("settings unavailable"));
+    const app = await loadAppModule();
+
+    await expect(app.loadCommandBlockSplitMode()).resolves.toBe("enter");
+
+    const { dismiss, toasts } = await import("./toast.svelte.ts");
+    expect(toasts()).toContainEqual(expect.objectContaining({
+      kind: "error",
+      message: "settings unavailable",
+    }));
+    for (const item of toasts()) dismiss(item.id);
+  });
+
   it("persists a supported mode through the shared settings command", async () => {
     const app = await loadAppModule();
 

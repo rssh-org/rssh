@@ -739,6 +739,7 @@ export async function loadCommandBlockSplitMode(): Promise<CommandBlockSplitMode
         _commandBlockSplitMode = value === "prompt" ? "prompt" : "enter";
       } catch (error) {
         console.warn("[settings] command-block split mode load failed:", error);
+        toast.error(errMsg(error));
       }
       _cbsmLoaded = true;
       return _commandBlockSplitMode;

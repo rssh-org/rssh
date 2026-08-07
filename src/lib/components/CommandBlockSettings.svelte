@@ -2,11 +2,13 @@
   import { onDestroy, onMount } from "svelte";
   import * as app from "../stores/app.svelte.ts";
   import { errMsg, t } from "../i18n/index.svelte.ts";
+  import { toast } from "../stores/toast.svelte.ts";
   import type { CommandBlockRedactRule } from "../stores/app.svelte.ts";
 
   let commandBlockBar = $state(true);
   let autoColorBlocks = $state(false);
   let splitMode = $state<app.CommandBlockSplitMode>("enter");
+  let splitModeReady = $state(false);
   let splitModeSaving = $state(false);
   let splitModeNote = $state<string | null>(null);
   let promptEnabled = $state(true);
@@ -31,6 +33,7 @@
     commandBlockBar = bar;
     autoColorBlocks = autoColor;
     splitMode = loadedSplitMode;
+    splitModeReady = true;
     try {
       applyRedaction(await app.loadCommandBlockRedaction(true));
       redactionReady = true;
@@ -60,7 +63,7 @@
   }
 
   async function selectSplitMode(value: app.CommandBlockSplitMode) {
-    if (splitModeSaving || value === splitMode) return;
+    if (!splitModeReady || splitModeSaving || value === splitMode) return;
     const previous = splitMode;
     splitMode = value;
     splitModeSaving = true;
@@ -70,6 +73,7 @@
     } catch (error) {
       splitMode = previous;
       splitModeNote = t("settings.shell.command_block_split_error", { error: errMsg(error) });
+      toast.error(errMsg(error));
     } finally {
       splitModeSaving = false;
     }
@@ -208,7 +212,7 @@
             class="split-mode-option"
             class:active={splitMode === "enter"}
             aria-pressed={splitMode === "enter"}
-            disabled={splitModeSaving}
+            disabled={!splitModeReady || splitModeSaving}
             onclick={() => selectSplitMode("enter")}
           >
             <span>
@@ -221,7 +225,7 @@
             class="split-mode-option"
             class:active={splitMode === "prompt"}
             aria-pressed={splitMode === "prompt"}
-            disabled={splitModeSaving}
+            disabled={!splitModeReady || splitModeSaving}
             onclick={() => selectSplitMode("prompt")}
           >
             <span>
