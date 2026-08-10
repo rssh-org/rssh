@@ -78,6 +78,12 @@
             case "download_completed": return t("ai.audit.summary.download_completed", { path: k.local_path, size: formatBytes(k.bytes) });
             case "analyze_proposed": return t("ai.audit.summary.analyze_proposed", { path: k.local_path, task: k.task });
             case "skill_loaded": return t("ai.audit.summary.skill_loaded", { name: k.name, id: k.id });
+            case "web_search_completed": return t("ai.audit.summary.web_search_completed", {
+                query: k.query,
+                provider: k.provider,
+                count: k.result_count,
+                dur: k.duration_ms,
+            });
             case "web_fetch_completed": return t("ai.audit.summary.web_fetch_completed", {
                 url: k.final_url,
                 size: formatBytes(k.source_bytes),

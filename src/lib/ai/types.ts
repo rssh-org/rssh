@@ -188,6 +188,7 @@ export type AuditKind =
   | { type: "download_completed"; id: string; local_path: string; bytes: number }
   | { type: "analyze_proposed"; id: string; local_path: string; task: string }
   | { type: "skill_loaded"; id: string; name: string }
+  | { type: "web_search_completed"; query: string; provider: string; result_count: number; duration_ms: number }
   | { type: "web_fetch_completed"; requested_url: string; final_url: string; source_bytes: number; truncated: boolean }
   | { type: "context_rolled_back"; user_message_index: number; dropped_messages: number }
   | { type: "note"; message: string }

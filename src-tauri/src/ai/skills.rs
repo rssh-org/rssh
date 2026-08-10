@@ -223,6 +223,18 @@ mod tests {
     }
 
     #[test]
+    fn web_research_searches_before_fetching_and_verifying_sources() {
+        let content = super::super::prompts::WEB_RESEARCH;
+        let search = content.find("`web_search`").expect("search step");
+        let fetch = content.find("`web_fetch`").expect("fetch step");
+
+        assert!(search < fetch);
+        assert!(content.contains("snippets"));
+        assert!(content.contains("CAPTCHA"));
+        assert!(content.contains("sensitive"));
+    }
+
+    #[test]
     fn preserves_a_preexisting_user_skill_with_the_new_builtin_id() {
         let db = Db::open_in_memory().unwrap();
         ai_skill::upsert(

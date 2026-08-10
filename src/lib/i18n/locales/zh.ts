@@ -574,6 +574,7 @@ const zh: Messages = {
   "ai.audit.summary.download_completed": "下载完成: {path}（{size}）",
   "ai.audit.summary.analyze_proposed": "本地分析: {path} — 提示词: {task}",
   "ai.audit.summary.skill_loaded": "加载技能: {name} ({id})",
+  "ai.audit.summary.web_search_completed": "通过 {provider} 搜索网页: {query}（{count} 条结果，{dur}ms）",
   "ai.audit.summary.web_fetch_completed": "已抓取网页: {url}（{size}）{truncated}",
   "ai.audit.summary.web_fetch_truncated": "（内容已截断）",
   "ai.audit.summary.context_rolled_back": "上下文回退到第 {index} 条用户消息之前（删除 {count} 条协议消息）",

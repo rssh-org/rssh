@@ -81,6 +81,12 @@ pub enum AuditKind {
         source_bytes: usize,
         truncated: bool,
     },
+    WebSearchCompleted {
+        query: String,
+        provider: String,
+        result_count: usize,
+        duration_ms: u64,
+    },
     ContextRolledBack {
         /// Zero-based index among user messages in the active context.
         user_message_index: usize,
@@ -217,6 +223,17 @@ impl AuditLog {
                         "WEB_FETCH_DONE   requested={requested_url} final={final_url} bytes={source_bytes} truncated={truncated}\n"
                     ));
                 }
+                AuditKind::WebSearchCompleted {
+                    query,
+                    provider,
+                    result_count,
+                    duration_ms,
+                } => {
+                    let query = query.replace(['\r', '\n'], " ");
+                    s.push_str(&format!(
+                        "WEB_SEARCH_DONE  provider={provider} results={result_count} dur={duration_ms}ms query={query}\n"
+                    ));
+                }
                 AuditKind::ContextRolledBack {
                     user_message_index,
                     dropped_messages,
@@ -319,6 +336,17 @@ mod tests {
         .unwrap();
         assert_eq!(fetched["type"], "web_fetch_completed");
         assert_eq!(fetched["source_bytes"], 42);
+
+        let searched = serde_json::to_value(AuditKind::WebSearchCompleted {
+            query: "rust async".into(),
+            provider: "duckduckgo".into(),
+            result_count: 5,
+            duration_ms: 123,
+        })
+        .unwrap();
+        assert_eq!(searched["type"], "web_search_completed");
+        assert_eq!(searched["provider"], "duckduckgo");
+        assert_eq!(searched["result_count"], 5);
     }
 
     #[test]
