@@ -11,9 +11,10 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot, watch, Notify};
+use url::Url;
 
 use crate::error::{AppError, AppResult};
 use crate::ssh::client::SshHandle;
@@ -29,6 +30,16 @@ use super::tools::{
 };
 use super::web_fetch::WebPage;
 use super::web_search::WebSearchResponse;
+
+#[derive(Debug, Deserialize)]
+struct WebSearchToolPayload {
+    search: WebSearchResponse,
+}
+
+struct WebFetchGrant {
+    presented_url: String,
+    fetch_url: String,
+}
 
 mod file_ops;
 
@@ -72,27 +83,62 @@ fn web_search_tool_payload(search: &WebSearchResponse) -> String {
     .to_string()
 }
 
-fn web_fetch_url_allowed(history: &[ChatMessage], raw_url: &str) -> bool {
-    let url = raw_url.trim();
-    if url.is_empty() {
-        return false;
+fn url_token(token: &str) -> Option<String> {
+    let token = token
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | '[' | '{' | '<'))
+        .trim_end_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | '`' | ')' | ']' | '}' | '>' | '.' | ',' | ';' | '!' | '?'
+            )
+        });
+    let url = Url::parse(token).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+        return None;
     }
-    if history
-        .iter()
-        .any(|message| matches!(message, ChatMessage::User { content } if content.contains(url)))
-    {
-        return true;
+    Some(token.to_string())
+}
+
+fn user_url_tokens(content: &str) -> impl Iterator<Item = String> + '_ {
+    content.split_whitespace().filter_map(url_token)
+}
+
+fn add_matching_target(
+    targets: &mut std::collections::HashSet<String>,
+    requested_url: &str,
+    fetch_url: String,
+    redact_rules: &[RedactRule],
+) {
+    if sanitize::redact(&fetch_url, redact_rules) == requested_url {
+        targets.insert(fetch_url);
+    }
+}
+
+fn web_fetch_grant(
+    history: &[ChatMessage],
+    requested_url: &str,
+    redact_rules: &[RedactRule],
+) -> Option<WebFetchGrant> {
+    let requested_url = requested_url.trim();
+    if requested_url.is_empty() {
+        return None;
     }
 
+    let mut targets = std::collections::HashSet::new();
     let mut search_call_ids = std::collections::HashSet::new();
     for message in history {
         match message {
+            ChatMessage::User { content } => {
+                for fetch_url in user_url_tokens(content) {
+                    add_matching_target(&mut targets, requested_url, fetch_url, redact_rules);
+                }
+            }
             ChatMessage::Assistant { tool_calls, .. } => {
                 search_call_ids.extend(
                     tool_calls
                         .iter()
                         .filter(|call| call.name == tools::TOOL_WEB_SEARCH)
-                        .map(|call| call.id.as_str()),
+                        .map(|call| call.id.clone()),
                 );
             }
             ChatMessage::ToolResult {
@@ -100,24 +146,36 @@ fn web_fetch_url_allowed(history: &[ChatMessage], raw_url: &str) -> bool {
                 content,
                 is_error: false,
                 ..
-            } if search_call_ids.contains(tool_call_id.as_str()) => {
-                let Ok(payload) = serde_json::from_str::<serde_json::Value>(content) else {
+            } if search_call_ids.contains(tool_call_id) => {
+                let Ok(payload) = serde_json::from_str::<WebSearchToolPayload>(content) else {
                     continue;
                 };
-                let Some(results) = payload["search"]["results"].as_array() else {
-                    continue;
-                };
-                if results
-                    .iter()
-                    .any(|result| result["url"].as_str() == Some(url))
-                {
-                    return true;
+                for result in payload.search.results {
+                    add_matching_target(&mut targets, requested_url, result.url, redact_rules);
                 }
             }
             _ => {}
         }
     }
-    false
+
+    let mut targets = targets.into_iter();
+    let fetch_url = targets.next()?;
+    if targets.next().is_some() {
+        return None;
+    }
+    Some(WebFetchGrant {
+        presented_url: requested_url.to_string(),
+        fetch_url,
+    })
+}
+
+#[cfg(test)]
+fn web_fetch_target(
+    history: &[ChatMessage],
+    requested_url: &str,
+    redact_rules: &[RedactRule],
+) -> Option<String> {
+    web_fetch_grant(history, requested_url, redact_rules).map(|grant| grant.fetch_url)
 }
 
 fn resolve_loadable_skill(id: &str, user_skills: &[SkillRecord]) -> Result<SkillRecord, String> {
@@ -1085,13 +1143,17 @@ impl Actor {
                 ));
             }
         };
-        if !web_fetch_url_allowed(&self.history, &input.url) {
+        let Some(grant) = web_fetch_grant(&self.history, &input.url, &self.cfg.redact_rules) else {
             return Ok(self.make_tool_error(
                 &tc.id,
                 "web_fetch only accepts an exact URL from a user message or a prior web_search result.",
             ));
-        }
-        let page = match super::web_fetch::fetch(&input.url).await {
+        };
+        debug_assert_eq!(
+            grant.presented_url,
+            sanitize::redact(&grant.fetch_url, &self.cfg.redact_rules)
+        );
+        let page = match super::web_fetch::fetch(&grant.fetch_url).await {
             Ok(page) => page,
             Err(error) => return Ok(self.make_tool_error(&tc.id, &error.to_string())),
         };
@@ -2067,15 +2129,91 @@ mod tests {
             },
         ];
 
-        assert!(web_fetch_url_allowed(&history, "https://example.com/docs"));
-        assert!(!web_fetch_url_allowed(
-            &history,
-            "https://example.com/docs?leak=data"
-        ));
-        assert!(!web_fetch_url_allowed(
-            &history,
-            "https://attacker.example/collect"
-        ));
+        assert_eq!(
+            web_fetch_target(&history, "https://example.com/docs", &[]).as_deref(),
+            Some("https://example.com/docs")
+        );
+        assert!(web_fetch_target(&history, "https://example.com/docs?leak=data", &[]).is_none());
+        assert!(web_fetch_target(&history, "https://attacker.example/collect", &[]).is_none());
+
+        let prefix_history = vec![user("See https://example.com.evil.test/path")];
+        assert!(web_fetch_target(&prefix_history, "https://example.com", &[]).is_none());
+
+        let raw_url = "https://example.com/0123456789abcdef0123456789abcdef";
+        let redacted_history = vec![user(&format!("Read {raw_url}."))];
+        let rules =
+            vec![
+                super::super::sanitize::RedactRule::new(r"[0-9a-f]{32}", "<REDACTED:hex>").unwrap(),
+            ];
+        assert_eq!(
+            web_fetch_target(
+                &redacted_history,
+                "https://example.com/<REDACTED:hex>",
+                &rules,
+            )
+            .as_deref(),
+            Some(raw_url)
+        );
+    }
+
+    #[test]
+    fn web_fetch_rejects_ambiguous_redacted_urls() {
+        let history = vec![user(
+            "Compare https://example.com/00000000000000000000000000000000 and https://example.com/11111111111111111111111111111111",
+        )];
+        let rules =
+            vec![
+                super::super::sanitize::RedactRule::new(r"[0-9a-f]{32}", "<REDACTED:hex>").unwrap(),
+            ];
+
+        assert!(
+            web_fetch_target(&history, "https://example.com/<REDACTED:hex>", &rules,).is_none()
+        );
+    }
+
+    #[test]
+    fn web_fetch_redeems_a_redacted_search_result_url() {
+        let raw_url = "https://example.com/0123456789abcdef0123456789abcdef";
+        let history = vec![
+            user("Find the deployment guide."),
+            ChatMessage::Assistant {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "search-1".into(),
+                    name: tools::TOOL_WEB_SEARCH.into(),
+                    input: json!({ "query": "deployment guide" }),
+                }],
+                reasoning_content: None,
+            },
+            ChatMessage::ToolResult {
+                tool_call_id: "search-1".into(),
+                content: json!({
+                    "warning": "UNTRUSTED_WEB_SEARCH_RESULTS",
+                    "search": {
+                        "query": "deployment guide",
+                        "provider": "duckduckgo",
+                        "elapsed_ms": 0,
+                        "results": [{
+                            "title": "Guide",
+                            "url": raw_url,
+                            "snippet": "Guide"
+                        }]
+                    }
+                })
+                .to_string(),
+                is_error: false,
+                pre_redacted: false,
+            },
+        ];
+        let rules =
+            vec![
+                super::super::sanitize::RedactRule::new(r"[0-9a-f]{32}", "<REDACTED:hex>").unwrap(),
+            ];
+
+        assert_eq!(
+            web_fetch_target(&history, "https://example.com/<REDACTED:hex>", &rules,).as_deref(),
+            Some(raw_url)
+        );
     }
 
     #[test]
@@ -2098,6 +2236,7 @@ mod tests {
                     "search": {
                         "query": "Rust async book",
                         "provider": "duckduckgo",
+                        "elapsed_ms": 0,
                         "results": [{
                             "title": "Async book",
                             "url": "https://rust-lang.github.io/async-book/",
@@ -2131,21 +2270,13 @@ mod tests {
             },
         ];
 
-        assert!(web_fetch_url_allowed(
-            &history,
-            "https://rust-lang.github.io/async-book/"
-        ));
-        assert!(!web_fetch_url_allowed(
-            &history,
-            "https://attacker.example/from-snippet"
-        ));
-        assert!(!web_fetch_url_allowed(
-            &history,
-            "https://invented.example/"
-        ));
-        assert!(!web_fetch_url_allowed(
-            &history,
-            "https://attacker.example/from-page"
-        ));
+        assert!(
+            web_fetch_target(&history, "https://rust-lang.github.io/async-book/", &[],).is_some()
+        );
+        assert!(
+            web_fetch_target(&history, "https://attacker.example/from-snippet", &[],).is_none()
+        );
+        assert!(web_fetch_target(&history, "https://invented.example/", &[],).is_none());
+        assert!(web_fetch_target(&history, "https://attacker.example/from-page", &[],).is_none());
     }
 }

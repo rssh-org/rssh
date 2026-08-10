@@ -11,6 +11,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REDIRECTS: usize = 5;
 const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_MARKDOWN_BYTES: usize = 64 * 1024;
+const MAX_TITLE_CHARS: usize = 300;
+const MAX_URL_CHARS: usize = 2_048;
 const TRUNCATION_NOTICE: &str = "\n\n[Content truncated by rssh.]";
 
 #[derive(Debug, thiserror::Error)]
@@ -91,7 +93,11 @@ fn parse_target_with_policy(
     raw: &str,
     allow_private_addresses: bool,
 ) -> Result<Url, WebFetchError> {
-    let mut url = Url::parse(raw.trim()).map_err(|_| WebFetchError::InvalidUrl)?;
+    let raw = raw.trim();
+    if raw.chars().count() > MAX_URL_CHARS {
+        return Err(WebFetchError::InvalidUrl);
+    }
+    let mut url = Url::parse(raw).map_err(|_| WebFetchError::InvalidUrl)?;
     if allow_private_addresses {
         validate_url_shape(&url)?;
     } else {
@@ -180,7 +186,7 @@ fn extract_content(html: &str, document_url: &str) -> Result<ExtractedContent, W
         return Err(WebFetchError::ContentExtraction);
     }
     Ok(ExtractedContent {
-        title: article.title.trim().to_string(),
+        title: article.title.trim().chars().take(MAX_TITLE_CHARS).collect(),
         markdown,
     })
 }
@@ -439,6 +445,25 @@ mod tests {
 
         assert!(page.markdown.contains("--safe"));
         assert!(page.markdown.contains("rssh --safe"));
+    }
+
+    #[test]
+    fn bounds_page_title() {
+        let title = "界".repeat(MAX_TITLE_CHARS + 1);
+        let html = format!(
+            "<html><head><title>{title}</title></head><body><main><p>Readable content.</p></main></body></html>"
+        );
+
+        let page = extract_content(&html, "https://example.com/docs").unwrap();
+
+        assert_eq!(page.title.chars().count(), MAX_TITLE_CHARS);
+    }
+
+    #[test]
+    fn rejects_an_oversized_target_url() {
+        let raw = format!("https://example.com/{}", "x".repeat(MAX_URL_CHARS));
+
+        assert!(matches!(parse_target(&raw), Err(WebFetchError::InvalidUrl)));
     }
 
     #[tokio::test]

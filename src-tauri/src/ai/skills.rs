@@ -23,7 +23,7 @@ const GENERAL_DESC: &str =
     "Default rule set + workflow reference for CPU / memory / general triage. The LLM picks commands itself.";
 const WEB_RESEARCH_NAME: &str = "Web research";
 const WEB_RESEARCH_DESC: &str =
-    "Fetch and analyze concrete web URLs already present in a user message, with citation and prompt-injection safeguards. This does not search the web.";
+    "Search, fetch, and analyze web sources with citation and prompt-injection safeguards.";
 
 pub fn builtin(id: &str) -> Option<SkillRecord> {
     let (name, description, content) = match id {
@@ -219,6 +219,7 @@ mod tests {
         let prompt = build_catalog_prompt(&db, "English", false).unwrap();
 
         assert!(prompt.contains("`web-research`"));
+        assert!(prompt.contains("search"));
         assert!(!prompt.contains(super::super::prompts::WEB_RESEARCH));
     }
 

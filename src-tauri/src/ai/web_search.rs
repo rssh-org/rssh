@@ -1,7 +1,7 @@
 //! Bounded, zero-configuration public web search for AI sessions.
 
 use h2m_search::{DuckDuckGo, SafeSearch, SearchError, SearchQuery, SearchResponse, TimeRange};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::{
@@ -16,7 +16,7 @@ const MAX_TITLE_CHARS: usize = 300;
 const MAX_SNIPPET_CHARS: usize = 1_000;
 const MAX_URL_CHARS: usize = 2_048;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSearchResult {
     pub title: String,
     pub url: String,
@@ -24,7 +24,7 @@ pub struct WebSearchResult {
     pub snippet: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSearchResponse {
     pub query: String,
     pub provider: String,
