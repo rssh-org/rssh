@@ -117,7 +117,7 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
     }
 
     if version < 12 {
-        // AI 自定义 skill 表（内置 5 个 skill 不入表，从 prompts.rs 直接读）
+        // AI 自定义 Skill 表（内置 Skill 不入表，从 prompts.rs 直接读）
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS ai_skills (

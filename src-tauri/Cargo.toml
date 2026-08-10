@@ -68,6 +68,7 @@ regex = "1"
 # （minimum_len()==0 → 会在每个位置 replace → 灾难性 over-replacement）。
 regex-syntax = "0.8"
 futures-util = "0.3"
+dom_smoothie = "0.18.0"
 
 # CLI（optional，靠 --features cli 启用）
 clap = { version = "4", features = ["derive"], optional = true }

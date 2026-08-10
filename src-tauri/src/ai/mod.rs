@@ -6,7 +6,7 @@
 //! - audit     内存审计 + 保存到文本
 //! - llm       BYOK 客户端（Anthropic / OpenAI 兼容）
 //! - tools     暴露给 LLM 的工具：run_command / load_skill / download_file /
-//!             analyze_locally / match_file / patch_file
+//!             analyze_locally / match_file / patch_file / web_fetch
 //! - session   AI 会话生命周期 + 对话循环（含远端 file_ops 脚本拼装：
 //!             python3 / perl 两层降级，rssh 后端不再 cat 整文件回流）
 //! - commands  Tauri 命令入口
@@ -22,3 +22,4 @@ pub mod session;
 pub mod shell;
 pub mod skills;
 pub mod tools;
+pub mod web_fetch;

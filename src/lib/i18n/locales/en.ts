@@ -571,6 +571,8 @@ const en = {
   "ai.audit.summary.download_completed": "Download done: {path} ({size})",
   "ai.audit.summary.analyze_proposed": "Local analysis: {path} — prompt: {task}",
   "ai.audit.summary.skill_loaded": "Loaded skill: {name} ({id})",
+  "ai.audit.summary.web_fetch_completed": "Fetched web page: {url} ({size}){truncated}",
+  "ai.audit.summary.web_fetch_truncated": " (content truncated)",
   "ai.audit.summary.context_rolled_back": "Context rolled back before user message {index} ({count} protocol messages removed)",
   "ai.audit.summary.note": "Note: {message}",
   "ai.audit.summary.error": "Error: {message}",

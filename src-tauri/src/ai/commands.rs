@@ -494,8 +494,8 @@ pub async fn ai_session_start_impl(
 
     let client = llm::build_client(&provider, api_key, endpoint)?;
 
-    // system prompt = 内置 general 规则集 + user-skill 目录（id + description）。
-    // user-skill 详细内容走 load_skill 工具按需加载（claude skills 模式），
+    // system prompt = 内置 general 规则集 + lazy Skill 目录（id + description）。
+    // 其它内置 Skill 和用户 Skill 走 load_skill 工具按需加载，
     // 用户写多个 skill 也不会让启动 prompt 爆炸。
     let _ = skill; // 前端不再选；保留参数兼容
     let locale_lbl = locale_label(locale.as_deref().unwrap_or("en"));

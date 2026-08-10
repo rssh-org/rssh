@@ -75,6 +75,12 @@ pub enum AuditKind {
         id: String,
         name: String,
     },
+    WebFetchCompleted {
+        requested_url: String,
+        final_url: String,
+        source_bytes: usize,
+        truncated: bool,
+    },
     ContextRolledBack {
         /// Zero-based index among user messages in the active context.
         user_message_index: usize,
@@ -201,6 +207,16 @@ impl AuditLog {
                 AuditKind::SkillLoaded { id, name } => {
                     s.push_str(&format!("SKILL_LOADED     id={id} name={name}\n"));
                 }
+                AuditKind::WebFetchCompleted {
+                    requested_url,
+                    final_url,
+                    source_bytes,
+                    truncated,
+                } => {
+                    s.push_str(&format!(
+                        "WEB_FETCH_DONE   requested={requested_url} final={final_url} bytes={source_bytes} truncated={truncated}\n"
+                    ));
+                }
                 AuditKind::ContextRolledBack {
                     user_message_index,
                     dropped_messages,
@@ -293,6 +309,16 @@ mod tests {
         assert_eq!(rollback["type"], "context_rolled_back");
         assert_eq!(rollback["user_message_index"], 1);
         assert_eq!(rollback["dropped_messages"], 4);
+
+        let fetched = serde_json::to_value(AuditKind::WebFetchCompleted {
+            requested_url: "https://example.com/start".into(),
+            final_url: "https://example.com/final".into(),
+            source_bytes: 42,
+            truncated: false,
+        })
+        .unwrap();
+        assert_eq!(fetched["type"], "web_fetch_completed");
+        assert_eq!(fetched["source_bytes"], 42);
     }
 
     #[test]
