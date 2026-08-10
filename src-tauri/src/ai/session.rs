@@ -1056,13 +1056,13 @@ impl Actor {
                 ));
             }
         };
-        let search = match super::web_search::search(&input).await {
+        let search = match super::web_search::search(&input, &self.cfg.redact_rules).await {
             Ok(search) => search,
             Err(error) => return Ok(self.make_tool_error(&tc.id, &error.to_string())),
         };
 
         self.audit_push(AuditKind::WebSearchCompleted {
-            query: sanitize::redact(&search.query, &self.cfg.redact_rules),
+            query: search.query.clone(),
             provider: search.provider.clone(),
             result_count: search.results.len(),
             duration_ms: search.elapsed_ms,

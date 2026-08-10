@@ -4,7 +4,10 @@ use h2m_search::{DuckDuckGo, SafeSearch, SearchError, SearchQuery, SearchRespons
 use serde::Serialize;
 use url::Url;
 
-use super::tools::WebSearchInput;
+use super::{
+    sanitize::{self, RedactRule},
+    tools::WebSearchInput,
+};
 
 const DEFAULT_RESULTS: usize = 5;
 const MAX_RESULTS: usize = 10;
@@ -45,8 +48,19 @@ pub enum WebSearchError {
     InvalidResponse,
 }
 
-fn build_query(input: &WebSearchInput) -> Result<SearchQuery, &'static str> {
-    let query = input.query.trim();
+fn build_query(
+    input: &WebSearchInput,
+    redact_rules: &[RedactRule],
+) -> Result<SearchQuery, &'static str> {
+    let raw_query = input.query.trim();
+    if raw_query.is_empty() || raw_query.chars().count() > MAX_QUERY_CHARS {
+        return Err("web_search query must be 1..=512 characters");
+    }
+
+    // This is the network egress boundary. Prompts can ask the model not to
+    // copy secrets into a query, but only local redaction can enforce it.
+    let redacted_query = sanitize::redact(raw_query, redact_rules);
+    let query = redacted_query.trim();
     if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS {
         return Err("web_search query must be 1..=512 characters");
     }
@@ -76,8 +90,11 @@ fn build_query(input: &WebSearchInput) -> Result<SearchQuery, &'static str> {
     Ok(search)
 }
 
-fn normalize_response(response: SearchResponse, limit: usize) -> WebSearchResponse {
-    let query = response.query;
+fn normalize_response(
+    response: SearchResponse,
+    limit: usize,
+    sent_query: String,
+) -> WebSearchResponse {
     let provider = response.provider.to_string();
     let elapsed_ms = response.elapsed_ms;
     let results = response
@@ -111,7 +128,9 @@ fn normalize_response(response: SearchResponse, limit: usize) -> WebSearchRespon
         .collect();
 
     WebSearchResponse {
-        query,
+        // Do not trust an upstream echo for local query provenance. This is
+        // exactly the redacted string sent across the network.
+        query: sent_query,
         provider,
         results,
         elapsed_ms,
@@ -134,12 +153,16 @@ fn map_search_error(error: SearchError) -> WebSearchError {
     }
 }
 
-pub async fn search(input: &WebSearchInput) -> Result<WebSearchResponse, WebSearchError> {
-    let query = build_query(input).map_err(WebSearchError::InvalidInput)?;
+pub async fn search(
+    input: &WebSearchInput,
+    redact_rules: &[RedactRule],
+) -> Result<WebSearchResponse, WebSearchError> {
+    let query = build_query(input, redact_rules).map_err(WebSearchError::InvalidInput)?;
     let limit = query.limit;
+    let sent_query = query.query.clone();
     let provider = DuckDuckGo::new().map_err(map_search_error)?;
     let response = provider.search(&query).await.map_err(map_search_error)?;
-    Ok(normalize_response(response, limit))
+    Ok(normalize_response(response, limit, sent_query))
 }
 
 #[cfg(test)]
@@ -148,17 +171,42 @@ mod tests {
 
     #[test]
     fn builds_a_bounded_moderate_safe_search_query() {
-        let query = build_query(&WebSearchInput {
-            query: "  rust async patterns  ".into(),
-            max_results: None,
-            freshness: Some("week".into()),
-        })
+        let query = build_query(
+            &WebSearchInput {
+                query: "  rust async patterns  ".into(),
+                max_results: None,
+                freshness: Some("week".into()),
+            },
+            &[],
+        )
         .unwrap();
 
         assert_eq!(query.query, "rust async patterns");
         assert_eq!(query.limit, DEFAULT_RESULTS);
         assert_eq!(query.time_range, Some(TimeRange::Week));
         assert_eq!(query.safesearch, SafeSearch::Moderate);
+    }
+
+    #[test]
+    fn redacts_query_before_building_provider_query() {
+        let rules =
+            vec![
+                super::super::sanitize::RedactRule::new(r"EMP-\d{4}", "<REDACTED:employee>")
+                    .unwrap(),
+            ];
+
+        let query = build_query(
+            &WebSearchInput {
+                query: "debug deployment for EMP-1234".into(),
+                max_results: None,
+                freshness: None,
+            },
+            &rules,
+        )
+        .unwrap();
+
+        assert_eq!(query.query, "debug deployment for <REDACTED:employee>");
+        assert!(!query.query.contains("EMP-1234"));
     }
 
     #[test]
@@ -169,11 +217,26 @@ mod tests {
             freshness,
         };
 
-        assert!(build_query(&input("   ".into(), None, None)).is_err());
-        assert!(build_query(&input("界".repeat(MAX_QUERY_CHARS + 1), None, None)).is_err());
-        assert!(build_query(&input("rust".into(), Some(0), None)).is_err());
-        assert!(build_query(&input("rust".into(), Some(MAX_RESULTS + 1), None)).is_err());
-        assert!(build_query(&input("rust".into(), None, Some("hour".into()))).is_err());
+        assert!(build_query(&input("   ".into(), None, None), &[]).is_err());
+        assert!(build_query(&input("界".repeat(MAX_QUERY_CHARS + 1), None, None), &[]).is_err());
+        assert!(build_query(&input("rust".into(), Some(0), None), &[]).is_err());
+        assert!(build_query(&input("rust".into(), Some(MAX_RESULTS + 1), None), &[]).is_err());
+        assert!(build_query(&input("rust".into(), None, Some("hour".into())), &[]).is_err());
+    }
+
+    #[test]
+    fn rejects_query_that_is_empty_after_redaction() {
+        let rules = vec![super::super::sanitize::RedactRule::new(r"EMP-\d{4}", "").unwrap()];
+
+        assert!(build_query(
+            &WebSearchInput {
+                query: "EMP-1234".into(),
+                max_results: None,
+                freshness: None,
+            },
+            &rules,
+        )
+        .is_err());
     }
 
     #[test]
@@ -184,11 +247,14 @@ mod tests {
             ("month", TimeRange::Month),
             ("year", TimeRange::Year),
         ] {
-            let query = build_query(&WebSearchInput {
-                query: "rust".into(),
-                max_results: Some(MAX_RESULTS),
-                freshness: Some(raw.into()),
-            })
+            let query = build_query(
+                &WebSearchInput {
+                    query: "rust".into(),
+                    max_results: Some(MAX_RESULTS),
+                    freshness: Some(raw.into()),
+                },
+                &[],
+            )
             .unwrap();
 
             assert_eq!(query.time_range, Some(expected));
@@ -197,7 +263,7 @@ mod tests {
 
     #[test]
     fn returns_only_bounded_http_results_with_utf8_safe_text() {
-        let mut upstream = SearchResponse::new("rust", "duckduckgo");
+        let mut upstream = SearchResponse::new("untrusted upstream echo", "duckduckgo");
         upstream.web.push(
             h2m_search::SearchHit::new("界".repeat(MAX_TITLE_CHARS + 1), "https://a.example/")
                 .with_description("文".repeat(MAX_SNIPPET_CHARS + 1)),
@@ -214,8 +280,9 @@ mod tests {
             "http://c.example/",
         ));
 
-        let result = normalize_response(upstream, 2);
+        let result = normalize_response(upstream, 2, "rust".into());
 
+        assert_eq!(result.query, "rust");
         assert_eq!(result.results.len(), 2);
         assert_eq!(result.results[0].title.chars().count(), MAX_TITLE_CHARS);
         assert_eq!(
