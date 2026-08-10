@@ -532,7 +532,7 @@ describe("command block line limit", () => {
     invokeMock.mockResolvedValueOnce(null);
     const app = await loadAppModule();
 
-    await expect(app.loadCommandBlockMaxLines()).resolves.toBe(500);
+    await expect(app.loadCommandBlockMaxLines()).resolves.toBe(50);
     await app.setCommandBlockMaxLines(320);
 
     expect(app.commandBlockMaxLines()).toBe(320);

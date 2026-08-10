@@ -9,7 +9,7 @@
  */
 export const TERMINAL_SCROLLBACK_LINES = 1_000;
 
-export const COMMAND_BLOCK_MAX_LINES_DEFAULT = 500;
+export const COMMAND_BLOCK_MAX_LINES_DEFAULT = 50;
 export const COMMAND_BLOCK_MAX_LINES_MIN = 10;
 // Leave at least 99 cached rows even at the largest user-selectable value.
 export const COMMAND_BLOCK_MAX_LINES_MAX = 900;
