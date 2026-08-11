@@ -2,6 +2,7 @@
     import * as ai from "./store.svelte.ts";
     import type { AiTargetKind, ChatItem, ConversationMeta } from "./types.ts";
     import CommandConfirmDialog from "./CommandConfirmDialog.svelte";
+    import WebToolCard from "./WebToolCard.svelte";
     import AuditPanel from "./AuditPanel.svelte";
     import Modal from "../components/Modal.svelte";
     import DangerModeToggle from "./DangerModeToggle.svelte";
@@ -488,6 +489,8 @@
                                 {active}
                             />
                         {/key}
+                    {:else if item.kind === "web_tool"}
+                        <WebToolCard activity={item.activity} />
                     {:else if item.kind === "error"}
                         <div class="bubble error">{item.text}</div>
                     {:else if item.kind === "note"}

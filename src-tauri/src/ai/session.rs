@@ -28,8 +28,8 @@ use super::tools::{
     self, AnalyzeLocallyInput, DownloadFileInput, LoadSkillInput, RunCommandInput, WebFetchInput,
     WebSearchInput,
 };
-use super::web_fetch::WebPage;
-use super::web_search::WebSearchResponse;
+use super::web_fetch::{WebFetchError, WebPage};
+use super::web_search::{WebSearchError, WebSearchResponse};
 
 #[derive(Debug, Deserialize)]
 struct WebSearchToolPayload {
@@ -66,6 +66,7 @@ pub(in crate::ai::session) enum CommandOutcome {
 /// 直接调用 analyze_locally。理由：(1) 单条 SSH 上的 SFTP 不是搬 GB 文件的合适通道；
 /// (2) AI 静默把巨型文件拉过来对用户是 hostile —— 让人显式动手。
 const MAX_DOWNLOAD_MB: u32 = 100;
+const MAX_WEB_TOOL_TARGET_CHARS: usize = 2_048;
 
 fn web_fetch_tool_payload(page: &WebPage) -> String {
     json!({
@@ -81,6 +82,33 @@ fn web_search_tool_payload(search: &WebSearchResponse) -> String {
         "search": search,
     })
     .to_string()
+}
+
+fn redacted_web_tool_target(
+    input: &serde_json::Value,
+    field: &str,
+    redact_rules: &[RedactRule],
+) -> String {
+    input
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .map(|value| sanitize::redact(value, redact_rules))
+        .unwrap_or_default()
+        .chars()
+        .take(MAX_WEB_TOOL_TARGET_CHARS)
+        .collect()
+}
+
+fn is_terminal_ui_mutation(kind: &str, payload: &serde_json::Value) -> bool {
+    matches!(
+        kind,
+        "assistant_message_end" | "command_completed" | "command_rejected"
+    ) || (kind == "web_tool_activity"
+        && matches!(
+            payload.get("status").and_then(serde_json::Value::as_str),
+            Some("completed" | "failed")
+        ))
 }
 
 fn url_token(token: &str) -> Option<String> {
@@ -251,7 +279,7 @@ pub enum UserAction {
 /// Idempotent UI mutations returned by the prepare-stop drain barrier. Event
 /// delivery into the WebView is asynchronous with respect to an invoke reply,
 /// so close-time persistence cannot infer that an emitted terminal event has
-/// already run its JavaScript callback. Replaying these by message/card id
+/// already run its JavaScript callback. Replaying these by message/card/activity id
 /// makes the final timeline independent of that scheduling race.
 #[derive(Clone, Debug, Serialize)]
 pub struct AiTerminalMutation {
@@ -1105,9 +1133,29 @@ impl Actor {
     }
 
     async fn handle_web_search(&mut self, tc: ToolCall) -> AppResult<ChatMessage> {
+        let mut target = redacted_web_tool_target(&tc.input, "query", &self.cfg.redact_rules);
+        self.emit(
+            "web_tool_activity",
+            json!({
+                "id": tc.id,
+                "tool": tools::TOOL_WEB_SEARCH,
+                "status": "running",
+                "target": target,
+            }),
+        );
         let input: WebSearchInput = match serde_json::from_value(tc.input.clone()) {
             Ok(input) => input,
             Err(error) => {
+                self.emit(
+                    "web_tool_activity",
+                    json!({
+                        "id": tc.id,
+                        "tool": tools::TOOL_WEB_SEARCH,
+                        "status": "failed",
+                        "target": target,
+                        "error_code": "invalid_input",
+                    }),
+                );
                 return Ok(self.make_tool_error(
                     &tc.id,
                     &format!("Failed to parse web_search input: {error}"),
@@ -1116,8 +1164,26 @@ impl Actor {
         };
         let search = match super::web_search::search(&input, &self.cfg.redact_rules).await {
             Ok(search) => search,
-            Err(error) => return Ok(self.make_tool_error(&tc.id, &error.to_string())),
+            Err(error) => {
+                let error_code = if matches!(error, WebSearchError::InvalidInput(_)) {
+                    "invalid_input"
+                } else {
+                    "unavailable"
+                };
+                self.emit(
+                    "web_tool_activity",
+                    json!({
+                        "id": tc.id,
+                        "tool": tools::TOOL_WEB_SEARCH,
+                        "status": "failed",
+                        "target": target,
+                        "error_code": error_code,
+                    }),
+                );
+                return Ok(self.make_tool_error(&tc.id, &error.to_string()));
+            }
         };
+        target = search.query.clone();
 
         self.audit_push(AuditKind::WebSearchCompleted {
             query: search.query.clone(),
@@ -1125,6 +1191,17 @@ impl Actor {
             result_count: search.results.len(),
             duration_ms: search.elapsed_ms,
         });
+        self.emit(
+            "web_tool_activity",
+            json!({
+                "id": tc.id,
+                "tool": tools::TOOL_WEB_SEARCH,
+                "status": "completed",
+                "target": target,
+                "result_count": search.results.len(),
+                "duration_ms": search.elapsed_ms,
+            }),
+        );
 
         Ok(Self::make_tool_result(
             &tc.id,
@@ -1134,9 +1211,29 @@ impl Actor {
     }
 
     async fn handle_web_fetch(&mut self, tc: ToolCall) -> AppResult<ChatMessage> {
+        let target = redacted_web_tool_target(&tc.input, "url", &self.cfg.redact_rules);
+        self.emit(
+            "web_tool_activity",
+            json!({
+                "id": tc.id,
+                "tool": tools::TOOL_WEB_FETCH,
+                "status": "running",
+                "target": target,
+            }),
+        );
         let input: WebFetchInput = match serde_json::from_value(tc.input.clone()) {
             Ok(input) => input,
             Err(error) => {
+                self.emit(
+                    "web_tool_activity",
+                    json!({
+                        "id": tc.id,
+                        "tool": tools::TOOL_WEB_FETCH,
+                        "status": "failed",
+                        "target": target,
+                        "error_code": "invalid_input",
+                    }),
+                );
                 return Ok(self.make_tool_error(
                     &tc.id,
                     &format!("Failed to parse web_fetch input: {error}"),
@@ -1144,6 +1241,16 @@ impl Actor {
             }
         };
         let Some(grant) = web_fetch_grant(&self.history, &input.url, &self.cfg.redact_rules) else {
+            self.emit(
+                "web_tool_activity",
+                json!({
+                    "id": tc.id,
+                    "tool": tools::TOOL_WEB_FETCH,
+                    "status": "failed",
+                    "target": target,
+                    "error_code": "not_allowed",
+                }),
+            );
             return Ok(self.make_tool_error(
                 &tc.id,
                 "web_fetch only accepts an exact URL from a user message or a prior web_search result.",
@@ -1155,7 +1262,26 @@ impl Actor {
         );
         let page = match super::web_fetch::fetch(&grant.fetch_url).await {
             Ok(page) => page,
-            Err(error) => return Ok(self.make_tool_error(&tc.id, &error.to_string())),
+            Err(error) => {
+                let error_code = match error {
+                    WebFetchError::InvalidUrl | WebFetchError::UnsupportedScheme => "invalid_input",
+                    WebFetchError::CredentialsNotAllowed | WebFetchError::BlockedAddress => {
+                        "not_allowed"
+                    }
+                    _ => "unavailable",
+                };
+                self.emit(
+                    "web_tool_activity",
+                    json!({
+                        "id": tc.id,
+                        "tool": tools::TOOL_WEB_FETCH,
+                        "status": "failed",
+                        "target": target,
+                        "error_code": error_code,
+                    }),
+                );
+                return Ok(self.make_tool_error(&tc.id, &error.to_string()));
+            }
         };
 
         self.audit_push(AuditKind::WebFetchCompleted {
@@ -1164,6 +1290,17 @@ impl Actor {
             source_bytes: page.source_bytes,
             truncated: page.truncated,
         });
+        self.emit(
+            "web_tool_activity",
+            json!({
+                "id": tc.id,
+                "tool": tools::TOOL_WEB_FETCH,
+                "status": "completed",
+                "target": target,
+                "source_bytes": page.source_bytes,
+                "truncated": page.truncated,
+            }),
+        );
 
         // The page is external data and may contain secrets. Keep the original
         // in local history, but force the normal LLM-boundary redaction pass.
@@ -1976,10 +2113,7 @@ impl Actor {
                 });
             }
         }
-        if matches!(
-            kind,
-            "assistant_message_end" | "command_completed" | "command_rejected"
-        ) {
+        if is_terminal_ui_mutation(kind, &payload) {
             if let Ok(mut terminal) = self.terminal_mutations.lock() {
                 terminal.push(AiTerminalMutation {
                     kind: kind.to_owned(),
@@ -2108,6 +2242,33 @@ mod tests {
             value["search"]["results"][0]["url"],
             "https://www.rust-lang.org/"
         );
+    }
+
+    #[test]
+    fn web_tool_terminal_events_are_replayed_but_running_events_are_not() {
+        assert!(!is_terminal_ui_mutation(
+            "web_tool_activity",
+            &json!({ "status": "running" }),
+        ));
+        assert!(is_terminal_ui_mutation(
+            "web_tool_activity",
+            &json!({ "status": "completed" }),
+        ));
+        assert!(is_terminal_ui_mutation(
+            "web_tool_activity",
+            &json!({ "status": "failed" }),
+        ));
+    }
+
+    #[test]
+    fn web_tool_card_target_uses_local_redaction() {
+        let rules = vec![RedactRule::new(r"TOKEN-[0-9]+", "<REDACTED:token>").unwrap()];
+        let input = json!({ "query": "  rust TOKEN-123  " });
+
+        let target = redacted_web_tool_target(&input, "query", &rules);
+
+        assert_eq!(target, "rust <REDACTED:token>");
+        assert!(!target.contains("TOKEN-123"));
     }
 
     #[test]

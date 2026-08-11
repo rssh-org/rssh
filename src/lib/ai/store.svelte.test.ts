@@ -424,6 +424,60 @@ describe("tab lifecycle", () => {
     expect(ai.tokenUsage("tab-a")).toEqual({ tokens_in: 13, tokens_out: 10 });
   });
 
+  it("keeps one web tool card while its lifecycle event advances", async () => {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    ai.activateTab("tab-a");
+    ai.openPanel("tab-a");
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "ai_session_start") return info;
+      return null;
+    });
+    await ai.startSession({ ...args, lease: ai.captureSessionLease("tab-a") });
+    const activity = listenMock.mock.calls.find(
+      ([event]) => event === "ai:web_tool_activity:tab-a",
+    )?.[1];
+
+    activity?.({ payload: {
+      id: "search-1",
+      tool: "web_search",
+      status: "running",
+      target: "rust <REDACTED:token>",
+      context_epoch: 0,
+    } });
+    activity?.({ payload: {
+      id: "search-1",
+      tool: "web_search",
+      status: "completed",
+      target: "rust <REDACTED:token>",
+      result_count: 4,
+      duration_ms: 25,
+      context_epoch: 0,
+    } });
+    // Event transports are ordered today, but a duplicate queued start must
+    // never regress an already terminal card during teardown/reconnect races.
+    activity?.({ payload: {
+      id: "search-1",
+      tool: "web_search",
+      status: "running",
+      target: "rust <REDACTED:token>",
+      context_epoch: 0,
+    } });
+
+    expect(ai.chatItems("tab-a")).toEqual([{
+      kind: "web_tool",
+      activity: {
+        id: "search-1",
+        tool: "web_search",
+        status: "completed",
+        target: "rust <REDACTED:token>",
+        result_count: 4,
+        duration_ms: 25,
+      },
+      at: expect.any(Number),
+    }]);
+  });
+
   it("preserves next-epoch events that outrun the clear command response", async () => {
     vi.resetModules();
     const ai = await import("./store.svelte.ts");
@@ -878,6 +932,17 @@ describe("tab lifecycle", () => {
             kind: "command_rejected",
             payload: { id: "command-reject", reason: "closed" },
           },
+          {
+            kind: "web_tool_activity",
+            payload: {
+              id: "fetch-close",
+              tool: "web_fetch",
+              status: "completed",
+              target: "https://example.com/",
+              source_bytes: 2048,
+              truncated: false,
+            },
+          },
         ];
       }
       return null;
@@ -889,6 +954,9 @@ describe("tab lifecycle", () => {
     )?.[1];
     const proposed = listenMock.mock.calls.find(
       ([event]) => event === "ai:command_proposed:tab-a",
+    )?.[1];
+    const webActivity = listenMock.mock.calls.find(
+      ([event]) => event === "ai:web_tool_activity:tab-a",
     )?.[1];
     assistantStart?.({ payload: { id: "reply-close" } });
     const command = (id: string, tool_call_id: string) => ({
@@ -904,6 +972,12 @@ describe("tab lifecycle", () => {
     });
     proposed?.({ payload: command("command-close", "tool-close") });
     proposed?.({ payload: command("command-reject", "tool-reject") });
+    webActivity?.({ payload: {
+      id: "fetch-close",
+      tool: "web_fetch",
+      status: "running",
+      target: "https://example.com/",
+    } });
 
     await ai.closePanel("tab-a");
 
@@ -937,6 +1011,18 @@ describe("tab lifecycle", () => {
         kind: "command",
         rejected: { reason: "closed" },
       }),
+      {
+        kind: "web_tool",
+        activity: {
+          id: "fetch-close",
+          tool: "web_fetch",
+          status: "completed",
+          target: "https://example.com/",
+          source_bytes: 2048,
+          truncated: false,
+        },
+        at: expect.any(Number),
+      },
     ]);
     const saveIndex = invokeMock.mock.calls.findIndex(
       ([commandName]) => commandName === "ai_conversation_save_timeline",

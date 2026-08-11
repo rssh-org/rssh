@@ -121,11 +121,61 @@ export interface TokenUsage {
   tokens_out: number;
 }
 
+export type WebToolErrorCode =
+  | "invalid_input"
+  | "not_allowed"
+  | "unavailable"
+  | "interrupted";
+
+type WebToolActivityBase = {
+  id: string;
+  /** Redacted query or URL. Raw egress data never belongs in the UI timeline. */
+  target: string;
+};
+
+/**
+ * Read-only web tool lifecycle. One backend event advances one card through
+ * running → completed|failed; the discriminants make invalid result metadata
+ * unrepresentable in the renderer and persisted timeline.
+ */
+export type WebToolActivity =
+  | (WebToolActivityBase & {
+    tool: "web_search";
+    status: "running";
+  })
+  | (WebToolActivityBase & {
+    tool: "web_search";
+    status: "completed";
+    result_count: number;
+    duration_ms: number;
+  })
+  | (WebToolActivityBase & {
+    tool: "web_search";
+    status: "failed";
+    error_code: WebToolErrorCode;
+  })
+  | (WebToolActivityBase & {
+    tool: "web_fetch";
+    status: "running";
+  })
+  | (WebToolActivityBase & {
+    tool: "web_fetch";
+    status: "completed";
+    source_bytes: number;
+    truncated: boolean;
+  })
+  | (WebToolActivityBase & {
+    tool: "web_fetch";
+    status: "failed";
+    error_code: WebToolErrorCode;
+  });
+
 /** 一条对话消息（前端展示用） */
 export type ChatItem =
   | { kind: "user"; client_id?: string; client_seq?: number; text: string; at: number }
   | { kind: "assistant"; id: string; text: string; at: number; streaming: boolean; cancelled?: boolean }
   | { kind: "command"; cmd: CommandProposed; at: number; result?: CommandResult; rejected?: { reason: string } }
+  | { kind: "web_tool"; activity: WebToolActivity; at: number }
   | { kind: "error"; text: string; at: number }
   | { kind: "note"; text: string; at: number };
 

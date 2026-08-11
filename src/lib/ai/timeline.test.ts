@@ -61,6 +61,31 @@ describe("restoreTimeline", () => {
     expect(c.kind === "command" && c.rejected?.reason).toBe(STALE);
   });
 
+  it("marks an in-flight web tool card as interrupted", () => {
+    expect(roundtrip([
+      {
+        kind: "web_tool",
+        activity: {
+          id: "search-1",
+          tool: "web_search",
+          status: "running",
+          target: "rust async patterns",
+        },
+        at: 1,
+      },
+    ])).toEqual([{
+      kind: "web_tool",
+      activity: {
+        id: "search-1",
+        tool: "web_search",
+        status: "failed",
+        target: "rust async patterns",
+        error_code: "interrupted",
+      },
+      at: 1,
+    }]);
+  });
+
   it("leaves resolved and rejected command cards alone", () => {
     const items = roundtrip([
       { kind: "command", cmd: { id: "c1", cmd: "ls" }, at: 1, result: { id: "c1", exit_code: 0 } },
@@ -236,5 +261,92 @@ describe("applyTerminalMutations", () => {
       streaming: false,
       cancelled: true,
     }]);
+  });
+
+  it("settles a leftover web tool if the actor exits without a terminal mutation", () => {
+    const source = [{
+      kind: "web_tool",
+      activity: {
+        id: "fetch-panic",
+        tool: "web_fetch",
+        status: "running",
+        target: "https://example.com/",
+      },
+      at: 1,
+    }] as unknown as ChatItem[];
+
+    expect(applyTerminalMutations(source, [])).toEqual([{
+      kind: "web_tool",
+      activity: {
+        id: "fetch-panic",
+        tool: "web_fetch",
+        status: "failed",
+        target: "https://example.com/",
+        error_code: "interrupted",
+      },
+      at: 1,
+    }]);
+  });
+
+  it("replays web tool completion and reconstructs a missed card", () => {
+    const source = [{
+      kind: "web_tool",
+      activity: {
+        id: "search-1",
+        tool: "web_search",
+        status: "running",
+        target: "rust async patterns",
+      },
+      at: 1,
+    }] as unknown as ChatItem[];
+    const mutations = [
+      {
+        kind: "web_tool_activity",
+        payload: {
+          id: "search-1",
+          tool: "web_search",
+          status: "completed",
+          target: "rust async patterns",
+          result_count: 5,
+          duration_ms: 42,
+        },
+      },
+      {
+        kind: "web_tool_activity",
+        payload: {
+          id: "fetch-1",
+          tool: "web_fetch",
+          status: "failed",
+          target: "https://example.com/",
+          error_code: "unavailable",
+        },
+      },
+    ];
+
+    expect(applyTerminalMutations(source, mutations)).toEqual([
+      {
+        kind: "web_tool",
+        activity: {
+          id: "search-1",
+          tool: "web_search",
+          status: "completed",
+          target: "rust async patterns",
+          result_count: 5,
+          duration_ms: 42,
+        },
+        at: 1,
+      },
+      {
+        kind: "web_tool",
+        activity: {
+          id: "fetch-1",
+          tool: "web_fetch",
+          status: "failed",
+          target: "https://example.com/",
+          error_code: "unavailable",
+        },
+        at: expect.any(Number),
+      },
+    ]);
   });
 });
