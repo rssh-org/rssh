@@ -136,9 +136,27 @@ fn is_public_ipv4(ip: Ipv4Addr) -> bool {
 fn is_public_ipv6(ip: Ipv6Addr) -> bool {
     let segments = ip.segments();
     // Public unicast currently lives in 2000::/3. Keep documentation space
-    // out even though it has the same prefix; everything else is conservatively
-    // denied (loopback, ULA, link-local, multicast, IPv4-mapped, NAT64, etc.).
-    segments[0] & 0xe000 == 0x2000 && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+    // and IPv4 transition ranges out even though they share that prefix;
+    // everything else is conservatively denied (loopback, ULA, link-local,
+    // multicast, IPv4-mapped, NAT64, etc.).
+    segments[0] & 0xe000 == 0x2000
+        && !(segments[0] == 0x2001 && matches!(segments[1], 0x0000 | 0x0db8))
+        && segments[0] != 0x2002
+}
+
+fn validate_redirect(
+    current: &Url,
+    next: &Url,
+    allow_private_addresses: bool,
+) -> Result<(), WebFetchError> {
+    if current.scheme() == "https" && next.scheme() == "http" {
+        return Err(WebFetchError::InvalidRedirect);
+    }
+    if allow_private_addresses {
+        validate_url_shape(next)
+    } else {
+        validate_target(next)
+    }
 }
 
 async fn resolve_target(
@@ -293,11 +311,7 @@ async fn fetch_with_policy(
             let mut next = url
                 .join(location)
                 .map_err(|_| WebFetchError::InvalidRedirect)?;
-            if allow_private_addresses {
-                validate_url_shape(&next)?;
-            } else {
-                validate_target(&next)?;
-            }
+            validate_redirect(&url, &next, allow_private_addresses)?;
             next.set_fragment(None);
             url = next;
             continue;
@@ -371,6 +385,9 @@ mod tests {
             "http://[fc00::1]/",
             "http://[fe80::1]/",
             "http://[2001:db8::1]/",
+            "http://[2001:0000:4136:e378:8000:63bf:3fff:fdd2]/",
+            "http://[2002:0a00:0001::1]/",
+            "http://[64:ff9b::a00:1]/",
         ] {
             let url = url::Url::parse(raw).unwrap();
             assert!(
@@ -378,6 +395,20 @@ mod tests {
                 "{raw} must be blocked"
             );
         }
+    }
+
+    #[test]
+    fn rejects_https_to_http_redirects() {
+        let https = Url::parse("https://example.com/start").unwrap();
+        let http = Url::parse("http://example.com/final").unwrap();
+        let next_https = Url::parse("https://example.com/final").unwrap();
+
+        assert!(matches!(
+            validate_redirect(&https, &http, true),
+            Err(WebFetchError::InvalidRedirect)
+        ));
+        assert!(validate_redirect(&https, &next_https, true).is_ok());
+        assert!(validate_redirect(&http, &http, true).is_ok());
     }
 
     #[test]
