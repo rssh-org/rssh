@@ -339,13 +339,13 @@ mod tests {
 
         let searched = serde_json::to_value(AuditKind::WebSearchCompleted {
             query: "rust async".into(),
-            provider: "duckduckgo".into(),
+            provider: "parallel".into(),
             result_count: 5,
             duration_ms: 123,
         })
         .unwrap();
         assert_eq!(searched["type"], "web_search_completed");
-        assert_eq!(searched["provider"], "duckduckgo");
+        assert_eq!(searched["provider"], "parallel");
         assert_eq!(searched["result_count"], 5);
     }
 

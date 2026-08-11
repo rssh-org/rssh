@@ -69,7 +69,6 @@ regex = "1"
 regex-syntax = "0.8"
 futures-util = "0.3"
 dom_smoothie = "0.18.0"
-h2m-search = { version = "0.7.1", default-features = false, features = ["duckduckgo"] }
 
 # CLI（optional，靠 --features cli 启用）
 clap = { version = "4", features = ["derive"], optional = true }

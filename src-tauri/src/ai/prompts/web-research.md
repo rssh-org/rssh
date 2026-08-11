@@ -1,6 +1,6 @@
 # Web research
 
-Use `web_search` to discover public web pages, then use `web_fetch` to inspect the important sources. Search queries are sent to DuckDuckGo: make them specific and never include sensitive information such as credentials, secrets, personal data, or unrelated user content. `web_fetch` accepts only an exact HTTP(S) URL from a user message or a prior `web_search` result; never invent, extend, or guess URLs.
+Use `web_search` to discover public web pages, then use `web_fetch` to inspect the important sources. Search queries are locally redacted, then sent to the anonymous Hosted MCP service provided by Exa or Parallel: make them specific and never include sensitive information such as credentials, secrets, personal data, or unrelated user content. `web_fetch` accepts only an exact HTTP(S) URL from a user message or a prior `web_search` result; never invent, extend, or guess URLs.
 
 ## Workflow
 

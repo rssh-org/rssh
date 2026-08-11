@@ -1162,7 +1162,13 @@ impl Actor {
                 ));
             }
         };
-        let search = match super::web_search::search(&input, &self.cfg.redact_rules).await {
+        let search = match super::web_search::search(
+            &input,
+            &self.cfg.redact_rules,
+            &self.cfg.conversation_id,
+        )
+        .await
+        {
             Ok(search) => search,
             Err(error) => {
                 let error_code = if matches!(error, WebSearchError::InvalidInput(_)) {
@@ -2223,7 +2229,7 @@ mod tests {
     fn web_search_payload_marks_results_as_untrusted() {
         let payload = web_search_tool_payload(&WebSearchResponse {
             query: "rust".into(),
-            provider: "duckduckgo".into(),
+            provider: "parallel".into(),
             results: vec![super::super::web_search::WebSearchResult {
                 title: "Rust".into(),
                 url: "https://www.rust-lang.org/".into(),
@@ -2237,7 +2243,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("UNTRUSTED_WEB_SEARCH_RESULTS"));
-        assert_eq!(value["search"]["provider"], "duckduckgo");
+        assert_eq!(value["search"]["provider"], "parallel");
         assert_eq!(
             value["search"]["results"][0]["url"],
             "https://www.rust-lang.org/"
@@ -2352,7 +2358,7 @@ mod tests {
                     "warning": "UNTRUSTED_WEB_SEARCH_RESULTS",
                     "search": {
                         "query": "deployment guide",
-                        "provider": "duckduckgo",
+                        "provider": "parallel",
                         "elapsed_ms": 0,
                         "results": [{
                             "title": "Guide",
@@ -2396,7 +2402,7 @@ mod tests {
                     "warning": "UNTRUSTED_WEB_SEARCH_RESULTS",
                     "search": {
                         "query": "Rust async book",
-                        "provider": "duckduckgo",
+                        "provider": "parallel",
                         "elapsed_ms": 0,
                         "results": [{
                             "title": "Async book",
