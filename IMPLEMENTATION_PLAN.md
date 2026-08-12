@@ -2,58 +2,72 @@
 
 ## 背景
 
-现状：8 个工具蹭同一套 `CommandProposed`（10 字段）+ `command_proposed` 事件 + `CommandConfirmDialog`。
-问题：`CommandProposed` 把**领域字段**（cmd/explain/side_effect/diff）、**执行字段**（full_cmd/sentinel/timeout_s）、**渲染**全揉在一起；`CommandConfirmDialog` 里 `isPatch`/`isAckOnly` 按 kind 分叉就是症状。patch 的命令字段是执行泄漏——它的领域是"改文件"不是"跑命令"。
+现状（阶段 1+2 完成后）：download/analyze/web 已独立线；PTY 工具（run/match/patch×4）仍蹭 `CommandProposed` + `command_proposed` + `CommandConfirmDialog` + `executeCommand`。
+问题：`CommandProposed` 把领域、执行、渲染揉一起；`CommandConfirmDialog` 的 `isPatch` 分叉是症状。patch 的命令字段是执行泄漏——领域是"改文件"。
 
 ## 目标分层
 
 | 层 | 职责 | 归属 |
 |---|---|---|
-| **领域** | 每工具独立 Proposal/Result，只带自己需要的字段 | 10 个 |
-| **执行信封** | `PtyExecution { full_cmd, sentinel, timeout_s }`，走 PTY 的工具共享，附加在 Proposal 上 | 1 个 |
-| **基础设施** | reject(`command_rejected`) / ack(`ai_command_result`) / commandApprovals registry / executeCommand / commandExecutionStatus | 共享，不动 |
+| **领域** | 每工具独立 Proposal/Result，只带自己需要的字段 | 每工具一个 |
+| **执行信封** | `PtyExecution { full_cmd, sentinel, timeout_s }`，走 PTY 的工具共享，附在 Proposal 上 | 1 个 |
+| **基础设施** | reject(`command_rejected`) / ack(`ai_command_result`) / commandApprovals / executeCommand / commandExecutionStatus | 共享，不动 |
 
-卡片只读领域字段；executeCommand（已独立，只认 id/full_cmd/sentinel/timeout_s）读执行信封。
+## 已完成
 
-## 阶段
+### 阶段 1：download_file 独立线 ✅ (commit 7b8ece3)
+### 阶段 2：analyze_locally 独立线 ✅ (commit 9c95845)
+两个 ack-only 工具（后端自己执行，不碰 PTY）。各自独立 Proposal/Result + 事件（`download_proposed/completed`、`analyze_proposed/completed`）+ 独立卡片（DownloadConfirmCard / AnalyzeConfirmCard）。reject/ack 复用。旧 command 记录在 `restoreTimeline` 丢弃。模式验证通过。
 
-### 阶段 1：download_file 独立线（tracer bullet）
-**目标**: download_file 从 command 线彻底剥离，独立 Proposal/Result + 事件 + 卡片 + ChatItem kind。
-**为什么先做它**: 非 PTY（走后端 SFTP），不涉及 PtyExecution 信封，最低风险，验证"独立线"完整模式。
-**交付**:
-- 后端: `DownloadProposal/Result` struct, `download_proposed/completed` 事件, `AuditKind::DownloadCompleted`, `handle_download_file` 改 emit
-- 前端: `DownloadProposal/Result` types, `ChatItem.download`, store listener, `DownloadConfirmCard`, ChatPanel 路由, timeline restore/mutation, command-approval 映射, i18n
-- `CommandKind` 移除 `download_file`
-- resume 兼容: restoreTimeline 把旧 `command/download_file` 记录安全降级（丢弃或转 note），不崩
-**成功标准**: cargo test + vitest + svelte-check 全绿；旧对话恢复不崩；download 全流程（审批→SFTP→卡片翻 done）手动可走
-**状态**: 进行中
+---
 
-### 阶段 2：analyze_locally 独立线
-**目标**: 同阶段 1 模式，analyze_locally 剥离。
-**交付**: `AnalyzeProposal/Result`, `analyze_proposed/completed` 事件, `AnalyzeConfirmCard`, `CommandKind` 移除 `analyze_locally`，resume 兼容。
-**成功标准**: 同阶段 1。
-**状态**: 未开始
+## 阶段 3：PtyExecution 信封 + patch×4 领域化（**最高风险，最复杂**）
 
-### 阶段 3：PtyExecution 信封 + patch×4 独立领域线（最复杂）
-**目标**:
-- 抽 `PtyExecution { full_cmd, sentinel, timeout_s }` 信封；`executeCommand` 入参从 `CommandProposed` 改 `PtyExecution`
-- patch×4 各自独立领域 Proposal（path/find/replace/count/diff/overwrite_warning + execution 信封）
-- patch×4 卡片各自独立（PatchCp/Modify/Diff/Mv Card），共享 PTY 执行器
-**交付**: 4 个 patch Proposal/Result, patch 事件, 4 个卡片（或一个 PatchCard 按 step union）, ChatPanel 路由, `CommandKind` 移除 patch_*
-**风险**: patch 是 4 步编排 + diff 在 step3→step4 传递 + 走 PTY。最高风险阶段。
-**成功标准**: patch 4 步全流程可走；diff 正确在 mv 卡片显示；resume 不崩。
-**状态**: 未开始
+### 起点（handoff 时的代码事实）
+- `executeCommand`（store.svelte.ts:1346）**只读** `proposed.{id, full_cmd, sentinel, timeout_s}` —— 正好是 PtyExecution + id。改造点明确。
+- `handle_patch_file`（file_ops.rs:760）：4 步 cp→modify→diff→mv，调 `run_file_op`（file_ops.rs:539），领域信息（path/find/replace/tmp_path）现在编码进 explain 文本，没结构化。
+- `run_file_op`（file_ops.rs:539）：patch + match 共用的 PTY 执行核，emit command_proposed/completed。
+- patch 的 `diff` 字段已在 step3→step4 传递（run_file_op 的 diff 参数，L572-574）。
 
-### 阶段 4：match_file + run_command 收尾
-**目标**: match_file 独立（pattern + execution）；run_command 留作 `CommandProposed` 的最终形态（cmd/explain/side_effect + execution），或一并改名 `RunCommandProposal`。`CommandProposed` / `CommandKind` 在此阶段退役或只剩 run_command。
-**成功标准**: 同上。
-**状态**: 未开始
+### 3a：PtyExecution 信封（先做，纯重构，行为不变）
+1. **types.ts**：定义 `PtyExecution { full_cmd, sentinel, timeout_s }`。`CommandProposed` 的 full_cmd/sentinel/timeout_s 重组进 `execution: PtyExecution` 字段。
+2. **executeCommand**（store.svelte.ts:1346）：签名从 `(session, proposed: CommandProposed, ...)` 改 `(session, cardId, execution: PtyExecution, ...)`。它本来就只读那 4 个字段（1359/1508/1535/1537/1551），逻辑不动。
+3. **调用方**：`CommandConfirmDialog.svelte` 的 approve（grep `executeCommand` 调用点）传 `{ id: cmd.id, execution: cmd.execution }`。
+4. **后端**：`handle_run_command`（session.rs:1685）+ `run_file_op`（file_ops.rs:539）emit 的 command_proposed payload 把 full_cmd/sentinel/timeout_s 嵌进 `execution` 对象。
+5. **验证**：PTY 命令全流程仍工作（run/match/patch）。cargo + vitest + 手动一条 run_command。
 
-### 阶段 5：清理 + 全量回归
-**目标**: 删所有死字段/死分支/死事件；`cargo test` + `vitest` + `svelte-check` 全绿；resume 回归（各时代 timeline blob）；手动验证每个工具卡片。
-**状态**: 未开始
+### 3b：patch×4 领域化
+1. **后端 handle_patch_file**（file_ops.rs:760）：4 步的领域字段从 explain 文本提到结构化——
+   - cp: `{ path, tmp_path, execution }`
+   - modify: `{ path, find, replace, expected_count, execution }`
+   - diff: `{ path, execution }`
+   - mv: `{ path, diff, execution }`
+   `run_file_op` 的 PTY 执行核保留，emit 改 `patch_proposed/completed`（领域 + execution 信封）。
+2. **前端**：4 个 PatchProposal（或 1 个带 step）+ `ChatItem.patch` + `PatchConfirmCard`（从 CommandConfirmDialog 抽 `isPatch` 逻辑 + diff 框，L39/L294）+ patch 事件 listener + timeline + `CommandKind` 移除 patch_*。
+3. **CommandConfirmDialog** 删 isPatch 分支（只剩 run/match）。
+
+### 风险（红线）
+1. **executeCommand 双粘**：重入 guard（`_commandExecutions` map，store.svelte.ts:1359-1368）必须保持。改入参时别破坏 guard —— 双粘 rm/reboot 是灾难。
+2. **patch 编排**：cp→modify→diff→mv 顺序 + tmp_path + count 校验。领域化**只改 emit 字段，不改 4 步逻辑**。错了 = 用户文件损坏（不可逆，never break userspace 红线）。
+3. **resume**：旧 `command/patch_*` 记录丢弃（timeline isRenderable command case 加 patch_* 迁移检查，仿 download_file/analyze_locally）。
+
+### 测试
+- timeline patch restore/mutation（平行 download/analyze 测试，timeline.test.ts）
+- PTY 执行 e2e（仿 reference_ws_server_e2e_harness，或现有 command 测试）
+- 手动：patch_file 4 步全流程 + diff 在 mv 卡片显示 + 断网 resume
+
+### 阶段 3 必须前后端 + 测试一次性完成
+前端听 patch_proposed、后端发 patch_proposed、executeCommand 改入参——三者任一半途，PTY 链断，编译不过。不能留中间态。
+
+---
+
+## 阶段 4：match_file + run_command 收尾
+match_file 独立（pattern + execution）；run_command 留作 CommandProposed 最终形态或改名 RunCommandProposal。CommandConfirmDialog 退役/重构（删 isAckOnly 死分支，isAckOnly 已恒 false）。
+
+## 阶段 5：清理 + 全量回归
+删死字段/死分支；cargo + vitest + svelte-check 全绿；resume 回归；手动每个工具卡片。
 
 ## 贯穿原则
-- 每阶段一个 commit，可编译可测，不破坏 resume
-- TDD：后端 handler test + 前端 timeline test 先行
-- 一次只做一个阶段
+- 每阶段一个 commit，可编译可测，不破坏 resume（旧记录丢弃即可，不强迁）
+- TDD
+- reject/ack/commandApprovals/executeCommand 是共享基础设施，不动其语义
