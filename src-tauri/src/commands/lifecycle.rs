@@ -2587,7 +2587,7 @@ mod tests {
         let card_id = tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
                 let (event, payload) = events.recv().await.expect("actor event channel closed");
-                if event == "ai:command_proposed:tab" {
+                if event == "ai:match_proposed:tab" {
                     return payload["id"].as_str().unwrap().to_owned();
                 }
             }
@@ -2624,12 +2624,12 @@ mod tests {
 
         // This is the old cancellation window: close immediately after the
         // invoke ack. The ack now proves run_file_op already recorded its
-        // command_completed terminal mutation, so prepare cannot erase it.
+        // match_completed terminal mutation, so prepare cannot erase it.
         let terminal = prepare_ai_session_stop(&state, "tab", &owner, None)
             .await
             .unwrap();
         assert!(terminal.iter().any(|mutation| {
-            mutation.kind == "command_completed" && mutation.payload["id"] == card_id
+            mutation.kind == "match_completed" && mutation.payload["id"] == card_id
         }));
 
         close_ai_session(&state, "tab", &owner, None).await.unwrap();

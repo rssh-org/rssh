@@ -115,31 +115,17 @@ export function restoreTimeline(json: string, staleCommandReason: string): ChatI
       // must drop it too, or it renders as a permanent "…".
       if (!item.text && !item.cancelled) continue;
       item.streaming = false;
-    } else if (item.kind === "command") {
-      // The one method-call crash vector in CommandConfirmDialog: a truthy
-      // non-string diff hits `cmd.diff.split()`. Strip rather than drop —
-      // the card is still meaningful without its diff preview. Every other
-      // cmd/result/rejected field is either plain-rendered (Svelte renders
-      // undefined as "") or crash-safe, and the action-button branch is
-      // unreachable for restored cards (stale-marking below guarantees
-      // result|rejected).
-      if (item.cmd.diff !== undefined && !isStr(item.cmd.diff)) {
-        delete item.cmd.diff;
-      }
-      if (!item.result && !item.rejected) {
-        item.rejected = { reason: staleCommandReason };
-      }
     } else if (item.kind === "patch") {
-      // Same crash vector as command cards: a truthy non-string diff would hit
-      // proposal.diff.split() in the mv card. Strip rather than drop — the card
-      // is still meaningful without its diff preview.
+      // A truthy non-string diff would hit proposal.diff.split() in the mv
+      // card. Strip rather than drop — the card is still meaningful without
+      // its diff preview.
       if (item.proposal.diff !== undefined && !isStr(item.proposal.diff)) {
         delete item.proposal.diff;
       }
       if (!item.result && !item.rejected) {
         item.rejected = { reason: staleCommandReason };
       }
-    } else if (item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze" || item.kind === "match") {
+    } else if (item.kind === "command" || item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze" || item.kind === "match") {
       // Same as command: an unresolved card belongs to a dead actor whose
       // approval ack it will never receive. Mark stale-rejected.
       if (!item.result && !item.rejected) {
