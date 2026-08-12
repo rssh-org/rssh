@@ -99,6 +99,7 @@ fn is_terminal_ui_mutation(kind: &str, _payload: &serde_json::Value) -> bool {
             | "download_completed"
             | "analyze_completed"
             | "patch_completed"
+            | "match_completed"
     )
 }
 

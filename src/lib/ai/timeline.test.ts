@@ -185,6 +185,22 @@ describe("restoreTimeline", () => {
     ]);
     expect(items).toEqual([{ kind: "user", text: "kept", at: 4 }]);
   });
+
+  // --- match (independent line, read-only PTY search) ---
+  it("marks an unresolved match card as stale-rejected", () => {
+    const [m] = roundtrip([
+      { kind: "match", proposal: { id: "m1", path: "/etc/x", find: "foo", before: 80, after: 80, cmd: "grep ..." }, at: 1 },
+    ]);
+    expect(m.kind === "match" && m.rejected?.reason).toBe(STALE);
+  });
+
+  it("drops legacy match_file command cards from before the split", () => {
+    const items = roundtrip([
+      { kind: "command", cmd: { id: "m1", tool_call_id: "m1", cmd: "match", full_cmd: "", sentinel: "", explain: "", side_effect: "", timeout_s: 60, kind: "match_file" }, at: 1 },
+      { kind: "user", text: "kept", at: 2 },
+    ]);
+    expect(items).toEqual([{ kind: "user", text: "kept", at: 2 }]);
+  });
 });
 
 describe("applyTerminalMutations", () => {
@@ -476,6 +492,42 @@ describe("applyTerminalMutations", () => {
     ])).toEqual([
       expect.objectContaining({
         kind: "patch",
+        rejected: { reason: "nope" },
+        result: undefined,
+      }),
+    ]);
+  });
+
+  it("replays match completion (pty result) by proposal id", () => {
+    const card: ChatItem = {
+      kind: "match",
+      proposal: { id: "m1", path: "/etc/x", find: "foo", before: 80, after: 80, cmd: "grep ...", execution: { full_cmd: "grep ...", sentinel: "s", timeout_s: 60 } },
+      at: 1,
+    };
+    const mutations = [
+      { kind: "match_completed", payload: { id: "m1", exit_code: 0, timed_out: false, duration_ms: 9, output: '{"count":1}', original_bytes: 12, truncated_bytes: 0 } },
+    ];
+    const once = applyTerminalMutations([card], mutations);
+    const twice = applyTerminalMutations(once, mutations);
+    expect(twice).toEqual([
+      expect.objectContaining({
+        kind: "match",
+        result: { id: "m1", exit_code: 0, timed_out: false, early_terminated: false, duration_ms: 9, output: '{"count":1}', original_bytes: 12, truncated_bytes: 0 },
+      }),
+    ]);
+  });
+
+  it("rejects a match card through the shared command_rejected channel", () => {
+    const card: ChatItem = {
+      kind: "match",
+      proposal: { id: "m1", path: "/etc/x", find: "foo", before: 80, after: 80, cmd: "grep ...", execution: { full_cmd: "grep ...", sentinel: "s", timeout_s: 60 } },
+      at: 1,
+    };
+    expect(applyTerminalMutations([card], [
+      { kind: "command_rejected", payload: { id: "m1", reason: "nope" } },
+    ])).toEqual([
+      expect.objectContaining({
+        kind: "match",
         rejected: { reason: "nope" },
         result: undefined,
       }),

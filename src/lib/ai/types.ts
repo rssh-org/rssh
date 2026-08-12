@@ -58,8 +58,9 @@ export interface AiSettings {
 }
 
 /** AI 工具卡片 kind —— 后端 emit command_proposed 时打的 tag；前端按它查 auto_* 设置。
- *  patch×4 已迁到独立 ChatItem.patch（见 PatchStep），不在此列。 */
-export type CommandKind = "run_command" | "match_file";
+ *  patch×4 / match_file 已迁到独立 ChatItem（见 PatchStep / MatchProposal），不在此列；
+ *  CommandProposed 现在只服务 run_command。 */
+export type CommandKind = "run_command";
 
 /** web_search / web_fetch — dedicated proposal/result stream, independent of
  *  the command card (no full_cmd/sentinel/explain/side_effect). */
@@ -142,6 +143,24 @@ export interface PatchProposal {
   execution: PtyExecution;
 }
 
+/** match_file — read-only search of `find` in a remote file. Independent
+ *  proposal/result stream (match_proposed / match_completed); reuses
+ *  executeCommand + the shared reject/ack channels. Result is the PTY
+ *  CommandResult (the raw search output). */
+export interface MatchProposal {
+  id: string;
+  /** Shell command to run (shown for trust). */
+  cmd: string;
+  /** File to search. */
+  path: string;
+  /** Search string. */
+  find: string;
+  /** Context chars before/after each match (clamped by the backend). */
+  before: number;
+  after: number;
+  execution: PtyExecution;
+}
+
 export interface ModelInfo {
   id: string;
   display_name: string | null;
@@ -206,6 +225,7 @@ export type ChatItem =
   | { kind: "download"; proposal: DownloadProposal; at: number; result?: DownloadResult; rejected?: { reason: string } }
   | { kind: "analyze"; proposal: AnalyzeProposal; at: number; result?: AnalyzeResult; rejected?: { reason: string } }
   | { kind: "patch"; proposal: PatchProposal; at: number; result?: CommandResult; rejected?: { reason: string } }
+  | { kind: "match"; proposal: MatchProposal; at: number; result?: CommandResult; rejected?: { reason: string } }
   | { kind: "error"; text: string; at: number }
   | { kind: "note"; text: string; at: number };
 

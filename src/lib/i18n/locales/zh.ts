@@ -644,6 +644,10 @@ const zh: Messages = {
   "ai.patch.replace": "替换",
   "ai.patch.expected": "预期",
   "ai.patch.diff": "差异",
+  "ai.match.tag": "搜索",
+  "ai.match.file": "文件",
+  "ai.match.find": "查找",
+  "ai.match.context": "上下文",
 
   // ── AI 排障：AiSettings ──
   "ai.settings.warn.byok": "BYOK：你的命令输出经本地脱敏后会发送到所选 LLM 提供方。提供方可能按其条款使用这些数据",

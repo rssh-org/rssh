@@ -5,15 +5,20 @@
     import type { SessionInstanceRef } from "./session-identity.ts";
     import { t, errMsg } from "../i18n/index.svelte.ts";
     import { toast } from "../stores/toast.svelte.ts";
-    import type { AiTargetKind, CommandProposed, CommandResult } from "./types.ts";
+    import type { AiTargetKind, CommandResult, MatchProposal } from "./types.ts";
     import { isRawDeviceKind } from "./types.ts";
 
-    let { tabId, instanceId, targetKind, targetSessionId, cmd, result, rejected, active } = $props<{
+    // Dedicated PTY execution card for match_file (read-only search). Like
+    // PatchConfirmCard it reuses the shared runner: approve hands
+    // proposal.execution to executeCommand. Read-only and low-risk, so it has
+    // its own auto-approval toggle (auto_match_file) and is the only tool that
+    // reasonably defaults to auto-run.
+    let { tabId, instanceId, targetKind, targetSessionId, proposal, result, rejected, active } = $props<{
         tabId: string;
         instanceId: string;
         targetKind: AiTargetKind;
         targetSessionId: string | null;
-        cmd: CommandProposed;
+        proposal: MatchProposal;
         result?: CommandResult;
         rejected?: { reason: string };
         active: boolean;
@@ -25,83 +30,51 @@
     let transportRunning = $state(false);
     let resultDeliveryFailed = $state(false);
     let terminating = $state(false);
-    // Raw devices (serial/telnet) only: the "submit output" button (distinct
-    // from terminate) is in flight.
     let submitting = $state(false);
     let eligibilityReady = $state(false);
     let autoApproveEligible = $state(false);
 
     const sessionRef = (): SessionInstanceRef => ({ tabId, instanceId });
-
     let isPending = $derived(!result && !rejected);
 
     function syncExecutionStatus() {
-        const status = ai.commandExecutionStatus(sessionRef(), cmd.id);
+        const status = ai.commandExecutionStatus(sessionRef(), proposal.id);
         transportRunning = status === "running";
         resultDeliveryFailed = status === "delivery_failed";
         executing = status === "running" || status === "reporting" || status === "delivered";
     }
 
-    // 自动批准只由当前可见 tab 发起。ChatPanel 现在会保活隐藏 tab；如果仍在 onMount
-    // 无条件批准，后台 tab 的命令会比旧行为更早执行。active 变 true 时 effect 再检查，
-    // UI 上"提议→执行"全程可见，审计 trail 与原行为不变。
-    //
-    // 重入防御：组件可能被销毁重建（chat list 重新 key 等）。
-    // 重建实例的 executing=false，单看 executing 拦不住同一命令卡第二次 approve
-    // 会被粘到 PTY 两次（rm/reboot 双执行级别的灾难）。用 store 的 per-execution registry
-    // （isCommandRunning）守门：命令还在 in-flight 时拒绝再次自动批准。
-    //
-    // onMount 只负责恢复已在执行的卡片视觉状态。
     onMount(() => {
         const session = sessionRef();
         autoApproveEligible = commandApprovals.eligibleWhileAllowed(
             session,
-            cmd.id,
-            isAutoApprovalAllowed(ai.settings(), cmd.kind),
+            proposal.id,
+            isAutoApprovalAllowed(ai.settings(), "match_file"),
         );
         eligibilityReady = true;
-        // Command already in flight when this dialog remounts after a keyed list
-        // rebuild. Reflect the running state
-        // so the card shows Terminate/Submit instead of a stale Approve button
-        // (clicking which would be a no-op now that executeCommand guards on the
-        // running map, but a dead button is confusing). The original execution
-        // still owns the listener/timer and delivers the result.
-        if (isPending) {
-            syncExecutionStatus();
-        }
+        if (isPending) syncExecutionStatus();
     });
 
     onDestroy(() => {
-        // Keep guards across ordinary keyed-list remounts, but release them
-        // when explicit panel/tab teardown removes the whole conversation.
-        // The replacement actor cannot start until teardown finishes and gets
-        // a fresh timeline, so no later component can reuse this command card.
         if (!ai.isOpen(tabId)) {
-            commandApprovals.clear(sessionRef(), cmd.id);
+            commandApprovals.clear(sessionRef(), proposal.id);
         }
     });
 
-    // Execution can outlive this component (for example, switch to Audit and
-    // back). The registry is reactive, so a remounted card still observes a
-    // later running → delivery_failed transition and exposes report-only retry.
     $effect(() => {
         if (isPending) syncExecutionStatus();
     });
 
-    // Eligibility is snapshotted when the command arrives. A later settings
-    // enable cannot authorize an old proposal; a later disable can still revoke
-    // the captured permission before this hidden tab becomes active.
     $effect(() => {
         if (eligibilityReady && autoApproveEligible) {
             autoApproveEligible = commandApprovals.eligibleWhileAllowed(
                 sessionRef(),
-                cmd.id,
-                isAutoApprovalAllowed(ai.settings(), cmd.kind),
+                proposal.id,
+                isAutoApprovalAllowed(ai.settings(), "match_file"),
             );
         }
     });
 
-    // 历史卡片没有 kind 字段 → autoApproveAllowed 返回 false → 走人审，符合 fail-safe。
     $effect(() => {
         if (
             active
@@ -110,23 +83,17 @@
             && isPending
             && !executing
             && !askingReason
-            // No danger mode on raw devices: a bare serial peer (firmware / PLC /
-            // bootloader) or a telnet peer (core switch, router) is too sensitive
-            // to auto-paste into — and the POSIX-oriented blacklist can't catch
-            // network-OS dangers (`reload`, `erase startup-config`). Always ask.
             && !isRawDeviceKind(targetKind)
-            && !ai.isCommandRunning(sessionRef(), cmd.id)
-            && !commandApprovals.wasAttempted(sessionRef(), cmd.id)
+            && !ai.isCommandRunning(sessionRef(), proposal.id)
+            && !commandApprovals.wasAttempted(sessionRef(), proposal.id)
         ) {
             void approve();
         }
     });
 
-    // Result/rejected ends every guard for this exact actor + command card. A later
-    // actor in the same tab has another instance id and never shares this entry.
     $effect(() => {
         if (result || rejected) {
-            commandApprovals.clear(sessionRef(), cmd.id);
+            commandApprovals.clear(sessionRef(), proposal.id);
         }
     });
 
@@ -134,10 +101,8 @@
         if (executing) return;
         const session = sessionRef();
         const retryingResultDelivery = resultDeliveryFailed;
-        // Reserve before the first await. Manual approval counts too: if settings
-        // become permissive while it runs, the reactive auto path must not fire.
         if (!retryingResultDelivery) {
-            commandApprovals.markAttempted(session, cmd.id);
+            commandApprovals.markAttempted(session, proposal.id);
         }
         resultDeliveryFailed = false;
         executing = true;
@@ -145,9 +110,9 @@
         try {
             const liveTargetSessionId = targetSessionId;
             if (!liveTargetSessionId) throw new Error(t("common.disconnected"));
-            await ai.executeCommand(session, cmd.id, cmd.execution, targetKind, liveTargetSessionId);
+            await ai.executeCommand(session, proposal.id, proposal.execution, targetKind, liveTargetSessionId);
         } catch (e) {
-            console.error("[ai] execute failed:", e);
+            console.error("[ai] match execute failed:", e);
             syncExecutionStatus();
             toast.error(t(
                 resultDeliveryFailed
@@ -159,8 +124,6 @@
             submitting = false;
             return;
         }
-        // executeCommand awaits until the result is delivered, so on success the
-        // card is already in its final state — reflect it and clear transient flags.
         syncExecutionStatus();
         terminating = false;
         submitting = false;
@@ -174,22 +137,19 @@
         const reason = rejectReason.trim();
         if (!reason) return;
         try {
-            await ai.rejectCommand(sessionRef(), cmd.id, reason);
+            await ai.rejectCommand(sessionRef(), proposal.id, reason);
             askingReason = false;
             rejectReason = "";
         } catch (e) {
-            // Close can win this invoke; the dialog is then gone, but the
-            // rejected Promise still needs an owner.
-            console.warn("[ai] reject command:", e);
+            console.warn("[ai] reject match:", e);
         }
     }
 
-    /** ssh/local 执行中点的"提前终止"：发 Ctrl+C；后续 finish() 上报 early_terminated=true。 */
     async function terminate() {
         if (terminating) return;
         terminating = true;
         try {
-            await ai.terminateCommand(sessionRef(), cmd.id);
+            await ai.terminateCommand(sessionRef(), proposal.id);
             syncExecutionStatus();
         } catch (e) {
             console.error("[ai] terminate failed:", e);
@@ -198,21 +158,13 @@
         }
     }
 
-    /**
-     * Raw-device-only "submit output": the user watched the device finish
-     * responding. Reports the accumulated buffer as a CLEAN result — no Ctrl+C
-     * (nothing to interrupt), not early-terminated. A dedicated button, fully
-     * separate from terminate, so neither action is overloaded onto the other.
-     */
     async function submit() {
         if (submitting) return;
         submitting = true;
         try {
-            await ai.submitCommand(sessionRef(), cmd.id);
+            await ai.submitCommand(sessionRef(), proposal.id);
             syncExecutionStatus();
         } catch (e) {
-            // Match approve()'s feedback — otherwise a failed submit looks like a
-            // dead button (user clicked, nothing happened, no clue why).
             console.error("[ai] submit failed:", e);
             syncExecutionStatus();
             toast.error(t(
@@ -226,17 +178,16 @@
     }
 </script>
 
-<div class="cmd-card surface-flat" class:pending={isPending} class:done={!!result} class:rejected={!!rejected}>
+<div class="match-card surface-flat" class:pending={isPending} class:done={!!result} class:rejected={!!rejected}>
     <div class="head">
-        <span class="tag">
-            {t("ai.cmd.proposed.tag")}
-        </span>
-        <code class="cmd" title={cmd.cmd}>{cmd.cmd}</code>
+        <span class="tag">{t("ai.match.tag")}</span>
+        <code class="cmd" title={proposal.cmd}>{proposal.cmd}</code>
     </div>
     <div class="meta">
-        <div><span class="label">{t("ai.cmd.label.explain")}</span><span class="val" title={cmd.explain}>{cmd.explain}</span></div>
-        <div><span class="label">{t("ai.cmd.label.side_effect")}</span><span class="val" title={cmd.side_effect}>{cmd.side_effect}</span></div>
-        <div><span class="label">{t("ai.cmd.label.timeout")}</span><span class="val">{cmd.execution.timeout_s}s</span></div>
+        <div><span class="label">{t("ai.match.file")}</span><code class="val" title={proposal.path}>{proposal.path}</code></div>
+        <div><span class="label">{t("ai.match.find")}</span><code class="val mono" title={proposal.find}>{proposal.find}</code></div>
+        <div><span class="label">{t("ai.match.context")}</span><span class="val">±{proposal.before}/{proposal.after}</span></div>
+        <div><span class="label">{t("ai.cmd.label.timeout")}</span><span class="val">{proposal.execution.timeout_s}s</span></div>
     </div>
 
     {#if isPending}
@@ -246,15 +197,10 @@
                     {resultDeliveryFailed ? t("ai.cmd.btn.retry_result") : executing ? t("ai.cmd.btn.executing") : t("ai.cmd.btn.approve")}
                 </button>
                 {#if transportRunning && isRawDeviceKind(targetKind)}
-                    <!-- Raw devices: a dedicated "submit output" button, fully separate
-                         from Terminate. The user clicks it when the device has finished
-                         responding; it reports the buffer as a clean result. -->
                     <button class="btn btn-submit" onclick={submit} disabled={submitting}>
                         {submitting ? t("ai.cmd.btn.submitting") : t("ai.cmd.btn.submit")}
                     </button>
                 {:else if transportRunning}
-                    <!-- ack-only 命令（analyze_locally）没 PTY，
-                         Terminate 发 Ctrl+C 是 no-op，不该露给用户当 affordance。 -->
                     <button class="btn btn-terminate" onclick={terminate} disabled={terminating}>
                         {terminating ? t("ai.cmd.btn.terminating") : t("ai.cmd.btn.terminate")}
                     </button>
@@ -293,33 +239,33 @@
 </div>
 
 <style>
-    .cmd-card {
+    .match-card {
         border: 1px solid var(--divider);
         border-radius: 6px;
         padding: calc(8px * var(--density)) calc(10px * var(--density));
         margin: calc(4px * var(--density)) 0;
         background: var(--bg);
     }
-    .cmd-card.pending {
-        border-left: 3px solid var(--warning);
-        background: color-mix(in srgb, var(--warning) 6%, var(--bg));
+    .match-card.pending {
+        border-left: 3px solid var(--accent);
+        background: color-mix(in srgb, var(--accent) 4%, var(--bg));
     }
-    .cmd-card.done { border-left: 3px solid var(--success); }
-    .cmd-card.rejected { opacity: 0.6; border-left: 3px solid var(--text-dim); }
+    .match-card.done { border-left: 3px solid var(--success); }
+    .match-card.rejected { opacity: 0.6; border-left: 3px solid var(--text-dim); }
 
     .head { display: flex; gap: 8px; align-items: center; }
     .tag {
         flex: none;
         font-size: 11px;
-        background: var(--warning);
-        color: var(--black);
+        background: var(--accent);
+        color: var(--white);
         padding: 1px 6px;
         border-radius: 3px;
         font-weight: 600;
     }
     .cmd {
         font-family: monospace;
-        font-size: 13px;
+        font-size: 12.5px;
         flex: 1;
         min-width: 0;
         white-space: nowrap;
@@ -328,7 +274,7 @@
     }
     .meta { font-size: 12px; margin-top: 6px; color: var(--text-dim); }
     .meta > div { display: flex; gap: 8px; }
-    .label { flex: none; min-width: 50px; color: var(--text-dim); }
+    .label { flex: none; min-width: 60px; color: var(--text-dim); }
     .val {
         flex: 1;
         min-width: 0;
@@ -336,18 +282,15 @@
         overflow: hidden;
         text-overflow: ellipsis;
     }
+    .val.mono { font-family: monospace; font-size: 11.5px; }
+
     .actions { margin-top: 8px; display: flex; gap: 8px; }
-    .btn { padding: 4px 12px; border-radius: 4px; cursor: pointer; }
+    .btn { padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
     .btn-approve { background: var(--success); color: var(--white); border: none; }
+    .btn-approve:disabled { opacity: 0.6; cursor: default; }
     .btn-reject { background: transparent; border: 1px solid var(--text-dim); color: var(--text); }
-    .btn-terminate {
-        background: var(--warning);
-        color: var(--black);
-        border: none;
-    }
+    .btn-terminate { background: var(--warning); color: var(--black); border: none; }
     .btn-terminate:disabled { opacity: 0.6; cursor: default; }
-    /* Serial "submit output" — a positive completion action, so green like approve
-       (the two never co-occur: approve shows pre-exec, submit shows during exec). */
     .btn-submit { background: var(--success); color: var(--white); border: none; }
     .btn-submit:disabled { opacity: 0.6; cursor: default; }
     .btn-ghost { background: transparent; border: 1px solid var(--divider); color: var(--text); }

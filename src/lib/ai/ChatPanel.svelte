@@ -6,6 +6,7 @@
     import DownloadConfirmCard from "./DownloadConfirmCard.svelte";
     import AnalyzeConfirmCard from "./AnalyzeConfirmCard.svelte";
     import PatchConfirmCard from "./PatchConfirmCard.svelte";
+    import MatchConfirmCard from "./MatchConfirmCard.svelte";
     import AuditPanel from "./AuditPanel.svelte";
     import Modal from "../components/Modal.svelte";
     import DangerModeToggle from "./DangerModeToggle.svelte";
@@ -506,6 +507,19 @@
                             <AnalyzeConfirmCard
                                 {tabId}
                                 instanceId={session.instance_id}
+                                proposal={item.proposal}
+                                result={item.result}
+                                rejected={item.rejected}
+                                {active}
+                            />
+                        {/key}
+                    {:else if item.kind === "match" && session}
+                        {#key item.proposal.id}
+                            <MatchConfirmCard
+                                {tabId}
+                                instanceId={session.instance_id}
+                                targetKind={targetKind}
+                                targetSessionId={targetId}
                                 proposal={item.proposal}
                                 result={item.result}
                                 rejected={item.rejected}

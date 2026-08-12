@@ -37,12 +37,13 @@ function isRenderable(item: ChatItem): boolean {
     case "assistant":
       return isStr(item.id) && isStr(item.text);
     case "command": {
-      // download_file / analyze_locally / patch×4 migrated to their own
-      // ChatItem kinds. A stale blob may still hold them as command cards —
-      // drop rather than resurrect orphans with empty full_cmd/sentinel.
+      // download_file / analyze_locally / match_file / patch×4 migrated to
+      // their own ChatItem kinds. A stale blob may still hold them as command
+      // cards — drop rather than resurrect orphans with empty full_cmd/sentinel.
       const migrated = item.cmd?.kind as string | undefined;
       if (
         migrated === "download_file" || migrated === "analyze_locally"
+        || migrated === "match_file"
         || migrated === "patch_cp" || migrated === "patch_modify"
         || migrated === "patch_diff" || migrated === "patch_mv"
       ) return false;
@@ -59,6 +60,11 @@ function isRenderable(item: ChatItem): boolean {
         (step === "cp" || step === "modify" || step === "diff" || step === "mv")
       );
     }
+    case "match":
+      return (
+        !!item.proposal && typeof item.proposal === "object" &&
+        isStr(item.proposal.id) && isStr(item.proposal.path) && isStr(item.proposal.find)
+      );
     case "analyze":
       return (
         !!item.proposal && typeof item.proposal === "object" &&
@@ -133,7 +139,7 @@ export function restoreTimeline(json: string, staleCommandReason: string): ChatI
       if (!item.result && !item.rejected) {
         item.rejected = { reason: staleCommandReason };
       }
-    } else if (item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze") {
+    } else if (item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze" || item.kind === "match") {
       // Same as command: an unresolved card belongs to a dead actor whose
       // approval ack it will never receive. Mark stale-rejected.
       if (!item.result && !item.rejected) {
@@ -201,7 +207,7 @@ export function applyTerminalMutations(
       const index = findLastIndex(items, (item) => cardId(item) === payload.id);
       if (index < 0) continue;
       const item = items[index];
-      if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download" && item.kind !== "analyze" && item.kind !== "patch") continue;
+      if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download" && item.kind !== "analyze" && item.kind !== "patch" && item.kind !== "match") continue;
       items = replaceAt(items, index, {
         ...item,
         result: undefined,
@@ -314,6 +320,38 @@ export function applyTerminalMutations(
       continue;
     }
 
+    if (mutation.kind === "match_completed") {
+      // Same PTY-execution result shape; matches match cards.
+      if (
+        typeof payload.exit_code !== "number"
+        || typeof payload.timed_out !== "boolean"
+        || typeof payload.duration_ms !== "number"
+        || !isStr(payload.output)
+        || typeof payload.original_bytes !== "number"
+        || typeof payload.truncated_bytes !== "number"
+      ) continue;
+      const index = findLastIndex(items, (item) =>
+        item.kind === "match" && item.proposal.id === payload.id);
+      if (index < 0) continue;
+      const item = items[index];
+      if (item.kind !== "match") continue;
+      items = replaceAt(items, index, {
+        ...item,
+        rejected: undefined,
+        result: {
+          id: payload.id,
+          exit_code: payload.exit_code,
+          timed_out: payload.timed_out,
+          early_terminated: payload.early_terminated === true,
+          duration_ms: payload.duration_ms,
+          output: payload.output,
+          original_bytes: payload.original_bytes,
+          truncated_bytes: payload.truncated_bytes,
+        },
+      });
+      continue;
+    }
+
     if (mutation.kind !== "command_completed") continue;
     if (
       typeof payload.exit_code !== "number"
@@ -371,6 +409,6 @@ function replaceAt(items: ChatItem[], index: number, item: ChatItem): ChatItem[]
 /** Card id of a proposal-bearing ChatItem (command or web_tool), else null. */
 function cardId(item: ChatItem): string | null {
   if (item.kind === "command") return item.cmd.id;
-  if (item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze" || item.kind === "patch") return item.proposal.id;
+  if (item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze" || item.kind === "patch" || item.kind === "match") return item.proposal.id;
   return null;
 }

@@ -661,11 +661,12 @@ impl Actor {
 
         let cmd = build_match_cmd(interp, &input.path, &input.find, before, after);
         let domain = serde_json::Map::from_iter([
-            ("explain".into(), json!(format!("match_file: search `{}` (read-only)", input.path))),
-            ("side_effect".into(), json!("read-only")),
-            ("kind".into(), json!("match_file")),
+            ("path".into(), json!(&input.path)),
+            ("find".into(), json!(&input.find)),
+            ("before".into(), json!(before)),
+            ("after".into(), json!(after)),
         ]);
-        let outcome = self.run_file_op(cmd, 60, domain, "command").await?;
+        let outcome = self.run_file_op(cmd, 60, domain, "match").await?;
 
         let (exit_code, output) = match outcome {
             CommandOutcome::Rejected { reason } => {

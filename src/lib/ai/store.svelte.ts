@@ -45,6 +45,7 @@ import type {
   AnalyzeProposal,
   AnalyzeResult,
   PatchProposal,
+  MatchProposal,
 } from "./types.ts";
 import { isRawDeviceKind } from "./types.ts";
 
@@ -1945,6 +1946,16 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
     pushChat(tab, { kind: "patch", proposal, at: Date.now() });
   });
 
+  await addListener<MatchProposal>(`ai:match_proposed:${tab}`, (e) => {
+    const proposal = stripContextEpoch(e.payload);
+    commandApprovals.snapshotEligibility(
+      { tabId: tab, instanceId: info.instance_id },
+      proposal.id,
+      isAutoApprovalAllowed(_settings, "match_file"),
+    );
+    pushChat(tab, { kind: "match", proposal, at: Date.now() });
+  });
+
   // internal_command：当前只用于 file_ops 工具的远端能力探测（一行只读 echo "py3=... perl=... diff=..."）。
   // 不弹审批、不入 chat 时间线，直接粘到 PTY 跑——用户在终端历史里看到探测命令滚过，
   // 透明但不打断流程。后续若加其他 read-only 内部命令也走这条路径。
@@ -2148,16 +2159,39 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
     }
   });
 
+  // match_completed: same PTY result shape; match cards reuse executeCommand.
+  await addListener<CommandResult>(`ai:match_completed:${tab}`, (e) => {
+    const result = stripContextEpoch(e.payload);
+    const arr = _chatByTab[tab] ?? [];
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const item = arr[i];
+      if (item.kind === "match" && item.proposal.id === result.id) {
+        clearCommandExecution(
+          { tabId: tab, instanceId: info.instance_id },
+          result.id,
+        );
+        commandApprovals.clear(
+          { tabId: tab, instanceId: info.instance_id },
+          result.id,
+        );
+        const replaced: ChatItem = { ...item, result };
+        _chatByTab[tab] = [...arr.slice(0, i), replaced, ...arr.slice(i + 1)];
+        schedulePersist(tab);
+        break;
+      }
+    }
+  });
+
   // 拒绝路径单独事件 —— complete 跟 reject 是两种语义，复用 command_completed
   // 加 rejected:true 字段会让 listener 分支模糊。后端 RejectCommand 分支 emit
-  // 这个，前端清 pending + 标记 ChatItem.rejected。command 和 web_tool 卡片
-  // 共用这条 reject 路径（按 id 匹配）。
+  // 这个，前端清 pending + 标记 ChatItem.rejected。所有按 id 匹配的卡片
+  // （command / web_tool / download / analyze / patch / match）共用这条 reject 路径。
   await addListener<{ id: string; reason: string }>(`ai:command_rejected:${tab}`, (e) => {
     _pendingByTab[tab] = null;
     const arr = _chatByTab[tab] ?? [];
     for (let i = arr.length - 1; i >= 0; i--) {
       const item = arr[i];
-      if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download" && item.kind !== "analyze" && item.kind !== "patch") continue;
+      if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download" && item.kind !== "analyze" && item.kind !== "patch" && item.kind !== "match") continue;
       const itemId = item.kind === "command" ? item.cmd.id : item.proposal.id;
       if (itemId === e.payload.id) {
         clearCommandExecution(

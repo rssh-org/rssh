@@ -641,6 +641,10 @@ const en = {
   "ai.patch.replace": "Replace",
   "ai.patch.expected": "Expected",
   "ai.patch.diff": "Diff",
+  "ai.match.tag": "Search",
+  "ai.match.file": "File",
+  "ai.match.find": "Find",
+  "ai.match.context": "Context",
 
   // ── AI Diagnose: AiSettings ──
   "ai.settings.warn.byok": "BYOK: command output is sanitized locally before being sent to the LLM provider. The provider may use this data per their terms",
