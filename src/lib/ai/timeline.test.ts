@@ -98,6 +98,38 @@ describe("restoreTimeline", () => {
     ]);
     expect(items).toEqual([{ kind: "note", text: "ok", at: 4 }]);
   });
+
+  it("marks an unresolved web_tool card as stale-rejected", () => {
+    const [w] = roundtrip([
+      { kind: "web_tool", proposal: { id: "w1", kind: "web_fetch", target: "https://x" }, at: 1 },
+    ]);
+    expect(w.kind === "web_tool" && w.rejected?.reason).toBe(STALE);
+  });
+
+  it("leaves resolved and rejected web_tool cards alone", () => {
+    const items = roundtrip([
+      {
+        kind: "web_tool", proposal: { id: "w1", kind: "web_search", target: "q" }, at: 1,
+        result: { id: "w1", ok: true, summary: "s", duration_ms: 1 },
+      },
+      {
+        kind: "web_tool", proposal: { id: "w2", kind: "web_fetch", target: "https://x" }, at: 2,
+        rejected: { reason: "user said no" },
+      },
+    ]);
+    expect(items[0].kind === "web_tool" && items[0].rejected).toBeUndefined();
+    expect(items[1].kind === "web_tool" && items[1].rejected?.reason).toBe("user said no");
+  });
+
+  it("drops web_tool cards with a mangled proposal shape", () => {
+    const items = roundtrip([
+      { kind: "web_tool", proposal: { id: "w1", kind: "bogus", target: "x" }, at: 1 }, // bad kind
+      { kind: "web_tool", proposal: { id: "w2", kind: "web_fetch" }, at: 2 },          // missing target
+      { kind: "web_tool", at: 3 },                                                      // missing proposal
+      { kind: "user", text: "kept", at: 4 },
+    ]);
+    expect(items).toEqual([{ kind: "user", text: "kept", at: 4 }]);
+  });
 });
 
 describe("applyTerminalMutations", () => {
@@ -236,6 +268,65 @@ describe("applyTerminalMutations", () => {
       streaming: false,
       cancelled: true,
     }]);
+  });
+
+  it("replays web_tool completion (ok and failed) by proposal id", () => {
+    const card = (id: string): ChatItem => ({
+      kind: "web_tool",
+      proposal: { id, kind: "web_fetch", target: "https://example.com" },
+      at: 1,
+    });
+    const mutations = [
+      { kind: "web_tool_completed", payload: { id: "ok", ok: true, summary: "done", duration_ms: 5 } },
+      { kind: "web_tool_completed", payload: { id: "fail", ok: false, summary: "boom", duration_ms: 7 } },
+    ];
+    const once = applyTerminalMutations([card("ok"), card("fail")], mutations);
+    // Idempotent: replaying the same terminal events must not double-apply.
+    const twice = applyTerminalMutations(once, mutations);
+    expect(twice).toEqual([
+      expect.objectContaining({
+        kind: "web_tool",
+        proposal: expect.objectContaining({ id: "ok" }),
+        result: { id: "ok", ok: true, summary: "done", duration_ms: 5 },
+      }),
+      expect.objectContaining({
+        kind: "web_tool",
+        proposal: expect.objectContaining({ id: "fail" }),
+        result: { id: "fail", ok: false, summary: "boom", duration_ms: 7 },
+      }),
+    ]);
+  });
+
+  it("drops malformed web_tool_completed payloads without touching the card", () => {
+    const card: ChatItem = {
+      kind: "web_tool",
+      proposal: { id: "w1", kind: "web_search", target: "query" },
+      at: 1,
+    };
+    expect(applyTerminalMutations([card], [
+      { kind: "web_tool_completed", payload: { id: "w1", summary: "s", duration_ms: 1 } }, // missing ok
+      { kind: "web_tool_completed", payload: { id: "w1", ok: true, duration_ms: 1 } },     // missing summary
+      { kind: "web_tool_completed", payload: { id: "w1", ok: true, summary: "s" } },       // missing duration_ms
+      { kind: "web_tool_completed", payload: { id: "missing", ok: true, summary: "s", duration_ms: 1 } }, // no card
+    ])).toEqual([card]);
+  });
+
+  it("rejects a web_tool card through the shared command_rejected channel", () => {
+    const card: ChatItem = {
+      kind: "web_tool",
+      proposal: { id: "w1", kind: "web_fetch", target: "https://x" },
+      at: 1,
+      result: { id: "w1", ok: true, summary: "stale", duration_ms: 1 },
+    };
+    expect(applyTerminalMutations([card], [
+      { kind: "command_rejected", payload: { id: "w1", reason: "nope" } },
+    ])).toEqual([
+      expect.objectContaining({
+        kind: "web_tool",
+        rejected: { reason: "nope" },
+        result: undefined,
+      }),
+    ]);
   });
 
 });

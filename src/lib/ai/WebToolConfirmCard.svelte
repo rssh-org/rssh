@@ -116,12 +116,14 @@
             askingReason = false;
             rejectReason = "";
         } catch (e) {
-            console.warn("[ai] reject web tool:", e);
+            // Keep the rejection form open so the user can retry; just surface
+            // the failure instead of swallowing it (mirrors approve()'s catch).
+            toast.error(t("ai.cmd.alert.exec_failed", { error: errMsg(e) }));
         }
     }
 </script>
 
-<div class="web-card surface-flat" class:pending={isPending} class:done={!!result} class:rejected={!!rejected}>
+<div class="web-card surface-flat" class:pending={isPending} class:done={!!result && result.ok} class:rejected={!!rejected}>
     <div class="head">
         <span class="tag">{t(isSearch ? "ai.webcmd.search" : "ai.webcmd.fetch")}</span>
         <code class="target" title={proposal.target}>{proposal.target}</code>
@@ -133,7 +135,7 @@
                 <button class="btn btn-approve" onclick={approve} disabled={executing}>
                     {executing ? t("ai.webcmd.running") : t("ai.webcmd.allow")}
                 </button>
-                <button class="btn btn-reject" onclick={reject}>{t("ai.webcmd.reject")}</button>
+                <button class="btn btn-reject" onclick={reject} disabled={executing}>{t("ai.webcmd.reject")}</button>
             </div>
         {:else}
             <div class="reject-form">
