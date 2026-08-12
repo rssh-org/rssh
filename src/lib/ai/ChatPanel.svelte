@@ -4,6 +4,7 @@
     import CommandConfirmDialog from "./CommandConfirmDialog.svelte";
     import WebToolConfirmCard from "./WebToolConfirmCard.svelte";
     import DownloadConfirmCard from "./DownloadConfirmCard.svelte";
+    import AnalyzeConfirmCard from "./AnalyzeConfirmCard.svelte";
     import AuditPanel from "./AuditPanel.svelte";
     import Modal from "../components/Modal.svelte";
     import DangerModeToggle from "./DangerModeToggle.svelte";
@@ -491,6 +492,17 @@
                     {:else if item.kind === "download" && session}
                         {#key item.proposal.id}
                             <DownloadConfirmCard
+                                {tabId}
+                                instanceId={session.instance_id}
+                                proposal={item.proposal}
+                                result={item.result}
+                                rejected={item.rejected}
+                                {active}
+                            />
+                        {/key}
+                    {:else if item.kind === "analyze" && session}
+                        {#key item.proposal.id}
+                            <AnalyzeConfirmCard
                                 {tabId}
                                 instanceId={session.instance_id}
                                 proposal={item.proposal}

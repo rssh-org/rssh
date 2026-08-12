@@ -61,7 +61,6 @@ export interface AiSettings {
 export type CommandKind =
   | "run_command"
   | "match_file"
-  | "analyze_locally"
   | "patch_cp"
   | "patch_modify"
   | "patch_diff"
@@ -100,6 +99,22 @@ export interface DownloadResult {
   ok: boolean;
   local_path?: string;
   bytes?: number;
+  summary: string;
+  duration_ms: number;
+}
+
+/** analyze_locally — spawn a new window with an independent AI session to
+ *  analyze a local artifact. Independent proposal/result stream; ack-only
+ *  (approve just acks, the backend spawns the window itself, no PTY). */
+export interface AnalyzeProposal {
+  id: string;
+  local_path: string;
+  task: string;
+}
+
+export interface AnalyzeResult {
+  id: string;
+  ok: boolean;
   summary: string;
   duration_ms: number;
 }
@@ -166,6 +181,7 @@ export type ChatItem =
   | { kind: "command"; cmd: CommandProposed; at: number; result?: CommandResult; rejected?: { reason: string } }
   | { kind: "web_tool"; proposal: WebToolProposal; at: number; result?: WebToolResult; rejected?: { reason: string } }
   | { kind: "download"; proposal: DownloadProposal; at: number; result?: DownloadResult; rejected?: { reason: string } }
+  | { kind: "analyze"; proposal: AnalyzeProposal; at: number; result?: AnalyzeResult; rejected?: { reason: string } }
   | { kind: "error"; text: string; at: number }
   | { kind: "note"; text: string; at: number };
 

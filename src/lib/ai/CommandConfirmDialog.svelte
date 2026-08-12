@@ -42,9 +42,11 @@
         || cmd.kind === "patch_diff"
         || cmd.kind === "patch_mv"
     );
-    // analyze_locally 不走 PTY，approve 只发 ack 给后端；视觉无需特化。
-    // download_file / web_search / web_fetch 走各自独立的 ConfirmCard，不经过本组件。
-    let isAckOnly = $derived(cmd.kind === "analyze_locally");
+    // All ack-only tools (download_file / analyze_locally / web_*) now have
+    // their own ConfirmCards — none route through this dialog anymore, so this
+    // collapses to false. The dead branches are removed when this dialog is
+    // slimmed to run/match/patch in a later phase.
+    let isAckOnly = $derived(false);
 
     function syncExecutionStatus() {
         const status = ai.commandExecutionStatus(sessionRef(), cmd.id);

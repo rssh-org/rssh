@@ -97,6 +97,7 @@ fn is_terminal_ui_mutation(kind: &str, _payload: &serde_json::Value) -> bool {
             | "command_rejected"
             | "web_tool_completed"
             | "download_completed"
+            | "analyze_completed"
     )
 }
 
@@ -1558,17 +1559,11 @@ impl Actor {
             task: input.task.clone(),
         });
         self.emit(
-            "command_proposed",
+            "analyze_proposed",
             json!({
                 "id": card_id,
-                "tool_call_id": card_id,
-                "cmd": format!("analyze_locally: {} ({})", input.local_path, input.task),
-                "full_cmd": "",
-                "sentinel": "",
-                "explain": "Spawn a new window with an independent AI session to analyze the local artifact.",
-                "side_effect": "New window opens; local AI session starts; current session unaffected.",
-                "timeout_s": 30,
-                "kind": "analyze_locally",
+                "local_path": input.local_path,
+                "task": input.task,
             }),
         );
         let started_at = std::time::Instant::now();
@@ -1615,17 +1610,13 @@ impl Actor {
         // 直接告知 LLM 工具不可用。
         // 简单的卡片关闭辅助：开窗成功 / 失败 / 移动端都得 emit command_completed，
         // 否则 UI 上审批卡片一直停在 "executing"（前端已 ack 但没拿到结果事件）。
-        let emit_done = |this: &Self, exit: i32, output: String| {
+        let emit_done = |this: &Self, ok: bool, summary: String| {
             this.emit(
-                "command_completed",
+                "analyze_completed",
                 json!({
                     "id": card_id,
-                    "exit_code": exit,
-                    "timed_out": false,
-                    "early_terminated": false,
-                    "output": output,
-                    "original_bytes": 0,
-                    "truncated_bytes": 0,
+                    "ok": ok,
+                    "summary": summary,
                     "duration_ms": started_at.elapsed().as_millis() as u64,
                 }),
             );
@@ -1637,7 +1628,7 @@ impl Actor {
                 .app
                 .open_app_window(&label, "RSSH — Local Analysis", &init_script)
             {
-                emit_done(self, 1, format!("打开分析窗口失败：{e}"));
+                emit_done(self, false, format!("Failed to open analysis window: {e}"));
                 return Ok(self.make_tool_error(
                     &tc.id,
                     &format!(
@@ -1653,7 +1644,11 @@ impl Actor {
                 ),
             });
 
-            emit_done(self, 0, format!("已打开分析窗口：{}", input.local_path));
+            emit_done(
+                self,
+                true,
+                format!("Opened analysis window for {}", input.local_path),
+            );
             return Ok(Self::make_tool_result(
                 &tc.id,
                 format!(
@@ -1669,7 +1664,7 @@ impl Actor {
         #[cfg(mobile)]
         {
             let _ = (init_script, label);
-            emit_done(self, 1, "该功能仅支持桌面端".into());
+            emit_done(self, false, "Desktop-only feature".into());
             Ok(self.make_tool_error(
                 &tc.id,
                 "analyze_locally is desktop-only: this build cannot spawn additional windows. Continue diagnosis in the current session.",

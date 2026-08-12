@@ -10,7 +10,7 @@
  * Both are normalized here. Unknown/corrupt entries are dropped, not thrown:
  * a damaged blob should degrade to a shorter timeline, never block resume.
  */
-import type { ChatItem, DownloadResult } from "./types.ts";
+import type { ChatItem, DownloadResult, AnalyzeResult } from "./types.ts";
 
 export interface AiTerminalMutation {
   kind: string;
@@ -36,14 +36,21 @@ function isRenderable(item: ChatItem): boolean {
       return isStr(item.text);
     case "assistant":
       return isStr(item.id) && isStr(item.text);
-    case "command":
-      // download_file migrated to its own ChatItem.download. A stale blob may
-      // still hold it as a command card — drop it rather than resurrect an
-      // orphan with empty full_cmd/sentinel.
-      if ((item.cmd?.kind as string | undefined) === "download_file") return false;
+    case "command": {
+      // download_file / analyze_locally migrated to their own ChatItem kinds.
+      // A stale blob may still hold them as command cards — drop rather than
+      // resurrect orphans with empty full_cmd/sentinel.
+      const migrated = item.cmd?.kind as string | undefined;
+      if (migrated === "download_file" || migrated === "analyze_locally") return false;
       return (
         !!item.cmd && typeof item.cmd === "object" &&
         isStr(item.cmd.id) && isStr(item.cmd.cmd)
+      );
+    }
+    case "analyze":
+      return (
+        !!item.proposal && typeof item.proposal === "object" &&
+        isStr(item.proposal.id) && isStr(item.proposal.local_path)
       );
     case "download":
       return (
@@ -104,7 +111,7 @@ export function restoreTimeline(json: string, staleCommandReason: string): ChatI
       if (!item.result && !item.rejected) {
         item.rejected = { reason: staleCommandReason };
       }
-    } else if (item.kind === "web_tool" || item.kind === "download") {
+    } else if (item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze") {
       // Same as command: an unresolved card belongs to a dead actor whose
       // approval ack it will never receive. Mark stale-rejected.
       if (!item.result && !item.rejected) {
@@ -172,7 +179,7 @@ export function applyTerminalMutations(
       const index = findLastIndex(items, (item) => cardId(item) === payload.id);
       if (index < 0) continue;
       const item = items[index];
-      if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download") continue;
+      if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download" && item.kind !== "analyze") continue;
       items = replaceAt(items, index, {
         ...item,
         result: undefined,
@@ -225,6 +232,30 @@ export function applyTerminalMutations(
         duration_ms: payload.duration_ms,
       };
       items = replaceAt(items, index, { ...item, rejected: undefined, result });
+      continue;
+    }
+
+    if (mutation.kind === "analyze_completed") {
+      if (
+        typeof payload.ok !== "boolean"
+        || !isStr(payload.summary)
+        || typeof payload.duration_ms !== "number"
+      ) continue;
+      const index = findLastIndex(items, (item) =>
+        item.kind === "analyze" && item.proposal.id === payload.id);
+      if (index < 0) continue;
+      const item = items[index];
+      if (item.kind !== "analyze") continue;
+      items = replaceAt(items, index, {
+        ...item,
+        rejected: undefined,
+        result: {
+          id: payload.id,
+          ok: payload.ok,
+          summary: payload.summary,
+          duration_ms: payload.duration_ms,
+        },
+      });
       continue;
     }
 
@@ -285,6 +316,6 @@ function replaceAt(items: ChatItem[], index: number, item: ChatItem): ChatItem[]
 /** Card id of a proposal-bearing ChatItem (command or web_tool), else null. */
 function cardId(item: ChatItem): string | null {
   if (item.kind === "command") return item.cmd.id;
-  if (item.kind === "web_tool" || item.kind === "download") return item.proposal.id;
+  if (item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze") return item.proposal.id;
   return null;
 }

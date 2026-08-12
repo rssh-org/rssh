@@ -562,6 +562,13 @@ const en = {
   "ai.dl.running": "Downloading…",
   "ai.dl.done": "Downloaded",
   "ai.dl.failed": "Failed",
+  "ai.an.tag": "Analyze",
+  "ai.an.task": "Task",
+  "ai.an.allow": "Allow",
+  "ai.an.reject": "Reject",
+  "ai.an.running": "Opening…",
+  "ai.an.done": "Window opened",
+  "ai.an.failed": "Failed",
 
   // ── AI Diagnose: AuditPanel ──
   "ai.audit.refresh": "𖦹 Refresh",

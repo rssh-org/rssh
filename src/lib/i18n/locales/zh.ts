@@ -565,6 +565,13 @@ const zh: Messages = {
   "ai.dl.running": "下载中…",
   "ai.dl.done": "已下载",
   "ai.dl.failed": "失败",
+  "ai.an.tag": "分析",
+  "ai.an.task": "任务",
+  "ai.an.allow": "允许",
+  "ai.an.reject": "拒绝",
+  "ai.an.running": "打开中…",
+  "ai.an.done": "已开窗",
+  "ai.an.failed": "失败",
 
   // ── AI 排障：AuditPanel ──
   "ai.audit.refresh": "𖦹 刷新",
