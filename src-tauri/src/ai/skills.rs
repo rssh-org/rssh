@@ -1,5 +1,5 @@
-//! Skill 管理：编译时内嵌的只读 builtin + DB 中的用户自定义 Skill。
-//! `general` 直接展开进 system prompt；其它 Skill 通过目录 + `load_skill` 按需加载。
+//! Skill 管理：编译时内嵌的只读 builtin `general` + DB 中的用户自定义 Skill。
+//! `general` 直接展开进 system prompt；用户自定义 Skill 通过目录 + `load_skill` 按需加载。
 
 use serde::{Deserialize, Serialize};
 
@@ -16,23 +16,14 @@ pub struct SkillRecord {
 }
 
 pub const GENERAL_ID: &str = "general";
-pub const WEB_RESEARCH_ID: &str = "web-research";
 
 const GENERAL_NAME: &str = "General Ops diagnosis";
 const GENERAL_DESC: &str =
     "Default rule set + workflow reference for CPU / memory / general triage. The LLM picks commands itself.";
-const WEB_RESEARCH_NAME: &str = "Web research";
-const WEB_RESEARCH_DESC: &str =
-    "Search, fetch, and analyze web sources with citation and prompt-injection safeguards.";
 
 pub fn builtin(id: &str) -> Option<SkillRecord> {
     let (name, description, content) = match id {
         GENERAL_ID => (GENERAL_NAME, GENERAL_DESC, super::prompts::GENERAL),
-        WEB_RESEARCH_ID => (
-            WEB_RESEARCH_NAME,
-            WEB_RESEARCH_DESC,
-            super::prompts::WEB_RESEARCH,
-        ),
         _ => return None,
     };
     Some(SkillRecord {
@@ -55,12 +46,8 @@ fn user_record(user: ai_skill::UserSkill) -> SkillRecord {
 }
 
 pub fn list_all(db: &Db) -> AppResult<Vec<SkillRecord>> {
-    let users = list_user(db)?;
     let mut out = vec![builtin(GENERAL_ID).expect("general builtin")];
-    if !users.iter().any(|skill| skill.id == WEB_RESEARCH_ID) {
-        out.push(builtin(WEB_RESEARCH_ID).expect("web-research builtin"));
-    }
-    out.extend(users);
+    out.extend(list_user(db)?);
     Ok(out)
 }
 
@@ -70,14 +57,6 @@ pub fn list_user(db: &Db) -> AppResult<Vec<SkillRecord>> {
 }
 
 pub fn get(db: &Db, id: &str) -> AppResult<Option<SkillRecord>> {
-    // Before this builtin existed, user Skill ids were free-form. Preserve a
-    // preexisting `web-research` record as an override until the user deletes
-    // it; otherwise an upgrade would hide data and make it impossible to edit.
-    if id == WEB_RESEARCH_ID {
-        if let Some(record) = ai_skill::get(db, id)? {
-            return Ok(Some(user_record(record)));
-        }
-    }
     if let Some(record) = builtin(id) {
         return Ok(Some(record));
     }
@@ -85,12 +64,11 @@ pub fn get(db: &Db, id: &str) -> AppResult<Option<SkillRecord>> {
 }
 
 pub fn is_builtin(id: &str) -> bool {
-    matches!(id, GENERAL_ID | WEB_RESEARCH_ID)
+    matches!(id, GENERAL_ID)
 }
 
 pub fn save_user(db: &Db, rec: &SkillRecord) -> AppResult<()> {
-    let is_legacy_override = rec.id == WEB_RESEARCH_ID && ai_skill::get(db, &rec.id)?.is_some();
-    if is_builtin(&rec.id) && !is_legacy_override {
+    if is_builtin(&rec.id) {
         return Err(crate::error::AppError::config(
             "skill_builtin_readonly",
             serde_json::json!({ "id": rec.id }),
@@ -108,8 +86,7 @@ pub fn save_user(db: &Db, rec: &SkillRecord) -> AppResult<()> {
 }
 
 pub fn delete_user(db: &Db, id: &str) -> AppResult<()> {
-    let is_legacy_override = id == WEB_RESEARCH_ID && ai_skill::get(db, id)?.is_some();
-    if is_builtin(id) && !is_legacy_override {
+    if is_builtin(id) {
         return Err(crate::error::AppError::config(
             "skill_builtin_undeletable",
             serde_json::json!({ "id": id }),
@@ -120,7 +97,7 @@ pub fn delete_user(db: &Db, id: &str) -> AppResult<()> {
 
 /// 构造会话启动用的 system prompt：
 /// - builtin general 规则集 **直接展开**（永远在 prompt 里）
-/// - 其它 builtin + user Skill **只放 id + description**，用 `load_skill(<id>)` 按需加载
+/// - 用户自定义 Skill **只放 id + description**，用 `load_skill(<id>)` 按需加载
 ///
 /// `user_locale_label` 是给 LLM 的回复语言提示（如 "English"、"Chinese (Simplified)"），
 /// 由 commands 层根据前端 UI locale 解析后传入。
@@ -136,25 +113,24 @@ pub fn build_catalog_prompt(
     let mut s = String::new();
     s.push_str(super::prompts::GENERAL);
 
-    s.push_str("\n\n---\n\n# Available skills (catalog)\n\n");
-    s.push_str(
-        "The `general` skill is already active. The skills below are lazy-loaded: \
-         when one matches the current problem, call `load_skill(<id>)` before following it.\n\n",
-    );
-    let mut loadable: Vec<SkillRecord> = ai_skill::list(db)?.into_iter().map(user_record).collect();
-    if !loadable.iter().any(|skill| skill.id == WEB_RESEARCH_ID) {
-        loadable.insert(0, builtin(WEB_RESEARCH_ID).expect("web-research builtin"));
-    }
-    for skill in loadable {
-        let desc = if skill.description.is_empty() {
-            "(no description)"
-        } else {
-            &skill.description
-        };
-        s.push_str(&format!(
-            "- **{}** (id: `{}`) — {}\n",
-            skill.name, skill.id, desc
-        ));
+    let loadable: Vec<SkillRecord> = ai_skill::list(db)?.into_iter().map(user_record).collect();
+    if !loadable.is_empty() {
+        s.push_str("\n\n---\n\n# Available skills (catalog)\n\n");
+        s.push_str(
+            "The `general` skill is already active. The skills below are lazy-loaded: \
+             when one matches the current problem, call `load_skill(<id>)` before following it.\n\n",
+        );
+        for skill in loadable {
+            let desc = if skill.description.is_empty() {
+                "(no description)"
+            } else {
+                &skill.description
+            };
+            s.push_str(&format!(
+                "- **{}** (id: `{}`) — {}\n",
+                skill.name, skill.id, desc
+            ));
+        }
     }
 
     s.push_str(&format!(
@@ -180,7 +156,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exposes_both_builtin_skills() {
+    fn exposes_only_general_builtin() {
         let db = Db::open_in_memory().unwrap();
 
         let records = list_all(&db).unwrap();
@@ -190,18 +166,14 @@ mod tests {
             .filter(|skill| skill.builtin)
             .map(|skill| skill.id.as_str())
             .collect();
-        assert_eq!(builtin_ids, ["general", "web-research"]);
-        assert_eq!(
-            get(&db, "web-research").unwrap().unwrap().content,
-            super::super::prompts::WEB_RESEARCH
-        );
+        assert_eq!(builtin_ids, ["general"]);
     }
 
     #[test]
-    fn web_research_is_read_only() {
+    fn general_builtin_is_read_only() {
         let db = Db::open_in_memory().unwrap();
         let record = SkillRecord {
-            id: "web-research".into(),
+            id: "general".into(),
             name: "replacement".into(),
             description: String::new(),
             content: "replacement".into(),
@@ -209,71 +181,38 @@ mod tests {
         };
 
         assert!(save_user(&db, &record).is_err());
-        assert!(delete_user(&db, "web-research").is_err());
+        assert!(delete_user(&db, "general").is_err());
     }
 
     #[test]
-    fn catalog_lists_web_research_without_inlining_it() {
+    fn catalog_omitted_when_no_user_skills() {
         let db = Db::open_in_memory().unwrap();
 
         let prompt = build_catalog_prompt(&db, "English", false).unwrap();
 
-        assert!(prompt.contains("`web-research`"));
-        assert!(prompt.contains("search"));
-        assert!(!prompt.contains(super::super::prompts::WEB_RESEARCH));
+        // The catalog section appears only when user skills exist. The
+        // `load_skill` tool itself is always listed in general.md regardless.
+        assert!(!prompt.contains("Available skills (catalog)"));
     }
 
     #[test]
-    fn web_research_searches_before_fetching_and_verifying_sources() {
-        let content = super::super::prompts::WEB_RESEARCH;
-        let search = content.find("`web_search`").expect("search step");
-        let fetch = content.find("`web_fetch`").expect("fetch step");
-
-        assert!(search < fetch);
-        assert!(content.contains("snippets"));
-        assert!(content.contains("CAPTCHA"));
-        assert!(content.contains("sensitive"));
-    }
-
-    #[test]
-    fn preserves_a_preexisting_user_skill_with_the_new_builtin_id() {
+    fn catalog_lists_user_skills_only() {
         let db = Db::open_in_memory().unwrap();
         ai_skill::upsert(
             &db,
             &ai_skill::UserSkill {
-                id: "web-research".into(),
-                name: "My existing research workflow".into(),
-                description: "legacy".into(),
+                id: "user-mine".into(),
+                name: "My workflow".into(),
+                description: "custom".into(),
                 content: "keep this content".into(),
             },
         )
         .unwrap();
 
-        let records = list_all(&db).unwrap();
-        let matches: Vec<&SkillRecord> = records
-            .iter()
-            .filter(|skill| skill.id == "web-research")
-            .collect();
-        assert_eq!(matches.len(), 1);
-        assert!(!matches[0].builtin);
-        assert_eq!(
-            get(&db, "web-research").unwrap().unwrap().content,
-            "keep this content"
-        );
+        let prompt = build_catalog_prompt(&db, "English", false).unwrap();
 
-        save_user(
-            &db,
-            &SkillRecord {
-                id: "web-research".into(),
-                name: "updated".into(),
-                description: String::new(),
-                content: "updated content".into(),
-                builtin: false,
-            },
-        )
-        .unwrap();
-        delete_user(&db, "web-research").unwrap();
-
-        assert!(get(&db, "web-research").unwrap().unwrap().builtin);
+        assert!(prompt.contains("`user-mine`"));
+        assert!(prompt.contains("My workflow"));
+        assert!(prompt.contains("load_skill"));
     }
 }

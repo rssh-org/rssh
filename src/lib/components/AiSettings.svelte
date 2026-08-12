@@ -61,6 +61,8 @@
     let autoPatchModify = $state(false);
     let autoPatchDiff = $state(false);
     let autoPatchMv = $state(false);
+    let autoWebSearch = $state(false);
+    let autoWebFetch = $state(false);
     let savingAuto = $state(false);
 
     // ─── 远端 shell 自动探测（与 danger_mode 解耦的独立开关）─────────
@@ -88,7 +90,7 @@
     /** 子开关写回后端。失败把 UI 状态回滚到 prev，避免界面与持久化失同步。 */
     async function persistAuto(field: "autoRunCommand" | "autoMatchFile" | "autoDownloadFile"
                                     | "autoAnalyzeLocally" | "autoPatchCp" | "autoPatchModify"
-                                    | "autoPatchDiff" | "autoPatchMv",
+                                    | "autoPatchDiff" | "autoPatchMv" | "autoWebSearch" | "autoWebFetch",
                                next: boolean) {
         savingAuto = true;
         dangerNote = null;
@@ -107,6 +109,8 @@
                     case "autoPatchModify":    autoPatchModify    = false; break;
                     case "autoPatchDiff":      autoPatchDiff      = false; break;
                     case "autoPatchMv":        autoPatchMv        = false; break;
+                    case "autoWebSearch":      autoWebSearch      = false; break;
+                    case "autoWebFetch":       autoWebFetch       = false; break;
                 }
             }
             dangerNote = t("ai.settings.danger.save_failed", { error: errMsg(err) });
@@ -251,6 +255,8 @@
         autoPatchModify = s.auto_patch_modify;
         autoPatchDiff = s.auto_patch_diff;
         autoPatchMv = s.auto_patch_mv;
+        autoWebSearch = s.auto_web_search;
+        autoWebFetch = s.auto_web_fetch;
         autoDetectRemoteShell = s.auto_detect_remote_shell;
         if (hasKey) void autoLoadModels();
         await refreshSkills();
@@ -651,6 +657,18 @@
                        disabled={!dangerMode || savingAuto}
                        onchange={(e) => persistAuto("autoPatchMv", (e.target as HTMLInputElement).checked)}/>
                 <span>{t("ai.settings.danger.auto.patch_mv")}</span>
+            </label>
+            <label class="auto-row">
+                <input type="checkbox" bind:checked={autoWebSearch}
+                       disabled={!dangerMode || savingAuto}
+                       onchange={(e) => persistAuto("autoWebSearch", (e.target as HTMLInputElement).checked)}/>
+                <span>{t("ai.settings.danger.auto.web_search")}</span>
+            </label>
+            <label class="auto-row">
+                <input type="checkbox" bind:checked={autoWebFetch}
+                       disabled={!dangerMode || savingAuto}
+                       onchange={(e) => persistAuto("autoWebFetch", (e.target as HTMLInputElement).checked)}/>
+                <span>{t("ai.settings.danger.auto.web_fetch")}</span>
             </label>
         </div>
     </div>

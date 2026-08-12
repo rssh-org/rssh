@@ -1423,6 +1423,8 @@ pub struct AiSettings {
     pub auto_patch_modify: bool,
     pub auto_patch_diff: bool,
     pub auto_patch_mv: bool,
+    pub auto_web_search: bool,
+    pub auto_web_fetch: bool,
     /// 远端 shell 自动探测：off 时远端假设 POSIX；on 时 AI panel 打开后跑探针。
     /// 详见 `key_auto_detect_remote_shell` 注释。
     pub auto_detect_remote_shell: bool,
@@ -1488,6 +1490,8 @@ pub async fn ai_settings_get_impl(
         auto_patch_modify: read_auto(state, "patch_modify")?,
         auto_patch_diff: read_auto(state, "patch_diff")?,
         auto_patch_mv: read_auto(state, "patch_mv")?,
+        auto_web_search: read_auto(state, "web_search")?,
+        auto_web_fetch: read_auto(state, "web_fetch")?,
         auto_detect_remote_shell,
     })
 }
@@ -1558,6 +1562,8 @@ pub struct AiSettingsPatch {
     pub auto_patch_modify: Option<bool>,
     pub auto_patch_diff: Option<bool>,
     pub auto_patch_mv: Option<bool>,
+    pub auto_web_search: Option<bool>,
+    pub auto_web_fetch: Option<bool>,
     pub auto_detect_remote_shell: Option<bool>,
 }
 
@@ -1582,6 +1588,8 @@ pub async fn ai_settings_set_impl(state: &AppState, patch: AiSettingsPatch) -> A
         auto_patch_modify,
         auto_patch_diff,
         auto_patch_mv,
+        auto_web_search,
+        auto_web_fetch,
         auto_detect_remote_shell,
     } = patch;
     if let Some(p) = provider.as_ref() {
@@ -1624,6 +1632,8 @@ pub async fn ai_settings_set_impl(state: &AppState, patch: AiSettingsPatch) -> A
         ("patch_modify", auto_patch_modify),
         ("patch_diff", auto_patch_diff),
         ("patch_mv", auto_patch_mv),
+        ("web_search", auto_web_search),
+        ("web_fetch", auto_web_fetch),
     ];
     for (name, val) in auto_writes {
         if let Some(on) = val {

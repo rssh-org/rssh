@@ -43,7 +43,12 @@
         || cmd.kind === "patch_mv"
     );
     // download_file / analyze_locally 不走 PTY，approve 只发 ack 给后端；视觉无需特化。
-    let isAckOnly = $derived(cmd.kind === "download_file" || cmd.kind === "analyze_locally");
+    let isAckOnly = $derived(
+        cmd.kind === "download_file"
+            || cmd.kind === "analyze_locally"
+            || cmd.kind === "web_search"
+            || cmd.kind === "web_fetch"
+    );
 
     function syncExecutionStatus() {
         const status = ai.commandExecutionStatus(sessionRef(), cmd.id);

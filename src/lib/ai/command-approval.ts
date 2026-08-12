@@ -21,6 +21,8 @@ export function isAutoApprovalAllowed(
     case "patch_modify": return settings.auto_patch_modify;
     case "patch_diff": return settings.auto_patch_diff;
     case "patch_mv": return settings.auto_patch_mv;
+    case "web_search": return settings.auto_web_search;
+    case "web_fetch": return settings.auto_web_fetch;
     default: {
       const exhaustive: never = kind;
       void exhaustive;

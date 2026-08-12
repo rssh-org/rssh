@@ -51,6 +51,8 @@ export interface AiSettings {
   auto_patch_modify: boolean;
   auto_patch_diff: boolean;
   auto_patch_mv: boolean;
+  auto_web_search: boolean;
+  auto_web_fetch: boolean;
   /** 远端 shell 自动探测：off 时远端假设 POSIX；on 时 AI panel 打开时发探针。默认 off。 */
   auto_detect_remote_shell: boolean;
 }
@@ -64,7 +66,9 @@ export type CommandKind =
   | "patch_cp"
   | "patch_modify"
   | "patch_diff"
-  | "patch_mv";
+  | "patch_mv"
+  | "web_search"
+  | "web_fetch";
 
 export interface ModelInfo {
   id: string;
@@ -121,61 +125,11 @@ export interface TokenUsage {
   tokens_out: number;
 }
 
-export type WebToolErrorCode =
-  | "invalid_input"
-  | "not_allowed"
-  | "unavailable"
-  | "interrupted";
-
-type WebToolActivityBase = {
-  id: string;
-  /** Redacted query or URL. Raw egress data never belongs in the UI timeline. */
-  target: string;
-};
-
-/**
- * Read-only web tool lifecycle. One backend event advances one card through
- * running → completed|failed; the discriminants make invalid result metadata
- * unrepresentable in the renderer and persisted timeline.
- */
-export type WebToolActivity =
-  | (WebToolActivityBase & {
-    tool: "web_search";
-    status: "running";
-  })
-  | (WebToolActivityBase & {
-    tool: "web_search";
-    status: "completed";
-    result_count: number;
-    duration_ms: number;
-  })
-  | (WebToolActivityBase & {
-    tool: "web_search";
-    status: "failed";
-    error_code: WebToolErrorCode;
-  })
-  | (WebToolActivityBase & {
-    tool: "web_fetch";
-    status: "running";
-  })
-  | (WebToolActivityBase & {
-    tool: "web_fetch";
-    status: "completed";
-    source_bytes: number;
-    truncated: boolean;
-  })
-  | (WebToolActivityBase & {
-    tool: "web_fetch";
-    status: "failed";
-    error_code: WebToolErrorCode;
-  });
-
 /** 一条对话消息（前端展示用） */
 export type ChatItem =
   | { kind: "user"; client_id?: string; client_seq?: number; text: string; at: number }
   | { kind: "assistant"; id: string; text: string; at: number; streaming: boolean; cancelled?: boolean }
   | { kind: "command"; cmd: CommandProposed; at: number; result?: CommandResult; rejected?: { reason: string } }
-  | { kind: "web_tool"; activity: WebToolActivity; at: number }
   | { kind: "error"; text: string; at: number }
   | { kind: "note"; text: string; at: number };
 
@@ -238,7 +192,7 @@ export type AuditKind =
   | { type: "download_completed"; id: string; local_path: string; bytes: number }
   | { type: "analyze_proposed"; id: string; local_path: string; task: string }
   | { type: "skill_loaded"; id: string; name: string }
-  | { type: "web_search_completed"; query: string; provider: string; result_count: number; duration_ms: number }
+  | { type: "web_search_completed"; query: string; provider: string; response_bytes: number; duration_ms: number }
   | { type: "web_fetch_completed"; requested_url: string; final_url: string; source_bytes: number; truncated: boolean }
   | { type: "context_rolled_back"; user_message_index: number; dropped_messages: number }
   | { type: "note"; message: string }

@@ -17,8 +17,8 @@ run_command(cmd, explain, side_effect, timeout_s?)
 download_file(remote_path, max_mb)               // SFTP a remote file to the user's local machine
 analyze_locally(local_path, task)                // opens a new window + local shell + separate AI session for analysis
 load_skill(id)                                   // pull a lazy skill from the Available skills catalog appended below
-web_search(query, max_results?)                  // zero-config public web search through Exa or Parallel; redacted query leaves the device
-web_fetch(url)                                   // fetch readable content from an exact URL in a user message or prior web_search result
+web_search(query, max_results?)                  // 1 approval card — web search via Exa or Parallel; the query is redacted locally before it leaves the device (auto_web_search under danger_mode)
+web_fetch(url)                                   // 1 approval card — fetch readable content from an HTTP(S) URL; every fetch is user-approved (auto_web_fetch under danger_mode)
 match_file(path, find, before?, after?)          // read-only — 1 approval card (may be auto-approved per user settings: auto_match_file under danger_mode); locates every occurrence of literal `find`
 patch_file(path, find, replace, expected_count)  // the ONLY way to modify a file — 4 approval cards (cp → modify → diff → mv); each card may be auto-approved independently per user settings (auto_patch_cp/_modify/_diff/_mv under danger_mode)
 ```

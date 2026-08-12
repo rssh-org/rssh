@@ -84,7 +84,7 @@ pub enum AuditKind {
     WebSearchCompleted {
         query: String,
         provider: String,
-        result_count: usize,
+        response_bytes: usize,
         duration_ms: u64,
     },
     ContextRolledBack {
@@ -226,12 +226,12 @@ impl AuditLog {
                 AuditKind::WebSearchCompleted {
                     query,
                     provider,
-                    result_count,
+                    response_bytes,
                     duration_ms,
                 } => {
                     let query = query.replace(['\r', '\n'], " ");
                     s.push_str(&format!(
-                        "WEB_SEARCH_DONE  provider={provider} results={result_count} dur={duration_ms}ms query={query}\n"
+                        "WEB_SEARCH_DONE  provider={provider} bytes={response_bytes} dur={duration_ms}ms query={query}\n"
                     ));
                 }
                 AuditKind::ContextRolledBack {
@@ -340,13 +340,13 @@ mod tests {
         let searched = serde_json::to_value(AuditKind::WebSearchCompleted {
             query: "rust async".into(),
             provider: "parallel".into(),
-            result_count: 5,
+            response_bytes: 512,
             duration_ms: 123,
         })
         .unwrap();
         assert_eq!(searched["type"], "web_search_completed");
         assert_eq!(searched["provider"], "parallel");
-        assert_eq!(searched["result_count"], 5);
+        assert_eq!(searched["response_bytes"], 512);
     }
 
     #[test]

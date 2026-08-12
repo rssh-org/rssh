@@ -1,19 +1,20 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::collections::HashMap;
 use std::time::Duration;
 
-use dom_smoothie::{Config, Readability, TextMode};
 use futures_util::StreamExt;
+use html2md::{Handle, StructuredPrinter, TagHandler, TagHandlerFactory};
 use serde::Serialize;
-use url::{Host, Url};
+use url::Url;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REDIRECTS: usize = 5;
 const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_MARKDOWN_BYTES: usize = 64 * 1024;
-const MAX_TITLE_CHARS: usize = 300;
 const MAX_URL_CHARS: usize = 2_048;
 const TRUNCATION_NOTICE: &str = "\n\n[Content truncated by rssh.]";
+const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+const HONEST_UA: &str = concat!("rssh/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, thiserror::Error)]
 pub enum WebFetchError {
@@ -23,10 +24,6 @@ pub enum WebFetchError {
     UnsupportedScheme,
     #[error("web_fetch URLs must not contain embedded credentials")]
     CredentialsNotAllowed,
-    #[error("web_fetch refuses local or non-public network addresses")]
-    BlockedAddress,
-    #[error("web_fetch could not resolve the target host")]
-    DnsLookup,
     #[error("web_fetch could not extract readable content from the page")]
     ContentExtraction,
     #[error("web_fetch could not create its HTTP client")]
@@ -37,31 +34,26 @@ pub enum WebFetchError {
     HttpStatus(u16),
     #[error("web_fetch does not support this content type")]
     UnsupportedContentType,
-    #[error("web_fetch received an invalid redirect")]
-    InvalidRedirect,
-    #[error("web_fetch stopped after too many redirects")]
-    TooManyRedirects,
     #[error("web_fetch response exceeds the 5 MiB limit")]
     ResponseTooLarge,
-}
-
-#[derive(Debug, Clone)]
-struct ExtractedContent {
-    title: String,
-    markdown: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebPage {
     pub requested_url: String,
     pub final_url: String,
-    pub title: String,
     pub content_type: String,
     pub markdown: String,
     pub source_bytes: usize,
     pub truncated: bool,
 }
 
+/// URL shape check — scheme, host, no embedded credentials. This is the ONLY
+/// gate (mirrors opencode): no IP allowlist, no DNS-resolved-address check, no
+/// DNS-rebinding pin. Behind a fake-ip proxy those checks are ineffective anyway
+/// (every domain resolves into the proxy's virtual range), and they broke real
+/// usage. The user approval card is the backstop — every URL is shown before
+/// fetch, same as opencode's ctx.ask.
 fn validate_url_shape(url: &Url) -> Result<(), WebFetchError> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(WebFetchError::UnsupportedScheme);
@@ -75,138 +67,60 @@ fn validate_url_shape(url: &Url) -> Result<(), WebFetchError> {
     Ok(())
 }
 
-fn validate_target(url: &Url) -> Result<(), WebFetchError> {
-    validate_url_shape(url)?;
-    match url.host() {
-        Some(Host::Ipv4(ip)) if !is_public_ip(IpAddr::V4(ip)) => Err(WebFetchError::BlockedAddress),
-        Some(Host::Ipv6(ip)) if !is_public_ip(IpAddr::V6(ip)) => Err(WebFetchError::BlockedAddress),
-        _ => Ok(()),
-    }
-}
-
-#[cfg(test)]
-fn parse_target(raw: &str) -> Result<Url, WebFetchError> {
-    parse_target_with_policy(raw, false)
-}
-
-fn parse_target_with_policy(
-    raw: &str,
-    allow_private_addresses: bool,
-) -> Result<Url, WebFetchError> {
+fn parse_url(raw: &str) -> Result<Url, WebFetchError> {
     let raw = raw.trim();
     if raw.chars().count() > MAX_URL_CHARS {
         return Err(WebFetchError::InvalidUrl);
     }
     let mut url = Url::parse(raw).map_err(|_| WebFetchError::InvalidUrl)?;
-    if allow_private_addresses {
-        validate_url_shape(&url)?;
-    } else {
-        validate_target(&url)?;
-    }
+    validate_url_shape(&url)?;
     url.set_fragment(None);
     Ok(url)
 }
 
-fn is_public_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => is_public_ipv4(ip),
-        IpAddr::V6(ip) => is_public_ipv6(ip),
+/// Drops a tag and all its descendants from the markdown output. This is the
+/// html2md equivalent of opencode's `turndown.remove(["script","style",...])`:
+/// `handle` emits nothing, and `skip_descendants` stops the DOM walk into the
+/// tag's children so script/style text never reaches the printer. DOM-level
+/// (html5ever), not a regex over HTML.
+struct DropTagHandler;
+
+impl TagHandler for DropTagHandler {
+    fn handle(&mut self, _tag: &Handle, _printer: &mut StructuredPrinter) {}
+    fn after_handle(&mut self, _printer: &mut StructuredPrinter) {}
+    fn skip_descendants(&self) -> bool {
+        true
     }
 }
 
-fn is_public_ipv4(ip: Ipv4Addr) -> bool {
-    let [a, b, c, _] = ip.octets();
+struct DropTagFactory;
 
-    !(a == 0
-        || a == 10
-        || a == 127
-        || a >= 224
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 169 && b == 254)
-        || (a == 172 && (16..=31).contains(&b))
-        || (a == 192 && b == 0 && c == 0)
-        || (a == 192 && b == 0 && c == 2)
-        || (a == 192 && b == 88 && c == 99)
-        || (a == 192 && b == 168)
-        || (a == 198 && (b == 18 || b == 19))
-        || (a == 198 && b == 51 && c == 100)
-        || (a == 203 && b == 0 && c == 113))
-}
-
-fn is_public_ipv6(ip: Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    // Public unicast currently lives in 2000::/3. Keep documentation space
-    // and IPv4 transition ranges out even though they share that prefix;
-    // everything else is conservatively denied (loopback, ULA, link-local,
-    // multicast, IPv4-mapped, NAT64, etc.).
-    segments[0] & 0xe000 == 0x2000
-        && !(segments[0] == 0x2001 && matches!(segments[1], 0x0000 | 0x0db8))
-        && segments[0] != 0x2002
-}
-
-fn validate_redirect(
-    current: &Url,
-    next: &Url,
-    allow_private_addresses: bool,
-) -> Result<(), WebFetchError> {
-    if current.scheme() == "https" && next.scheme() == "http" {
-        return Err(WebFetchError::InvalidRedirect);
-    }
-    if allow_private_addresses {
-        validate_url_shape(next)
-    } else {
-        validate_target(next)
+impl TagHandlerFactory for DropTagFactory {
+    fn instantiate(&self) -> Box<dyn TagHandler> {
+        Box::new(DropTagHandler)
     }
 }
 
-async fn resolve_target(
-    url: &Url,
-    allow_private_addresses: bool,
-) -> Result<Vec<SocketAddr>, WebFetchError> {
-    let port = url
-        .port_or_known_default()
-        .ok_or(WebFetchError::InvalidUrl)?;
-    let mut addrs = match url.host().ok_or(WebFetchError::InvalidUrl)? {
-        Host::Ipv4(ip) => vec![SocketAddr::new(IpAddr::V4(ip), port)],
-        Host::Ipv6(ip) => vec![SocketAddr::new(IpAddr::V6(ip), port)],
-        Host::Domain(host) => {
-            tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port)))
-                .await
-                .map_err(|_| WebFetchError::DnsLookup)?
-                .map_err(|_| WebFetchError::DnsLookup)?
-                .collect()
-        }
-    };
-    addrs.sort_unstable();
-    addrs.dedup();
-    if addrs.is_empty() {
-        return Err(WebFetchError::DnsLookup);
+/// Full-page HTML→markdown (mirrors opencode's turndown): nav/footer are kept;
+/// only script/style/meta/link/noscript/iframe/object/embed are dropped, via a
+/// custom html2md TagHandler (DOM level). opencode does not extract a page
+/// `<title>`, neither do we — the LLM gets the body markdown.
+fn html_to_markdown(html: &str) -> String {
+    let mut custom: HashMap<String, Box<dyn TagHandlerFactory>> = HashMap::new();
+    for tag in [
+        "script", "style", "meta", "link", "noscript", "iframe", "object", "embed",
+    ] {
+        custom.insert(tag.to_string(), Box::new(DropTagFactory));
     }
-    if !allow_private_addresses && addrs.iter().any(|addr| !is_public_ip(addr.ip())) {
-        return Err(WebFetchError::BlockedAddress);
-    }
-    Ok(addrs)
+    html2md::parse_html_custom(html, &custom)
 }
 
-fn extract_content(html: &str, document_url: &str) -> Result<ExtractedContent, WebFetchError> {
-    let config = Config {
-        max_elements_to_parse: 20_000,
-        text_mode: TextMode::Markdown,
-        ..Default::default()
-    };
-    let mut readability = Readability::new(html, Some(document_url), Some(config))
-        .map_err(|_| WebFetchError::ContentExtraction)?;
-    let article = readability
-        .parse()
-        .map_err(|_| WebFetchError::ContentExtraction)?;
-    let markdown = article.text_content.trim().to_string();
+fn extract_markdown(html: &str) -> Result<String, WebFetchError> {
+    let markdown = html_to_markdown(html).trim().to_string();
     if markdown.is_empty() {
         return Err(WebFetchError::ContentExtraction);
     }
-    Ok(ExtractedContent {
-        title: article.title.trim().chars().take(MAX_TITLE_CHARS).collect(),
-        markdown,
-    })
+    Ok(markdown)
 }
 
 fn truncate_markdown(mut markdown: String) -> (String, bool) {
@@ -260,101 +174,85 @@ fn supported_content_type(content_type: &str) -> bool {
     )
 }
 
-pub async fn fetch(raw_url: &str) -> Result<WebPage, WebFetchError> {
-    fetch_with_policy(raw_url, false).await
+async fn send_request(
+    client: &reqwest::Client,
+    url: &Url,
+    user_agent: &str,
+) -> Result<reqwest::Response, WebFetchError> {
+    client
+        .get(url.clone())
+        .header(
+            reqwest::header::ACCEPT,
+            "text/markdown, text/html;q=0.9, application/xhtml+xml;q=0.9, text/plain;q=0.8, application/json;q=0.7",
+        )
+        .header(reqwest::header::USER_AGENT, user_agent)
+        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+        .send()
+        .await
+        .map_err(|_| WebFetchError::RequestFailed)
 }
 
-async fn fetch_with_policy(
-    raw_url: &str,
-    allow_private_addresses: bool,
-) -> Result<WebPage, WebFetchError> {
-    let requested_url = parse_target_with_policy(raw_url, allow_private_addresses)?;
-    let mut url = requested_url.clone();
-
-    for redirect_count in 0..=MAX_REDIRECTS {
-        let addrs = resolve_target(&url, allow_private_addresses).await?;
-        let mut client = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT);
-        if let Some(Host::Domain(host)) = url.host() {
-            // Pin the address set we just validated. Letting reqwest resolve the
-            // hostname again would reopen a DNS-rebinding gap between policy check
-            // and connection.
-            client = client.resolve_to_addrs(host, &addrs);
-        }
-        let client = client.build().map_err(|_| WebFetchError::ClientBuild)?;
-        let response = client
-            .get(url.clone())
-            .header(
-                reqwest::header::ACCEPT,
-                "text/markdown, text/html;q=0.9, application/xhtml+xml;q=0.9, text/plain;q=0.8, application/json;q=0.7",
-            )
-            .header(
-                reqwest::header::USER_AGENT,
-                concat!("rssh/", env!("CARGO_PKG_VERSION")),
-            )
-            .send()
-            .await
-            .map_err(|_| WebFetchError::RequestFailed)?;
-
-        if response.status().is_redirection() {
-            if redirect_count == MAX_REDIRECTS {
-                return Err(WebFetchError::TooManyRedirects);
-            }
-            let location = response
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|value| value.to_str().ok())
-                .ok_or(WebFetchError::InvalidRedirect)?;
-            let mut next = url
-                .join(location)
-                .map_err(|_| WebFetchError::InvalidRedirect)?;
-            validate_redirect(&url, &next, allow_private_addresses)?;
-            next.set_fragment(None);
-            url = next;
-            continue;
-        }
-        if !response.status().is_success() {
-            return Err(WebFetchError::HttpStatus(response.status().as_u16()));
-        }
-        let final_url = url.to_string();
-        let content_type = response
+fn is_cf_challenge(response: &reqwest::Response) -> bool {
+    response.status() == reqwest::StatusCode::FORBIDDEN
+        && response
             .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("text/plain")
-            .split(';')
-            .next()
-            .unwrap_or("text/plain")
-            .trim()
-            .to_ascii_lowercase();
-        if !supported_content_type(&content_type) {
-            return Err(WebFetchError::UnsupportedContentType);
-        }
-        let bytes = read_response(response).await?;
-        let text = String::from_utf8_lossy(&bytes);
-        let (title, markdown) = match content_type.as_str() {
-            "text/html" | "application/xhtml+xml" => {
-                let extracted = extract_content(&text, &final_url)?;
-                (extracted.title, extracted.markdown)
-            }
-            _ => (String::new(), text.trim().to_string()),
-        };
-        let (markdown, truncated) = truncate_markdown(markdown);
+            .get("cf-mitigated")
+            .is_some_and(|value| value == "challenge")
+}
 
-        return Ok(WebPage {
-            requested_url: requested_url.to_string(),
-            final_url,
-            title,
-            content_type,
-            markdown,
-            source_bytes: bytes.len(),
-            truncated,
-        });
+pub async fn fetch(raw_url: &str) -> Result<WebPage, WebFetchError> {
+    let requested_url = parse_url(raw_url)?;
+    // reqwest follows redirects itself (Policy::limited) and reads the system
+    // proxy via the `system-proxy` feature — same as opencode. No manual
+    // redirect loop, no per-hop address re-check.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|_| WebFetchError::ClientBuild)?;
+    let response = send_request(&client, &requested_url, CHROME_UA).await?;
+    // Cloudflare bot challenge (TLS fingerprint mismatch): retry once with an
+    // honest UA, matching opencode's fallback.
+    let response = if is_cf_challenge(&response) {
+        send_request(&client, &requested_url, HONEST_UA).await?
+    } else {
+        response
+    };
+
+    if !response.status().is_success() {
+        return Err(WebFetchError::HttpStatus(response.status().as_u16()));
     }
-    Err(WebFetchError::TooManyRedirects)
+    let final_url = response.url().to_string();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("text/plain")
+        .split(';')
+        .next()
+        .unwrap_or("text/plain")
+        .trim()
+        .to_ascii_lowercase();
+    if !supported_content_type(&content_type) {
+        return Err(WebFetchError::UnsupportedContentType);
+    }
+    let bytes = read_response(response).await?;
+    let text = String::from_utf8_lossy(&bytes);
+    let markdown = match content_type.as_str() {
+        "text/html" | "application/xhtml+xml" => extract_markdown(&text)?,
+        _ => text.trim().to_string(),
+    };
+    let (markdown, truncated) = truncate_markdown(markdown);
+
+    Ok(WebPage {
+        requested_url: requested_url.to_string(),
+        final_url,
+        content_type,
+        markdown,
+        source_bytes: bytes.len(),
+        truncated,
+    })
 }
 
 #[cfg(test)]
@@ -362,83 +260,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_loopback_ip_literals() {
-        let url = url::Url::parse("http://127.0.0.1/admin").unwrap();
-
-        let error = validate_target(&url).unwrap_err();
-
-        assert!(matches!(error, WebFetchError::BlockedAddress));
-    }
-
-    #[test]
-    fn rejects_non_public_ip_literals() {
-        for raw in [
-            "http://0.0.0.0/",
-            "http://10.0.0.1/",
-            "http://100.64.0.1/",
-            "http://169.254.169.254/latest/meta-data/",
-            "http://172.16.0.1/",
-            "http://192.168.0.1/",
-            "http://198.18.0.1/",
-            "http://224.0.0.1/",
-            "http://[::1]/",
-            "http://[fc00::1]/",
-            "http://[fe80::1]/",
-            "http://[2001:db8::1]/",
-            "http://[2001:0000:4136:e378:8000:63bf:3fff:fdd2]/",
-            "http://[2002:0a00:0001::1]/",
-            "http://[64:ff9b::a00:1]/",
-        ] {
-            let url = url::Url::parse(raw).unwrap();
-            assert!(
-                matches!(validate_target(&url), Err(WebFetchError::BlockedAddress)),
-                "{raw} must be blocked"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_https_to_http_redirects() {
-        let https = Url::parse("https://example.com/start").unwrap();
-        let http = Url::parse("http://example.com/final").unwrap();
-        let next_https = Url::parse("https://example.com/final").unwrap();
-
-        assert!(matches!(
-            validate_redirect(&https, &http, true),
-            Err(WebFetchError::InvalidRedirect)
-        ));
-        assert!(validate_redirect(&https, &next_https, true).is_ok());
-        assert!(validate_redirect(&http, &http, true).is_ok());
-    }
-
-    #[test]
     fn accepts_only_anonymous_http_urls() {
         assert!(matches!(
-            parse_target("not a url"),
+            parse_url("not a url"),
             Err(WebFetchError::InvalidUrl)
         ));
         assert!(matches!(
-            parse_target("file:///etc/passwd"),
+            parse_url("file:///etc/passwd"),
             Err(WebFetchError::UnsupportedScheme)
         ));
         assert!(matches!(
-            parse_target("https://user:pass@example.com/private"),
+            parse_url("https://user:pass@example.com/private"),
             Err(WebFetchError::CredentialsNotAllowed)
         ));
-        assert!(parse_target("https://example.com/docs").is_ok());
-    }
-
-    #[tokio::test]
-    async fn rejects_domains_that_resolve_to_private_addresses() {
-        let url = parse_target("http://localhost/").unwrap();
-
-        let error = resolve_target(&url, false).await.unwrap_err();
-
-        assert!(matches!(error, WebFetchError::BlockedAddress));
+        assert!(parse_url("https://example.com/docs").is_ok());
     }
 
     #[test]
-    fn extracts_readable_markdown_instead_of_page_chrome() {
+    fn rejects_an_oversized_target_url() {
+        let raw = format!("https://example.com/{}", "x".repeat(MAX_URL_CHARS));
+        assert!(matches!(parse_url(&raw), Err(WebFetchError::InvalidUrl)));
+    }
+
+    #[test]
+    fn converts_full_page_to_markdown_dropping_script_style() {
         let html = r#"
             <html>
               <head><title>Service Runbook</title></head>
@@ -455,13 +300,15 @@ mod tests {
             </html>
         "#;
 
-        let page = extract_content(html, "https://example.com/runbook").unwrap();
+        let markdown = extract_markdown(html).unwrap();
 
-        assert_eq!(page.title, "Service Runbook");
-        assert!(page.markdown.contains("Recover the worker"));
-        assert!(page.markdown.contains("preserve the queue"));
-        assert!(!page.markdown.contains("Products Pricing"));
-        assert!(!page.markdown.contains("delete the server"));
+        // Full-page conversion (turndown-style, like opencode): body content
+        // AND nav/footer chrome are kept.
+        assert!(markdown.contains("Recover the worker"));
+        assert!(markdown.contains("preserve the queue"));
+        assert!(markdown.contains("Products Pricing"));
+        // script text must never leak as markdown (prompt-injection surface).
+        assert!(!markdown.contains("delete the server"));
     }
 
     #[test]
@@ -472,29 +319,10 @@ mod tests {
             </main></body></html>
         "#;
 
-        let page = extract_content(html, "https://example.com/flags/safe").unwrap();
+        let markdown = extract_markdown(html).unwrap();
 
-        assert!(page.markdown.contains("--safe"));
-        assert!(page.markdown.contains("rssh --safe"));
-    }
-
-    #[test]
-    fn bounds_page_title() {
-        let title = "界".repeat(MAX_TITLE_CHARS + 1);
-        let html = format!(
-            "<html><head><title>{title}</title></head><body><main><p>Readable content.</p></main></body></html>"
-        );
-
-        let page = extract_content(&html, "https://example.com/docs").unwrap();
-
-        assert_eq!(page.title.chars().count(), MAX_TITLE_CHARS);
-    }
-
-    #[test]
-    fn rejects_an_oversized_target_url() {
-        let raw = format!("https://example.com/{}", "x".repeat(MAX_URL_CHARS));
-
-        assert!(matches!(parse_target(&raw), Err(WebFetchError::InvalidUrl)));
+        assert!(markdown.contains("--safe"));
+        assert!(markdown.contains("rssh --safe"));
     }
 
     #[tokio::test]
@@ -514,12 +342,9 @@ mod tests {
             .create_async()
             .await;
 
-        let page = fetch_with_policy(&format!("{}/guide", server.url()), true)
-            .await
-            .unwrap();
+        let page = fetch(&format!("{}/guide", server.url())).await.unwrap();
 
         mock.assert_async().await;
-        assert_eq!(page.title, "Deploy guide");
         assert_eq!(page.content_type, "text/html");
         assert_eq!(page.source_bytes, body.len());
         assert!(!page.truncated);
@@ -544,9 +369,7 @@ mod tests {
             .create_async()
             .await;
 
-        let page = fetch_with_policy(&format!("{}/start", server.url()), true)
-            .await
-            .unwrap();
+        let page = fetch(&format!("{}/start", server.url())).await.unwrap();
 
         first.assert_async().await;
         final_page.assert_async().await;
@@ -565,9 +388,7 @@ mod tests {
             .create_async()
             .await;
 
-        let error = fetch_with_policy(&format!("{}/large", server.url()), true)
-            .await
-            .unwrap_err();
+        let error = fetch(&format!("{}/large", server.url())).await.unwrap_err();
 
         mock.assert_async().await;
         assert!(matches!(error, WebFetchError::ResponseTooLarge));
@@ -590,7 +411,7 @@ mod tests {
             .create_async()
             .await;
 
-        let error = fetch_with_policy(&format!("{}/large-stream", server.url()), true)
+        let error = fetch(&format!("{}/large-stream", server.url()))
             .await
             .unwrap_err();
 
@@ -610,9 +431,7 @@ mod tests {
             .create_async()
             .await;
 
-        let page = fetch_with_policy(&format!("{}/long", server.url()), true)
-            .await
-            .unwrap();
+        let page = fetch(&format!("{}/long", server.url())).await.unwrap();
 
         mock.assert_async().await;
         assert_eq!(page.source_bytes, body.len());

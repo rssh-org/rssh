@@ -11,7 +11,7 @@
  * Both are normalized here. Unknown/corrupt entries are dropped, not thrown:
  * a damaged blob should degrade to a shorter timeline, never block resume.
  */
-import type { ChatItem, WebToolActivity, WebToolErrorCode } from "./types.ts";
+import type { ChatItem } from "./types.ts";
 
 export interface AiTerminalMutation {
   kind: string;
@@ -20,47 +20,6 @@ export interface AiTerminalMutation {
 
 function isStr(v: unknown): v is string {
   return typeof v === "string";
-}
-
-function isWebToolErrorCode(value: unknown): value is WebToolErrorCode {
-  return value === "invalid_input"
-    || value === "not_allowed"
-    || value === "unavailable"
-    || value === "interrupted";
-}
-
-function isNonNegativeNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
-}
-
-function webToolActivity(value: unknown): WebToolActivity | null {
-  if (!value || typeof value !== "object") return null;
-  const activity = value as Record<string, unknown>;
-  if (
-    !isStr(activity.id)
-    || !isStr(activity.target)
-    || (activity.tool !== "web_search" && activity.tool !== "web_fetch")
-  ) return null;
-
-  if (activity.status === "running") {
-    return activity as WebToolActivity;
-  }
-  if (activity.status === "failed") {
-    return isWebToolErrorCode(activity.error_code)
-      ? activity as WebToolActivity
-      : null;
-  }
-  if (activity.status !== "completed") return null;
-  if (activity.tool === "web_search") {
-    return isNonNegativeNumber(activity.result_count)
-      && isNonNegativeNumber(activity.duration_ms)
-      ? activity as WebToolActivity
-      : null;
-  }
-  return isNonNegativeNumber(activity.source_bytes)
-    && typeof activity.truncated === "boolean"
-    ? activity as WebToolActivity
-    : null;
 }
 
 /** Per-kind shape check — the fields the templates dereference unconditionally
@@ -78,8 +37,6 @@ function isRenderable(item: ChatItem): boolean {
       return isStr(item.text);
     case "assistant":
       return isStr(item.id) && isStr(item.text);
-    case "web_tool":
-      return webToolActivity(item.activity) !== null;
     case "command":
       return (
         !!item.cmd && typeof item.cmd === "object" &&
@@ -133,14 +90,6 @@ export function restoreTimeline(json: string, staleCommandReason: string): ChatI
       if (!item.result && !item.rejected) {
         item.rejected = { reason: staleCommandReason };
       }
-    } else if (item.kind === "web_tool" && item.activity.status === "running") {
-      item.activity = {
-        id: item.activity.id,
-        tool: item.activity.tool,
-        status: "failed",
-        target: item.activity.target,
-        error_code: "interrupted",
-      };
     }
     items.push(item);
   }
@@ -196,22 +145,6 @@ export function applyTerminalMutations(
       continue;
     }
 
-    if (mutation.kind === "web_tool_activity") {
-      const activity = webToolActivity(payload);
-      if (!activity || activity.status === "running") continue;
-      const index = findLastIndex(items, (item) =>
-        item.kind === "web_tool" && item.activity.id === activity.id);
-      const replacement: ChatItem = {
-        kind: "web_tool",
-        activity,
-        at: index >= 0 ? items[index].at : Date.now(),
-      };
-      items = index >= 0
-        ? replaceAt(items, index, replacement)
-        : [...items, replacement];
-      continue;
-    }
-
     const index = findLastIndex(items, (item) =>
       item.kind === "command" && item.cmd.id === payload.id);
     if (index < 0) continue;
@@ -257,18 +190,6 @@ export function applyTerminalMutations(
   return items.map((item) => {
     if (item.kind === "assistant" && item.streaming) {
       return { ...item, streaming: false, cancelled: true };
-    }
-    if (item.kind === "web_tool" && item.activity.status === "running") {
-      return {
-        ...item,
-        activity: {
-          id: item.activity.id,
-          tool: item.activity.tool,
-          status: "failed",
-          target: item.activity.target,
-          error_code: "interrupted",
-        },
-      };
     }
     return item;
   });

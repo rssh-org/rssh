@@ -1,4 +1,9 @@
 //! Bounded, zero-configuration Hosted MCP web search for AI sessions.
+//!
+//! The MCP service's text response is returned to the LLM verbatim — we do not
+//! parse it into structured results, so rssh never breaks when Exa / Parallel
+//! change their response shape (mirrors opencode's approach). The only local
+//! processing is redacting the query before it leaves the device.
 
 use std::fmt;
 use std::sync::OnceLock;
@@ -8,7 +13,6 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use url::Url;
 
 use super::{
     sanitize::{self, RedactRule},
@@ -23,9 +27,6 @@ const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const DEFAULT_RESULTS: usize = 8;
 const MAX_RESULTS: usize = 20;
 const MAX_QUERY_CHARS: usize = 512;
-const MAX_TITLE_CHARS: usize = 300;
-const MAX_SNIPPET_CHARS: usize = 1_000;
-const MAX_URL_CHARS: usize = 2_048;
 static HTTP_CLIENT: OnceLock<Result<reqwest::Client, ()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,19 +66,12 @@ struct ValidatedQuery {
     limit: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebSearchResult {
-    pub title: String,
-    pub url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub snippet: Option<String>,
-}
-
+/// MCP response text returned to the LLM verbatim. Not parsed — see module docs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSearchResponse {
     pub query: String,
     pub provider: String,
-    pub results: Vec<WebSearchResult>,
+    pub text: String,
     pub elapsed_ms: u64,
 }
 
@@ -140,10 +134,6 @@ fn select_provider(routing_key: &str, provider_override: Option<&str>) -> WebSea
     } else {
         WebSearchProvider::Parallel
     }
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    value.trim().chars().take(max_chars).collect()
 }
 
 fn mcp_request(provider: WebSearchProvider, query: &ValidatedQuery) -> Value {
@@ -240,124 +230,15 @@ fn parse_mcp_response(body: &str) -> Option<McpText> {
         .find_map(parse_mcp_payload)
 }
 
-fn normalize_result(
-    title: &str,
-    raw_url: &str,
-    snippet: Option<String>,
-) -> Option<WebSearchResult> {
-    let raw_url = raw_url.trim();
-    if raw_url.chars().count() > MAX_URL_CHARS {
-        return None;
-    }
-    let url = Url::parse(raw_url).ok()?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
-        return None;
-    }
-
-    let title = truncate_chars(title, MAX_TITLE_CHARS);
-    let snippet = snippet.and_then(|value| {
-        let value = truncate_chars(&value, MAX_SNIPPET_CHARS);
-        (!value.is_empty()).then_some(value)
-    });
-    Some(WebSearchResult {
-        title: if title.is_empty() {
-            raw_url.to_owned()
-        } else {
-            title
-        },
-        url: raw_url.to_owned(),
-        snippet,
-    })
-}
-
-fn json_result_snippet(result: &Value) -> Option<String> {
-    for key in ["excerpts", "highlights"] {
-        if let Some(values) = result.get(key).and_then(Value::as_array) {
-            let text = values
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !text.trim().is_empty() {
-                return Some(text);
-            }
-        }
-    }
-    ["snippet", "content", "text"]
-        .into_iter()
-        .find_map(|key| result.get(key).and_then(Value::as_str).map(str::to_owned))
-}
-
-fn parse_json_results(text: &str, limit: usize) -> Option<Vec<WebSearchResult>> {
-    let payload: Value = serde_json::from_str(text).ok()?;
-    let results = payload.get("results")?.as_array()?;
-    Some(
-        results
-            .iter()
-            .filter_map(|result| {
-                normalize_result(
-                    result.get("title").and_then(Value::as_str).unwrap_or(""),
-                    result.get("url").and_then(Value::as_str)?,
-                    json_result_snippet(result),
-                )
-            })
-            .take(limit)
-            .collect(),
-    )
-}
-
-fn parse_exa_results(text: &str, limit: usize) -> Vec<WebSearchResult> {
-    text.split("\n---\n")
-        .filter_map(|block| {
-            let mut title = "";
-            let mut url = "";
-            let mut content = Vec::new();
-            let mut reading_content = false;
-
-            for line in block.trim().lines() {
-                if reading_content {
-                    content.push(line);
-                } else if let Some(value) = line.strip_prefix("Title: ") {
-                    title = value;
-                } else if let Some(value) = line.strip_prefix("URL: ") {
-                    url = value;
-                } else if let Some(value) = line.strip_prefix("Highlights:") {
-                    reading_content = true;
-                    if !value.trim().is_empty() {
-                        content.push(value.trim());
-                    }
-                } else if let Some(value) = line.strip_prefix("Text: ") {
-                    reading_content = true;
-                    content.push(value);
-                }
-            }
-
-            let snippet = (!content.is_empty()).then(|| content.join("\n"));
-            normalize_result(title, url, snippet)
-        })
-        .take(limit)
-        .collect()
-}
-
-fn is_no_results(text: &str) -> bool {
-    text.trim()
-        .eq_ignore_ascii_case("No search results found. Please try a different query.")
-}
-
 fn is_rate_limit_error(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("rate limit") || lower.contains("too many requests") || lower.contains("429")
 }
 
-fn decode_search_results(
-    provider: WebSearchProvider,
-    body: &str,
-    limit: usize,
-) -> Result<Vec<WebSearchResult>, WebSearchError> {
+/// Decode the MCP envelope and return its text verbatim. A provider-side
+/// `isError` is surfaced as an error (rate limits mapped specifically) so the
+/// LLM learns the search failed rather than trusting an error body as data.
+fn decode_search_text(provider: WebSearchProvider, body: &str) -> Result<String, WebSearchError> {
     let result = parse_mcp_response(body).ok_or(WebSearchError::InvalidResponse { provider })?;
     if result.is_error {
         return if is_rate_limit_error(&result.text) {
@@ -366,22 +247,7 @@ fn decode_search_results(
             Err(WebSearchError::Unavailable { provider })
         };
     }
-    if is_no_results(&result.text) {
-        return Ok(Vec::new());
-    }
-
-    match provider {
-        WebSearchProvider::Parallel => parse_json_results(&result.text, limit)
-            .ok_or(WebSearchError::InvalidResponse { provider }),
-        WebSearchProvider::Exa => {
-            let results = parse_exa_results(&result.text, limit);
-            if results.is_empty() {
-                Err(WebSearchError::InvalidResponse { provider })
-            } else {
-                Ok(results)
-            }
-        }
-    }
+    Ok(result.text)
 }
 
 fn http_client() -> Result<&'static reqwest::Client, WebSearchError> {
@@ -447,13 +313,13 @@ async fn search_provider(
 
     let body = read_response(response, provider).await?;
     let body = String::from_utf8(body).map_err(|_| WebSearchError::InvalidResponse { provider })?;
-    let results = decode_search_results(provider, &body, query.limit)?;
+    let text = decode_search_text(provider, &body)?;
     Ok(WebSearchResponse {
         // Never trust an upstream query echo for provenance. This is exactly
         // the locally redacted string sent across the network.
         query: query.query.clone(),
         provider: provider.id().to_owned(),
-        results,
+        text,
         elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
     })
 }
@@ -580,43 +446,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_parallel_json_and_filters_unusable_results() {
-        let provider_text = json!({
-            "results": [
-                {
-                    "title": "界".repeat(MAX_TITLE_CHARS + 1),
-                    "url": "https://a.example/",
-                    "excerpts": ["文".repeat(MAX_SNIPPET_CHARS + 1)]
-                },
-                { "title": "unsafe", "url": "javascript:alert(1)", "excerpts": [] },
-                { "title": "plain http", "url": "http://b.example/", "excerpts": ["ok"] }
-            ]
-        })
-        .to_string();
-        let body = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "content": [{ "type": "text", "text": provider_text }],
-                "isError": false
-            }
-        })
-        .to_string();
-
-        let results = decode_search_results(WebSearchProvider::Parallel, &body, 2).unwrap();
-
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].title.chars().count(), MAX_TITLE_CHARS);
-        assert_eq!(
-            results[0].snippet.as_ref().unwrap().chars().count(),
-            MAX_SNIPPET_CHARS
-        );
-        assert_eq!(results[1].url, "http://b.example/");
-    }
-
-    #[test]
-    fn parses_exa_results_from_an_sse_mcp_response() {
-        let provider_text = "Title: Rust\nURL: https://www.rust-lang.org/\nPublished: N/A\nAuthor: N/A\nHighlights:\nA language empowering everyone";
+    fn decodes_mcp_text_verbatim_from_an_sse_response() {
+        let provider_text = "Title: Rust\nURL: https://www.rust-lang.org/\nA language";
         let payload = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -627,46 +458,14 @@ mod tests {
         });
         let body = format!("event: message\ndata: {payload}\n\n");
 
-        let results = decode_search_results(WebSearchProvider::Exa, &body, 8).unwrap();
+        let text = decode_search_text(WebSearchProvider::Exa, &body).unwrap();
 
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Rust");
-        assert_eq!(results[0].url, "https://www.rust-lang.org/");
-        assert_eq!(
-            results[0].snippet.as_deref(),
-            Some("A language empowering everyone")
-        );
-    }
-
-    #[test]
-    fn accepts_an_empty_parallel_result_set() {
-        let provider_text = json!({ "results": [] }).to_string();
-        let body = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "content": [{ "type": "text", "text": provider_text }],
-                "isError": false
-            }
-        })
-        .to_string();
-
-        let results = decode_search_results(WebSearchProvider::Parallel, &body, 8).unwrap();
-
-        assert!(results.is_empty());
+        assert_eq!(text, provider_text);
     }
 
     #[tokio::test]
-    async fn calls_parallel_anonymously_and_returns_structured_results() {
-        let mut server = mockito::Server::new_async().await;
-        let provider_text = json!({
-            "results": [{
-                "title": "Rust",
-                "url": "https://www.rust-lang.org/",
-                "excerpts": ["A language"]
-            }]
-        })
-        .to_string();
+    async fn calls_parallel_anonymously_and_returns_mcp_text() {
+        let provider_text = "Title: Rust\nURL: https://www.rust-lang.org/";
         let response = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -675,6 +474,7 @@ mod tests {
                 "isError": false
             }
         });
+        let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/")
             .match_header("authorization", Matcher::Missing)
@@ -696,7 +496,7 @@ mod tests {
         mock.assert_async().await;
         assert_eq!(response.provider, "parallel");
         assert_eq!(response.query, "rust");
-        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.text, provider_text);
     }
 
     #[tokio::test]

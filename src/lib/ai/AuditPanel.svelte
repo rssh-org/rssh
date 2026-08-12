@@ -81,7 +81,7 @@
             case "web_search_completed": return t("ai.audit.summary.web_search_completed", {
                 query: k.query,
                 provider: k.provider,
-                count: k.result_count,
+                size: formatBytes(k.response_bytes),
                 dur: k.duration_ms,
             });
             case "web_fetch_completed": return t("ai.audit.summary.web_fetch_completed", {

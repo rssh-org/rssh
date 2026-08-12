@@ -2,7 +2,7 @@
     import * as ai from "./store.svelte.ts";
     import type { AiTargetKind, ChatItem, ConversationMeta } from "./types.ts";
     import CommandConfirmDialog from "./CommandConfirmDialog.svelte";
-    import WebToolCard from "./WebToolCard.svelte";
+    import WebToolConfirmCard from "./WebToolConfirmCard.svelte";
     import AuditPanel from "./AuditPanel.svelte";
     import Modal from "../components/Modal.svelte";
     import DangerModeToggle from "./DangerModeToggle.svelte";
@@ -478,19 +478,28 @@
                         </div>
                     {:else if item.kind === "command" && session}
                         {#key item.cmd.id}
-                            <CommandConfirmDialog
-                                {tabId}
-                                instanceId={session.instance_id}
-                                targetKind={targetKind}
-                                targetSessionId={targetId}
-                                cmd={item.cmd}
-                                result={item.result}
-                                rejected={item.rejected}
-                                {active}
-                            />
+                            {#if item.cmd.kind === "web_search" || item.cmd.kind === "web_fetch"}
+                                <WebToolConfirmCard
+                                    {tabId}
+                                    instanceId={session.instance_id}
+                                    cmd={item.cmd}
+                                    result={item.result}
+                                    rejected={item.rejected}
+                                    {active}
+                                />
+                            {:else}
+                                <CommandConfirmDialog
+                                    {tabId}
+                                    instanceId={session.instance_id}
+                                    targetKind={targetKind}
+                                    targetSessionId={targetId}
+                                    cmd={item.cmd}
+                                    result={item.result}
+                                    rejected={item.rejected}
+                                    {active}
+                                />
+                            {/if}
                         {/key}
-                    {:else if item.kind === "web_tool"}
-                        <WebToolCard activity={item.activity} />
                     {:else if item.kind === "error"}
                         <div class="bubble error">{item.text}</div>
                     {:else if item.kind === "note"}

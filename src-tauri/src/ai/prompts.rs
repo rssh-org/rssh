@@ -2,4 +2,3 @@
 //! `general` 直接进入 system prompt；其余内置 skill 只在目录中暴露，按需加载。
 
 pub const GENERAL: &str = include_str!("prompts/general.md");
-pub const WEB_RESEARCH: &str = include_str!("prompts/web-research.md");

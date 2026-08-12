@@ -37,7 +37,6 @@ import type {
   ShellKind,
   SkillRecord,
   TokenUsage,
-  WebToolActivity,
 } from "./types.ts";
 import { isRawDeviceKind } from "./types.ts";
 
@@ -1882,26 +1881,6 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
     );
     _pendingByTab[tab] = proposed;
     pushChat(tab, { kind: "command", cmd: proposed, at: Date.now() });
-  });
-
-  // web_search/web_fetch are read-only and need no approval, but they are
-  // user-visible work. A single lifecycle event updates one durable card.
-  await addListener<WebToolActivity>(`ai:web_tool_activity:${tab}`, (e) => {
-    const activity = stripContextEpoch(e.payload);
-    const arr = _chatByTab[tab] ?? [];
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const item = arr[i];
-      if (item.kind === "web_tool" && item.activity.id === activity.id) {
-        // The lifecycle is monotonic. A duplicate/late start must not turn a
-        // completed or failed card back into an in-flight request.
-        if (item.activity.status !== "running") return;
-        const replacement: ChatItem = { ...item, activity };
-        _chatByTab[tab] = [...arr.slice(0, i), replacement, ...arr.slice(i + 1)];
-        schedulePersist(tab);
-        return;
-      }
-    }
-    pushChat(tab, { kind: "web_tool", activity, at: Date.now() });
   });
 
   // internal_command：当前只用于 file_ops 工具的远端能力探测（一行只读 echo "py3=... perl=... diff=..."）。
