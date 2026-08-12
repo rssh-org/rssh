@@ -3,13 +3,13 @@ import {
   sessionCommandKeyPrefix,
   type SessionInstanceRef,
 } from "./session-identity.ts";
-import type { AiSettings, CommandKind } from "./types.ts";
+import type { AiSettings } from "./types.ts";
 
 /** Fail closed for missing settings/kind. This is shared by the event-time
  * snapshot and the dialog's later revocation check so their policy cannot drift. */
 export function isAutoApprovalAllowed(
   settings: AiSettings | null,
-  kind?: CommandKind,
+  kind?: string,
 ): boolean {
   if (!settings || !settings.danger_mode || !kind) return false;
   switch (kind) {
@@ -23,11 +23,7 @@ export function isAutoApprovalAllowed(
     case "patch_mv": return settings.auto_patch_mv;
     case "web_search": return settings.auto_web_search;
     case "web_fetch": return settings.auto_web_fetch;
-    default: {
-      const exhaustive: never = kind;
-      void exhaustive;
-      return false;
-    }
+    default: return false;
   }
 }
 

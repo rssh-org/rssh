@@ -476,29 +476,29 @@
                                 <span class="cancelled-tag">{t("ai.bubble.cancelled")}</span>
                             {/if}
                         </div>
+                    {:else if item.kind === "web_tool" && session}
+                        {#key item.proposal.id}
+                            <WebToolConfirmCard
+                                {tabId}
+                                instanceId={session.instance_id}
+                                proposal={item.proposal}
+                                result={item.result}
+                                rejected={item.rejected}
+                                {active}
+                            />
+                        {/key}
                     {:else if item.kind === "command" && session}
                         {#key item.cmd.id}
-                            {#if item.cmd.kind === "web_search" || item.cmd.kind === "web_fetch"}
-                                <WebToolConfirmCard
-                                    {tabId}
-                                    instanceId={session.instance_id}
-                                    cmd={item.cmd}
-                                    result={item.result}
-                                    rejected={item.rejected}
-                                    {active}
-                                />
-                            {:else}
-                                <CommandConfirmDialog
-                                    {tabId}
-                                    instanceId={session.instance_id}
-                                    targetKind={targetKind}
-                                    targetSessionId={targetId}
-                                    cmd={item.cmd}
-                                    result={item.result}
-                                    rejected={item.rejected}
-                                    {active}
-                                />
-                            {/if}
+                            <CommandConfirmDialog
+                                {tabId}
+                                instanceId={session.instance_id}
+                                targetKind={targetKind}
+                                targetSessionId={targetId}
+                                cmd={item.cmd}
+                                result={item.result}
+                                rejected={item.rejected}
+                                {active}
+                            />
                         {/key}
                     {:else if item.kind === "error"}
                         <div class="bubble error">{item.text}</div>

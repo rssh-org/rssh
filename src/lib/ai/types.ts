@@ -66,9 +66,25 @@ export type CommandKind =
   | "patch_cp"
   | "patch_modify"
   | "patch_diff"
-  | "patch_mv"
-  | "web_search"
-  | "web_fetch";
+  | "patch_mv";
+
+/** web_search / web_fetch — dedicated proposal/result stream, independent of
+ *  the command card (no full_cmd/sentinel/explain/side_effect). */
+export type WebToolKind = "web_search" | "web_fetch";
+
+export interface WebToolProposal {
+  id: string;
+  kind: WebToolKind;
+  /** Redacted query (web_search) or URL (web_fetch). */
+  target: string;
+}
+
+export interface WebToolResult {
+  id: string;
+  ok: boolean;
+  summary: string;
+  duration_ms: number;
+}
 
 export interface ModelInfo {
   id: string;
@@ -130,6 +146,7 @@ export type ChatItem =
   | { kind: "user"; client_id?: string; client_seq?: number; text: string; at: number }
   | { kind: "assistant"; id: string; text: string; at: number; streaming: boolean; cancelled?: boolean }
   | { kind: "command"; cmd: CommandProposed; at: number; result?: CommandResult; rejected?: { reason: string } }
+  | { kind: "web_tool"; proposal: WebToolProposal; at: number; result?: WebToolResult; rejected?: { reason: string } }
   | { kind: "error"; text: string; at: number }
   | { kind: "note"; text: string; at: number };
 

@@ -4,9 +4,8 @@
  * live-only states that must not be resurrected verbatim:
  *
  * - assistant `streaming: true` → a blinking cursor with no stream behind it
- * - command cards with neither result nor rejection → approval buttons whose
- *   sentinel the restarted backend has never heard of
- * - web tool `running` → a request that no actor can still complete
+ * - command / web_tool cards with neither result nor rejection → approval
+ *   buttons whose ack the restarted backend has never heard of
  *
  * Both are normalized here. Unknown/corrupt entries are dropped, not thrown:
  * a damaged blob should degrade to a shorter timeline, never block resume.
@@ -41,6 +40,12 @@ function isRenderable(item: ChatItem): boolean {
       return (
         !!item.cmd && typeof item.cmd === "object" &&
         isStr(item.cmd.id) && isStr(item.cmd.cmd)
+      );
+    case "web_tool":
+      return (
+        !!item.proposal && typeof item.proposal === "object" &&
+        isStr(item.proposal.id) && isStr(item.proposal.target) &&
+        (item.proposal.kind === "web_search" || item.proposal.kind === "web_fetch")
       );
     default:
       return false;
@@ -87,6 +92,12 @@ export function restoreTimeline(json: string, staleCommandReason: string): ChatI
       if (item.cmd.diff !== undefined && !isStr(item.cmd.diff)) {
         delete item.cmd.diff;
       }
+      if (!item.result && !item.rejected) {
+        item.rejected = { reason: staleCommandReason };
+      }
+    } else if (item.kind === "web_tool") {
+      // Same as command: an unresolved card belongs to a dead actor whose
+      // approval ack it will never receive. Mark stale-rejected.
       if (!item.result && !item.rejected) {
         item.rejected = { reason: staleCommandReason };
       }
@@ -145,14 +156,14 @@ export function applyTerminalMutations(
       continue;
     }
 
-    const index = findLastIndex(items, (item) =>
-      item.kind === "command" && item.cmd.id === payload.id);
-    if (index < 0) continue;
-    const item = items[index];
-    if (item.kind !== "command") continue;
-
     if (mutation.kind === "command_rejected") {
       if (!isStr(payload.reason)) continue;
+      // Reject covers both command and web_tool cards (shared reject channel
+      // by id).
+      const index = findLastIndex(items, (item) => cardId(item) === payload.id);
+      if (index < 0) continue;
+      const item = items[index];
+      if (item.kind !== "command" && item.kind !== "web_tool") continue;
       items = replaceAt(items, index, {
         ...item,
         result: undefined,
@@ -160,6 +171,31 @@ export function applyTerminalMutations(
       });
       continue;
     }
+
+    if (mutation.kind === "web_tool_completed") {
+      if (
+        typeof payload.ok !== "boolean"
+        || !isStr(payload.summary)
+        || typeof payload.duration_ms !== "number"
+      ) continue;
+      const index = findLastIndex(items, (item) =>
+        item.kind === "web_tool" && item.proposal.id === payload.id);
+      if (index < 0) continue;
+      const item = items[index];
+      if (item.kind !== "web_tool") continue;
+      items = replaceAt(items, index, {
+        ...item,
+        rejected: undefined,
+        result: {
+          id: payload.id,
+          ok: payload.ok,
+          summary: payload.summary,
+          duration_ms: payload.duration_ms,
+        },
+      });
+      continue;
+    }
+
     if (mutation.kind !== "command_completed") continue;
     if (
       typeof payload.exit_code !== "number"
@@ -169,6 +205,11 @@ export function applyTerminalMutations(
       || typeof payload.original_bytes !== "number"
       || typeof payload.truncated_bytes !== "number"
     ) continue;
+    const index = findLastIndex(items, (item) =>
+      item.kind === "command" && item.cmd.id === payload.id);
+    if (index < 0) continue;
+    const item = items[index];
+    if (item.kind !== "command") continue;
     items = replaceAt(items, index, {
       ...item,
       rejected: undefined,
@@ -207,4 +248,11 @@ function findLastIndex(
 
 function replaceAt(items: ChatItem[], index: number, item: ChatItem): ChatItem[] {
   return [...items.slice(0, index), item, ...items.slice(index + 1)];
+}
+
+/** Card id of a proposal-bearing ChatItem (command or web_tool), else null. */
+function cardId(item: ChatItem): string | null {
+  if (item.kind === "command") return item.cmd.id;
+  if (item.kind === "web_tool") return item.proposal.id;
+  return null;
 }

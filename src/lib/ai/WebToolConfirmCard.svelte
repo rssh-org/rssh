@@ -6,18 +6,18 @@
     import type { SessionInstanceRef } from "./session-identity.ts";
     import { t, errMsg } from "../i18n/index.svelte.ts";
     import { toast } from "../stores/toast.svelte.ts";
-    import type { CommandProposed, CommandResult } from "./types.ts";
+    import type { WebToolProposal, WebToolResult } from "./types.ts";
 
-    // Dedicated approval card for web_search / web_fetch. These tools have no
-    // explain/side_effect (those are run_command fields) and run server-side
-    // after approval — same ack-only flow as download_file, but a distinct,
-    // web-oriented card: accent tag, the query/URL as the target, Allow/Reject
-    // buttons, and a one-line result summary instead of a command output dump.
-    let { tabId, instanceId, cmd, result, rejected, active } = $props<{
+    // Dedicated approval card for web_search / web_fetch. Independent data
+    // model (WebToolProposal / WebToolResult) — does NOT reuse
+    // CommandProposed / CommandResult, so it carries no command-only dead
+    // fields. Approve acks via ai_command_result (the shared approve channel,
+    // by id); reject via rejectCommand.
+    let { tabId, instanceId, proposal, result, rejected, active } = $props<{
         tabId: string;
         instanceId: string;
-        cmd: CommandProposed;
-        result?: CommandResult;
+        proposal: WebToolProposal;
+        result?: WebToolResult;
         rejected?: { reason: string };
         active: boolean;
     }>();
@@ -30,22 +30,22 @@
 
     const sessionRef = (): SessionInstanceRef => ({ tabId, instanceId });
     let isPending = $derived(!result && !rejected);
-    let isSearch = $derived(cmd.kind === "web_search");
+    let isSearch = $derived(proposal.kind === "web_search");
 
     onMount(() => {
         autoApproveEligible = commandApprovals.eligibleWhileAllowed(
             sessionRef(),
-            cmd.id,
-            isAutoApprovalAllowed(ai.settings(), cmd.kind),
+            proposal.id,
+            isAutoApprovalAllowed(ai.settings(), proposal.kind),
         );
         eligibilityReady = true;
-        if (isPending && commandApprovals.isAcknowledged(sessionRef(), cmd.id)) {
+        if (isPending && commandApprovals.isAcknowledged(sessionRef(), proposal.id)) {
             executing = true;
         }
     });
 
     onDestroy(() => {
-        if (!ai.isOpen(tabId)) commandApprovals.clear(sessionRef(), cmd.id);
+        if (!ai.isOpen(tabId)) commandApprovals.clear(sessionRef(), proposal.id);
     });
 
     // A later settings disable revokes the arrival snapshot before any auto run.
@@ -53,8 +53,8 @@
         if (eligibilityReady && autoApproveEligible) {
             autoApproveEligible = commandApprovals.eligibleWhileAllowed(
                 sessionRef(),
-                cmd.id,
-                isAutoApprovalAllowed(ai.settings(), cmd.kind),
+                proposal.id,
+                isAutoApprovalAllowed(ai.settings(), proposal.kind),
             );
         }
     });
@@ -69,36 +69,36 @@
             && isPending
             && !executing
             && !askingReason
-            && !commandApprovals.isAcknowledged(sessionRef(), cmd.id)
-            && !commandApprovals.wasAttempted(sessionRef(), cmd.id)
+            && !commandApprovals.isAcknowledged(sessionRef(), proposal.id)
+            && !commandApprovals.wasAttempted(sessionRef(), proposal.id)
         ) {
             void approve();
         }
     });
 
     $effect(() => {
-        if (result || rejected) commandApprovals.clear(sessionRef(), cmd.id);
+        if (result || rejected) commandApprovals.clear(sessionRef(), proposal.id);
     });
 
     async function approve() {
         if (executing) return;
         const session = sessionRef();
-        if (commandApprovals.isAcknowledged(session, cmd.id)) return;
-        commandApprovals.markAttempted(session, cmd.id);
+        if (commandApprovals.isAcknowledged(session, proposal.id)) return;
+        commandApprovals.markAttempted(session, proposal.id);
         executing = true;
-        commandApprovals.markAcknowledged(session, cmd.id);
+        commandApprovals.markAcknowledged(session, proposal.id);
         try {
             await invoke("ai_command_result", {
                 tabId,
                 instanceId,
-                toolCallId: cmd.id,
+                toolCallId: proposal.id,
                 exitCode: 0,
                 output: "",
                 timedOut: false,
                 earlyTerminated: false,
             });
         } catch (e) {
-            commandApprovals.clearAcknowledged(session, cmd.id);
+            commandApprovals.clearAcknowledged(session, proposal.id);
             executing = false;
             toast.error(t("ai.cmd.alert.exec_failed", { error: errMsg(e) }));
         }
@@ -112,7 +112,7 @@
         const reason = rejectReason.trim();
         if (!reason) return;
         try {
-            await ai.rejectCommand(sessionRef(), cmd.id, reason);
+            await ai.rejectCommand(sessionRef(), proposal.id, reason);
             askingReason = false;
             rejectReason = "";
         } catch (e) {
@@ -124,7 +124,7 @@
 <div class="web-card surface-flat" class:pending={isPending} class:done={!!result} class:rejected={!!rejected}>
     <div class="head">
         <span class="tag">{t(isSearch ? "ai.webcmd.search" : "ai.webcmd.fetch")}</span>
-        <code class="target" title={cmd.cmd}>{cmd.cmd}</code>
+        <code class="target" title={proposal.target}>{proposal.target}</code>
     </div>
 
     {#if isPending}
@@ -150,8 +150,8 @@
         <div class="rejected-note">{t("ai.cmd.rejected_note", { reason: rejected.reason })}</div>
     {:else if result}
         <div class="result">
-            <span class="output" title={result.output}>{result.output || t("ai.webcmd.done")}</span>
-            {#if result.exit_code !== 0}
+            <span class="output" title={result.summary}>{result.summary || t("ai.webcmd.done")}</span>
+            {#if !result.ok}
                 <span class="warn">{t("ai.webcmd.failed")}</span>
             {/if}
             <span class="dur">{result.duration_ms}ms</span>

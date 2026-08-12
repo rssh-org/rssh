@@ -92,7 +92,7 @@ fn redacted_web_tool_target(
 fn is_terminal_ui_mutation(kind: &str, _payload: &serde_json::Value) -> bool {
     matches!(
         kind,
-        "assistant_message_end" | "command_completed" | "command_rejected"
+        "assistant_message_end" | "command_completed" | "command_rejected" | "web_tool_completed"
     )
 }
 
@@ -1024,23 +1024,19 @@ impl Actor {
         &self,
         id: &str,
         started_at: &std::time::Instant,
-        exit_code: i32,
-        output: &str,
+        ok: bool,
+        summary: &str,
     ) {
-        // web_search / web_fetch are ack-only command cards: the user approves
-        // the proposed URL/query, the backend runs the network call, then this
-        // flips the card to its result state (same command_completed payload
-        // download_file uses).
+        // web_search / web_fetch have their own dedicated card + event stream
+        // (web_tool_proposed / web_tool_completed), independent of the command
+        // card. After the user approves, the backend runs the network call and
+        // this flips the card to its result state.
         self.emit(
-            "command_completed",
+            "web_tool_completed",
             json!({
                 "id": id,
-                "exit_code": exit_code,
-                "timed_out": false,
-                "early_terminated": false,
-                "output": output,
-                "original_bytes": output.len(),
-                "truncated_bytes": 0,
+                "ok": ok,
+                "summary": summary,
                 "duration_ms": started_at.elapsed().as_millis() as u64,
             }),
         );
@@ -1062,17 +1058,11 @@ impl Actor {
         let display = redacted_web_tool_target(&tc.input, "query", &self.cfg.redact_rules);
         let id = uuid::Uuid::new_v4().to_string();
         self.emit(
-            "command_proposed",
+            "web_tool_proposed",
             json!({
                 "id": id,
-                "tool_call_id": id,
-                "cmd": display,
-                "full_cmd": "",
-                "sentinel": "",
-                "explain": "",
-                "side_effect": "",
-                "timeout_s": 25,
                 "kind": "web_search",
+                "target": display,
             }),
         );
         let started_at = std::time::Instant::now();
@@ -1099,7 +1089,7 @@ impl Actor {
             Ok(search) => search,
             Err(error) => {
                 let detail = error.to_string();
-                self.finish_web_tool_card(&id, &started_at, 1, &detail);
+                self.finish_web_tool_card(&id, &started_at, false, &detail);
                 return Ok(self.make_tool_error(&tc.id, &detail));
             }
         };
@@ -1116,7 +1106,7 @@ impl Actor {
             search.provider,
             search.text.len()
         );
-        self.finish_web_tool_card(&id, &started_at, 0, &summary);
+        self.finish_web_tool_card(&id, &started_at, true, &summary);
 
         Ok(Self::make_tool_result(
             &tc.id,
@@ -1136,17 +1126,11 @@ impl Actor {
         let display = redacted_web_tool_target(&tc.input, "url", &self.cfg.redact_rules);
         let id = uuid::Uuid::new_v4().to_string();
         self.emit(
-            "command_proposed",
+            "web_tool_proposed",
             json!({
                 "id": id,
-                "tool_call_id": id,
-                "cmd": display,
-                "full_cmd": "",
-                "sentinel": "",
-                "explain": "",
-                "side_effect": "",
-                "timeout_s": 30,
                 "kind": "web_fetch",
+                "target": display,
             }),
         );
         let started_at = std::time::Instant::now();
@@ -1163,14 +1147,13 @@ impl Actor {
             CommandOutcome::Result { .. } => Self::complete_action(ack, Ok(())),
         }
 
-        // web_fetch::fetch enforces the full SSRF policy (public-IP check,
-        // DNS-rebinding pin, https→http downgrade block) even after approval —
-        // the card is user consent, this is the hard technical backstop.
+        // The approval card is the only gate (no SSRF allowlist — see
+        // web_fetch.rs); the user sees every URL before fetch.
         let page = match super::web_fetch::fetch(&input.url).await {
             Ok(page) => page,
             Err(error) => {
                 let detail = error.to_string();
-                self.finish_web_tool_card(&id, &started_at, 1, &detail);
+                self.finish_web_tool_card(&id, &started_at, false, &detail);
                 return Ok(self.make_tool_error(&tc.id, &detail));
             }
         };
@@ -1187,7 +1170,7 @@ impl Actor {
             page.source_bytes,
             if page.truncated { " (truncated)" } else { "" }
         );
-        self.finish_web_tool_card(&id, &started_at, 0, &summary);
+        self.finish_web_tool_card(&id, &started_at, true, &summary);
 
         // The page is external data and may contain secrets. Keep the original
         // in local history, but force the normal LLM-boundary redaction pass.
