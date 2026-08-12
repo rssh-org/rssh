@@ -44,6 +44,7 @@ import type {
   DownloadResult,
   AnalyzeProposal,
   AnalyzeResult,
+  PatchProposal,
 } from "./types.ts";
 import { isRawDeviceKind } from "./types.ts";
 
@@ -1932,6 +1933,18 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
     pushChat(tab, { kind: "analyze", proposal, at: Date.now() });
   });
 
+  await addListener<PatchProposal>(`ai:patch_proposed:${tab}`, (e) => {
+    const proposal = stripContextEpoch(e.payload);
+    // Per-step auto-approval: patch_cp / patch_modify / patch_diff / patch_mv
+    // each map to their own settings.auto_patch_<step> toggle.
+    commandApprovals.snapshotEligibility(
+      { tabId: tab, instanceId: info.instance_id },
+      proposal.id,
+      isAutoApprovalAllowed(_settings, `patch_${proposal.step}`),
+    );
+    pushChat(tab, { kind: "patch", proposal, at: Date.now() });
+  });
+
   // internal_command：当前只用于 file_ops 工具的远端能力探测（一行只读 echo "py3=... perl=... diff=..."）。
   // 不弹审批、不入 chat 时间线，直接粘到 PTY 跑——用户在终端历史里看到探测命令滚过，
   // 透明但不打断流程。后续若加其他 read-only 内部命令也走这条路径。
@@ -2110,6 +2123,31 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
     }
   });
 
+  // patch_completed carries the same PTY result shape as command_completed;
+  // patch cards reuse executeCommand (hence clearCommandExecution), so the
+  // registry cleanup mirrors the command path.
+  await addListener<CommandResult>(`ai:patch_completed:${tab}`, (e) => {
+    const result = stripContextEpoch(e.payload);
+    const arr = _chatByTab[tab] ?? [];
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const item = arr[i];
+      if (item.kind === "patch" && item.proposal.id === result.id) {
+        clearCommandExecution(
+          { tabId: tab, instanceId: info.instance_id },
+          result.id,
+        );
+        commandApprovals.clear(
+          { tabId: tab, instanceId: info.instance_id },
+          result.id,
+        );
+        const replaced: ChatItem = { ...item, result };
+        _chatByTab[tab] = [...arr.slice(0, i), replaced, ...arr.slice(i + 1)];
+        schedulePersist(tab);
+        break;
+      }
+    }
+  });
+
   // 拒绝路径单独事件 —— complete 跟 reject 是两种语义，复用 command_completed
   // 加 rejected:true 字段会让 listener 分支模糊。后端 RejectCommand 分支 emit
   // 这个，前端清 pending + 标记 ChatItem.rejected。command 和 web_tool 卡片
@@ -2119,7 +2157,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
     const arr = _chatByTab[tab] ?? [];
     for (let i = arr.length - 1; i >= 0; i--) {
       const item = arr[i];
-      if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download" && item.kind !== "analyze") continue;
+      if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download" && item.kind !== "analyze" && item.kind !== "patch") continue;
       const itemId = item.kind === "command" ? item.cmd.id : item.proposal.id;
       if (itemId === e.payload.id) {
         clearCommandExecution(

@@ -57,14 +57,9 @@ export interface AiSettings {
   auto_detect_remote_shell: boolean;
 }
 
-/** AI 工具卡片 kind —— 后端 emit command_proposed 时打的 tag；前端按它查 auto_* 设置。 */
-export type CommandKind =
-  | "run_command"
-  | "match_file"
-  | "patch_cp"
-  | "patch_modify"
-  | "patch_diff"
-  | "patch_mv";
+/** AI 工具卡片 kind —— 后端 emit command_proposed 时打的 tag；前端按它查 auto_* 设置。
+ *  patch×4 已迁到独立 ChatItem.patch（见 PatchStep），不在此列。 */
+export type CommandKind = "run_command" | "match_file";
 
 /** web_search / web_fetch — dedicated proposal/result stream, independent of
  *  the command card (no full_cmd/sentinel/explain/side_effect). */
@@ -117,6 +112,34 @@ export interface AnalyzeResult {
   ok: boolean;
   summary: string;
   duration_ms: number;
+}
+
+/** patch_file — 4-step staged edit (cp → modify → diff → mv), each step a PTY
+ *  execution sharing the PtyExecution envelope. Independent proposal/result
+ *  stream (patch_proposed / patch_completed); reuses executeCommand + the
+ *  shared reject (command_rejected) / ack (ai_command_result) channels.
+ *
+ *  `step` discriminates which fields are meaningful; optionals are absent on
+ *  the steps that don't use them. The result is a PTY CommandResult (exit code
+ *  + output), same shape as run_command. */
+export type PatchStep = "cp" | "modify" | "diff" | "mv";
+
+export interface PatchProposal {
+  id: string;
+  step: PatchStep;
+  /** Shell command to run (shown for trust). */
+  cmd: string;
+  /** Target file being patched. */
+  path: string;
+  /** Staging tmp path (cp / modify / diff / mv). */
+  tmp_path?: string;
+  /** modify only. */
+  find?: string;
+  replace?: string;
+  expected_count?: number;
+  /** mv only: the unified diff to show on the apply card. */
+  diff?: string;
+  execution: PtyExecution;
 }
 
 export interface ModelInfo {
@@ -182,6 +205,7 @@ export type ChatItem =
   | { kind: "web_tool"; proposal: WebToolProposal; at: number; result?: WebToolResult; rejected?: { reason: string } }
   | { kind: "download"; proposal: DownloadProposal; at: number; result?: DownloadResult; rejected?: { reason: string } }
   | { kind: "analyze"; proposal: AnalyzeProposal; at: number; result?: AnalyzeResult; rejected?: { reason: string } }
+  | { kind: "patch"; proposal: PatchProposal; at: number; result?: CommandResult; rejected?: { reason: string } }
   | { kind: "error"; text: string; at: number }
   | { kind: "note"; text: string; at: number };
 

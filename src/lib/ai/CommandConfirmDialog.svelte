@@ -35,13 +35,6 @@
     const sessionRef = (): SessionInstanceRef => ({ tabId, instanceId });
 
     let isPending = $derived(!result && !rejected);
-    // patch 卡片视觉特化（accent 高亮 + diff 框）—— 4 个阶段任一都算
-    let isPatch = $derived(
-        cmd.kind === "patch_cp"
-        || cmd.kind === "patch_modify"
-        || cmd.kind === "patch_diff"
-        || cmd.kind === "patch_mv"
-    );
     // All ack-only tools (download_file / analyze_locally / web_*) now have
     // their own ConfirmCards — none route through this dialog anymore, so this
     // collapses to false. The dead branches are removed when this dialog is
@@ -278,10 +271,10 @@
     }
 </script>
 
-<div class="cmd-card surface-flat" class:pending={isPending} class:done={!!result} class:rejected={!!rejected} class:patch={isPatch}>
+<div class="cmd-card surface-flat" class:pending={isPending} class:done={!!result} class:rejected={!!rejected}>
     <div class="head">
-        <span class="tag" class:patch-tag={isPatch}>
-            {isPatch ? t("ai.cmd.patch.tag") : t("ai.cmd.proposed.tag")}
+        <span class="tag">
+            {t("ai.cmd.proposed.tag")}
         </span>
         <code class="cmd" title={cmd.cmd}>{cmd.cmd}</code>
     </div>
@@ -290,13 +283,6 @@
         <div><span class="label">{t("ai.cmd.label.side_effect")}</span><span class="val" title={cmd.side_effect}>{cmd.side_effect}</span></div>
         <div><span class="label">{t("ai.cmd.label.timeout")}</span><span class="val">{cmd.execution.timeout_s}s</span></div>
     </div>
-
-    {#if isPatch && cmd.diff}
-        <!-- 注意：span 是 display:block，自然换行。`<pre>` + `white-space:pre` 会把任何模板里的
-             字面换行/缩进当真空白渲染，所以 span 之间不能有任何 whitespace，否则 diff 每行后会出现
-             多余空行。整段写在一行内，闭合标签紧贴下一个开始标签。 -->
-        <pre class="diff">{#each cmd.diff.split("\n") as line, i (i)}<span class="diff-line {line.startsWith('+') && !line.startsWith('+++') ? 'add' : line.startsWith('-') && !line.startsWith('---') ? 'del' : line.startsWith('@@') ? 'hunk' : line.startsWith('+++') || line.startsWith('---') ? 'file' : 'ctx'}">{line}</span>{/each}</pre>
-    {/if}
 
     {#if isPending}
         {#if !askingReason}
@@ -365,33 +351,6 @@
     }
     .cmd-card.done { border-left: 3px solid var(--success); }
     .cmd-card.rejected { opacity: 0.6; border-left: 3px solid var(--text-dim); }
-    .cmd-card.patch.pending {
-        border-left: 3px solid var(--accent);
-        background: color-mix(in srgb, var(--accent) 4%, var(--bg));
-    }
-
-    .patch-tag {
-        background: var(--accent);
-        color: var(--white);
-    }
-    .diff {
-        margin-top: 6px;
-        padding: 6px 8px;
-        background: color-mix(in srgb, var(--text) 5%, var(--bg));
-        border-radius: 4px;
-        font-family: monospace;
-        font-size: 11.5px;
-        max-height: 360px;
-        overflow: auto;
-        white-space: pre;
-        line-height: 1.35;
-    }
-    .diff-line { display: block; }
-    .diff-line.add { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
-    .diff-line.del { background: color-mix(in srgb, var(--error) 18%, transparent); color: var(--error); }
-    .diff-line.hunk { color: var(--text-dim); font-weight: 600; }
-    .diff-line.file { color: var(--text-dim); }
-    .diff-line.ctx { color: var(--text); }
 
     .head { display: flex; gap: 8px; align-items: center; }
     .tag {

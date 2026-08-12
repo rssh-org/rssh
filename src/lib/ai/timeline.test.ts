@@ -149,6 +149,42 @@ describe("restoreTimeline", () => {
     ]);
     expect(items).toEqual([{ kind: "user", text: "kept", at: 2 }]);
   });
+
+  // --- patch (independent line, PTY execution via executeCommand) ---
+  it("marks an unresolved patch card as stale-rejected", () => {
+    const [p] = roundtrip([
+      { kind: "patch", proposal: { id: "p1", step: "cp", path: "/etc/x", tmp_path: "/etc/x.rssh-1", cmd: "cp ..." }, at: 1 },
+    ]);
+    expect(p.kind === "patch" && p.rejected?.reason).toBe(STALE);
+  });
+
+  it("strips a non-string patch diff instead of crashing the diff renderer", () => {
+    const [p] = roundtrip([
+      { kind: "patch", proposal: { id: "p1", step: "mv", path: "/etc/x", diff: 42, cmd: "mv ..." }, at: 1, rejected: { reason: "no" } },
+    ]);
+    expect(p.kind === "patch" && p.proposal.diff).toBeUndefined();
+  });
+
+  it("drops legacy patch_* command cards from before the split", () => {
+    // patch×4 migrated to ChatItem.patch — a stale blob may still hold them as
+    // command cards. Drop, don't resurrect orphans.
+    const items = roundtrip([
+      { kind: "command", cmd: { id: "p1", tool_call_id: "p1", cmd: "cp", full_cmd: "", sentinel: "", explain: "", side_effect: "", timeout_s: 30, kind: "patch_cp" }, at: 1 },
+      { kind: "command", cmd: { id: "p2", tool_call_id: "p2", cmd: "mv", full_cmd: "", sentinel: "", explain: "", side_effect: "", timeout_s: 30, kind: "patch_mv" }, at: 2 },
+      { kind: "user", text: "kept", at: 3 },
+    ]);
+    expect(items).toEqual([{ kind: "user", text: "kept", at: 3 }]);
+  });
+
+  it("drops patch cards with a mangled proposal shape", () => {
+    const items = roundtrip([
+      { kind: "patch", proposal: { id: "p1", step: "bogus", path: "/x" }, at: 1 }, // bad step
+      { kind: "patch", proposal: { id: "p2", step: "cp" }, at: 2 },                // missing path
+      { kind: "patch", at: 3 },                                                    // missing proposal
+      { kind: "user", text: "kept", at: 4 },
+    ]);
+    expect(items).toEqual([{ kind: "user", text: "kept", at: 4 }]);
+  });
 });
 
 describe("applyTerminalMutations", () => {
@@ -385,6 +421,61 @@ describe("applyTerminalMutations", () => {
     ])).toEqual([
       expect.objectContaining({
         kind: "download",
+        rejected: { reason: "nope" },
+        result: undefined,
+      }),
+    ]);
+  });
+
+  it("replays patch completion (pty result) by proposal id", () => {
+    const card = (id: string): ChatItem => ({
+      kind: "patch",
+      proposal: { id, step: "cp", path: "/etc/x", tmp_path: "/etc/x.rssh-1", cmd: "cp ...", execution: { full_cmd: "cp ...", sentinel: "s", timeout_s: 30 } },
+      at: 1,
+    });
+    const mutations = [
+      { kind: "patch_completed", payload: { id: "ok", exit_code: 0, timed_out: false, duration_ms: 12, output: "", original_bytes: 0, truncated_bytes: 0 } },
+      { kind: "patch_completed", payload: { id: "fail", exit_code: 1, timed_out: false, duration_ms: 7, output: "boom", original_bytes: 4, truncated_bytes: 0 } },
+    ];
+    const once = applyTerminalMutations([card("ok"), card("fail")], mutations);
+    // Idempotent: replaying the same terminal events must not double-apply.
+    const twice = applyTerminalMutations(once, mutations);
+    expect(twice).toEqual([
+      expect.objectContaining({
+        kind: "patch",
+        result: { id: "ok", exit_code: 0, timed_out: false, early_terminated: false, duration_ms: 12, output: "", original_bytes: 0, truncated_bytes: 0 },
+      }),
+      expect.objectContaining({
+        kind: "patch",
+        result: { id: "fail", exit_code: 1, timed_out: false, early_terminated: false, duration_ms: 7, output: "boom", original_bytes: 4, truncated_bytes: 0 },
+      }),
+    ]);
+  });
+
+  it("drops malformed patch_completed payloads without touching the card", () => {
+    const card: ChatItem = {
+      kind: "patch",
+      proposal: { id: "p1", step: "cp", path: "/x", cmd: "cp ...", execution: { full_cmd: "cp ...", sentinel: "s", timeout_s: 30 } },
+      at: 1,
+    };
+    expect(applyTerminalMutations([card], [
+      { kind: "patch_completed", payload: { id: "p1", exit_code: 0, timed_out: false, duration_ms: 1, output: "", original_bytes: 0 } }, // missing truncated_bytes
+      { kind: "patch_completed", payload: { id: "missing", exit_code: 0, timed_out: false, duration_ms: 1, output: "", original_bytes: 0, truncated_bytes: 0 } }, // no card
+    ])).toEqual([card]);
+  });
+
+  it("rejects a patch card through the shared command_rejected channel", () => {
+    const card: ChatItem = {
+      kind: "patch",
+      proposal: { id: "p1", step: "mv", path: "/etc/x", diff: "--- x\n+++ x\n", cmd: "mv ...", execution: { full_cmd: "mv ...", sentinel: "s", timeout_s: 30 } },
+      at: 1,
+      result: { id: "p1", exit_code: 0, timed_out: false, duration_ms: 1, output: "", original_bytes: 0, truncated_bytes: 0 },
+    };
+    expect(applyTerminalMutations([card], [
+      { kind: "command_rejected", payload: { id: "p1", reason: "nope" } },
+    ])).toEqual([
+      expect.objectContaining({
+        kind: "patch",
         rejected: { reason: "nope" },
         result: undefined,
       }),

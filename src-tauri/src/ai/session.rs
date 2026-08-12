@@ -98,6 +98,7 @@ fn is_terminal_ui_mutation(kind: &str, _payload: &serde_json::Value) -> bool {
             | "web_tool_completed"
             | "download_completed"
             | "analyze_completed"
+            | "patch_completed"
     )
 }
 

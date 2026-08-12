@@ -37,14 +37,26 @@ function isRenderable(item: ChatItem): boolean {
     case "assistant":
       return isStr(item.id) && isStr(item.text);
     case "command": {
-      // download_file / analyze_locally migrated to their own ChatItem kinds.
-      // A stale blob may still hold them as command cards — drop rather than
-      // resurrect orphans with empty full_cmd/sentinel.
+      // download_file / analyze_locally / patch×4 migrated to their own
+      // ChatItem kinds. A stale blob may still hold them as command cards —
+      // drop rather than resurrect orphans with empty full_cmd/sentinel.
       const migrated = item.cmd?.kind as string | undefined;
-      if (migrated === "download_file" || migrated === "analyze_locally") return false;
+      if (
+        migrated === "download_file" || migrated === "analyze_locally"
+        || migrated === "patch_cp" || migrated === "patch_modify"
+        || migrated === "patch_diff" || migrated === "patch_mv"
+      ) return false;
       return (
         !!item.cmd && typeof item.cmd === "object" &&
         isStr(item.cmd.id) && isStr(item.cmd.cmd)
+      );
+    }
+    case "patch": {
+      const step = item.proposal?.step as string | undefined;
+      return (
+        !!item.proposal && typeof item.proposal === "object" &&
+        isStr(item.proposal.id) && isStr(item.proposal.path) &&
+        (step === "cp" || step === "modify" || step === "diff" || step === "mv")
       );
     }
     case "analyze":
@@ -107,6 +119,16 @@ export function restoreTimeline(json: string, staleCommandReason: string): ChatI
       // result|rejected).
       if (item.cmd.diff !== undefined && !isStr(item.cmd.diff)) {
         delete item.cmd.diff;
+      }
+      if (!item.result && !item.rejected) {
+        item.rejected = { reason: staleCommandReason };
+      }
+    } else if (item.kind === "patch") {
+      // Same crash vector as command cards: a truthy non-string diff would hit
+      // proposal.diff.split() in the mv card. Strip rather than drop — the card
+      // is still meaningful without its diff preview.
+      if (item.proposal.diff !== undefined && !isStr(item.proposal.diff)) {
+        delete item.proposal.diff;
       }
       if (!item.result && !item.rejected) {
         item.rejected = { reason: staleCommandReason };
@@ -179,7 +201,7 @@ export function applyTerminalMutations(
       const index = findLastIndex(items, (item) => cardId(item) === payload.id);
       if (index < 0) continue;
       const item = items[index];
-      if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download" && item.kind !== "analyze") continue;
+      if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download" && item.kind !== "analyze" && item.kind !== "patch") continue;
       items = replaceAt(items, index, {
         ...item,
         result: undefined,
@@ -259,6 +281,39 @@ export function applyTerminalMutations(
       continue;
     }
 
+    if (mutation.kind === "patch_completed") {
+      // Same PTY-execution result shape as command_completed; matches patch
+      // cards (reuses executeCommand, so the registry is shared by id).
+      if (
+        typeof payload.exit_code !== "number"
+        || typeof payload.timed_out !== "boolean"
+        || typeof payload.duration_ms !== "number"
+        || !isStr(payload.output)
+        || typeof payload.original_bytes !== "number"
+        || typeof payload.truncated_bytes !== "number"
+      ) continue;
+      const index = findLastIndex(items, (item) =>
+        item.kind === "patch" && item.proposal.id === payload.id);
+      if (index < 0) continue;
+      const item = items[index];
+      if (item.kind !== "patch") continue;
+      items = replaceAt(items, index, {
+        ...item,
+        rejected: undefined,
+        result: {
+          id: payload.id,
+          exit_code: payload.exit_code,
+          timed_out: payload.timed_out,
+          early_terminated: payload.early_terminated === true,
+          duration_ms: payload.duration_ms,
+          output: payload.output,
+          original_bytes: payload.original_bytes,
+          truncated_bytes: payload.truncated_bytes,
+        },
+      });
+      continue;
+    }
+
     if (mutation.kind !== "command_completed") continue;
     if (
       typeof payload.exit_code !== "number"
@@ -316,6 +371,6 @@ function replaceAt(items: ChatItem[], index: number, item: ChatItem): ChatItem[]
 /** Card id of a proposal-bearing ChatItem (command or web_tool), else null. */
 function cardId(item: ChatItem): string | null {
   if (item.kind === "command") return item.cmd.id;
-  if (item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze") return item.proposal.id;
+  if (item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze" || item.kind === "patch") return item.proposal.id;
   return null;
 }

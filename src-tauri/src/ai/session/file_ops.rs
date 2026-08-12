@@ -521,60 +521,53 @@ impl Actor {
         Ok(caps)
     }
 
-    /// 跑一条 file_ops 命令：弹 `command_proposed` 卡片 → 等用户审批 / 执行 → 审计 + 返回结果。
+    /// 跑一条 file_ops 命令：弹 `<event>_proposed` 卡片 → 等用户审批 / 执行 → 审计 + 返回结果。
     ///
     /// 跟 `handle_run_command` 的区别：
     /// 1. **不走 `sanitize::validate`**。cp / mv / python3 等会被 DESTRUCTIVE / INTERPRETERS_DENIED
     ///    拒掉，但 file_ops 的命令是 rssh 后端构造的固定模板（不是 LLM 直传），由 rssh 自己负责安全。
-    /// 2. `explain` / `side_effect` 由调用方硬编码传入，不来自 LLM。
-    /// 3. 返回原始 `CommandOutcome` 给上层做错误分支（多步流程要根据 exit / JSON marker
+    /// 2. 返回原始 `CommandOutcome` 给上层做错误分支（多步流程要根据 exit / JSON marker
     ///    决定是否中断、是否提示 tmp 残留等）。
     ///
-    /// `kind` 透传给前端 dialog —— 前端按 kind 查 per-tool 自动批准设置：
-    /// `patch_cp` / `patch_modify` / `patch_diff` / `patch_mv` 四张 patch_file 卡片各自一档；
-    /// `match_file` 一张卡片自己一档（read-only，默认自动批）。danger_mode 关时全部需人审。
-    ///
-    /// `diff` 透传给前端：patch_file 第 4 张 mv 卡片把第 3 张 diff 命令的输出当作审批
-    /// 材料展示在卡片上 —— 用户审批 mv 时不用回滚翻第 3 张结果区域。其他卡片传 None。
+    /// `domain` 是该步骤的领域字段（调用方构造）—— patch 步骤带 step / path / find / replace /
+    /// expected_count / diff 等结构化字段；match_file 带 explain / side_effect / kind。本方法只负责
+    /// 注入执行信封（id / cmd / execution），不关心领域语义。`event` 决定 emit 的事件名前缀
+    /// （"command" 给 match_file，"patch" 给 patch×4），让每种工具拥有自己的 proposal/result 流，
+    /// 而共用同一条 PTY 执行 + sentinel + outcome-wait 核。
     async fn run_file_op(
         &mut self,
         cmd: String,
-        explain: String,
-        side_effect: String,
         timeout_s: u32,
-        kind: Option<&str>,
-        diff: Option<&str>,
+        domain: serde_json::Map<String, serde_json::Value>,
+        event: &str,
     ) -> AppResult<CommandOutcome> {
         let cmd_id = uuid::Uuid::new_v4().to_string();
         let (sentinel, full_cmd) = self.cfg.shell_kind.sentinel_command(&cmd);
 
+        // Audit reads explain/side_effect from the domain when the caller
+        // carries them (match_file). Patch steps carry structured fields
+        // instead, so the audit surfaces just the command — the cmd itself is
+        // the meaningful record, and handle_patch_file audits a step-aware Note.
+        let explain = domain.get("explain").and_then(|v| v.as_str()).unwrap_or("");
+        let side_effect = domain.get("side_effect").and_then(|v| v.as_str()).unwrap_or("");
         self.audit_push(AuditKind::CommandProposed {
             id: cmd_id.clone(),
             cmd: cmd.clone(),
-            explain: explain.clone(),
-            side_effect: side_effect.clone(),
+            explain: explain.to_string(),
+            side_effect: side_effect.to_string(),
         });
         let started_at = std::time::Instant::now();
 
-        let mut payload = json!({
-            "id": cmd_id,
-            "tool_call_id": cmd_id,
-            "cmd": cmd,
-            "explain": explain,
-            "side_effect": side_effect,
-            "execution": {
-                "full_cmd": full_cmd,
-                "sentinel": sentinel,
-                "timeout_s": timeout_s,
-            },
-        });
-        if let Some(k) = kind {
-            payload["kind"] = json!(k);
-        }
-        if let Some(d) = diff {
-            payload["diff"] = json!(d);
-        }
-        self.emit("command_proposed", payload);
+        let mut payload = domain;
+        payload.insert("id".into(), json!(cmd_id));
+        payload.insert("tool_call_id".into(), json!(cmd_id));
+        payload.insert("cmd".into(), json!(cmd));
+        payload.insert("execution".into(), json!({
+            "full_cmd": full_cmd,
+            "sentinel": sentinel,
+            "timeout_s": timeout_s,
+        }));
+        self.emit(&format!("{event}_proposed"), serde_json::Value::Object(payload));
 
         let (outcome, ack) = self.wait_command_outcome(&cmd_id).await?;
         match outcome {
@@ -592,7 +585,7 @@ impl Actor {
                 let redacted = sanitize::redact(&output, &self.cfg.redact_rules);
                 let trunc = sanitize::truncate(&redacted, self.cfg.max_output_bytes);
                 self.emit(
-                    "command_completed",
+                    &format!("{event}_completed"),
                     json!({
                         "id": cmd_id,
                         "exit_code": exit_code,
@@ -667,16 +660,12 @@ impl Actor {
         };
 
         let cmd = build_match_cmd(interp, &input.path, &input.find, before, after);
-        let outcome = self
-            .run_file_op(
-                cmd,
-                format!("match_file: search `{}` (read-only)", input.path),
-                "read-only".into(),
-                60,
-                Some("match_file"),
-                None,
-            )
-            .await?;
+        let domain = serde_json::Map::from_iter([
+            ("explain".into(), json!(format!("match_file: search `{}` (read-only)", input.path))),
+            ("side_effect".into(), json!("read-only")),
+            ("kind".into(), json!("match_file")),
+        ]);
+        let outcome = self.run_file_op(cmd, 60, domain, "command").await?;
 
         let (exit_code, output) = match outcome {
             CommandOutcome::Rejected { reason } => {
@@ -811,18 +800,13 @@ impl Actor {
         let tmp_path = format!("{}.rssh-{}", input.path, tmp_suffix);
 
         // ── Card 1/4: cp 原文到 tmp ──────────────────────────────
+        let domain = serde_json::Map::from_iter([
+            ("step".into(), json!("cp")),
+            ("path".into(), json!(&input.path)),
+            ("tmp_path".into(), json!(&tmp_path)),
+        ]);
         let outcome = self
-            .run_file_op(
-                build_cp_cmd(&input.path, &tmp_path),
-                format!(
-                    "patch_file 1/4: copy `{}` to staging `{}`",
-                    input.path, tmp_path
-                ),
-                format!("Create {}", tmp_path),
-                30,
-                Some("patch_cp"),
-                None,
-            )
+            .run_file_op(build_cp_cmd(&input.path, &tmp_path), 30, domain, "patch")
             .await?;
         match outcome {
             CommandOutcome::Rejected { reason } => {
@@ -846,6 +830,14 @@ impl Actor {
         }
 
         // ── Card 2/4: 解释器 in-place 改 tmp（校验 count → 替换 → 回 {count}） ──
+        let domain = serde_json::Map::from_iter([
+            ("step".into(), json!("modify")),
+            ("path".into(), json!(&input.path)),
+            ("tmp_path".into(), json!(&tmp_path)),
+            ("find".into(), json!(&input.find)),
+            ("replace".into(), json!(&input.replace)),
+            ("expected_count".into(), json!(input.expected_count)),
+        ]);
         let outcome = self
             .run_file_op(
                 build_modify_cmd(
@@ -855,16 +847,9 @@ impl Actor {
                     &input.replace,
                     input.expected_count,
                 ),
-                format!(
-                    "patch_file 2/4: replace {} occurrence(s) in `{}` (via {})",
-                    input.expected_count,
-                    tmp_path,
-                    interp.binary()
-                ),
-                format!("Modify {} in place", tmp_path),
                 60,
-                Some("patch_modify"),
-                None,
+                domain,
+                "patch",
             )
             .await?;
         let (modify_exit, modify_output) = match outcome {
@@ -933,18 +918,13 @@ impl Actor {
 
         // ── Card 3/4: diff -u path tmp（输出展示给用户）─────────
         // exit 0=无差异 / 1=有差异（正常）/ >=2=工具失败
+        let domain = serde_json::Map::from_iter([
+            ("step".into(), json!("diff")),
+            ("path".into(), json!(&input.path)),
+            ("tmp_path".into(), json!(&tmp_path)),
+        ]);
         let outcome = self
-            .run_file_op(
-                build_diff_cmd(&input.path, &tmp_path),
-                format!(
-                    "patch_file 3/4: review diff of `{}` vs staged tmp",
-                    input.path
-                ),
-                "read-only (display diff for review)".into(),
-                30,
-                Some("patch_diff"),
-                None,
-            )
+            .run_file_op(build_diff_cmd(&input.path, &tmp_path), 30, domain, "patch")
             .await?;
         let (diff_exit, diff_raw) = match outcome {
             CommandOutcome::Rejected { reason } => {
@@ -1004,18 +984,14 @@ impl Actor {
         let diff_truncated_bytes = diff_trunc.truncated_bytes;
 
         // ── Card 4/4: mv tmp → path（原子覆盖） ─────────────────
+        let domain = serde_json::Map::from_iter([
+            ("step".into(), json!("mv")),
+            ("path".into(), json!(&input.path)),
+            ("tmp_path".into(), json!(&tmp_path)),
+            ("diff".into(), json!(&diff)),
+        ]);
         let outcome = self
-            .run_file_op(
-                build_mv_cmd(&tmp_path, &input.path),
-                format!(
-                    "patch_file 4/4: apply via `mv {} -> {}`",
-                    tmp_path, input.path
-                ),
-                format!("Atomic rename {} -> {}", tmp_path, input.path),
-                30,
-                Some("patch_mv"),
-                Some(&diff),
-            )
+            .run_file_op(build_mv_cmd(&tmp_path, &input.path), 30, domain, "patch")
             .await?;
         match outcome {
             CommandOutcome::Rejected { reason } => {
