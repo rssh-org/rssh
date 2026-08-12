@@ -1634,6 +1634,8 @@ type AiSettingsPatch = Partial<{
   autoPatchModify: boolean;
   autoPatchDiff: boolean;
   autoPatchMv: boolean;
+  autoWebSearch: boolean;
+  autoWebFetch: boolean;
   autoDetectRemoteShell: boolean;
 }>;
 
@@ -1646,7 +1648,9 @@ type AutoApprovalSettingKey =
   | "auto_patch_cp"
   | "auto_patch_modify"
   | "auto_patch_diff"
-  | "auto_patch_mv";
+  | "auto_patch_mv"
+  | "auto_web_search"
+  | "auto_web_fetch";
 
 const AUTO_APPROVAL_PATCH_FIELDS = [
   ["dangerMode", "danger_mode"],
@@ -1658,6 +1662,8 @@ const AUTO_APPROVAL_PATCH_FIELDS = [
   ["autoPatchModify", "auto_patch_modify"],
   ["autoPatchDiff", "auto_patch_diff"],
   ["autoPatchMv", "auto_patch_mv"],
+  ["autoWebSearch", "auto_web_search"],
+  ["autoWebFetch", "auto_web_fetch"],
 ] as const satisfies ReadonlyArray<readonly [keyof AiSettingsPatch, AutoApprovalSettingKey]>;
 
 // A disable is a safety action, not merely a persisted preference. Keep its

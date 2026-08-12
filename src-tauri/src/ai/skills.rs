@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::{ai_skill, Db};
+use crate::db::{Db, ai_skill};
 use crate::error::AppResult;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,8 +18,7 @@ pub struct SkillRecord {
 pub const GENERAL_ID: &str = "general";
 
 const GENERAL_NAME: &str = "General Ops diagnosis";
-const GENERAL_DESC: &str =
-    "Default rule set + workflow reference for CPU / memory / general triage. The LLM picks commands itself.";
+const GENERAL_DESC: &str = "Default rule set + workflow reference for CPU / memory / general triage. The LLM picks commands itself.";
 
 pub fn builtin(id: &str) -> Option<SkillRecord> {
     let (name, description, content) = match id {
@@ -113,7 +112,7 @@ pub fn build_catalog_prompt(
     let mut s = String::new();
     s.push_str(super::prompts::GENERAL);
 
-    let loadable: Vec<SkillRecord> = ai_skill::list(db)?.into_iter().map(user_record).collect();
+    let loadable = list_user(db)?;
     if !loadable.is_empty() {
         s.push_str("\n\n---\n\n# Available skills (catalog)\n\n");
         s.push_str(

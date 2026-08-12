@@ -304,7 +304,7 @@ mod tests {
     fn exposes_web_search_with_bounded_parameters() {
         let tool = all_tools()
             .into_iter()
-            .find(|tool| tool.name == "web_search")
+            .find(|tool| tool.name == TOOL_WEB_SEARCH)
             .expect("web_search tool must be exposed");
 
         assert_eq!(tool.input_schema["required"], json!(["query"]));

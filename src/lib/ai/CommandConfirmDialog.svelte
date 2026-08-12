@@ -43,11 +43,9 @@
         || cmd.kind === "patch_mv"
     );
     // download_file / analyze_locally 不走 PTY，approve 只发 ack 给后端；视觉无需特化。
+    // web_search / web_fetch 走独立的 WebToolConfirmCard，不经过本组件。
     let isAckOnly = $derived(
-        cmd.kind === "download_file"
-            || cmd.kind === "analyze_locally"
-            || cmd.kind === "web_search"
-            || cmd.kind === "web_fetch"
+        cmd.kind === "download_file" || cmd.kind === "analyze_locally"
     );
 
     function syncExecutionStatus() {

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -15,6 +16,11 @@ const MAX_URL_CHARS: usize = 2_048;
 const TRUNCATION_NOTICE: &str = "\n\n[Content truncated by rssh.]";
 const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
 const HONEST_UA: &str = concat!("rssh/", env!("CARGO_PKG_VERSION"));
+
+// Process-lifetime connection pool — mirrors web_search. UA is deliberately NOT
+// set on the builder: send_request swaps CHROME_UA / HONEST_UA per request for
+// the Cloudflare-retry path, and a builder UA would shadow that header.
+static HTTP_CLIENT: OnceLock<Result<reqwest::Client, ()>> = OnceLock::new();
 
 #[derive(Debug, thiserror::Error)]
 pub enum WebFetchError {
@@ -200,22 +206,31 @@ fn is_cf_challenge(response: &reqwest::Response) -> bool {
             .is_some_and(|value| value == "challenge")
 }
 
+fn http_client() -> Result<&'static reqwest::Client, WebFetchError> {
+    HTTP_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .map_err(|_| ())
+        })
+        .as_ref()
+        .map_err(|_| WebFetchError::ClientBuild)
+}
+
 pub async fn fetch(raw_url: &str) -> Result<WebPage, WebFetchError> {
     let requested_url = parse_url(raw_url)?;
     // reqwest follows redirects itself (Policy::limited) and reads the system
     // proxy via the `system-proxy` feature — same as opencode. No manual
     // redirect loop, no per-hop address re-check.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .map_err(|_| WebFetchError::ClientBuild)?;
-    let response = send_request(&client, &requested_url, CHROME_UA).await?;
+    let client = http_client()?;
+    let response = send_request(client, &requested_url, CHROME_UA).await?;
     // Cloudflare bot challenge (TLS fingerprint mismatch): retry once with an
     // honest UA, matching opencode's fallback.
     let response = if is_cf_challenge(&response) {
-        send_request(&client, &requested_url, HONEST_UA).await?
+        send_request(client, &requested_url, HONEST_UA).await?
     } else {
         response
     };
