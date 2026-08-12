@@ -191,7 +191,7 @@
             }
             const liveTargetSessionId = targetSessionId;
             if (!liveTargetSessionId) throw new Error(t("common.disconnected"));
-            await ai.executeCommand(session, cmd, targetKind, liveTargetSessionId);
+            await ai.executeCommand(session, cmd.id, cmd.execution, targetKind, liveTargetSessionId);
         } catch (e) {
             console.error("[ai] execute failed:", e);
             if (isAckOnly) {
@@ -288,7 +288,7 @@
     <div class="meta">
         <div><span class="label">{t("ai.cmd.label.explain")}</span><span class="val" title={cmd.explain}>{cmd.explain}</span></div>
         <div><span class="label">{t("ai.cmd.label.side_effect")}</span><span class="val" title={cmd.side_effect}>{cmd.side_effect}</span></div>
-        <div><span class="label">{t("ai.cmd.label.timeout")}</span><span class="val">{cmd.timeout_s}s</span></div>
+        <div><span class="label">{t("ai.cmd.label.timeout")}</span><span class="val">{cmd.execution.timeout_s}s</span></div>
     </div>
 
     {#if isPatch && cmd.diff}

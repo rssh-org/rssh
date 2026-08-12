@@ -31,6 +31,7 @@ import type {
   CategoryGroup,
   CommandResult,
   ConversationMeta,
+  PtyExecution,
   LlmProvider,
   ModelInfo,
   RedactRuleRecord,
@@ -1342,14 +1343,20 @@ function clearCommandExecutionsForSession(session: SessionInstanceRef): void {
 }
 
 /**
- * Execute an AI-proposed command: paste `full_cmd` (with sentinel +
- * exit-code echo) into the active terminal, watch the PTY stream for
- * the sentinel, then report output + exit code to the backend. All
+ * Execute an AI-proposed PTY command: paste `execution.full_cmd` (with
+ * sentinel + exit-code echo) into the active terminal, watch the PTY stream
+ * for the sentinel, then report output + exit code to the backend. All
  * front-end; the backend's ai module never executes commands itself.
+ *
+ * Takes the execution envelope directly (not a CommandProposed) so every PTY
+ * tool — run_command / match_file / patch×4 — reuses this same runner by
+ * handing its own `execution` field. `cardId` is the per-card id shared with
+ * the proposal/result events.
  */
 export async function executeCommand(
   session: SessionInstanceRef,
-  proposed: CommandProposed,
+  cardId: string,
+  execution: PtyExecution,
   target_kind: AiTargetKind,
   target_session_id: string,
 ): Promise<void> {
@@ -1360,7 +1367,7 @@ export async function executeCommand(
   // listener + timer would leak when `_commandExecutions.set` below overwrites
   // the entry. The map is the single source of truth for "in flight" — honor it.
   // Once transport has run, a retry can only redeliver its recorded result.
-  const executionKey = sessionCommandKey(session, proposed.id);
+  const executionKey = sessionCommandKey(session, cardId);
   const existing = _commandExecutions.get(executionKey);
   if (existing) {
     switch (existing.status) {
@@ -1401,7 +1408,7 @@ export async function executeCommand(
 
   const exec: Execution = {
     key: executionKey,
-    commandId: proposed.id,
+    commandId: cardId,
     tabId: session.tabId,
     instanceId: session.instanceId,
     targetSessionId: target_session_id,
@@ -1509,7 +1516,7 @@ export async function executeCommand(
       // Raw devices (serial/telnet) have no sentinel — just accumulate.
       // Completion comes from the user (submit) or the safety timeout below.
       if (isRawDeviceKind(target_kind)) return;
-      const hit = findSentinel(exec.buffer.view(), proposed.sentinel);
+      const hit = findSentinel(exec.buffer.view(), execution.sentinel);
       if (hit) void finish(hit.output, hit.exitCode, false);
     });
     // close/terminate may have won while listen() was registering. Never paste
@@ -1536,9 +1543,9 @@ export async function executeCommand(
   // isCommandRunning() stays true forever.
   try {
     if (target_kind === "telnet") {
-      await invoke("telnet_write_line", { sessionId: target_session_id, text: proposed.full_cmd });
+      await invoke("telnet_write_line", { sessionId: target_session_id, text: execution.full_cmd });
     } else {
-      const data = Array.from(new TextEncoder().encode(proposed.full_cmd + "\r"));
+      const data = Array.from(new TextEncoder().encode(execution.full_cmd + "\r"));
       await invoke(writeCmd, { sessionId: target_session_id, data });
     }
   } catch (e) {
@@ -1552,7 +1559,7 @@ export async function executeCommand(
   if (exec.status !== "running") return done;
   exec.timer = window.setTimeout(() => {
     void finish(extractOutput(exec.buffer.view(), undefined, dropEcho), -1, true);
-  }, Math.max(1000, proposed.timeout_s * 1000)) as unknown as number;
+  }, Math.max(1000, execution.timeout_s * 1000)) as unknown as number;
 
   return done;
 }
@@ -1966,18 +1973,14 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
       }
       return;
     }
-    const proposed: CommandProposed = {
-      id: e.payload.id,
-      tool_call_id: e.payload.id,
-      cmd: e.payload.cmd,
-      full_cmd: e.payload.full_cmd,
-      sentinel: e.payload.sentinel,
-      explain: "",
-      side_effect: "",
-      timeout_s: 60,
-    };
     try {
-      await executeCommand(session, proposed, kind, currentInfo.target_id);
+      await executeCommand(
+        session,
+        e.payload.id,
+        { full_cmd: e.payload.full_cmd, sentinel: e.payload.sentinel, timeout_s: 60 },
+        kind,
+        currentInfo.target_id,
+      );
       // Internal probes have no command card and therefore no matching
       // command_completed event to own registry cleanup. ai_command_result is a
       // processing ack, so success is the exact point at which replay is no

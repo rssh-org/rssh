@@ -185,19 +185,28 @@ export type ChatItem =
   | { kind: "error"; text: string; at: number }
   | { kind: "note"; text: string; at: number };
 
+/** PTY execution envelope — the "how to run it" half of a proposal, shared by
+ *  every tool whose approval pastes a command into the terminal (run_command /
+ *  match_file / patch×4). Split out from each tool's domain fields so
+ *  `executeCommand` takes just (cardId, execution) and is reused across proposal
+ *  types instead of depending on any one of them. */
+export interface PtyExecution {
+  /** 实际要粘贴到终端的命令（含 sentinel + exit code 回显），由后端拼装。 */
+  full_cmd: string;
+  /** 用于在 PTY 输出流里识别命令完成的随机字符串。 */
+  sentinel: string;
+  timeout_s: number;
+}
+
 export interface CommandProposed {
   id: string;
   /** Compatibility wire alias. New backends set this to the per-card `id`; the
    * provider's tool-call id remains backend-internal. */
   tool_call_id: string;
   cmd: string;
-  /** 实际要粘贴到终端的命令（含 sentinel + exit code 回显），由后端拼装。 */
-  full_cmd: string;
-  /** 用于在 PTY 输出流里识别命令完成的随机字符串。 */
-  sentinel: string;
   explain: string;
   side_effect: string;
-  timeout_s: number;
+  execution: PtyExecution;
   /**
    * 工具卡片类型 —— 前端按 kind 查 settings.auto_<kind> 决定是否自动批准。
    * 历史回放（旧 audit log 重渲染）可能没有 kind，按未知处理走人审。

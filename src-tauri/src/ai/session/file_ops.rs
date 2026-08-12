@@ -560,11 +560,13 @@ impl Actor {
             "id": cmd_id,
             "tool_call_id": cmd_id,
             "cmd": cmd,
-            "full_cmd": full_cmd,
-            "sentinel": sentinel,
             "explain": explain,
             "side_effect": side_effect,
-            "timeout_s": timeout_s,
+            "execution": {
+                "full_cmd": full_cmd,
+                "sentinel": sentinel,
+                "timeout_s": timeout_s,
+            },
         });
         if let Some(k) = kind {
             payload["kind"] = json!(k);

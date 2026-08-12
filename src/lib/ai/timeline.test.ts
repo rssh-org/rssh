@@ -185,11 +185,9 @@ describe("applyTerminalMutations", () => {
         id,
         tool_call_id: `tool-${id}`,
         cmd: "show secret",
-        full_cmd: "show secret",
-        sentinel: "sentinel",
         explain: "",
         side_effect: "",
-        timeout_s: 30,
+        execution: { full_cmd: "show secret", sentinel: "sentinel", timeout_s: 30 },
       },
       at: 1,
     });

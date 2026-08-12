@@ -1721,12 +1721,14 @@ impl Actor {
                 "id": cmd_id,
                 "tool_call_id": cmd_id,
                 "cmd": input.cmd,
-                "full_cmd": full_cmd,
-                "sentinel": sentinel,
                 "explain": input.explain,
                 "side_effect": input.side_effect,
-                "timeout_s": timeout_s,
                 "kind": "run_command",
+                "execution": {
+                    "full_cmd": full_cmd,
+                    "sentinel": sentinel,
+                    "timeout_s": timeout_s,
+                },
             }),
         );
 
