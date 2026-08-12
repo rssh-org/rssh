@@ -130,6 +130,25 @@ describe("restoreTimeline", () => {
     ]);
     expect(items).toEqual([{ kind: "user", text: "kept", at: 4 }]);
   });
+
+  // --- download (independent line, ack-only) ---
+  it("marks an unresolved download card as stale-rejected", () => {
+    const [d] = roundtrip([
+      { kind: "download", proposal: { id: "d1", remote_path: "/var/log/x", max_mb: 50, dest_dir: "/tmp/x" }, at: 1 },
+    ]);
+    expect(d.kind === "download" && d.rejected?.reason).toBe(STALE);
+  });
+
+  it("drops legacy command/download_file cards from before the split", () => {
+    // download_file migrated to its own ChatItem.download — a stale blob may
+    // still hold it as a command card. Drop it, don't resurrect an orphan
+    // whose full_cmd/sentinel are empty under the new model.
+    const items = roundtrip([
+      { kind: "command", cmd: { id: "d1", tool_call_id: "d1", cmd: "download_file: /x", full_cmd: "", sentinel: "", explain: "", side_effect: "", timeout_s: 600, kind: "download_file" }, at: 1 },
+      { kind: "user", text: "kept", at: 2 },
+    ]);
+    expect(items).toEqual([{ kind: "user", text: "kept", at: 2 }]);
+  });
 });
 
 describe("applyTerminalMutations", () => {
@@ -323,6 +342,51 @@ describe("applyTerminalMutations", () => {
     ])).toEqual([
       expect.objectContaining({
         kind: "web_tool",
+        rejected: { reason: "nope" },
+        result: undefined,
+      }),
+    ]);
+  });
+
+  it("replays download completion (ok with local_path, failed without) by proposal id", () => {
+    const card = (id: string): ChatItem => ({
+      kind: "download",
+      proposal: { id, remote_path: "/var/log/x", max_mb: 50, dest_dir: "/tmp/x" },
+      at: 1,
+    });
+    const mutations = [
+      { kind: "download_completed", payload: { id: "ok", ok: true, local_path: "/tmp/x/log", bytes: 1024, summary: "Downloaded 1024 bytes", duration_ms: 5 } },
+      { kind: "download_completed", payload: { id: "fail", ok: false, summary: "Download failed", duration_ms: 7 } },
+    ];
+    const once = applyTerminalMutations([card("ok"), card("fail")], mutations);
+    // Idempotent: replaying the same terminal events must not double-apply.
+    const twice = applyTerminalMutations(once, mutations);
+    expect(twice).toEqual([
+      expect.objectContaining({
+        kind: "download",
+        proposal: expect.objectContaining({ id: "ok" }),
+        result: { id: "ok", ok: true, local_path: "/tmp/x/log", bytes: 1024, summary: "Downloaded 1024 bytes", duration_ms: 5 },
+      }),
+      expect.objectContaining({
+        kind: "download",
+        proposal: expect.objectContaining({ id: "fail" }),
+        result: { id: "fail", ok: false, local_path: undefined, bytes: undefined, summary: "Download failed", duration_ms: 7 },
+      }),
+    ]);
+  });
+
+  it("rejects a download card through the shared command_rejected channel", () => {
+    const card: ChatItem = {
+      kind: "download",
+      proposal: { id: "d1", remote_path: "/x", max_mb: 50, dest_dir: "/tmp" },
+      at: 1,
+      result: { id: "d1", ok: true, summary: "stale", duration_ms: 1 },
+    };
+    expect(applyTerminalMutations([card], [
+      { kind: "command_rejected", payload: { id: "d1", reason: "nope" } },
+    ])).toEqual([
+      expect.objectContaining({
+        kind: "download",
         rejected: { reason: "nope" },
         result: undefined,
       }),

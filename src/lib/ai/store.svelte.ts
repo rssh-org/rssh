@@ -39,6 +39,8 @@ import type {
   TokenUsage,
   WebToolProposal,
   WebToolResult,
+  DownloadProposal,
+  DownloadResult,
 } from "./types.ts";
 import { isRawDeviceKind } from "./types.ts";
 
@@ -1901,6 +1903,16 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
     pushChat(tab, { kind: "web_tool", proposal, at: Date.now() });
   });
 
+  await addListener<DownloadProposal>(`ai:download_proposed:${tab}`, (e) => {
+    const proposal = stripContextEpoch(e.payload);
+    commandApprovals.snapshotEligibility(
+      { tabId: tab, instanceId: info.instance_id },
+      proposal.id,
+      isAutoApprovalAllowed(_settings, "download_file"),
+    );
+    pushChat(tab, { kind: "download", proposal, at: Date.now() });
+  });
+
   // internal_command：当前只用于 file_ops 工具的远端能力探测（一行只读 echo "py3=... perl=... diff=..."）。
   // 不弹审批、不入 chat 时间线，直接粘到 PTY 跑——用户在终端历史里看到探测命令滚过，
   // 透明但不打断流程。后续若加其他 read-only 内部命令也走这条路径。
@@ -2047,6 +2059,24 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
     }
   });
 
+  await addListener<DownloadResult>(`ai:download_completed:${tab}`, (e) => {
+    const result = stripContextEpoch(e.payload);
+    const arr = _chatByTab[tab] ?? [];
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const item = arr[i];
+      if (item.kind === "download" && item.proposal.id === result.id) {
+        commandApprovals.clear(
+          { tabId: tab, instanceId: info.instance_id },
+          result.id,
+        );
+        const replaced: ChatItem = { ...item, result };
+        _chatByTab[tab] = [...arr.slice(0, i), replaced, ...arr.slice(i + 1)];
+        schedulePersist(tab);
+        break;
+      }
+    }
+  });
+
   // 拒绝路径单独事件 —— complete 跟 reject 是两种语义，复用 command_completed
   // 加 rejected:true 字段会让 listener 分支模糊。后端 RejectCommand 分支 emit
   // 这个，前端清 pending + 标记 ChatItem.rejected。command 和 web_tool 卡片
@@ -2056,7 +2086,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
     const arr = _chatByTab[tab] ?? [];
     for (let i = arr.length - 1; i >= 0; i--) {
       const item = arr[i];
-      if (item.kind !== "command" && item.kind !== "web_tool") continue;
+      if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download") continue;
       const itemId = item.kind === "command" ? item.cmd.id : item.proposal.id;
       if (itemId === e.payload.id) {
         clearCommandExecution(

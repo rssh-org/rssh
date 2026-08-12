@@ -42,11 +42,9 @@
         || cmd.kind === "patch_diff"
         || cmd.kind === "patch_mv"
     );
-    // download_file / analyze_locally 不走 PTY，approve 只发 ack 给后端；视觉无需特化。
-    // web_search / web_fetch 走独立的 WebToolConfirmCard，不经过本组件。
-    let isAckOnly = $derived(
-        cmd.kind === "download_file" || cmd.kind === "analyze_locally"
-    );
+    // analyze_locally 不走 PTY，approve 只发 ack 给后端；视觉无需特化。
+    // download_file / web_search / web_fetch 走各自独立的 ConfirmCard，不经过本组件。
+    let isAckOnly = $derived(cmd.kind === "analyze_locally");
 
     function syncExecutionStatus() {
         const status = ai.commandExecutionStatus(sessionRef(), cmd.id);
@@ -312,7 +310,7 @@
                         {submitting ? t("ai.cmd.btn.submitting") : t("ai.cmd.btn.submit")}
                     </button>
                 {:else if transportRunning && !isAckOnly}
-                    <!-- ack-only 命令（download_file / analyze_locally）没 PTY，
+                    <!-- ack-only 命令（analyze_locally）没 PTY，
                          Terminate 发 Ctrl+C 是 no-op，不该露给用户当 affordance。 -->
                     <button class="btn btn-terminate" onclick={terminate} disabled={terminating}>
                         {terminating ? t("ai.cmd.btn.terminating") : t("ai.cmd.btn.terminate")}

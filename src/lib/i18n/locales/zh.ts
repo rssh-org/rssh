@@ -558,6 +558,13 @@ const zh: Messages = {
   "ai.webcmd.running": "进行中…",
   "ai.webcmd.done": "已完成",
   "ai.webcmd.failed": "失败",
+  "ai.dl.tag": "下载",
+  "ai.dl.meta": "最大 {max_mb} MB",
+  "ai.dl.allow": "允许",
+  "ai.dl.reject": "拒绝",
+  "ai.dl.running": "下载中…",
+  "ai.dl.done": "已下载",
+  "ai.dl.failed": "失败",
 
   // ── AI 排障：AuditPanel ──
   "ai.audit.refresh": "𖦹 刷新",

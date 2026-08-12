@@ -10,7 +10,7 @@
  * Both are normalized here. Unknown/corrupt entries are dropped, not thrown:
  * a damaged blob should degrade to a shorter timeline, never block resume.
  */
-import type { ChatItem } from "./types.ts";
+import type { ChatItem, DownloadResult } from "./types.ts";
 
 export interface AiTerminalMutation {
   kind: string;
@@ -37,9 +37,18 @@ function isRenderable(item: ChatItem): boolean {
     case "assistant":
       return isStr(item.id) && isStr(item.text);
     case "command":
+      // download_file migrated to its own ChatItem.download. A stale blob may
+      // still hold it as a command card — drop it rather than resurrect an
+      // orphan with empty full_cmd/sentinel.
+      if ((item.cmd?.kind as string | undefined) === "download_file") return false;
       return (
         !!item.cmd && typeof item.cmd === "object" &&
         isStr(item.cmd.id) && isStr(item.cmd.cmd)
+      );
+    case "download":
+      return (
+        !!item.proposal && typeof item.proposal === "object" &&
+        isStr(item.proposal.id) && isStr(item.proposal.remote_path)
       );
     case "web_tool":
       return (
@@ -95,7 +104,7 @@ export function restoreTimeline(json: string, staleCommandReason: string): ChatI
       if (!item.result && !item.rejected) {
         item.rejected = { reason: staleCommandReason };
       }
-    } else if (item.kind === "web_tool") {
+    } else if (item.kind === "web_tool" || item.kind === "download") {
       // Same as command: an unresolved card belongs to a dead actor whose
       // approval ack it will never receive. Mark stale-rejected.
       if (!item.result && !item.rejected) {
@@ -163,7 +172,7 @@ export function applyTerminalMutations(
       const index = findLastIndex(items, (item) => cardId(item) === payload.id);
       if (index < 0) continue;
       const item = items[index];
-      if (item.kind !== "command" && item.kind !== "web_tool") continue;
+      if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download") continue;
       items = replaceAt(items, index, {
         ...item,
         result: undefined,
@@ -193,6 +202,29 @@ export function applyTerminalMutations(
           duration_ms: payload.duration_ms,
         },
       });
+      continue;
+    }
+
+    if (mutation.kind === "download_completed") {
+      if (
+        typeof payload.ok !== "boolean"
+        || !isStr(payload.summary)
+        || typeof payload.duration_ms !== "number"
+      ) continue;
+      const index = findLastIndex(items, (item) =>
+        item.kind === "download" && item.proposal.id === payload.id);
+      if (index < 0) continue;
+      const item = items[index];
+      if (item.kind !== "download") continue;
+      const result: DownloadResult = {
+        id: payload.id,
+        ok: payload.ok,
+        local_path: isStr(payload.local_path) ? payload.local_path : undefined,
+        bytes: typeof payload.bytes === "number" ? payload.bytes : undefined,
+        summary: payload.summary,
+        duration_ms: payload.duration_ms,
+      };
+      items = replaceAt(items, index, { ...item, rejected: undefined, result });
       continue;
     }
 
@@ -253,6 +285,6 @@ function replaceAt(items: ChatItem[], index: number, item: ChatItem): ChatItem[]
 /** Card id of a proposal-bearing ChatItem (command or web_tool), else null. */
 function cardId(item: ChatItem): string | null {
   if (item.kind === "command") return item.cmd.id;
-  if (item.kind === "web_tool") return item.proposal.id;
+  if (item.kind === "web_tool" || item.kind === "download") return item.proposal.id;
   return null;
 }

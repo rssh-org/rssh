@@ -555,6 +555,13 @@ const en = {
   "ai.webcmd.running": "Running…",
   "ai.webcmd.done": "Done",
   "ai.webcmd.failed": "Failed",
+  "ai.dl.tag": "Download",
+  "ai.dl.meta": "max {max_mb} MB",
+  "ai.dl.allow": "Allow",
+  "ai.dl.reject": "Reject",
+  "ai.dl.running": "Downloading…",
+  "ai.dl.done": "Downloaded",
+  "ai.dl.failed": "Failed",
 
   // ── AI Diagnose: AuditPanel ──
   "ai.audit.refresh": "𖦹 Refresh",

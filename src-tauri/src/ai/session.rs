@@ -92,7 +92,11 @@ fn redacted_web_tool_target(
 fn is_terminal_ui_mutation(kind: &str, _payload: &serde_json::Value) -> bool {
     matches!(
         kind,
-        "assistant_message_end" | "command_completed" | "command_rejected" | "web_tool_completed"
+        "assistant_message_end"
+            | "command_completed"
+            | "command_rejected"
+            | "web_tool_completed"
+            | "download_completed"
     )
 }
 
@@ -1382,17 +1386,12 @@ impl Actor {
         // 让用户误以为是真路径片段。
         let dest_dir = self.cfg.data_dir.join("diagnose").join(&self.cfg.tab_id);
         self.emit(
-            "command_proposed",
+            "download_proposed",
             json!({
                 "id": dl_id,
-                "tool_call_id": dl_id,
-                "cmd": format!("download_file: {} (max {} MB)", input.remote_path, input.max_mb),
-                "full_cmd": "",
-                "sentinel": "",
-                "explain": "SFTP download remote artifact to local rssh data dir for offline analysis.",
-                "side_effect": format!("Write under {}/", dest_dir.display()),
-                "timeout_s": 600,
-                "kind": "download_file",
+                "remote_path": input.remote_path,
+                "max_mb": input.max_mb,
+                "dest_dir": dest_dir.display().to_string(),
             }),
         );
         // 跟 run_command 一致：审批 + 实际执行的端到端耗时计入 duration_ms，
@@ -1421,12 +1420,11 @@ impl Actor {
             .map(|n| n.to_string_lossy().into_owned())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| format!("dump-{}", &dl_id[..8]));
-        let local_dir = self.cfg.data_dir.join("diagnose").join(&self.cfg.tab_id);
-        let local_path = local_dir.join(&basename);
+        let local_path = dest_dir.join(&basename);
         let max_bytes = (input.max_mb as u64).saturating_mul(1024 * 1024);
 
         let result: AppResult<u64> = async {
-            tokio::fs::create_dir_all(&local_dir).await.map_err(|e| {
+            tokio::fs::create_dir_all(&dest_dir).await.map_err(|e| {
                 AppError::other(
                     "ai_local_dir_create_failed",
                     json!({ "err": e.to_string() }),
@@ -1460,17 +1458,15 @@ impl Actor {
                     local_path: local_str.clone(),
                     bytes,
                 });
-                let card_output = format!("已下载 {} 字节 → {}", bytes, local_str);
+                let summary = format!("Downloaded {} bytes → {}", bytes, local_str);
                 self.emit(
-                    "command_completed",
+                    "download_completed",
                     json!({
                         "id": dl_id,
-                        "exit_code": 0,
-                        "timed_out": false,
-                        "early_terminated": false,
-                        "output": card_output,
-                        "original_bytes": card_output.len(),
-                        "truncated_bytes": 0,
+                        "ok": true,
+                        "local_path": local_str,
+                        "bytes": bytes,
+                        "summary": summary,
                         "duration_ms": started_at.elapsed().as_millis() as u64,
                     }),
                 );
@@ -1493,24 +1489,23 @@ impl Actor {
                 // Use code() to give a semantic bucket + the remote path.
                 let card_msg = match e.code() {
                     "sftp_file_too_large" => format!(
-                        "远端文件超出 {MAX_DOWNLOAD_MB} MB 上限：{}",
+                        "Remote file exceeds the {MAX_DOWNLOAD_MB} MB cap: {}",
                         input.remote_path
                     ),
                     "sftp_io_failed" => {
-                        format!("无法访问远端文件（不存在或不可读）：{}", input.remote_path)
+                        format!(
+                            "Remote file not accessible (missing or unreadable): {}",
+                            input.remote_path
+                        )
                     }
-                    _ => format!("下载失败：{}", input.remote_path),
+                    _ => format!("Download failed: {}", input.remote_path),
                 };
                 self.emit(
-                    "command_completed",
+                    "download_completed",
                     json!({
                         "id": dl_id,
-                        "exit_code": 1,
-                        "timed_out": false,
-                        "early_terminated": false,
-                        "output": card_msg,
-                        "original_bytes": 0,
-                        "truncated_bytes": 0,
+                        "ok": false,
+                        "summary": card_msg,
                         "duration_ms": started_at.elapsed().as_millis() as u64,
                     }),
                 );

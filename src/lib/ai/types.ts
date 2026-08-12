@@ -61,7 +61,6 @@ export interface AiSettings {
 export type CommandKind =
   | "run_command"
   | "match_file"
-  | "download_file"
   | "analyze_locally"
   | "patch_cp"
   | "patch_modify"
@@ -82,6 +81,25 @@ export interface WebToolProposal {
 export interface WebToolResult {
   id: string;
   ok: boolean;
+  summary: string;
+  duration_ms: number;
+}
+
+/** download_file — SFTP pull of a remote artifact to local. Independent
+ *  proposal/result stream; ack-only (approve just acks, the backend does the
+ *  SFTP transfer itself — no PTY execution). */
+export interface DownloadProposal {
+  id: string;
+  remote_path: string;
+  max_mb: number;
+  dest_dir: string;
+}
+
+export interface DownloadResult {
+  id: string;
+  ok: boolean;
+  local_path?: string;
+  bytes?: number;
   summary: string;
   duration_ms: number;
 }
@@ -147,6 +165,7 @@ export type ChatItem =
   | { kind: "assistant"; id: string; text: string; at: number; streaming: boolean; cancelled?: boolean }
   | { kind: "command"; cmd: CommandProposed; at: number; result?: CommandResult; rejected?: { reason: string } }
   | { kind: "web_tool"; proposal: WebToolProposal; at: number; result?: WebToolResult; rejected?: { reason: string } }
+  | { kind: "download"; proposal: DownloadProposal; at: number; result?: DownloadResult; rejected?: { reason: string } }
   | { kind: "error"; text: string; at: number }
   | { kind: "note"; text: string; at: number };
 
