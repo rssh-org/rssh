@@ -230,6 +230,8 @@ const en = {
   "terminal.block.menu.uncolor": "Remove color",
   "terminal.block.menu.send_ai": "Send to AI",
   "terminal.block.menu.send_ai_n": "Send {n} blocks to AI",
+  "terminal.block.menu.disable_auto_fold": "Disable auto-fold (this tab)",
+  "terminal.block.menu.enable_auto_fold": "Enable auto-fold",
   "ai.mobile.hint": "Tip: rotate to landscape for the AI panel. Tools download_file / analyze_locally are unavailable on this build.",
   "ai.no_session": "Connect to a terminal before opening the AI panel.",
   "settings.section.cli": "CLI Tool",

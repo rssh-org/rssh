@@ -224,6 +224,11 @@
     let paintScheduler: PaintScheduler | undefined;
     let paintTick = $state(0);
     let isAltBuffer = $state(false);
+    // Per-tab: when true the fold store stops auto-folding new output (see
+    // shouldAutoFold below). Existing folds stay untouched; flip back to fold
+    // future output again. Survives reconnect and tab switches; resets only
+    // when the tab closes (this keyed component instance is destroyed).
+    let autoFoldDisabled = $state(false);
 
     function schedulePaintTick() {
         paintScheduler?.schedule();
@@ -535,6 +540,12 @@
                     label: sendAiLabel,
                     disabled: n === 0 || !aiConfigured,
                     action: () => sendBlocksToAi(targets),
+                },
+                {
+                    label: t(autoFoldDisabled
+                        ? "terminal.block.menu.enable_auto_fold"
+                        : "terminal.block.menu.disable_auto_fold"),
+                    action: () => { autoFoldDisabled = !autoFoldDisabled; },
                 },
             ],
         };
@@ -1644,7 +1655,7 @@
         foldStore = createFoldStore(terminal, blockTracker, {
             maxVisibleLines: commandBlockMaxLines,
             maxCachedLines: commandBlockFoldCacheLines(commandBlockMaxLines),
-            shouldAutoFold: () => app.commandBlockBar(),
+            shouldAutoFold: () => app.commandBlockBar() && !autoFoldDisabled,
         });
         paintScheduler = createPaintScheduler({
             shouldPaint: () => app.commandBlockBar() && !isAltBuffer,
