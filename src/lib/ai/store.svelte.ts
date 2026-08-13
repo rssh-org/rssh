@@ -48,6 +48,15 @@ import type {
   MatchProposal,
 } from "./types.ts";
 import { isRawDeviceKind } from "./types.ts";
+import { bracketedPasteEnabled } from "../terminal/bracketed-paste.ts";
+
+/** DECSET 2004 bracketed-paste markers. When the target shell has enabled
+ *  bracketed paste, a paste is wrapped so zsh/bash/PowerShell treat it as one
+ *  atomic insert instead of parsing it char-by-char through the line editor —
+ *  which is what mangles long pasted commands (file_ops' ansi_c_quoted python)
+ *  and leaves the card stuck in "Executing". */
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
 
 // ─── Position ────────────────────────────────────────────────────
 // 只支持 left/right。移动端用户横屏即可用——左右布局就够了，没必要再开上下分支。
@@ -1544,10 +1553,16 @@ export async function executeCommand(
   // already registered → must funnel through finish() to clean up, else
   // isCommandRunning() stays true forever.
   try {
+    // Wrap in bracketed-paste markers when the target shell enabled DECSET
+    // 2004 — same as the terminal's manual paste. The submit `\r` stays
+    // OUTSIDE the markers so the shell runs the pasted line (inside the
+    // markers it'd be part of the paste buffer and never execute).
+    const bp = bracketedPasteEnabled(session.tabId);
+    const body = bp ? `${PASTE_START}${execution.full_cmd}${PASTE_END}` : execution.full_cmd;
     if (target_kind === "telnet") {
-      await invoke("telnet_write_line", { sessionId: target_session_id, text: execution.full_cmd });
+      await invoke("telnet_write_line", { sessionId: target_session_id, text: body });
     } else {
-      const data = Array.from(new TextEncoder().encode(execution.full_cmd + "\r"));
+      const data = Array.from(new TextEncoder().encode(body + "\r"));
       await invoke(writeCmd, { sessionId: target_session_id, data });
     }
   } catch (e) {

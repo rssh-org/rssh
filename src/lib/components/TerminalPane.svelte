@@ -25,6 +25,7 @@
     import {extractBlockTexts, extractBlocksText} from "../terminal/block-content.ts";
     import {redactCommandBlockTexts} from "../terminal/command-block-redaction.ts";
     import {setupTouchScroll} from "../terminal/touch-scroll.ts";
+    import {registerBracketedPasteProvider, unregisterBracketedPasteProvider} from "../terminal/bracketed-paste.ts";
     import {setupXtermIme229Workaround} from "../terminal/xterm-ime-229-workaround.ts";
     import {createReservedSessionAttempt} from "../terminal/reserved-session-attempt.ts";
     import {renderBlocksToBlob} from "../terminal/block-to-image.ts";
@@ -1549,6 +1550,10 @@
             readViewport: () => readViewportSnapshot(terminal),
             readViewportText: () => readViewportText(terminal),
         });
+        // Expose xterm's live bracketed-paste mode so the AI store can wrap
+        // AI-driven pastes the same way xterm wraps manual ones. See
+        // bracketed-paste.ts.
+        registerBracketedPasteProvider(tabId, () => terminal?.modes.bracketedPasteMode ?? false);
 
         // Copy-on-select (left-button mouseup) + right-click action (capture
         // phase — required so preventDefault can suppress the native menu before
@@ -1805,6 +1810,7 @@
         app.unregisterTerminalWriter();
         app.unregisterTerminalArrowSender();
         app.unregisterTerminalControls(tabId);
+        unregisterBracketedPasteProvider(tabId);
         app.unregisterSession(tabId);
         highlightDecorator?.dispose();
         terminal?.dispose();

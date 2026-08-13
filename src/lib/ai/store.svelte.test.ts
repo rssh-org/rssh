@@ -2338,4 +2338,32 @@ describe("executeCommand", () => {
     await ai.submitCommand(session, "cmd-1");
     await running;
   });
+
+  it("wraps the paste in bracketed-paste markers when the shell enabled DECSET 2004", async () => {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    // Register a live provider on the SAME module instance store.svelte.ts
+    // imports (resetModules re-imported both).
+    const { registerBracketedPasteProvider } = await import("../terminal/bracketed-paste.ts");
+    registerBracketedPasteProvider("tab-1", () => true);
+
+    const proposed = {
+      id: "cmd-bp",
+      tool_call_id: "t",
+      cmd: "ls -la",
+      explain: "",
+      side_effect: "",
+      execution: { full_cmd: "ls -la", sentinel: "unused-for-telnet", timeout_s: 30 },
+    };
+    const session = { tabId: "tab-1", instanceId: "instance-1" };
+    const running = ai.executeCommand(session, proposed.id, proposed.execution, "telnet", "session-1");
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("telnet_write_line", {
+        sessionId: "session-1",
+        text: "\x1b[200~ls -la\x1b[201~",
+      });
+    });
+    await ai.submitCommand(session, "cmd-bp");
+    await running;
+  });
 });
