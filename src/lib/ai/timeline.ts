@@ -125,9 +125,25 @@ export function restoreTimeline(json: string, staleCommandReason: string): ChatI
       if (!item.result && !item.rejected) {
         item.rejected = { reason: staleCommandReason };
       }
-    } else if (item.kind === "command" || item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze" || item.kind === "match") {
-      // Same as command: an unresolved card belongs to a dead actor whose
-      // approval ack it will never receive. Mark stale-rejected.
+    } else if (item.kind === "command") {
+      // Migrate pre-PtyExecution-split blobs: old command cards carried
+      // full_cmd / sentinel / timeout_s as flat fields; CommandConfirmDialog
+      // now reads them off cmd.execution. Normalize so a historical card
+      // renders instead of crashing the panel on cmd.execution.timeout_s.
+      const cmd = item.cmd as unknown as Record<string, unknown>;
+      if (typeof cmd.execution !== "object" || cmd.execution === null) {
+        cmd.execution = {
+          full_cmd: isStr(cmd.full_cmd) ? cmd.full_cmd : "",
+          sentinel: isStr(cmd.sentinel) ? cmd.sentinel : "",
+          timeout_s: typeof cmd.timeout_s === "number" ? cmd.timeout_s : 0,
+        };
+      }
+      if (!item.result && !item.rejected) {
+        item.rejected = { reason: staleCommandReason };
+      }
+    } else if (item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze" || item.kind === "match") {
+      // An unresolved card belongs to a dead actor whose approval ack it will
+      // never receive. Mark stale-rejected.
       if (!item.result && !item.rejected) {
         item.rejected = { reason: staleCommandReason };
       }

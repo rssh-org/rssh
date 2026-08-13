@@ -70,6 +70,25 @@ describe("restoreTimeline", () => {
     expect(items[1].kind === "command" && items[1].rejected?.reason).toBe("user said no");
   });
 
+  it("migrates a pre-split command card's flat execution into the envelope", () => {
+    // Pre-PtyExecution-split blobs carried full_cmd/sentinel/timeout_s flat.
+    // CommandConfirmDialog now reads cmd.execution.timeout_s — normalize so an
+    // old conversation opens instead of crashing the render.
+    const [c] = roundtrip([
+      {
+        kind: "command",
+        cmd: {
+          id: "c1", tool_call_id: "c1", cmd: "df -h",
+          full_cmd: "df -h; echo s:$?", sentinel: "s", timeout_s: 30,
+          explain: "check disk", side_effect: "read-only", kind: "run_command",
+        },
+        at: 1, result: { id: "c1", exit_code: 0 },
+      },
+    ]);
+    if (!(c.kind === "command")) throw new Error("expected command");
+    expect(c.cmd.execution).toEqual({ full_cmd: "df -h; echo s:$?", sentinel: "s", timeout_s: 30 });
+  });
+
   it("drops unknown kinds and garbage entries", () => {
     const items = roundtrip([
       null,
