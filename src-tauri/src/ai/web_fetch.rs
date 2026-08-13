@@ -73,7 +73,7 @@ fn validate_url_shape(url: &Url) -> Result<(), WebFetchError> {
     Ok(())
 }
 
-fn parse_url(raw: &str) -> Result<Url, WebFetchError> {
+pub fn parse_target(raw: &str) -> Result<Url, WebFetchError> {
     let raw = raw.trim();
     if raw.chars().count() > MAX_URL_CHARS {
         return Err(WebFetchError::InvalidUrl);
@@ -221,7 +221,7 @@ fn http_client() -> Result<&'static reqwest::Client, WebFetchError> {
 }
 
 pub async fn fetch(raw_url: &str) -> Result<WebPage, WebFetchError> {
-    let requested_url = parse_url(raw_url)?;
+    let requested_url = parse_target(raw_url)?;
     // reqwest follows redirects itself (Policy::limited) and reads the system
     // proxy via the `system-proxy` feature — same as opencode. No manual
     // redirect loop, no per-hop address re-check.
@@ -277,24 +277,24 @@ mod tests {
     #[test]
     fn accepts_only_anonymous_http_urls() {
         assert!(matches!(
-            parse_url("not a url"),
+            parse_target("not a url"),
             Err(WebFetchError::InvalidUrl)
         ));
         assert!(matches!(
-            parse_url("file:///etc/passwd"),
+            parse_target("file:///etc/passwd"),
             Err(WebFetchError::UnsupportedScheme)
         ));
         assert!(matches!(
-            parse_url("https://user:pass@example.com/private"),
+            parse_target("https://user:pass@example.com/private"),
             Err(WebFetchError::CredentialsNotAllowed)
         ));
-        assert!(parse_url("https://example.com/docs").is_ok());
+        assert!(parse_target("https://example.com/docs").is_ok());
     }
 
     #[test]
     fn rejects_an_oversized_target_url() {
         let raw = format!("https://example.com/{}", "x".repeat(MAX_URL_CHARS));
-        assert!(matches!(parse_url(&raw), Err(WebFetchError::InvalidUrl)));
+        assert!(matches!(parse_target(&raw), Err(WebFetchError::InvalidUrl)));
     }
 
     #[test]

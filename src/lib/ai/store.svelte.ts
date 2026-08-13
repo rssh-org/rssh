@@ -756,11 +756,10 @@ async function launchSessionAtGeneration(
     _targetKindByTab[info.tab_id] = args.targetKind;
     _chatByTab[info.tab_id] = timeline;
     initializeContextEpoch({ tabId: info.tab_id, instanceId: info.instance_id });
-    await attachListeners(info, generation);
-    assertTabLive(args.tabId, generation);
-    // Rebuild token totals from the resumed audit log. Token spend is derived
-    // (the sum of every LlmResponse entry); the audit log is its only source,
-    // so a resumed session must recompute it or the toolbar shows 0.
+    // Rebuild token totals BEFORE attaching listeners: the audit is still the
+    // resume snapshot here (initial_audit + SessionStarted, no live events
+    // yet), so sumAuditTokens can't race an assistant_message_end incrementing
+    // the same counter once listeners go live.
     if (resumeId) {
       try {
         const audit = await getAudit({ tabId: info.tab_id, instanceId: info.instance_id });
@@ -774,6 +773,8 @@ async function launchSessionAtGeneration(
         // audit empty / actor raced — leave tokens at 0; non-fatal.
       }
     }
+    await attachListeners(info, generation);
+    assertTabLive(args.tabId, generation);
     return info;
   } catch (error) {
     clearSessionState(info.tab_id);
@@ -1762,18 +1763,47 @@ function releaseEnabledAutoApprovals(patch: AiSettingsPatch): void {
   }
 }
 
+/** The auto-approval kind key for a tool card, or null for non-tool items.
+ *  Covers every card type so a danger-mode toggle revokes pending approvals
+ *  across the whole chat, not just run_command cards. */
+function cardAutoApprovalKind(item: ChatItem): string | null {
+  switch (item.kind) {
+    case "command": return item.cmd.kind ?? "run_command";
+    case "web_tool": return item.proposal.kind;
+    case "patch": return `patch_${item.proposal.step}`;
+    case "match": return "match_file";
+    case "download": return "download_file";
+    case "analyze": return "analyze_locally";
+    default: return null;
+  }
+}
+
+function cardId(item: ChatItem): string | null {
+  switch (item.kind) {
+    case "command": return item.cmd.id;
+    case "web_tool":
+    case "patch":
+    case "match":
+    case "download":
+    case "analyze":
+      return item.proposal.id;
+    default: return null;
+  }
+}
+
 function revokeDisallowedCommandApprovals(settings: AiSettings): void {
   for (const [tabId, session] of Object.entries(_sessionByTab)) {
     for (const item of _chatByTab[tabId] ?? []) {
-      if (
-        item.kind === "command"
-        && !item.result
-        && !item.rejected
-        && !isAutoApprovalAllowed(settings, item.cmd.kind)
-      ) {
+      // Only tool cards (run_command + the proposal cards) carry pending
+      // approvals worth revoking; skip plain bubbles and settled cards.
+      if (item.kind !== "command" && !("proposal" in item)) continue;
+      if (item.result || item.rejected) continue;
+      const kind = cardAutoApprovalKind(item);
+      const id = cardId(item);
+      if (kind && id && !isAutoApprovalAllowed(settings, kind)) {
         commandApprovals.revokeEligibility(
           { tabId, instanceId: session.instance_id },
-          item.cmd.id,
+          id,
         );
       }
     }

@@ -114,9 +114,9 @@
             askingReason = false;
             rejectReason = "";
         } catch (e) {
-            // Close/reject can win this invoke; the card is then gone but the
-            // rejected Promise still needs an owner.
-            console.warn("[ai] reject download:", e);
+            // Close/reject can win this invoke (card already gone). Surface it
+            // rather than swallowing — mirrors approve()'s catch.
+            toast.error(t("ai.cmd.alert.exec_failed", { error: errMsg(e) }));
         }
     }
 </script>

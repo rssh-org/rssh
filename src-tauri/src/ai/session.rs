@@ -1136,7 +1136,19 @@ impl Actor {
                     .make_tool_error(&tc.id, &format!("Failed to parse web_fetch input: {error}")))
             }
         };
-        let display = redacted_web_tool_target(&tc.input, "url", &self.cfg.redact_rules);
+        // The approval card is the ONLY SSRF gate (no IP allowlist — see
+        // web_fetch.rs), so it must show the exact target the user approves.
+        // Redaction stays on the audit record + LLM payload, not the card — a
+        // redacted card hides the target and defeats the only gate.
+        let target = match super::web_fetch::parse_target(&input.url) {
+            Ok(url) => url,
+            Err(error) => return Ok(self.make_tool_error(&tc.id, &error.to_string())),
+        };
+        let display: String = target
+            .as_str()
+            .chars()
+            .take(MAX_WEB_TOOL_TARGET_CHARS)
+            .collect();
         let id = uuid::Uuid::new_v4().to_string();
         self.emit(
             "web_tool_proposed",
@@ -1162,7 +1174,7 @@ impl Actor {
 
         // The approval card is the only gate (no SSRF allowlist — see
         // web_fetch.rs); the user sees every URL before fetch.
-        let page = match super::web_fetch::fetch(&input.url).await {
+        let page = match super::web_fetch::fetch(target.as_str()).await {
             Ok(page) => page,
             Err(error) => {
                 let detail = error.to_string();
@@ -1179,7 +1191,7 @@ impl Actor {
         });
         let summary = format!(
             "{} — {} bytes{}",
-            page.final_url,
+            sanitize::redact(&page.final_url, &self.cfg.redact_rules),
             page.source_bytes,
             if page.truncated { " (truncated)" } else { "" }
         );

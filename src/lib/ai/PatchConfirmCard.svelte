@@ -172,7 +172,7 @@
             askingReason = false;
             rejectReason = "";
         } catch (e) {
-            console.warn("[ai] reject patch:", e);
+            toast.error(t("ai.cmd.alert.exec_failed", { error: errMsg(e) }));
         }
     }
 

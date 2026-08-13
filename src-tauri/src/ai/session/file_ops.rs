@@ -549,7 +549,10 @@ impl Actor {
         // instead, so the audit surfaces just the command — the cmd itself is
         // the meaningful record, and handle_patch_file audits a step-aware Note.
         let explain = domain.get("explain").and_then(|v| v.as_str()).unwrap_or("");
-        let side_effect = domain.get("side_effect").and_then(|v| v.as_str()).unwrap_or("");
+        let side_effect = domain
+            .get("side_effect")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         self.audit_push(AuditKind::CommandProposed {
             id: cmd_id.clone(),
             cmd: cmd.clone(),
@@ -562,12 +565,18 @@ impl Actor {
         payload.insert("id".into(), json!(cmd_id));
         payload.insert("tool_call_id".into(), json!(cmd_id));
         payload.insert("cmd".into(), json!(cmd));
-        payload.insert("execution".into(), json!({
-            "full_cmd": full_cmd,
-            "sentinel": sentinel,
-            "timeout_s": timeout_s,
-        }));
-        self.emit(&format!("{event}_proposed"), serde_json::Value::Object(payload));
+        payload.insert(
+            "execution".into(),
+            json!({
+                "full_cmd": full_cmd,
+                "sentinel": sentinel,
+                "timeout_s": timeout_s,
+            }),
+        );
+        self.emit(
+            &format!("{event}_proposed"),
+            serde_json::Value::Object(payload),
+        );
 
         let (outcome, ack) = self.wait_command_outcome(&cmd_id).await?;
         match outcome {

@@ -1,10 +1,11 @@
-//! AI conversation persistence (schema v17). Two blobs per row — see the
+//! AI conversation persistence (schema v27). Three blobs per row — see the
 //! migration comment in schema.rs for the data-fork rationale.
 //!
-//! Writers are split by ownership: the session actor owns history_json
-//! (`save_history`, called at every consistent commit point), the front-end
-//! owns timeline_json (`set_timeline`, called after chat-mutating events).
-//! They never touch each other's column, so no lost-update hazard.
+//! Writers are split by ownership: the session actor owns history_json AND
+//! audit_json (`save_history_and_audit`, called at every consistent commit
+//! point), the front-end owns timeline_json (`set_timeline`, called after
+//! chat-mutating events). They never touch each other's column, so no
+//! lost-update hazard.
 
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
