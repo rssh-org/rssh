@@ -10,7 +10,7 @@
  * Both are normalized here. Unknown/corrupt entries are dropped, not thrown:
  * a damaged blob should degrade to a shorter timeline, never block resume.
  */
-import type { ChatItem, DownloadResult, AnalyzeResult } from "./types.ts";
+import type { ChatItem, DownloadResult, AnalyzeResult, PtyExecution } from "./types.ts";
 
 export interface AiTerminalMutation {
   kind: string;
@@ -21,13 +21,34 @@ function isStr(v: unknown): v is string {
   return typeof v === "string";
 }
 
-/** Per-kind shape check — the fields the templates dereference unconditionally
- *  (renderMarkdown(text), fmt(at), CommandConfirmDialog's cmd.*). A known kind
- *  with a mangled body must be dropped here, not crash the panel at render
- *  time. Deliberately NOT a full schema: blobs are written by our own
- *  serializer, this guards against crashes and visible junk ("Invalid Date"),
- *  not against every cosmetic defect of a hand-corrupted row. */
-function isRenderable(item: ChatItem): boolean {
+/** Guarantee a PTY card's `execution` envelope exists, migrating the
+ *  pre-PtyExecution-split flat shape (full_cmd / sentinel / timeout_s at the
+ *  top level) if that's what the blob holds. CommandConfirmDialog /
+ *  PatchConfirmCard / MatchConfirmCard all dereference execution.timeout_s, so
+ *  without this a card of any lineage crashes the panel on resume. */
+function ensureExecution(obj: Record<string, unknown>): PtyExecution {
+  const ex = obj.execution;
+  if (ex && typeof ex === "object" && !Array.isArray(ex)) {
+    return ex as PtyExecution;
+  }
+  return {
+    full_cmd: isStr(obj.full_cmd) ? obj.full_cmd : "",
+    sentinel: isStr(obj.sentinel) ? obj.sentinel : "",
+    timeout_s: typeof obj.timeout_s === "number" ? obj.timeout_s : 0,
+  };
+}
+
+/** Structural check only — is this entry a card at all? A known kind, a numeric
+ *  timestamp, and the primary payload object the template dereferences (cmd for
+ *  command, proposal for the rest; text for bubbles). Missing domain FIELDS are
+ *  not validated here: they're normalized in restoreTimeline and render as-is
+ *  (empty shows empty).
+ *
+ *  This replaces the old per-field validator. Validation was fragile — it had
+ *  to mirror every template dereference exactly, and the single one it missed
+ *  (cmd.execution) crashed the whole panel. Normalization makes that class of
+ *  bug impossible: a missed default renders blank instead of throwing. */
+function isCard(item: ChatItem): boolean {
   if (typeof item.at !== "number") return false;
   switch (item.kind) {
     case "user":
@@ -36,51 +57,14 @@ function isRenderable(item: ChatItem): boolean {
       return isStr(item.text);
     case "assistant":
       return isStr(item.id) && isStr(item.text);
-    case "command": {
-      // download_file / analyze_locally / match_file / patch×4 migrated to
-      // their own ChatItem kinds. A stale blob may still hold them as command
-      // cards — drop rather than resurrect orphans with empty full_cmd/sentinel.
-      const migrated = item.cmd?.kind as string | undefined;
-      if (
-        migrated === "download_file" || migrated === "analyze_locally"
-        || migrated === "match_file"
-        || migrated === "patch_cp" || migrated === "patch_modify"
-        || migrated === "patch_diff" || migrated === "patch_mv"
-      ) return false;
-      return (
-        !!item.cmd && typeof item.cmd === "object" &&
-        isStr(item.cmd.id) && isStr(item.cmd.cmd)
-      );
-    }
-    case "patch": {
-      const step = item.proposal?.step as string | undefined;
-      return (
-        !!item.proposal && typeof item.proposal === "object" &&
-        isStr(item.proposal.id) && isStr(item.proposal.path) &&
-        (step === "cp" || step === "modify" || step === "diff" || step === "mv")
-      );
-    }
+    case "command":
+      return !!item.cmd && typeof item.cmd === "object";
+    case "patch":
     case "match":
-      return (
-        !!item.proposal && typeof item.proposal === "object" &&
-        isStr(item.proposal.id) && isStr(item.proposal.path) && isStr(item.proposal.find)
-      );
-    case "analyze":
-      return (
-        !!item.proposal && typeof item.proposal === "object" &&
-        isStr(item.proposal.id) && isStr(item.proposal.local_path)
-      );
     case "download":
-      return (
-        !!item.proposal && typeof item.proposal === "object" &&
-        isStr(item.proposal.id) && isStr(item.proposal.remote_path)
-      );
+    case "analyze":
     case "web_tool":
-      return (
-        !!item.proposal && typeof item.proposal === "object" &&
-        isStr(item.proposal.id) && isStr(item.proposal.target) &&
-        (item.proposal.kind === "web_search" || item.proposal.kind === "web_fetch")
-      );
+      return !!item.proposal && typeof item.proposal === "object";
     default:
       return false;
   }
@@ -99,7 +83,7 @@ export function restoreTimeline(json: string, staleCommandReason: string): ChatI
   for (const raw of parsed) {
     if (!raw || typeof raw !== "object") continue;
     const item = raw as ChatItem;
-    if (!isRenderable(item)) continue;
+    if (!isCard(item)) continue;
     if (item.kind === "user") {
       // client_id/client_seq only correlate optimistic mutations in the live
       // renderer. Old versions persisted them, but carrying those sequence
@@ -115,33 +99,36 @@ export function restoreTimeline(json: string, staleCommandReason: string): ChatI
       // must drop it too, or it renders as a permanent "…".
       if (!item.text && !item.cancelled) continue;
       item.streaming = false;
-    } else if (item.kind === "patch") {
-      // A truthy non-string diff would hit proposal.diff.split() in the mv
-      // card. Strip rather than drop — the card is still meaningful without
-      // its diff preview.
-      if (item.proposal.diff !== undefined && !isStr(item.proposal.diff)) {
-        delete item.proposal.diff;
-      }
-      if (!item.result && !item.rejected) {
-        item.rejected = { reason: staleCommandReason };
-      }
     } else if (item.kind === "command") {
-      // Migrate pre-PtyExecution-split blobs: old command cards carried
-      // full_cmd / sentinel / timeout_s as flat fields; CommandConfirmDialog
-      // now reads them off cmd.execution. Normalize so a historical card
-      // renders instead of crashing the panel on cmd.execution.timeout_s.
+      // Normalize the execution envelope. Covers every command card of any
+      // lineage — run_command, plus the legacy match_file / patch×4 /
+      // download_file / analyze_locally command cards from before those tools
+      // got their own ChatItem kinds. They all render as command cards now:
+      // their explain/cmd text carries the history, and the domain fields that
+      // were never structured on the old shape simply show empty.
       const cmd = item.cmd as unknown as Record<string, unknown>;
-      if (typeof cmd.execution !== "object" || cmd.execution === null) {
-        cmd.execution = {
-          full_cmd: isStr(cmd.full_cmd) ? cmd.full_cmd : "",
-          sentinel: isStr(cmd.sentinel) ? cmd.sentinel : "",
-          timeout_s: typeof cmd.timeout_s === "number" ? cmd.timeout_s : 0,
-        };
+      cmd.execution = ensureExecution(cmd);
+      if (!item.result && !item.rejected) {
+        item.rejected = { reason: staleCommandReason };
+      }
+    } else if (item.kind === "patch") {
+      const proposal = item.proposal as unknown as Record<string, unknown>;
+      proposal.execution = ensureExecution(proposal);
+      // A truthy non-string diff would hit proposal.diff.split() in the mv
+      // card. Strip rather than crash.
+      if (proposal.diff !== undefined && !isStr(proposal.diff)) {
+        delete proposal.diff;
       }
       if (!item.result && !item.rejected) {
         item.rejected = { reason: staleCommandReason };
       }
-    } else if (item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze" || item.kind === "match") {
+    } else if (item.kind === "match") {
+      const proposal = item.proposal as unknown as Record<string, unknown>;
+      proposal.execution = ensureExecution(proposal);
+      if (!item.result && !item.rejected) {
+        item.rejected = { reason: staleCommandReason };
+      }
+    } else if (item.kind === "web_tool" || item.kind === "download" || item.kind === "analyze") {
       // An unresolved card belongs to a dead actor whose approval ack it will
       // never receive. Mark stale-rejected.
       if (!item.result && !item.rejected) {

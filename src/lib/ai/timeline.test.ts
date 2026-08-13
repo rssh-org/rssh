@@ -99,16 +99,26 @@ describe("restoreTimeline", () => {
     expect(items).toEqual([{ kind: "user", text: "kept", at: 2 }]);
   });
 
-  it("drops known kinds with mangled bodies instead of crashing render", () => {
+  it("drops entries that aren't a card (no payload / no text / no timestamp)", () => {
     const items = roundtrip([
-      { kind: "command", at: 1 },                       // no cmd object
-      { kind: "command", cmd: { id: 7, cmd: "x" } },    // id not a string
+      { kind: "command", at: 1 },                       // no cmd payload
       { kind: "user", at: 2 },                          // no text
       { kind: "assistant", text: "no id", at: 3 },      // no id
       { kind: "note", text: "no timestamp" },           // no at → "Invalid Date"
       { kind: "note", text: "ok", at: 4 },
     ]);
     expect(items).toEqual([{ kind: "note", text: "ok", at: 4 }]);
+  });
+
+  it("renders a command card with weak fields instead of dropping it", () => {
+    // A command card is a card as long as it has a cmd object — missing/typed
+    // fields no longer drop it, they render empty (execution normalized to
+    // defaults). No more per-field validation that has to mirror the template.
+    const [c] = roundtrip([
+      { kind: "command", cmd: { id: 7, cmd: "x" }, at: 1, rejected: { reason: "no" } },
+    ]);
+    if (!(c.kind === "command")) throw new Error("expected command");
+    expect(c.cmd.execution).toEqual({ full_cmd: "", sentinel: "", timeout_s: 0 });
   });
 
   it("marks an unresolved web_tool card as stale-rejected", () => {
@@ -133,14 +143,16 @@ describe("restoreTimeline", () => {
     expect(items[1].kind === "web_tool" && items[1].rejected?.reason).toBe("user said no");
   });
 
-  it("drops web_tool cards with a mangled proposal shape", () => {
+  it("keeps web_tool cards with partial proposals, drops only those with no proposal", () => {
     const items = roundtrip([
-      { kind: "web_tool", proposal: { id: "w1", kind: "bogus", target: "x" }, at: 1 }, // bad kind
-      { kind: "web_tool", proposal: { id: "w2", kind: "web_fetch" }, at: 2 },          // missing target
-      { kind: "web_tool", at: 3 },                                                      // missing proposal
+      { kind: "web_tool", proposal: { id: "w1", kind: "bogus", target: "x" }, at: 1 },
+      { kind: "web_tool", proposal: { id: "w2", kind: "web_fetch" }, at: 2 },
+      { kind: "web_tool", at: 3 }, // no proposal → not a card
       { kind: "user", text: "kept", at: 4 },
     ]);
-    expect(items).toEqual([{ kind: "user", text: "kept", at: 4 }]);
+    expect(items).toHaveLength(3);
+    expect(items[0].kind === "web_tool" && items[0].proposal.id).toBe("w1");
+    expect(items[1].kind === "web_tool" && items[1].proposal.id).toBe("w2");
   });
 
   // --- download (independent line, ack-only) ---
@@ -151,15 +163,18 @@ describe("restoreTimeline", () => {
     expect(d.kind === "download" && d.rejected?.reason).toBe(STALE);
   });
 
-  it("drops legacy command/download_file cards from before the split", () => {
-    // download_file migrated to its own ChatItem.download — a stale blob may
-    // still hold it as a command card. Drop it, don't resurrect an orphan
-    // whose full_cmd/sentinel are empty under the new model.
-    const items = roundtrip([
-      { kind: "command", cmd: { id: "d1", tool_call_id: "d1", cmd: "download_file: /x", full_cmd: "", sentinel: "", explain: "", side_effect: "", timeout_s: 600, kind: "download_file" }, at: 1 },
+  it("renders legacy download_file command cards as command cards", () => {
+    // download_file used to ride the command line; an old blob may still hold
+    // it that way. It renders as a command card (execution normalized) rather
+    // than disappearing — explain/cmd text carries the history.
+    const [c, u] = roundtrip([
+      { kind: "command", cmd: { id: "d1", tool_call_id: "d1", cmd: "download_file: /x", full_cmd: "", sentinel: "", explain: "download /x", side_effect: "", timeout_s: 600, kind: "download_file" }, at: 1, rejected: { reason: "no" } },
       { kind: "user", text: "kept", at: 2 },
     ]);
-    expect(items).toEqual([{ kind: "user", text: "kept", at: 2 }]);
+    if (!(c.kind === "command")) throw new Error("expected command");
+    expect(c.cmd.kind).toBe("download_file");
+    expect(c.cmd.execution).toEqual({ full_cmd: "", sentinel: "", timeout_s: 600 });
+    expect(u.kind).toBe("user");
   });
 
   // --- patch (independent line, PTY execution via executeCommand) ---
@@ -177,25 +192,31 @@ describe("restoreTimeline", () => {
     expect(p.kind === "patch" && p.proposal.diff).toBeUndefined();
   });
 
-  it("drops legacy patch_* command cards from before the split", () => {
-    // patch×4 migrated to ChatItem.patch — a stale blob may still hold them as
-    // command cards. Drop, don't resurrect orphans.
+  it("renders legacy patch_* command cards as command cards", () => {
+    // patch×4 used to ride the command line; old blobs hold them as command
+    // cards. They render as command cards (execution normalized) rather than
+    // disappearing.
     const items = roundtrip([
-      { kind: "command", cmd: { id: "p1", tool_call_id: "p1", cmd: "cp", full_cmd: "", sentinel: "", explain: "", side_effect: "", timeout_s: 30, kind: "patch_cp" }, at: 1 },
-      { kind: "command", cmd: { id: "p2", tool_call_id: "p2", cmd: "mv", full_cmd: "", sentinel: "", explain: "", side_effect: "", timeout_s: 30, kind: "patch_mv" }, at: 2 },
+      { kind: "command", cmd: { id: "p1", tool_call_id: "p1", cmd: "cp", full_cmd: "", sentinel: "", explain: "patch 1/4", side_effect: "", timeout_s: 30, kind: "patch_cp" }, at: 1, rejected: { reason: "no" } },
+      { kind: "command", cmd: { id: "p2", tool_call_id: "p2", cmd: "mv", full_cmd: "", sentinel: "", explain: "patch 4/4", side_effect: "", timeout_s: 30, kind: "patch_mv" }, at: 2, rejected: { reason: "no" } },
       { kind: "user", text: "kept", at: 3 },
     ]);
-    expect(items).toEqual([{ kind: "user", text: "kept", at: 3 }]);
+    expect(items).toHaveLength(3);
+    if (!(items[0].kind === "command")) throw new Error("expected command");
+    expect(items[0].cmd.kind).toBe("patch_cp");
+    expect(items[1].kind === "command" && items[1].cmd.kind).toBe("patch_mv");
   });
 
-  it("drops patch cards with a mangled proposal shape", () => {
+  it("keeps patch cards with partial proposals, drops only those with no proposal", () => {
     const items = roundtrip([
-      { kind: "patch", proposal: { id: "p1", step: "bogus", path: "/x" }, at: 1 }, // bad step
-      { kind: "patch", proposal: { id: "p2", step: "cp" }, at: 2 },                // missing path
-      { kind: "patch", at: 3 },                                                    // missing proposal
+      { kind: "patch", proposal: { id: "p1", step: "bogus", path: "/x" }, at: 1, rejected: { reason: "no" } },
+      { kind: "patch", proposal: { id: "p2", step: "cp" }, at: 2, rejected: { reason: "no" } },
+      { kind: "patch", at: 3 }, // no proposal → not a card
       { kind: "user", text: "kept", at: 4 },
     ]);
-    expect(items).toEqual([{ kind: "user", text: "kept", at: 4 }]);
+    expect(items).toHaveLength(3);
+    expect(items[0].kind === "patch" && items[0].proposal.id).toBe("p1");
+    expect(items[1].kind === "patch" && items[1].proposal.id).toBe("p2");
   });
 
   // --- match (independent line, read-only PTY search) ---
@@ -206,12 +227,15 @@ describe("restoreTimeline", () => {
     expect(m.kind === "match" && m.rejected?.reason).toBe(STALE);
   });
 
-  it("drops legacy match_file command cards from before the split", () => {
-    const items = roundtrip([
-      { kind: "command", cmd: { id: "m1", tool_call_id: "m1", cmd: "match", full_cmd: "", sentinel: "", explain: "", side_effect: "", timeout_s: 60, kind: "match_file" }, at: 1 },
+  it("renders legacy match_file command cards as command cards", () => {
+    const [c, u] = roundtrip([
+      { kind: "command", cmd: { id: "m1", tool_call_id: "m1", cmd: "match", full_cmd: "", sentinel: "", explain: "match_file: search /x", side_effect: "", timeout_s: 60, kind: "match_file" }, at: 1, rejected: { reason: "no" } },
       { kind: "user", text: "kept", at: 2 },
     ]);
-    expect(items).toEqual([{ kind: "user", text: "kept", at: 2 }]);
+    if (!(c.kind === "command")) throw new Error("expected command");
+    expect(c.cmd.kind).toBe("match_file");
+    expect(c.cmd.execution).toEqual({ full_cmd: "", sentinel: "", timeout_s: 60 });
+    expect(u.kind).toBe("user");
   });
 });
 

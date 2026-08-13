@@ -19,7 +19,7 @@
         mv: "ai.patch.step.mv",
     };
     function stepLabelFor(step: PatchStep): string {
-        return t(STEP_KEY[step]);
+        return t(STEP_KEY[step] ?? "ai.patch.tag");
     }
 
     // Dedicated PTY execution card for patch_file (cp / modify / diff / mv).
