@@ -2367,3 +2367,26 @@ describe("executeCommand", () => {
     await running;
   });
 });
+
+describe("sumAuditTokens", () => {
+  it("sums llm_response token counts and skips other entries and nulls", async () => {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    const audit = {
+      entries: [
+        { at: "1", kind: { type: "user_message", content: "hi" } },
+        { at: "2", kind: { type: "llm_response", tokens_in: 100, tokens_out: 50 } },
+        { at: "3", kind: { type: "llm_response", tokens_in: null, tokens_out: null } },
+        { at: "4", kind: { type: "llm_response", tokens_in: 200, tokens_out: 30 } },
+        { at: "5", kind: { type: "session_ended" } },
+      ],
+    };
+    expect(ai.sumAuditTokens(audit as never)).toEqual({ tokens_in: 300, tokens_out: 80 });
+  });
+
+  it("returns zeros when there are no llm_response entries", async () => {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    expect(ai.sumAuditTokens({ entries: [] } as never)).toEqual({ tokens_in: 0, tokens_out: 0 });
+  });
+});

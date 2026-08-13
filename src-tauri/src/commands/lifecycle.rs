@@ -1335,6 +1335,7 @@ mod tests {
                 conversation_id,
                 target_key: "local".into(),
                 initial_history: Vec::new(),
+                initial_audit: crate::ai::audit::AuditLog::default(),
             },
             host,
         )
@@ -1377,6 +1378,7 @@ mod tests {
                 conversation_id,
                 target_key: "local".into(),
                 initial_history: Vec::new(),
+                initial_audit: crate::ai::audit::AuditLog::default(),
             },
             host,
         )
@@ -1421,6 +1423,7 @@ mod tests {
                 conversation_id,
                 target_key: "local".into(),
                 initial_history: Vec::new(),
+                initial_audit: crate::ai::audit::AuditLog::default(),
             },
             host,
         )

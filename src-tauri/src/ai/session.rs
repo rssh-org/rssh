@@ -329,6 +329,9 @@ pub struct SessionConfig {
     pub target_key: String,
     /// Resumed conversations are born with their persisted history; new ones empty.
     pub initial_history: Vec<ChatMessage>,
+    /// Resumed conversations are born with their persisted audit log (so the
+    /// audit panel + token totals survive a restart); new ones empty.
+    pub initial_audit: AuditLog,
 }
 
 /// `build()` 构造出来的"待启动"会话：拿到了 DiagnoseSession（含 action_tx），
@@ -383,7 +386,8 @@ pub fn start(mut cfg: SessionConfig, app: crate::emitter::Host) -> AppResult<Pen
     let system_prompt = sanitize::redact(&cfg.system_prompt, &cfg.redact_rules);
 
     let (action_tx, action_rx) = mpsc::unbounded_channel();
-    let audit = Arc::new(Mutex::new(AuditLog::default()));
+    let initial_audit = std::mem::take(&mut cfg.initial_audit);
+    let audit = Arc::new(Mutex::new(initial_audit));
     if let Ok(mut g) = audit.lock() {
         g.push(AuditKind::SessionStarted {
             skill: cfg.skill.clone(),
@@ -520,9 +524,12 @@ impl Actor {
                     self.history.push(ChatMessage::User {
                         content: text.clone(),
                     });
+                    self.audit_push(AuditKind::UserMessage {
+                        content: sanitize::redact(&text, &self.cfg.redact_rules),
+                    });
                     // Persist before the turn runs: a crash mid-turn must not
                     // lose the message the user already typed.
-                    self.persist_history();
+                    self.persist();
                     self.emit("user_message", json!({ "text": text }));
                     Self::complete_action(ack, Ok(()));
                     if !*shutdown_rx.borrow() {
@@ -534,7 +541,7 @@ impl Actor {
                         }
                         // Covers the turn's terminal paths that push history without
                         // reaching a loop commit (cancel marker, error placeholder).
-                        self.persist_history();
+                        self.persist();
                     }
                 }
                 UserAction::ClearContext { ack } => {
@@ -580,8 +587,11 @@ impl Actor {
                     self.history.push(ChatMessage::User {
                         content: text.clone(),
                     });
+                    self.audit_push(AuditKind::UserMessage {
+                        content: sanitize::redact(&text, &self.cfg.redact_rules),
+                    });
                     self.close_interrupted_history_tail();
-                    self.persist_history();
+                    self.persist();
                     self.emit("user_message", json!({ "text": text }));
                     Self::complete_action(ack, Ok(()));
                 }
@@ -623,7 +633,7 @@ impl Actor {
         self.audit_push(AuditKind::Note {
             message: format!("context cleared by user ({dropped} messages dropped)"),
         });
-        self.persist_history();
+        self.persist();
         self.emit("context_cleared", json!({}));
         Self::complete_action(ack, Ok(()));
     }
@@ -657,7 +667,7 @@ impl Actor {
             user_message_index,
             dropped_messages: dropped,
         });
-        self.persist_history();
+        self.persist();
         self.emit(
             "context_rolled_back",
             json!({ "user_message_index": user_message_index }),
@@ -699,7 +709,7 @@ impl Actor {
     /// accepted user message and the start/completion of its assistant turn.
     fn finish_interrupted_history(&mut self) {
         if self.close_interrupted_history_tail() {
-            self.persist_history();
+            self.persist();
         }
     }
 
@@ -784,11 +794,8 @@ impl Actor {
                 max_tokens: 4096,
             };
 
-            let payload_text = serde_json::to_string_pretty(&redacted_history)
-                .unwrap_or_else(|_| "<unserializable>".into());
             self.audit_push(AuditKind::LlmRequest {
                 model: self.cfg.model.clone(),
-                redacted_payload: payload_text,
             });
 
             // 流式：先 emit start 给前端开一条空 streaming bubble；
@@ -922,7 +929,6 @@ impl Actor {
             );
 
             self.audit_push(AuditKind::LlmResponse {
-                text: resp.text.clone(),
                 tokens_in: resp.tokens_in,
                 tokens_out: resp.tokens_out,
             });
@@ -945,7 +951,7 @@ impl Actor {
 
             if resp.tool_calls.is_empty() {
                 self.history.push(assistant);
-                self.persist_history();
+                self.persist();
                 return Ok(());
             }
 
@@ -1001,7 +1007,7 @@ impl Actor {
             // Persist each committed tool turn: approval waits can run minutes,
             // and a crash there must not roll the conversation back to the
             // previous user message.
-            self.persist_history();
+            self.persist();
             if stopping || *shutdown_rx.borrow() {
                 return Ok(());
             }
@@ -1923,17 +1929,32 @@ impl Actor {
         }
     }
 
-    /// Autosave `history` into ai_conversations. Call only at consistent
-    /// commit points — every tool_use paired with its tool_result — or a
-    /// resume of this snapshot gets 400-rejected by Anthropic.
+    /// Autosave `history` AND `audit` into ai_conversations in one UPDATE. Call
+    /// only at consistent commit points — every tool_use paired with its
+    /// tool_result — or a resume of this snapshot gets 400-rejected by Anthropic.
+    /// Audit rides the same points so a resumed session's audit panel and token
+    /// totals survive an actor restart.
     ///
     /// Persistence is a side feature: a failed disk write must not kill the
     /// live conversation, so errors are logged, never propagated.
-    fn persist_history(&self) {
-        let json = match serde_json::to_string(&self.history) {
+    fn persist(&self) {
+        let history_json = match serde_json::to_string(&self.history) {
             Ok(j) => j,
             Err(e) => {
                 log::warn!("conversation serialize failed: {e}");
+                return;
+            }
+        };
+        let audit_json = match self.audit.lock() {
+            Ok(g) => match serde_json::to_string(&*g) {
+                Ok(j) => j,
+                Err(e) => {
+                    log::warn!("audit serialize failed: {e}");
+                    return;
+                }
+            },
+            Err(_) => {
+                log::warn!("audit lock failed");
                 return;
             }
         };
@@ -1955,11 +1976,12 @@ impl Actor {
                 _ => None,
             })
             .unwrap_or_default();
-        if let Err(e) = crate::db::ai_conversation::save_history(
+        if let Err(e) = crate::db::ai_conversation::save_history_and_audit(
             &self.cfg.db,
             &self.cfg.conversation_id,
             &title,
-            &json,
+            &history_json,
+            &audit_json,
         ) {
             log::warn!("conversation persist failed: {e}");
         }

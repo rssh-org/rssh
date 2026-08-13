@@ -345,6 +345,22 @@ export function tokenUsage(tab_id: string): TokenUsage {
   return _tokensByTab[tab_id] ?? { tokens_in: 0, tokens_out: 0 };
 }
 
+/** Sum token spend across an audit log. LlmResponse entries carry the only
+ *  authoritative per-turn token counts (history doesn't), so this is the single
+ *  source for rebuilding a resumed session's toolbar total. Entries with null
+ *  token fields (e.g. some OpenAI streams that omit usage) contribute 0. */
+export function sumAuditTokens(audit: AuditLog): TokenUsage {
+  let tin = 0;
+  let tout = 0;
+  for (const e of audit.entries) {
+    if (e.kind.type === "llm_response") {
+      tin += e.kind.tokens_in ?? 0;
+      tout += e.kind.tokens_out ?? 0;
+    }
+  }
+  return { tokens_in: tin, tokens_out: tout };
+}
+
 function pushChat(tab_id: string, item: ChatItem, persist = true) {
   const arr = _chatByTab[tab_id] ?? [];
   _chatByTab[tab_id] = [...arr, item];
@@ -742,6 +758,22 @@ async function launchSessionAtGeneration(
     initializeContextEpoch({ tabId: info.tab_id, instanceId: info.instance_id });
     await attachListeners(info, generation);
     assertTabLive(args.tabId, generation);
+    // Rebuild token totals from the resumed audit log. Token spend is derived
+    // (the sum of every LlmResponse entry); the audit log is its only source,
+    // so a resumed session must recompute it or the toolbar shows 0.
+    if (resumeId) {
+      try {
+        const audit = await getAudit({ tabId: info.tab_id, instanceId: info.instance_id });
+        if (isTabLive(args.tabId, generation)) {
+          const spent = sumAuditTokens(audit);
+          if (spent.tokens_in || spent.tokens_out) {
+            _tokensByTab[info.tab_id] = spent;
+          }
+        }
+      } catch {
+        // audit empty / actor raced — leave tokens at 0; non-fatal.
+      }
+    }
     return info;
   } catch (error) {
     clearSessionState(info.tab_id);

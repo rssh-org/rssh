@@ -61,6 +61,7 @@
         switch (k.type) {
             case "session_started": return t("ai.audit.summary.session_started", { skill: k.skill, target: k.target });
             case "session_ended": return t("ai.audit.summary.session_ended");
+            case "user_message": return t("ai.audit.summary.user_message", { content: k.content });
             case "llm_request": return t("ai.audit.summary.llm_request", { model: k.model });
             case "llm_response": return t("ai.audit.summary.llm_response", { tin: k.tokens_in ?? "?", tout: k.tokens_out ?? "?" });
             case "command_proposed": return t("ai.audit.summary.command_proposed", { cmd: k.cmd });
@@ -114,17 +115,7 @@
                 <div class="audit-entry">
                     <span class="ts">{fmt(entry.at)}</span>
                     <span class="text">{summary(entry)}</span>
-                    {#if entry.kind.type === "llm_request"}
-                        <details class="dropdown">
-                            <summary>{t("ai.audit.toggle.payload")}</summary>
-                            <pre>{entry.kind.redacted_payload}</pre>
-                        </details>
-                    {:else if entry.kind.type === "llm_response"}
-                        <details class="dropdown">
-                            <summary>{t("ai.audit.toggle.response")}</summary>
-                            <pre>{entry.kind.text}</pre>
-                        </details>
-                    {:else if entry.kind.type === "command_executed"}
+                    {#if entry.kind.type === "command_executed"}
                         <details class="dropdown">
                             <summary>{t("ai.audit.toggle.output", { bytes: entry.kind.original_bytes })}</summary>
                             <pre>{entry.kind.output_redacted}</pre>

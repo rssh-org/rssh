@@ -512,7 +512,7 @@ pub async fn ai_session_start_impl(
     //    stale front-end cache must not graft an SSH history onto a serial port.
     let target_key = conversation_target_key(state, &target)?;
     let is_new_conversation = resume.is_none();
-    let (conversation_id, initial_history) = match resume {
+    let (conversation_id, initial_history, initial_audit) = match resume {
         Some(id) => {
             // Claim before reading the row. Otherwise delete or another resume
             // can win the load-to-activation gap and leave two writers (or
@@ -530,12 +530,18 @@ pub async fn ai_session_start_impl(
                 serde_json::from_str(&row.history_json).map_err(|e| {
                     AppError::other("conversation_corrupt", json!({ "error": e.to_string() }))
                 })?;
-            (id, history)
+            // Audit is fail-soft: a corrupt/missing audit must NOT block the
+            // conversation (unlike history, which the LLM needs to continue).
+            // Fall back to an empty log — the panel just shows nothing for the
+            // old turns, and token totals start from 0 for this resumed session.
+            let audit: super::audit::AuditLog =
+                serde_json::from_str(&row.audit_json).unwrap_or_default();
+            (id, history, audit)
         }
         None => {
             let id = uuid::Uuid::new_v4().to_string();
             owner_reservation.claim_conversation(&id)?;
-            (id, Vec::new())
+            (id, Vec::new(), super::audit::AuditLog::default())
         }
     };
 
@@ -564,6 +570,7 @@ pub async fn ai_session_start_impl(
         conversation_id,
         target_key: target_key.clone(),
         initial_history,
+        initial_audit,
     };
 
     // 并发 start 防御：上方的 contains_key 检查到这里的 insert 之间夹着

@@ -281,8 +281,9 @@ export interface AuditEntry {
 export type AuditKind =
   | { type: "session_started"; skill: string; target: string }
   | { type: "session_ended" }
-  | { type: "llm_request"; model: string; redacted_payload: string }
-  | { type: "llm_response"; text: string; tokens_in: number | null; tokens_out: number | null }
+  | { type: "user_message"; content: string }
+  | { type: "llm_request"; model: string }
+  | { type: "llm_response"; tokens_in: number | null; tokens_out: number | null }
   | { type: "command_proposed"; id: string; cmd: string; explain: string; side_effect: string }
   | { type: "command_rejected"; id: string; reason: string }
   | { type: "command_blocked"; cmd: string; reason: string }
