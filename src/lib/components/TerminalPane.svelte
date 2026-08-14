@@ -19,8 +19,14 @@
     import {createCommandBlockTracker, type CommandBlock, type CommandBlockTracker} from "../terminal/command-blocks.ts";
     import {readViewportSnapshot, readViewportText} from "../terminal/viewport-snapshot.ts";
     import {createFoldStore, type FoldStore} from "../terminal/folds.ts";
-    import {TERMINAL_SCROLLBACK_LINES, commandBlockFoldCacheLines} from "../terminal/limits.ts";
+    import {
+        TERMINAL_SCROLLBACK_LINES,
+        commandBlockFoldCacheLines,
+        BACKLOG_MAX_PENDING_BYTES,
+        BACKLOG_MAX_PENDING_BYTES_MOBILE,
+    } from "../terminal/limits.ts";
     import {createPaintScheduler, type PaintScheduler} from "../terminal/paint-scheduler.ts";
+    import {createOutputFeeder, type OutputFeeder} from "../terminal/output-feeder.ts";
 
     import {extractBlockTexts, extractBlocksText} from "../terminal/block-content.ts";
     import {redactCommandBlockTexts} from "../terminal/command-block-redaction.ts";
@@ -222,6 +228,7 @@
     let blockTracker: CommandBlockTracker | undefined;
     let foldStore: FoldStore | undefined;
     let paintScheduler: PaintScheduler | undefined;
+    let outputFeeder: OutputFeeder | undefined;
     let paintTick = $state(0);
     let isAltBuffer = $state(false);
     // Per-tab: when true the fold store stops auto-folding new output (see
@@ -250,7 +257,8 @@
     }
 
     function writeRawOutput(raw: Uint8Array) {
-        terminal.write(raw);
+        if (outputFeeder) outputFeeder.push(raw);
+        else terminal.write(raw);
     }
 
     // 右键菜单状态。null = 不显示。
@@ -618,6 +626,8 @@
     function announceDisconnected(reason?: string) {
         if (destroyed || disconnected) return;
         disconnected = true;
+        // Stale flood must not keep flowing behind the disconnect banner.
+        outputFeeder?.dropPending();
         if (reason) terminal.write(`\r\n\x1b[31m${reason}\x1b[0m\r\n`);
         terminal.write("\r\n\x1b[31m--- Disconnected ---\x1b[0m\r\n");
         terminal.write("\x1b[90mPress any key to reconnect.\x1b[0m\r\n");
@@ -923,8 +933,13 @@
                 const raw = new Uint8Array(ev.payload);
                 if (streamOpts) {
                     stageLoginScript(raw);
-                    if (streamOpts.outputMode === "hex") { terminal.write(bytesToHex(raw)); return; }
-                    terminal.write(streamNormalizeOut(decoder.decode(raw, { stream: true })));
+                    if (streamOpts.outputMode === "hex") {
+                        const hex = bytesToHex(raw);
+                        if (outputFeeder) outputFeeder.push(hex); else terminal.write(hex);
+                        return;
+                    }
+                    const text = streamNormalizeOut(decoder.decode(raw, { stream: true }));
+                    if (outputFeeder) outputFeeder.push(text); else terminal.write(text);
                     return;
                 }
                 // Write the raw bytes untouched — keyword highlighting is a decoration
@@ -1523,6 +1538,14 @@
             enabled: keymap.isMac && !app.isMobile,
         });
         terminal.unicode.activeVersion = "11";
+        // Flood control: all data-event writes go through the feeder (see
+        // output-feeder.ts). Synthetic UI writes (prompts, banners) bypass it.
+        outputFeeder = createOutputFeeder({
+            write: (data, cb) => terminal.write(data, cb),
+            maxPendingBytes: app.isMobile
+                ? BACKLOG_MAX_PENDING_BYTES_MOBILE
+                : BACKLOG_MAX_PENDING_BYTES,
+        });
         // Keyword highlighting lives here: a decoration layer over the parsed
         // cell grid. The reactive $effect above feeds it the compiled rules.
         highlightDecorator = new HighlightDecorator(terminal);
@@ -1819,6 +1842,8 @@
         mobileKeyboardCleanup?.();
         mobileTouchScrollCleanup?.();
         paintScheduler?.dispose();
+        outputFeeder?.dispose();
+        outputFeeder = undefined;
         foldStore?.dispose();
         blockTracker?.dispose();
         app.unregisterTerminalWriter();
