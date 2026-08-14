@@ -4,34 +4,46 @@
     import { toast } from "../stores/toast.svelte.ts";
     import { t, errMsg } from "../i18n/index.svelte.ts";
     import AppIcon from "./AppIcon.svelte";
+    import { onDestroy } from "svelte";
 
     function prevent(e: Event) { e.preventDefault(); }
 
     // Long-press a modifier button to LOCK it (stays armed across keys); a short
-    // tap stays one-shot (arms for the next key, then clears). One timer + flag
-    // is safe — only one finger is on one button at a time on a phone.
-    let modTimer: ReturnType<typeof setTimeout> | null = null;
-    let modFired = false;
+    // tap stays one-shot (arms for the next key, then clears). Press state is
+    // per-modifier: two fingers can hold Ctrl and Alt at once, and one button's
+    // release must never touch the other's pending timer.
+    type ModName = "ctrl" | "alt";
+    const modPress: Record<ModName, { timer: ReturnType<typeof setTimeout> | null; fired: boolean }> = {
+        ctrl: { timer: null, fired: false },
+        alt: { timer: null, fired: false },
+    };
     const MOD_LONG_PRESS_MS = 400;
-    function armLongPress(lock: () => void) {
-        modFired = false;
-        modTimer = setTimeout(() => { modFired = true; lock(); }, MOD_LONG_PRESS_MS);
+    function armLongPress(mod: ModName, lock: () => void) {
+        modPress[mod].fired = false;
+        modPress[mod].timer = setTimeout(() => { modPress[mod].fired = true; lock(); }, MOD_LONG_PRESS_MS);
     }
-    function clearModTimer() {
-        if (modTimer) { clearTimeout(modTimer); modTimer = null; }
+    function clearModTimer(mod: ModName) {
+        const p = modPress[mod];
+        if (p.timer) { clearTimeout(p.timer); p.timer = null; }
     }
-    function finishPress(tap: () => void) {
-        clearModTimer();
-        if (!modFired) tap();
-        modFired = false;
+    function finishPress(mod: ModName, tap: () => void) {
+        clearModTimer(mod);
+        if (!modPress[mod].fired) tap();
+        modPress[mod].fired = false;
     }
     // pointercancel (system interrupt) fully resets. pointerleave must NOT reset
-    // modFired: if the long-press already fired, sliding off and back up should
-    // still release without toggling the lock off — only a system cancel aborts.
-    function cancelPress() {
-        clearModTimer();
-        modFired = false;
+    // the fired flag: if the long-press already fired, sliding off and back up
+    // should still release without toggling the lock off.
+    function cancelPress(mod: ModName) {
+        clearModTimer(mod);
+        modPress[mod].fired = false;
     }
+    onDestroy(() => {
+        // A tab switch can unmount the bar mid-press; a pending timer must not
+        // lock a modifier after the UI is gone.
+        clearModTimer("ctrl");
+        clearModTimer("alt");
+    });
 
     function send(seq: string) {
         app.sendToTerminal(seq);
@@ -98,15 +110,15 @@
 
 <div class="keybar">
     <button class="key mod" class:active={app.ctrlActive()} class:locked={app.ctrlLocked()}
-        onpointerdown={(e) => { prevent(e); armLongPress(() => app.lockCtrl()); }}
-        onpointerup={() => finishPress(() => app.setCtrl(!app.ctrlActive()))}
-        onpointerleave={clearModTimer}
-        onpointercancel={cancelPress}>Ctrl</button>
+        onpointerdown={(e) => { prevent(e); armLongPress("ctrl", () => app.lockCtrl()); }}
+        onpointerup={() => finishPress("ctrl", () => app.setCtrl(!app.ctrlActive()))}
+        onpointerleave={() => clearModTimer("ctrl")}
+        onpointercancel={() => cancelPress("ctrl")}>Ctrl</button>
     <button class="key mod" class:active={app.altActive()} class:locked={app.altLocked()}
-        onpointerdown={(e) => { prevent(e); armLongPress(() => app.lockAlt()); }}
-        onpointerup={() => finishPress(() => app.setAlt(!app.altActive()))}
-        onpointerleave={clearModTimer}
-        onpointercancel={cancelPress}>Alt</button>
+        onpointerdown={(e) => { prevent(e); armLongPress("alt", () => app.lockAlt()); }}
+        onpointerup={() => finishPress("alt", () => app.setAlt(!app.altActive()))}
+        onpointerleave={() => clearModTimer("alt")}
+        onpointercancel={() => cancelPress("alt")}>Alt</button>
     <button class="key" onpointerdown={prevent} onclick={() => send('\x1b')}>Esc</button>
     <button class="key" onpointerdown={prevent} onclick={() => send('\t')}>Tab</button>
     <button class="key" onpointerdown={prevent} onclick={() => arrow('A')}>↑</button>
@@ -162,7 +174,10 @@
     .key:active {
         background: var(--divider);
     }
-    .key.mod.active {
+    /* Accent fill for any toggled-on key: armed modifiers, the open "..." and
+       AI buttons. (AI's class:active binding predates this rule — it was a dead
+       binding until this selector stopped requiring .mod.) */
+    .key.active {
         background: var(--accent);
         color: var(--white);
     }
