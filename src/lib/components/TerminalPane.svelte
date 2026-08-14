@@ -2052,6 +2052,13 @@
     .xterm-host {
         width: 100%;
         height: 100%;
+        /* Contain the whole xterm paint (canvases + its z-indexed decoration
+           layers, incl. the GPU-composited WebGL canvas) in one stacking
+           context. Without this the WebGL layer composites over sibling
+           overlays unpredictably — the backlog badge was only visible while
+           devtools was open. */
+        position: relative;
+        z-index: 0;
     }
 
     /* Widen left padding 4px → 12px to make room for the block bar.
