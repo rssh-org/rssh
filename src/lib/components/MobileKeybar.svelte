@@ -58,8 +58,9 @@
         app.clearModifiers();
     }
 
-    // Extension keys (PgUp/PgDn/Home/End/Ins/Del) tucked behind a "..." button so
-    // the main bar stays one row; opened as a floating panel above the bar.
+    // Extension keys (PgUp/PgDn/Home/End/Ins/Del) plus the panel actions
+    // (Snippets/SFTP/AI) tucked behind a "..." button so the main bar stays one
+    // row of high-frequency keys; opened as a floating panel above the bar.
     const EXT_KEYS: { label: string; seq: string }[] = [
         { label: "PgUp", seq: "\x1b[5~" },
         { label: "PgDn", seq: "\x1b[6~" },
@@ -126,15 +127,6 @@
     <button class="key" onpointerdown={prevent} onclick={() => arrow('D')}>←</button>
     <button class="key" onpointerdown={prevent} onclick={() => arrow('C')}>→</button>
     <button class="key" class:active={extOpen} title="More keys" aria-label="More keys" onpointerdown={prevent} onclick={() => extOpen = !extOpen}>⋯</button>
-    <button class="key" title="Snippets" aria-label="Snippets" onpointerdown={prevent} onclick={() => app.openSnippetPicker()}>
-        <AppIcon name="snippet" size={16} />
-    </button>
-    {#if app.activeTab()?.type === "ssh"}
-        <button class="key" title="SFTP" aria-label="SFTP" onpointerdown={prevent} onclick={openSftpPanel}>
-            <AppIcon name="folder" size={16} />
-        </button>
-    {/if}
-    <button class="key" class:active={aiOpen} class:dim={!aiOpen && !canOpenAi} title="AI Chat" onpointerdown={prevent} onclick={toggleAi}>AI</button>
     {#if extOpen}
         <!-- Transparent: a tap on the terminal area above dismisses the panel. -->
         <div class="ext-backdrop" onpointerdown={() => { extOpen = false; }}></div>
@@ -142,6 +134,17 @@
             {#each EXT_KEYS as k}
                 <button class="key ext" onpointerdown={prevent} onclick={() => send(k.seq)}>{k.label}</button>
             {/each}
+            <!-- Keys keep the panel open (you may press several); panel actions
+               navigate away, so they dismiss it. -->
+            <button class="key ext" title="Snippets" aria-label="Snippets" onpointerdown={prevent} onclick={() => { extOpen = false; app.openSnippetPicker(); }}>
+                <AppIcon name="snippet" size={16} />
+            </button>
+            {#if app.activeTab()?.type === "ssh"}
+                <button class="key ext" title="SFTP" aria-label="SFTP" onpointerdown={prevent} onclick={() => { extOpen = false; openSftpPanel(); }}>
+                    <AppIcon name="folder" size={16} />
+                </button>
+            {/if}
+            <button class="key ext" class:active={aiOpen} class:dim={!aiOpen && !canOpenAi} title="AI Chat" onpointerdown={prevent} onclick={() => { extOpen = false; toggleAi(); }}>AI</button>
         </div>
     {/if}
 </div>
