@@ -22,8 +22,10 @@
     import {
         TERMINAL_SCROLLBACK_LINES,
         commandBlockFoldCacheLines,
+        BACKLOG_DROP_TRIGGER_BYTES,
         BACKLOG_MAX_PENDING_BYTES,
         BACKLOG_MAX_PENDING_BYTES_MOBILE,
+        BACKLOG_QUIESCENCE_MS,
     } from "../terminal/limits.ts";
     import {createPaintScheduler, type PaintScheduler} from "../terminal/paint-scheduler.ts";
     import {createOutputFeeder, type OutputFeeder} from "../terminal/output-feeder.ts";
@@ -259,6 +261,18 @@
     function writeRawOutput(raw: Uint8Array) {
         if (outputFeeder) outputFeeder.push(raw);
         else terminal.write(raw);
+    }
+
+    /** Kernel-tty SIGINT semantics: with a big backlog pending, Ctrl+C must
+     * stop the DISPLAY, not just kill the producer. Drop everything not yet
+     * rendered, then discard stale bytes still in flight until the pipe goes
+     * quiet — otherwise the webview event queue refills the screen anyway. */
+    function maybeReleaseBacklog(text: string) {
+        if (!outputFeeder) return;
+        if (!text.includes("\x03")) return;
+        if (outputFeeder.pendingBytes() <= BACKLOG_DROP_TRIGGER_BYTES) return;
+        outputFeeder.dropPending();
+        outputFeeder.armQuiescentDrop(BACKLOG_QUIESCENCE_MS);
     }
 
     // 右键菜单状态。null = 不显示。
@@ -669,6 +683,7 @@
         tick();
     }
     function streamSendText(text: string) {
+        maybeReleaseBacklog(text);
         streamSendBytes(Array.from(new TextEncoder().encode(text)));
     }
     function streamEchoText(text: string) {
@@ -1006,6 +1021,7 @@
 
         dataDisposable = terminal.onData((data: string) => {
             if (destroyed || disconnected || sessionId !== sid) return;
+            maybeReleaseBacklog(data);
             if (streamOpts) { streamOnData(data); return; }
             invoke(writeCmd, { sessionId: sid, data: Array.from(new TextEncoder().encode(processInput(data))) });
         });
@@ -1778,6 +1794,7 @@
             requestAnimationFrame(() => requestAnimationFrame(fitTerminal));
             terminal?.focus();
             const writePty = (text: string) => {
+                maybeReleaseBacklog(text);
                 if (sessionId && !disconnected) {
                     if (streamOpts) {
                         streamSendText(text);
