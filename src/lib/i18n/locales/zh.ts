@@ -233,7 +233,7 @@ const zh: Messages = {
   "terminal.block.menu.send_ai": "发送到 AI",
   "terminal.block.menu.send_ai_n": "发送 {n} 块到 AI",
   "terminal.block.menu.disable_auto_fold": "临时关闭自动折叠（当前标签）",
-  "terminal.block.menu.enable_auto_fold": "开启自动折叠",
+  "terminal.block.menu.enable_auto_fold": "开启自动折叠（当前标签）",
   "ai.mobile.hint": "建议横屏使用 AI 面板。本机型不支持 download_file / analyze_locally 两个工具。",
   "ai.no_session": "请先连接到一个终端再打开 AI 面板。",
   "settings.section.cli": "CLI 工具",

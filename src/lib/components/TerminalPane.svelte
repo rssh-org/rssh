@@ -1655,7 +1655,10 @@
         foldStore = createFoldStore(terminal, blockTracker, {
             maxVisibleLines: commandBlockMaxLines,
             maxCachedLines: commandBlockFoldCacheLines(commandBlockMaxLines),
-            shouldAutoFold: () => app.commandBlockBar() && !autoFoldDisabled,
+            shouldAutoFold: () => app.commandBlockBar(),
+            // Per-tab "disable auto-fold" suspends folding of NEW output only;
+            // enforceAutoFold (resize/reflow) still restores existing folds.
+            shouldFoldNewOutput: () => !autoFoldDisabled,
         });
         paintScheduler = createPaintScheduler({
             shouldPaint: () => app.commandBlockBar() && !isAltBuffer,

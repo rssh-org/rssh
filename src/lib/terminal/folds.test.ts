@@ -911,6 +911,56 @@ describe("FoldStore — automatic command-block limit", () => {
     expect(f.lineContents().slice(0, 4)).toEqual(["L0", "L8", "L9", "L10"]);
   });
 
+  it("does not fold new output while new-output folding is disabled (bar still on)", () => {
+    const f = fakeTerm({ rows: 12, initialLines: 12, cursorY: 10 });
+    const start = f.makeMarker(0);
+    const store = createFoldStore(
+      f.term,
+      fakeTracker([makeBlock(1, start, null)]),
+      { maxVisibleLines: 3, maxCachedLines: 8, shouldFoldNewOutput: () => false },
+    );
+
+    f.fireWriteParsed();
+
+    // shouldFoldNewOutput=false suspends incremental folding; the block stays
+    // fully visible even though it exceeds maxVisibleLines.
+    expect(store.getFold(1)).toBeUndefined();
+    expect(f.lineContents().slice(0, 4)).toEqual(["L0", "L1", "L2", "L3"]);
+  });
+
+  it("keeps an existing fold through resize/reflow while new-output folding is disabled", () => {
+    const f = fakeTerm({ rows: 12, initialLines: 12, cursorY: 10 });
+    const start = f.makeMarker(0);
+    let newOutputEnabled = true;
+    const store = createFoldStore(
+      f.term,
+      fakeTracker([makeBlock(1, start, null)]),
+      {
+        maxVisibleLines: 3,
+        maxCachedLines: 8,
+        shouldFoldNewOutput: () => newOutputEnabled,
+      },
+    );
+
+    // 1. Auto-fold on: a block over the limit gets prefix-folded.
+    f.fireWriteParsed();
+    expect(store.getFold(1)).toMatchObject({ kind: "prefix", count: 7 });
+
+    // 2. User disables auto-fold for this tab (future output only).
+    newOutputEnabled = false;
+
+    // 3. fitTerminal resize sequence: unfoldAll (so saved lines reflow at the
+    //    new width) then enforceAutoFold. Disabling new-output folding must NOT
+    //    block the reflow re-application, or the existing fold is lost.
+    store.unfoldAll();
+    expect(store.getFold(1)).toBeUndefined();
+    store.enforceAutoFold();
+
+    // 4. The existing fold is restored.
+    expect(store.getFold(1)).toMatchObject({ kind: "prefix", count: 7 });
+    expect(f.lineContents().slice(0, 4)).toEqual(["L0", "L8", "L9", "L10"]);
+  });
+
   it("folds during a large parse batch before xterm can trim the block marker", () => {
     const f = fakeTerm({ rows: 40, initialLines: 40, cursorY: 3 });
     const start = f.makeMarker(0);

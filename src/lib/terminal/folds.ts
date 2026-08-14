@@ -80,6 +80,10 @@ export interface FoldStoreOptions {
   maxCachedLines?: number;
   /** Visual block controls must be available before automatic folding hides rows. */
   shouldAutoFold?: () => boolean;
+  /** Suspend folding of *new* output only. enforceAutoFold (the resize/reflow
+   *  re-application) is unaffected, so existing folds survive a resize while a
+   *  per-tab "disable auto-fold" toggle suspends folding of future output. */
+  shouldFoldNewOutput?: () => boolean;
 }
 
 /** xterm 默认 attr（fg=0,bg=0），与 DEFAULT_ATTR_DATA 等价。getBlankLine 必填。 */
@@ -316,6 +320,14 @@ export function createFoldStore(
       && term.buffer.active.type === "normal";
   }
 
+  /** Incremental folding of newly arriving output. Stricter than canAutoFold:
+   *  also honors shouldFoldNewOutput so a per-tab "disable auto-fold" toggle
+   *  suspends folding of future output WITHOUT disabling enforceAutoFold,
+   *  which must still restore folds after a resize/reflow. */
+  function canFoldNewOutput(): boolean {
+    return canAutoFold() && options.shouldFoldNewOutput?.() !== false;
+  }
+
   function foldBlockOverflow(block: CommandBlock, minimumExcess: number): void {
     if (maxVisibleLines === null || block.start.isDisposed) return;
     if (folds.get(block.id)?.kind === "full") return;
@@ -332,13 +344,13 @@ export function createFoldStore(
   }
 
   function foldActiveOverflow(minimumExcess: number): void {
-    if (!canAutoFold()) return;
+    if (!canFoldNewOutput()) return;
     const block = tracker.blocks[tracker.blocks.length - 1];
     if (block?.end === null) foldBlockOverflow(block, minimumExcess);
   }
 
   function foldRecentOverflow(): void {
-    if (!canAutoFold()) return;
+    if (!canFoldNewOutput()) return;
     const blocks = tracker.blocks;
     // Prompt detection runs before this listener and may close the previous
     // block while opening a new prompt block in the same parse batch.
