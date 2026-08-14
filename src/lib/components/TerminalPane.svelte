@@ -974,10 +974,12 @@
                     if (streamOpts.outputMode === "hex") {
                         const hex = bytesToHex(raw);
                         if (outputFeeder) outputFeeder.push(hex); else terminal.write(hex);
+                        scheduleBacklogUpdate();
                         return;
                     }
                     const text = streamNormalizeOut(decoder.decode(raw, { stream: true }));
                     if (outputFeeder) outputFeeder.push(text); else terminal.write(text);
+                    scheduleBacklogUpdate();
                     return;
                 }
                 // Write the raw bytes untouched — keyword highlighting is a decoration
@@ -2094,8 +2096,6 @@
         pointer-events: none;
         overflow: visible;
     }
-    /* 折叠角标：行末右侧贴一个灰字 "⋯ N lines"。
-       pointer-events: none 让 xterm 选中、链接、滚动手势全部穿透。 */
     .backlog-badge {
         position: absolute;
         top: 8px;
@@ -2118,6 +2118,8 @@
         color: var(--text-dim);
     }
 
+    /* 折叠角标：行末右侧贴一个灰字 "⋯ N lines"。
+       pointer-events: none 让 xterm 选中、链接、滚动手势全部穿透。 */
     .fold-label {
         position: absolute;
         right: 8px;
