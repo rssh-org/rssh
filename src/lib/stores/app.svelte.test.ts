@@ -629,14 +629,32 @@ describe("soft keyboard gate", () => {
 
   it("mirrors the open state and resets it when the pane unregisters", async () => {
     const app = await loadAppModule();
-    app.registerSoftKeyboardToggle(() => {});
+    const toggle = () => {};
+    app.registerSoftKeyboardToggle(toggle);
     app.setSoftKeyboardOpen(true);
     expect(app.softKeyboardOpen()).toBe(true);
 
-    app.unregisterSoftKeyboardToggle();
+    app.unregisterSoftKeyboardToggle(toggle);
 
     expect(app.softKeyboardOpen()).toBe(false);
     // No controller registered — a tap is a silent no-op, not a throw.
     app.toggleSoftKeyboard();
+  });
+
+  it("a hidden pane unregistering must not clear the active pane's slot", async () => {
+    // Panes stay mounted per tab; a later-mounted pane steals the slot, and a
+    // stale pane being destroyed must not wipe the current owner.
+    const app = await loadAppModule();
+    const stale = () => {};
+    const active = () => {};
+    app.registerSoftKeyboardToggle(stale);
+    app.registerSoftKeyboardToggle(active);
+
+    app.unregisterSoftKeyboardToggle(stale);
+
+    let called = false;
+    app.registerSoftKeyboardToggle(() => { called = true; });
+    app.toggleSoftKeyboard();
+    expect(called).toBe(true); // the current owner still receives the toggle
   });
 });

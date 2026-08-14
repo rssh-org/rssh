@@ -558,6 +558,9 @@
     let resizeObs: ResizeObserver;
     let ime229WorkaroundCleanup: (() => void) | undefined;
     let mobileKeyboardCleanup: (() => void) | undefined;
+    // The active pane's keyboard toggle, built by setupMobileSoftKeyboard and
+    // registered in the activation effect (see below for why not at mount).
+    let softKbToggle: (() => void) | null = null;
     let mobileTouchScrollCleanup: (() => void) | undefined;
 
     const isLocal = $derived(tabType === "local");
@@ -1444,13 +1447,14 @@
             lockKeyboard();
         }
 
-        // The keybar's keyboard button is the ONLY way to pop the keyboard;
-        // route it through the store (single-slot, same pattern as the writer).
-        app.registerSoftKeyboardToggle(() => {
+        // The keybar's keyboard button is the ONLY way to pop the keyboard.
+        // Only STORE the toggle here — registering at mount would let a hidden
+        // pane steal the store's single slot (panes stay mounted per tab); the
+        // activation effect registers it when THIS pane becomes the active tab.
+        softKbToggle = () => {
             if (document.activeElement === helper) hideKeyboard();
             else showKeyboard();
-        });
-        app.setSoftKeyboardOpen(false);
+        };
         pinKeyboardHelper();
         lockKeyboard();
         helper.blur();
@@ -1477,7 +1481,8 @@
             else helper.setAttribute("style", originalHelperStyle);
             helper.removeEventListener("focus", onFocus);
             helper.removeEventListener("blur", onBlur);
-            app.unregisterSoftKeyboardToggle();
+            if (softKbToggle) app.unregisterSoftKeyboardToggle(softKbToggle);
+            softKbToggle = null;
             helper.removeEventListener("input", keepKeyboardHelperInView);
             helper.removeEventListener("keydown", keepKeyboardHelperInView);
             helper.removeEventListener("compositionstart", keepKeyboardHelperInView);
@@ -1793,6 +1798,10 @@
                     : `\x1b[1;${mod}${dir}`;
                 writePty(seq);
             });
+            // Same re-own-on-activation as the writer above: the visible tab's
+            // ⌨ button must always control this pane's helper, never a hidden
+            // pane that happened to mount later.
+            if (softKbToggle) app.registerSoftKeyboardToggle(softKbToggle);
         }
     });
 

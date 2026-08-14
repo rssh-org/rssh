@@ -530,7 +530,14 @@ export function softKeyboardOpen() { return _softKeyboardOpen; }
 export function setSoftKeyboardOpen(v: boolean) { _softKeyboardOpen = v; }
 let _softKeyboardToggle: (() => void) | null = null;
 export function registerSoftKeyboardToggle(fn: () => void) { _softKeyboardToggle = fn; }
-export function unregisterSoftKeyboardToggle() { _softKeyboardToggle = null; _softKeyboardOpen = false; }
+/** Owner-guarded: panes stay mounted per tab — a hidden pane being destroyed
+ *  must not clear the slot the active pane owns. */
+export function unregisterSoftKeyboardToggle(fn: () => void) {
+  if (_softKeyboardToggle === fn) {
+    _softKeyboardToggle = null;
+    _softKeyboardOpen = false;
+  }
+}
 export function toggleSoftKeyboard() { _softKeyboardToggle?.(); }
 
 /* ─── Send to active terminal ─── */
