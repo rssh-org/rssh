@@ -3,6 +3,7 @@
     import {SvelteSet} from "svelte/reactivity";
     import {Terminal, type IDisposable} from "@xterm/xterm";
     import {FitAddon} from "@xterm/addon-fit";
+    import {WebglAddon} from "@xterm/addon-webgl";
     import {SearchAddon} from "@xterm/addon-search";
     import {Unicode11Addon} from "@xterm/addon-unicode11";
     import {ImageAddon} from "@xterm/addon-image";
@@ -1570,6 +1571,20 @@
             pixelLimit: app.isMobile ? 4_000_000 : 16_000_000,
         }));
         terminal.open(containerEl);
+        // GPU renderer: the default DomRenderer rebuilds DOM spans per paint
+        // and drowns on flood output. WebGL draws from a texture atlas — the
+        // "GPU acceleration" every modern terminal ships. Any failure (old
+        // GPU, RDP, WebView without WebGL2) falls back to the DomRenderer.
+        try {
+            const webglAddon = new WebglAddon();
+            webglAddon.onContextLoss(() => {
+                console.warn("[terminal] WebGL context lost — falling back to DOM renderer");
+                webglAddon.dispose();
+            });
+            terminal.loadAddon(webglAddon);
+        } catch (e) {
+            console.warn("[terminal] WebGL renderer unavailable, using DOM:", e);
+        }
         ime229WorkaroundCleanup = setupXtermIme229Workaround({
             terminal,
             host: containerEl,
