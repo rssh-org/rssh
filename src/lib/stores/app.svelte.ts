@@ -498,13 +498,27 @@ export function setSidebarPosition(pos: SidebarPosition) {
 }
 
 /* ─── Mobile key modifiers (sticky Ctrl/Alt) ─── */
+// Two arming modes on the mobile keybar:
+//  - one-shot (setCtrl, a short tap): arms for the next key only
+//  - lock (lockCtrl, a long-press): stays armed across keys until tapped off
+// clearModifiers clears one-shot arms but leaves locks — so a locked Ctrl keeps
+// producing Ctrl+arrow on every tap without re-arming.
 let _ctrlActive = $state(false);
 let _altActive = $state(false);
+let _ctrlLocked = $state(false);
+let _altLocked = $state(false);
 export function ctrlActive() { return _ctrlActive; }
 export function altActive() { return _altActive; }
-export function setCtrl(v: boolean) { _ctrlActive = v; }
-export function setAlt(v: boolean) { _altActive = v; }
-export function clearModifiers() { _ctrlActive = false; _altActive = false; }
+export function ctrlLocked() { return _ctrlLocked; }
+export function altLocked() { return _altLocked; }
+export function setCtrl(v: boolean) { _ctrlActive = v; if (!v) _ctrlLocked = false; }
+export function setAlt(v: boolean) { _altActive = v; if (!v) _altLocked = false; }
+export function lockCtrl() { _ctrlActive = true; _ctrlLocked = true; }
+export function lockAlt() { _altActive = true; _altLocked = true; }
+export function clearModifiers() {
+  if (!_ctrlLocked) _ctrlActive = false;
+  if (!_altLocked) _altActive = false;
+}
 
 /* ─── Send to active terminal ─── */
 let _terminalWriter: ((text: string) => void) | null = null;

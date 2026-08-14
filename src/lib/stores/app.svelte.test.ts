@@ -556,3 +556,58 @@ describe("command block line limit", () => {
     });
   });
 });
+
+describe("mobile key modifier lock", () => {
+  // Two ways to arm a modifier on the mobile keybar:
+  //  - short tap (setCtrl): one-shot — arms for the NEXT key, then clears
+  //  - long-press (lockCtrl): sticky — stays armed across many keys until tapped off
+  // The distinction lives entirely in clearModifiers: it clears one-shot arms but
+  // must leave locks untouched, so a locked Ctrl keeps producing Ctrl+arrow on
+  // every tap without re-arming.
+
+  it("a short tap is one-shot: armed until clearModifiers, then gone", async () => {
+    const app = await loadAppModule();
+    app.setCtrl(true);
+    expect(app.ctrlActive()).toBe(true);
+    expect(app.ctrlLocked()).toBe(false); // a tap never locks
+    app.clearModifiers();
+    expect(app.ctrlActive()).toBe(false); // one-shot cleared after the key
+  });
+
+  it("a long-press lock survives clearModifiers", async () => {
+    const app = await loadAppModule();
+    app.lockCtrl();
+    expect(app.ctrlActive()).toBe(true);
+    expect(app.ctrlLocked()).toBe(true);
+    app.clearModifiers();
+    expect(app.ctrlActive()).toBe(true); // locked: NOT cleared
+    expect(app.ctrlLocked()).toBe(true);
+  });
+
+  it("tapping a locked modifier off releases the lock", async () => {
+    const app = await loadAppModule();
+    app.lockCtrl();
+    app.setCtrl(false);
+    expect(app.ctrlActive()).toBe(false);
+    expect(app.ctrlLocked()).toBe(false);
+  });
+
+  it("keeps ctrl and alt independent across one-shot and lock", async () => {
+    const app = await loadAppModule();
+    app.lockCtrl();      // ctrl sticky
+    app.setAlt(true);    // alt one-shot
+    app.clearModifiers();
+    expect(app.ctrlActive()).toBe(true);  // ctrl locked -> survives
+    expect(app.altActive()).toBe(false);  // alt one-shot -> cleared
+    expect(app.altLocked()).toBe(false);
+  });
+
+  it("locks alt symmetrically", async () => {
+    const app = await loadAppModule();
+    app.lockAlt();
+    expect(app.altActive()).toBe(true);
+    expect(app.altLocked()).toBe(true);
+    app.clearModifiers();
+    expect(app.altActive()).toBe(true);
+  });
+});

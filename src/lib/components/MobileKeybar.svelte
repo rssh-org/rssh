@@ -7,6 +7,32 @@
 
     function prevent(e: Event) { e.preventDefault(); }
 
+    // Long-press a modifier button to LOCK it (stays armed across keys); a short
+    // tap stays one-shot (arms for the next key, then clears). One timer + flag
+    // is safe — only one finger is on one button at a time on a phone.
+    let modTimer: ReturnType<typeof setTimeout> | null = null;
+    let modFired = false;
+    const MOD_LONG_PRESS_MS = 400;
+    function armLongPress(lock: () => void) {
+        modFired = false;
+        modTimer = setTimeout(() => { modFired = true; lock(); }, MOD_LONG_PRESS_MS);
+    }
+    function clearModTimer() {
+        if (modTimer) { clearTimeout(modTimer); modTimer = null; }
+    }
+    function finishPress(tap: () => void) {
+        clearModTimer();
+        if (!modFired) tap();
+        modFired = false;
+    }
+    // pointercancel (system interrupt) fully resets. pointerleave must NOT reset
+    // modFired: if the long-press already fired, sliding off and back up should
+    // still release without toggling the lock off — only a system cancel aborts.
+    function cancelPress() {
+        clearModTimer();
+        modFired = false;
+    }
+
     function send(seq: string) {
         app.sendToTerminal(seq);
         app.clearModifiers();
@@ -19,6 +45,18 @@
         app.sendArrow(dir, mod);
         app.clearModifiers();
     }
+
+    // Extension keys (PgUp/PgDn/Home/End/Ins/Del) tucked behind a "..." button so
+    // the main bar stays one row; opened as a floating panel above the bar.
+    const EXT_KEYS: { label: string; seq: string }[] = [
+        { label: "PgUp", seq: "\x1b[5~" },
+        { label: "PgDn", seq: "\x1b[6~" },
+        { label: "Home", seq: "\x1b[H" },
+        { label: "End", seq: "\x1b[F" },
+        { label: "Ins", seq: "\x1b[2~" },
+        { label: "Del", seq: "\x1b[3~" },
+    ];
+    let extOpen = $state(false);
 
     // 当前 tab 是否有活跃 SSH/local session——AI 面板要求已连接的终端做诊断对象。
     // 没连接就让按钮 disabled，避免点了没反应（aiVisible 在 AppShell 层会因 session 缺失静默不渲染）。
@@ -59,14 +97,23 @@
 </script>
 
 <div class="keybar">
-    <button class="key mod" class:active={app.ctrlActive()} onpointerdown={prevent} onclick={() => app.setCtrl(!app.ctrlActive())}>Ctrl</button>
-    <button class="key mod" class:active={app.altActive()} onpointerdown={prevent} onclick={() => app.setAlt(!app.altActive())}>Alt</button>
+    <button class="key mod" class:active={app.ctrlActive()} class:locked={app.ctrlLocked()}
+        onpointerdown={(e) => { prevent(e); armLongPress(() => app.lockCtrl()); }}
+        onpointerup={() => finishPress(() => app.setCtrl(!app.ctrlActive()))}
+        onpointerleave={clearModTimer}
+        onpointercancel={cancelPress}>Ctrl</button>
+    <button class="key mod" class:active={app.altActive()} class:locked={app.altLocked()}
+        onpointerdown={(e) => { prevent(e); armLongPress(() => app.lockAlt()); }}
+        onpointerup={() => finishPress(() => app.setAlt(!app.altActive()))}
+        onpointerleave={clearModTimer}
+        onpointercancel={cancelPress}>Alt</button>
     <button class="key" onpointerdown={prevent} onclick={() => send('\x1b')}>Esc</button>
     <button class="key" onpointerdown={prevent} onclick={() => send('\t')}>Tab</button>
     <button class="key" onpointerdown={prevent} onclick={() => arrow('A')}>↑</button>
     <button class="key" onpointerdown={prevent} onclick={() => arrow('B')}>↓</button>
     <button class="key" onpointerdown={prevent} onclick={() => arrow('D')}>←</button>
     <button class="key" onpointerdown={prevent} onclick={() => arrow('C')}>→</button>
+    <button class="key" class:active={extOpen} title="More keys" aria-label="More keys" onpointerdown={prevent} onclick={() => extOpen = !extOpen}>⋯</button>
     <button class="key" title="Snippets" aria-label="Snippets" onpointerdown={prevent} onclick={() => app.openSnippetPicker()}>
         <AppIcon name="snippet" size={16} />
     </button>
@@ -76,6 +123,15 @@
         </button>
     {/if}
     <button class="key" class:active={aiOpen} class:dim={!aiOpen && !canOpenAi} title="AI Chat" onpointerdown={prevent} onclick={toggleAi}>AI</button>
+    {#if extOpen}
+        <!-- Transparent: a tap on the terminal area above dismisses the panel. -->
+        <div class="ext-backdrop" onpointerdown={() => { extOpen = false; }}></div>
+        <div class="ext-panel">
+            {#each EXT_KEYS as k}
+                <button class="key ext" onpointerdown={prevent} onclick={() => send(k.seq)}>{k.label}</button>
+            {/each}
+        </div>
+    {/if}
 </div>
 
 <style>
@@ -86,6 +142,7 @@
         background: var(--bg);
         border-top: 1px solid var(--divider);
         flex-shrink: 0;
+        position: relative; /* anchor for the floating extension panel + backdrop */
     }
     .key {
         flex: 1;
@@ -109,5 +166,39 @@
         background: var(--accent);
         color: var(--white);
     }
+    /* Locked (long-press) vs one-shot (tap): both accent-filled, but locked gets
+       an inset ring so you can tell at a glance that Ctrl will keep applying. */
+    .key.mod.locked {
+        box-shadow: inset 0 0 0 2px var(--white);
+    }
     .key.dim { opacity: 0.45; }
+
+    /* Floating extension panel: sits just above the bar, overlays the terminal
+       instead of pushing it (the soft keyboard already eats half the screen).
+       The backdrop covers everything above the bar so a tap there dismisses it. */
+    .ext-backdrop {
+        position: absolute;
+        bottom: 100%;
+        left: 0;
+        right: 0;
+        height: 100vh;
+    }
+    .ext-panel {
+        position: absolute;
+        bottom: 100%;
+        left: 0;
+        right: 0;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        padding: 6px 8px;
+        background: var(--bg);
+        border-top: 1px solid var(--divider);
+        border-radius: 8px 8px 0 0;
+        z-index: 1; /* above the backdrop so the keys stay tappable */
+    }
+    .ext-panel .key.ext {
+        flex: 0 0 auto;
+        min-width: 44px;
+    }
 </style>
