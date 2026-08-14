@@ -31,6 +31,7 @@
     } from "../terminal/limits.ts";
     import {createPaintScheduler, type PaintScheduler} from "../terminal/paint-scheduler.ts";
     import {createOutputFeeder, formatBacklogBytes, type OutputFeeder} from "../terminal/output-feeder.ts";
+    import {terminalRowHeight} from "../terminal/row-height.ts";
 
     import {extractBlockTexts, extractBlocksText} from "../terminal/block-content.ts";
     import {redactCommandBlockTexts} from "../terminal/command-block-redaction.ts";
@@ -318,8 +319,7 @@
         // selectedBlockIds 是 SvelteSet，下方 .has() 调用自带 reactivity
         if (!app.commandBlockBar()) return [];
         if (!terminal || !blockTracker || !containerEl || isAltBuffer) return [];
-        const firstRow = containerEl.querySelector(".xterm-rows")?.firstElementChild as HTMLElement | null;
-        const rowHeight = firstRow?.offsetHeight ?? 0;
+        const rowHeight = terminalRowHeight(terminal, containerEl);
         if (!rowHeight) return [];
         const buf = terminal.buffer.active;
         const viewportY = buf.viewportY;

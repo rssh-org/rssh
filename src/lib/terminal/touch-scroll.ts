@@ -1,5 +1,7 @@
 import type { Terminal } from "@xterm/xterm";
 
+import { terminalRowHeight } from "./row-height.ts";
+
 /**
  * Mobile touch-scroll for an xterm terminal. xterm 6.0.0 vendors a VS Code
  * touch-gesture service (with inertia!) but never calls addTarget(), so
@@ -69,8 +71,7 @@ export function setupTouchScroll(host: HTMLElement, terminal: Terminal): () => v
   // rows forces a synchronous layout reflow on every touchmove/fling frame (layout
   // thrash). Cached in rowH.
   function measureRowHeight(): number {
-    const row = host.querySelector(".xterm-rows")?.firstElementChild as HTMLElement | null;
-    return row?.offsetHeight ?? 0;
+    return terminalRowHeight(terminal, host);
   }
 
   // Finger down (dy>0) = reveal earlier output = scroll up → negate.
