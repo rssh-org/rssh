@@ -7,7 +7,7 @@
     import * as updates from "../stores/updates.svelte.ts";
     import * as syncStatus from "../stores/sync.svelte.ts";
     import HomeScreen from "./HomeScreen.svelte";
-    import TerminalPane from "./TerminalPane.svelte";
+    import TerminalSplitLayout from "./TerminalSplitLayout.svelte";
     import ForwardPane from "./ForwardPane.svelte";
     import EditPane from "./EditPane.svelte";
     import SettingsLayout from "./SettingsLayout.svelte";
@@ -45,9 +45,18 @@
     let menuCtx = $state<{ x: number; y: number; tab: Tab } | null>(null);
     let pinnedMenu = $state<{ x: number; y: number } | null>(null);
     let pinned = $state(false);
+    let pendingPaneSources = $state<Record<string, string>>({});
     const bypassStartupReconcile = !!window.__rssh_clone || !!window.__rssh_ai_handoff;
     let resourcePanesAllowed = $state(bypassStartupReconcile);
     let navigationLoad = 0;
+    $effect(() => {
+        const tabs = app.tabs();
+        for (const paneId of Object.keys(pendingPaneSources)) {
+            if (!tabs.some((tab) => tab.id === paneId) || app.sessionIdForTab(paneId)) {
+                delete pendingPaneSources[paneId];
+            }
+        }
+    });
 
     async function refreshNavigationData() {
         const current = ++navigationLoad;
@@ -83,10 +92,14 @@
         const tab = app.tabs().find(t => t.id === id);
         if (!tab || tab.type === "home") return;
         if (app.confirmCloseTab()) { closingTab = tab; return; }
+        delete pendingPaneSources[id];
         app.closeTab(id);
     }
     function confirmCloseTab() {
-        if (closingTab) app.closeTab(closingTab.id);
+        if (closingTab) {
+            delete pendingPaneSources[closingTab.id];
+            app.closeTab(closingTab.id);
+        }
         closingTab = null;
     }
 
@@ -99,7 +112,7 @@
                 skipInSettings: true,
                 match: e => matchBinding(e, keymap.binding("tab.close")),
                 handler: () => {
-                    const id = app.activeTabId();
+                    const id = app.activePaneId();
                     if (id === "home") return false;
                     requestCloseTab(id);
                 },
@@ -133,8 +146,6 @@
                 skipInSettings: true,
                 match: e => matchBinding(e, keymap.binding("ai.toggle")),
                 handler: () => {
-                    // Close always works; open only on a connected terminal tab
-                    // (mirrors MobileKeybar's canOpenAi guard).
                     const tab = app.activeTab();
                     if (tab && ai.isOpen(tab.id)) {
                         void ai.closePanel(tab.id).catch((e) => {
@@ -151,17 +162,14 @@
             {
                 display: "Ctrl+Tab / Ctrl+Shift+Tab",
                 description: t("shortcut.tab.cycle"),
-                // Exact match (excludes Ctrl+Alt/Meta+Tab) via the same data that
-                // backs RESERVED, so the reserved set and this predicate can't drift.
                 match: e => TAB_CYCLE.some(b => matchBinding(e, b)),
                 handler: e => {
-                    // Don't hijack keys while the user is recording a new binding.
                     if (keymap.recording()) return false;
                     const dir = e.shiftKey ? -1 : 1;
                     if (!tabCycling) {
                         tabCycling = true;
                         const idx = navItems.findIndex(item =>
-                            item.kind === "tab" ? item.tab.id === app.activeTabId() && !app.settingsActive()
+                            item.kind === "tab" ? item.tab.id === app.activeWorkspaceId() && !app.settingsActive()
                             : item.kind === "settings" ? app.settingsActive()
                             : false
                         );
@@ -174,20 +182,14 @@
             {
                 display: keymap.isMac ? "⌘1 … ⌘9" : "Alt+1 … Alt+9",
                 description: t("shortcut.tab.goto"),
-                // Direct jump to the Nth tab (1-based, by strip order). A fixed
-                // combo like Ctrl+Tab — kept out of the customizable ACTIONS
-                // editor since it is 9 combos, not one bindable action. Home
-                // (index 0) is skipped, so the combo lands on the first session
-                // tab. Cmd+1..9 on macOS, Alt+1..9 elsewhere — see digitTabIndex.
                 match: e => digitTabIndex(e, keymap.isMac) !== null,
                 handler: e => {
-                    // Don't hijack keys while the user is recording a new binding.
                     if (keymap.recording()) return false;
                     const idx = digitTabIndex(e, keymap.isMac);
                     if (idx === null) return false;
-                    const tab = app.tabs()[idx];
-                    if (!tab) return false; // out of range: don't swallow the key
-                    app.setActiveTab(tab.id);
+                    const tab = app.workspaceTabs()[idx - 1];
+                    if (!tab) return false;
+                    app.setActiveWorkspace(tab.id);
                 },
             },
             {
@@ -204,11 +206,6 @@
         keymap.init();
         // Crash recovery must settle before any pane can create a replacement
         // backend resource. Otherwise reconcile([]) can race that new session.
-        //
-        // Skip this in cloned windows (window.__rssh_clone is set by
-        // open_tab_in_new_window) and AI handoff windows (window.__rssh_ai_handoff
-        // is set by analyze_locally tool): passing activeIds=[] would nuke every
-        // session in the shared AppState, including other windows' tabs.
         if (!bypassStartupReconcile) {
             void initializePrimarySessionWindow({
                 signal: startup.signal,
@@ -316,14 +313,10 @@
         delete window.__rssh_clone;
     }
 
-    type SplitDir = "up" | "down" | "left" | "right";
-
-    // split === undefined → plain new window (OS-positioned). A direction tiles
-    // the current window into one half and opens the new one in the other.
-    function openInNewWindow(tab: Tab, split?: SplitDir) {
-        const payload = {type: tab.type, label: tab.label, meta: tab.meta};
-        invoke("open_tab_in_new_window", {clone: JSON.stringify(payload), split: split ?? null})
-            .catch(e => console.error("open_tab_in_new_window failed:", e));
+    function openInNewWindow(tab: Tab) {
+        invoke("open_tab_in_new_window", {
+            clone: JSON.stringify({type: tab.type, label: tab.label, meta: tab.meta}),
+        }).catch(e => console.error("open_tab_in_new_window failed:", e));
     }
 
     $effect(() => {
@@ -345,14 +338,16 @@
         });
     });
 
+
     $effect(() => {
-        const tab = app.activeTab();
+        const workspace = app.workspaceTabs().find((tab) => tab.id === app.activeWorkspaceId())
+            ?? app.tabs().find((tab) => tab.id === "home");
+        const pane = app.tabs().find((tab) => tab.id === app.activePaneId());
         if (app.settingsActive()) {
             getCurrentWindow().setTitle("Settings");
-        } else if (tab) {
-            const termTitle = app.terminalTitle(tab.id);
-            const title = termTitle ? `${tab.label} — ${termTitle}` : tab.label;
-            getCurrentWindow().setTitle(title);
+        } else if (workspace || pane) {
+            const terminalTitle = app.terminalTitle(app.activePaneId());
+            getCurrentWindow().setTitle(terminalTitle || workspace?.label || pane?.label || "RSSH");
         } else {
             getCurrentWindow().setTitle("RSSH");
         }
@@ -360,15 +355,23 @@
         // overlay, not a route.
     });
 
+    let terminalWorkspaceTabs = $derived(
+        app.workspaceTabs().filter((tab) => app.isTerminalWorkspace(tab.id)),
+    );
+    let activeRouteTab = $derived(
+        app.activeWorkspaceId() === "home"
+            ? app.tabs().find((tab) => tab.id === "home")
+            : app.workspaceTabs().find((tab) => tab.id === app.activeWorkspaceId()),
+    );
     let pinnedProfiles = $derived(
         profiles.filter(p => app.pinnedProfileIds().includes(p.id))
     );
     let sbPos = $derived(app.sidebarPosition());
     let isHorizontal = $derived(sbPos === "top" || sbPos === "bottom");
 
-    // AI 面板：仅在终端 tab 已连接时可见；位置走 ai.position()
-    let aiTabId = $derived(app.activeTabId());
-    let aiActiveTab = $derived(app.activeTab());
+    // AI 面板：仅在 active pane 已连接时可见；位置走 ai.position()
+    let aiTabId = $derived(app.activePaneId());
+    let aiActiveTab = $derived(app.tabs().find((tab) => tab.id === app.activePaneId()));
     let aiSessionId = $derived(aiActiveTab ? app.sessionIdForTab(aiActiveTab.id) : undefined);
     let aiVisible = $derived(
         ai.isOpen(aiTabId)
@@ -405,7 +408,7 @@
     const panelMinWidth = 280;
     const mainPanelMinWidth = 320;
     let aiPanelWidth = $derived(ai.panelWidth(aiTabId));
-    let sftpPanelWidth = $derived(app.sftpPanelWidthForTab(app.activeTabId()));
+    let sftpPanelWidth = $derived(app.sftpPanelWidthForTab(app.activePaneId()));
     let contentEl = $state<HTMLDivElement | null>(null);
     let contentWidth = $state(window.innerWidth);
     let viewportWidth = $state(window.innerWidth);
@@ -527,7 +530,7 @@
             minWidth: panelMinWidth,
             minMain: mainPanelMinWidth,
             otherPanelVisible: sftpVisible,
-            stillActive: () => aiVisible && app.activeTabId() === tabId,
+            stillActive: () => aiVisible && app.activePaneId() === tabId,
             setWidth: ai.setPanelWidth,
             commitWidth: ai.commitPanelWidth,
         });
@@ -545,7 +548,7 @@
        SFTP 永远走 AI 的对侧（aiPos=right → SFTP 左；aiPos=left → SFTP 右），
        靠 .content.ai-left 的 row-reverse 自动翻边，不引入新位置 config。 */
     function startSftpResize(e: MouseEvent) {
-        const tabId = app.activeTabId();
+        const tabId = app.activePaneId();
         startPanelResize(e, {
             tabId,
             currentWidth: app.sftpPanelWidthForTab(tabId),
@@ -555,14 +558,14 @@
             minWidth: panelMinWidth,
             minMain: mainPanelMinWidth,
             otherPanelVisible: aiVisible,
-            stillActive: () => sftpVisible && app.activeTabId() === tabId,
+            stillActive: () => sftpVisible && app.activePaneId() === tabId,
             setWidth: app.setSftpPanelWidth,
             commitWidth: app.commitSftpPanelWidth,
         });
     }
 
     function resetSftpWidth() {
-        const tabId = app.activeTabId();
+        const tabId = app.activePaneId();
         panelFitPriorityByTab[tabId] = "sftp";
         app.setSftpPanelWidth(tabId, null);
         app.commitSftpPanelWidth(tabId);
@@ -572,7 +575,7 @@
        flat navItems is what the keyboard shortcut cycles through. */
     let navSections = $derived<{ header: NavItem[]; middle: NavItem[]; footer: NavItem[] }>({
         header: [
-            ...app.tabs().filter(t => t.type === "home").map(t => ({kind: "tab" as const, tab: t})),
+            {kind: "tab" as const, tab: {id: "home", type: "home", label: t("tab.home")} },
             ...(app.isMobile ? [] : [{kind: "new-tab" as const}, {kind: "new-edit" as const}]),
             // Horizontal strip would burst sideways with N pinned profiles — collapse
             // them into one star button that pops a menu. Vertical sidebar keeps the list.
@@ -580,7 +583,7 @@
                 ? (pinnedProfiles.length > 0 ? [{kind: "pinned-menu" as const}] : [])
                 : pinnedProfiles.map(p => ({kind: "pin" as const, profile: p}))),
         ],
-        middle: app.tabs().filter(t => t.type !== "home").map(t => ({kind: "tab" as const, tab: t})),
+        middle: app.workspaceTabs().map(t => ({kind: "tab" as const, tab: t})),
         footer: [
             // Downloads (transfer queue) is now reachable on mobile too — SFTP
             // single-file transfer runs through it. pin-window stays desktop-only.
@@ -612,7 +615,7 @@
     }
 
     function isActiveItem(item: NavItem): boolean {
-        if (item.kind === "tab") return !app.settingsActive() && item.tab.id === app.activeTabId();
+        if (item.kind === "tab") return !app.settingsActive() && item.tab.id === app.activeWorkspaceId();
         if (item.kind === "settings") return app.settingsActive();
         // Downloads is a popover, not a route. "active" only tracks real
         // routes (home / settings). The open/closed state surfaces through
@@ -677,7 +680,8 @@
     }
 
     function selectTab(id: string) {
-        app.setActiveTab(id);
+        if (id === "home") app.setActiveTab(id);
+        else app.setActiveWorkspace(id);
         closeDrawer();
     }
 
@@ -739,6 +743,36 @@
     function canOpenTabInNewWindow(tab: Tab): boolean {
         return app.isTerminalTabType(tab.type) && tab.type !== "serial";
     }
+    type SplitSide = "left" | "right" | "top" | "bottom";
+
+    function splitCurrentPane(tab: Tab, side: SplitSide) {
+        if (!app.isTerminalTabType(tab.type) || tab.type === "serial") return;
+        const workspaceId = tab.workspaceId ?? tab.id;
+        if (!app.isTerminalWorkspace(workspaceId)) return;
+        const sourcePaneId = tab.id;
+        if (tab.paneOf) app.setActivePane(tab.id);
+        else app.setActiveWorkspace(workspaceId);
+
+        const newId = `${tab.type}:${crypto.randomUUID()}`;
+        const newTab: Tab = {
+            id: newId,
+            type: tab.type,
+            label: tab.label,
+            meta: tab.meta ? {...tab.meta} : undefined,
+        };
+        try {
+            const paneId = app.addPane(workspaceId, side, newTab);
+            if (!paneId) throw new Error(t("toast.error.add"));
+            pendingPaneSources[paneId] = sourcePaneId;
+        } catch (error) {
+            delete pendingPaneSources[newId];
+            // addPane is synchronous, but keep rollback here so a future store
+            // implementation cannot leave a hidden tab after a failed connect.
+            if (app.tabs().some((candidate) => candidate.id === newId)) app.closePane(newId);
+            toast.error(errMsg(error));
+        }
+    }
+
 
     function buildMenu(tab: Tab): CtxMenuItem[][] {
         // Serial and telnet are also text terminals — they get copy/paste/search/
@@ -774,7 +808,7 @@
                     // otherwise leave the user unable to type. terminalFocus runs
                     // after the async read, so it wins the focus back from <body>.
                     onClick: () => {
-                        app.setActiveTab(tab.id);
+                        app.setActivePane(tab.id);
                         readClipboard().then(text => {
                             if (text) app.terminalPaste(tab.id, text);
                         }).catch((error) => toast.error(errMsg(error)))
@@ -816,12 +850,12 @@
                 {
                     label: t("tab.context.search"),
                     shortcut: keymap.format("term.search"),
-                    onClick: () => { app.setActiveTab(tab.id); app.requestSearch(tab.id); },
+                    onClick: () => { app.setActivePane(tab.id); app.requestSearch(tab.id); },
                 },
                 {
                     label: t("tab.context.snippets"),
                     shortcut: keymap.format("term.snippet"),
-                    onClick: () => { app.setActiveTab(tab.id); app.openSnippetPicker(); },
+                    onClick: () => { app.setActivePane(tab.id); app.openSnippetPicker(); },
                 },
             ];
             // Tab context menu is a desktop right-click affordance; on mobile
@@ -831,10 +865,18 @@
                     label: t("tab.context.sftp"),
                     shortcut: keymap.format("term.sftp"),
                     disabled: !isSsh,
-                    onClick: () => { app.setActiveTab(tab.id); app.openSftp(); },
+                    onClick: () => { app.setActivePane(tab.id); app.openSftp(); },
                 });
             }
             sections.push(items);
+        }
+        if (isTextTerminal && tab.type !== "serial") {
+            sections.push([
+                {label: t("tab.context.split.left"), onClick: () => splitCurrentPane(tab, "left")},
+                {label: t("tab.context.split.right"), onClick: () => splitCurrentPane(tab, "right")},
+                {label: t("tab.context.split.top"), onClick: () => splitCurrentPane(tab, "top")},
+                {label: t("tab.context.split.bottom"), onClick: () => splitCurrentPane(tab, "bottom")},
+            ]);
         }
 
         // Serial control lines: DTR/RTS assert/deassert + break. Runtime ops on
@@ -878,7 +920,7 @@
                     label: t("tab.context.ai"),
                     shortcut: keymap.format("ai.toggle"),
                     disabled: !sid,
-                    onClick: () => { app.setActiveTab(tab.id); ai.openPanel(tab.id); },
+                    onClick: () => { app.setActivePane(tab.id); ai.openPanel(tab.id); },
                 },
             ]);
         }
@@ -890,17 +932,47 @@
                     label: t("tab.context.open_new_window"),
                     shortcut: keymap.format("tab.openNewWindow"),
                     onClick: () => openInNewWindow(tab),
-                    submenu: [
-                        {label: t("tab.context.open_new_window.up"), onClick: () => openInNewWindow(tab, "up")},
-                        {label: t("tab.context.open_new_window.down"), onClick: () => openInNewWindow(tab, "down")},
-                        {label: t("tab.context.open_new_window.left"), onClick: () => openInNewWindow(tab, "left")},
-                        {label: t("tab.context.open_new_window.right"), onClick: () => openInNewWindow(tab, "right")},
-                    ],
                 },
             ]);
         }
 
+
         return sections;
+    }
+    function openPaneContextMenu(e: MouseEvent, tabId: string) {
+        if (app.isMobile) return;
+        const tab = app.tabs().find((candidate) => candidate.id === tabId);
+        if (tab) openCtxMenu(e, tab);
+    }
+    function openRouteContextMenu(e: MouseEvent, tab: Tab | undefined) {
+        if (app.isMobile || !tab) return;
+        openCtxMenu(e, tab);
+    }
+
+    function handleInitialConnectionFailure(tabId: string, error: unknown): boolean {
+        const tab = app.tabs().find((candidate) => candidate.id === tabId);
+        if (!tab?.paneOf) {
+            toast.error(errMsg(error));
+            return false;
+        }
+        const sourcePaneId = pendingPaneSources[tabId];
+        const workspaceId = tab.workspaceId;
+        app.closePane(tabId);
+        delete pendingPaneSources[tabId];
+        if (
+            sourcePaneId
+            && workspaceId
+            && app.activeWorkspaceId() === workspaceId
+            && app.paneIdsForWorkspace(workspaceId).includes(sourcePaneId)
+        ) {
+            app.setActivePane(sourcePaneId);
+        }
+        toast.error(errMsg(error));
+        return true;
+    }
+
+    function closeTerminalPane(tabId: string) {
+        requestCloseTab(tabId);
     }
 
     function tabGroupColor(tab: Tab): string | null {
@@ -928,23 +1000,28 @@
     function handleDrop(e: DragEvent, tabId: string) {
         e.preventDefault();
         if (dragTabId && dragTabId !== tabId) {
-            const allTabs = app.tabs();
-            const fromIdx = allTabs.findIndex(t => t.id === dragTabId);
-            const toIdx = allTabs.findIndex(t => t.id === tabId);
-            if (fromIdx >= 0 && toIdx >= 0) app.moveTab(fromIdx, toIdx);
+            const workspaces = app.workspaceTabs();
+            if (workspaces.some((tab) => tab.id === dragTabId) && workspaces.some((tab) => tab.id === tabId)) {
+                const allTabs = app.tabs();
+                const fromIdx = allTabs.findIndex(t => t.id === dragTabId);
+                const toIdx = allTabs.findIndex(t => t.id === tabId);
+                if (fromIdx >= 0 && toIdx >= 0) app.moveTab(fromIdx, toIdx);
+            }
         }
         dragTabId = null;
         dropTabId = null;
     }
 
     function handleDragEnd(e: DragEvent) {
-        // dropEffect === "none" means the drag was cancelled (Esc or invalid drop)
         const cancelled = e.dataTransfer?.dropEffect === "none";
         if (!cancelled && dragTabId && dropTabId && dragTabId !== dropTabId) {
-            const allTabs = app.tabs();
-            const fromIdx = allTabs.findIndex(t => t.id === dragTabId);
-            const toIdx = allTabs.findIndex(t => t.id === dropTabId);
-            if (fromIdx >= 0 && toIdx >= 0) app.moveTab(fromIdx, toIdx);
+            const workspaces = app.workspaceTabs();
+            if (workspaces.some((tab) => tab.id === dragTabId) && workspaces.some((tab) => tab.id === dropTabId)) {
+                const allTabs = app.tabs();
+                const fromIdx = allTabs.findIndex(t => t.id === dragTabId);
+                const toIdx = allTabs.findIndex(t => t.id === dropTabId);
+                if (fromIdx >= 0 && toIdx >= 0) app.moveTab(fromIdx, toIdx);
+            }
         }
         dragTabId = null;
         dropTabId = null;
@@ -1120,34 +1197,53 @@
                      aria-orientation="vertical"
                      title={t("common.resize_hint")}></div>
                 {#each sftpTabs as tab (tab.id)}
-                    <div class="sftp-pane" class:visible={tab.id === app.activeTabId() && sftpVisible}>
+                    <div class="sftp-pane" class:visible={tab.id === app.activePaneId() && sftpVisible}>
                         <SftpBrowser meta={{...tab.meta ?? {}, sessionId: app.sessionIdForTab(tab.id) ?? ''}}/>
                     </div>
                 {/each}
             </aside>
         {/if}
         <div class="main-area">
+            {#each terminalWorkspaceTabs as workspace (workspace.id)}
+                {@const layout = app.layoutForWorkspace(workspace.id)}
+                <div
+                    class="pane terminal-layout-pane"
+                    class:visible={!app.settingsActive() && workspace.id === app.activeWorkspaceId() && resourcePanesAllowed && !!layout}
+                    role="presentation"
+                >
+                    {#if resourcePanesAllowed && layout}
+                        <TerminalSplitLayout
+                            {layout}
+                            activePaneId={workspace.id === app.activeWorkspaceId() ? app.activePaneId() : workspace.id}
+                            onActivate={(tabId) => {
+                                if (workspace.id === app.activeWorkspaceId()) app.setActivePane(tabId);
+                            }}
+                            onResize={(path, ratio) => app.resizeLayoutPath(workspace.id, path, ratio)}
+                            onClose={closeTerminalPane}
+                            onContextMenu={openPaneContextMenu}
+                            onInitialConnectionFailure={handleInitialConnectionFailure}
+                        />
+                    {/if}
+                </div>
+            {/each}
+
             {#if app.settingsActive()}
                 <div class="pane visible">
                     <SettingsLayout/>
                 </div>
-            {/if}
-
-            {#each app.tabs() as tab (tab.id)}
-                <div class="pane"
-                     class:visible={!app.settingsActive() && tab.id === app.activeTabId()}
-                     oncontextmenu={app.isMobile ? undefined : (e) => openCtxMenu(e, tab)}>
-                    {#if tab.type === "home"}
-                        <HomeScreen/>
-                    {:else if app.isTerminalTabType(tab.type) && resourcePanesAllowed}
-                        <TerminalPane tabId={tab.id} tabType={tab.type} meta={tab.meta ?? {}}/>
-                    {:else if tab.type === "forward" && resourcePanesAllowed}
-                        <ForwardPane tabId={tab.id} meta={tab.meta ?? {}}/>
-                    {:else if tab.type === "edit"}
-                        <EditPane tabId={tab.id} />
-                    {/if}
+            {:else if activeRouteTab?.type === "home"}
+                <div class="pane visible" role="presentation" oncontextmenu={(event) => openRouteContextMenu(event, activeRouteTab)}>
+                    <HomeScreen/>
                 </div>
-            {/each}
+            {:else if activeRouteTab?.type === "forward" && resourcePanesAllowed}
+                <div class="pane visible" role="presentation" oncontextmenu={(event) => openRouteContextMenu(event, activeRouteTab)}>
+                    <ForwardPane tabId={activeRouteTab.id} meta={activeRouteTab.meta ?? {}}/>
+                </div>
+            {:else if activeRouteTab?.type === "edit"}
+                <div class="pane visible" role="presentation" oncontextmenu={(event) => openRouteContextMenu(event, activeRouteTab)}>
+                    <EditPane tabId={activeRouteTab.id} />
+                </div>
+            {/if}
         </div>
 
         <!-- 任何 tab 开了 AI 就保留对应 ChatPanel；只有当前 tab 的 pane 可见。
@@ -1336,9 +1432,12 @@
     /* 终端区——所有 .pane 挂在这里，绝对定位由父级 main-area 提供 position: relative。
        min-width: 0 让 flex 能把它压到 0（窄屏 AI 接管时） */
     .main-area {
-        flex: 1;
+        display: flex;
+        flex: 1 1 auto;
         position: relative;
         min-width: 0;
+        min-height: 0;
+        overflow: hidden;
     }
 
     /* 边框在 ChatPanel 自身 CSS 里（左右都有），aside 不重复加 */
@@ -1402,6 +1501,9 @@
         position: absolute;
         inset: 0;
         display: none;
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
     }
 
     .pane.visible {

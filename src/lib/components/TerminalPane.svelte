@@ -78,10 +78,11 @@
         highlightDecorator?.setRules(rules);
     });
 
-    let {tabId, tabType, meta = {}}: {
+    let {tabId, tabType, meta = {}, onInitialConnectionFailure}: {
         tabId: string;
         tabType: app.TerminalTabType;
         meta: Record<string, string>;
+        onInitialConnectionFailure?: (tabId: string, error: unknown) => boolean;
     } = $props();
 
     let containerEl: HTMLDivElement;
@@ -208,6 +209,18 @@
     let connectGeneration = 0;
     let destroyed = false;
     let disconnected = $state(false);
+    // Initial split panes are removed when their first connect attempt fails;
+    // reconnect attempts must never trigger that cleanup.
+    let initialConnection = true;
+    let initialConnectionFailureReported = false;
+    let initialConnectionFailureHandled = false;
+    function reportInitialConnectionFailure(error: unknown) {
+        if (!initialConnection || initialConnectionFailureReported || destroyed) return;
+        initialConnectionFailureReported = true;
+        initialConnectionFailureHandled = onInitialConnectionFailure?.(tabId, error) === true;
+    }
+    // `connectAndWire` crosses several awaits. The generation guards the whole
+    // component flow; ReservedSessionAttempt owns the finer Pending/Ready state.
     let telnetRemoteEcho = $state(false);
     // Telnet scripts are fetched into component memory by profile id. They must
     // never enter tab meta, which is cloned through localStorage for a new
@@ -1052,6 +1065,7 @@
                 terminal.write(`\x1b[31mSerial open failed: ${e}\x1b[0m\r\n`);
                 terminal.write("\x1b[90mPress any key to retry.\x1b[0m\r\n");
                 disconnected = true;
+                reportInitialConnectionFailure(e);
                 return false;
             }
             if (disconnected) {
@@ -1107,8 +1121,9 @@
                 // localized sentence ("Telnet connect to {peer} failed: {err}");
                 // a hardcoded prefix would just duplicate it in English.
                 terminal.write(`\x1b[31m${errMsg(e)}\x1b[0m\r\n`);
-                terminal.write("\x1b[90mPress any key to retry.\x1b[0m\r\n");
+                terminal.write("\x1b[90mPress any key to reconnect.\x1b[0m\r\n");
                 disconnected = true;
+                reportInitialConnectionFailure(e);
                 return false;
             }
             // A peer can close after emitting the close event but before the
@@ -1147,6 +1162,7 @@
                 }
                 terminal.write(`\x1b[31mLaunch failed: ${e}\x1b[0m\r\n`);
                 disconnected = true;
+                reportInitialConnectionFailure(e);
                 return false;
             }
             if (disconnected) {
@@ -1181,6 +1197,7 @@
                 terminal.write(`\x1b[31mConnection failed: ${e}\x1b[0m\r\n`);
                 terminal.write("\x1b[90mPress any key to reconnect.\x1b[0m\r\n");
                 disconnected = true;
+                reportInitialConnectionFailure(e);
                 return false;
             }
             clearSshPromptUi();
@@ -1251,6 +1268,7 @@
     }
 
     async function reconnect() {
+        initialConnection = false;
         terminal.write("\r\n\x1b[36mReconnecting ...\x1b[0m\r\n");
         const generation = connectGeneration + 1;
         const ok = await connectAndWire();
@@ -1479,12 +1497,17 @@
     let unsubscribeFont: (() => void) | null = null;
 
     onMount(async () => {
+        const TERMINAL_SCROLLBACK = 1000;
+        const IMAGE_STORAGE_LIMIT_MB = app.isMobile ? 32 : 128;
+        const IMAGE_PIXEL_LIMIT = app.isMobile ? 4_000_000 : 16_000_000;
+
         terminal = new Terminal({
             cursorBlink: true,
             scrollback: TERMINAL_SCROLLBACK_LINES,
             fontSize: theme.termFontSize(),
             fontFamily: theme.currentTermFontStack(),
             allowProposedApi: true,
+            scrollback: TERMINAL_SCROLLBACK,
             /*
             // When an app enables mouse tracking (zellij/tmux/vim), xterm hands
             // drags to that app instead of selecting text. Holding a modifier
@@ -1513,8 +1536,8 @@
             sixelSupport: true,
             sixelScrolling: true,
             iipSupport: true,
-            storageLimit: app.isMobile ? 32 : 128,
-            pixelLimit: app.isMobile ? 4_000_000 : 16_000_000,
+            storageLimit: IMAGE_STORAGE_LIMIT_MB,
+            pixelLimit: IMAGE_PIXEL_LIMIT,
         }));
         terminal.open(containerEl);
         ime229WorkaroundCleanup = setupXtermIme229Workaround({
@@ -1560,11 +1583,23 @@
             focus: () => terminal.focus(),
             readViewport: () => readViewportSnapshot(terminal),
             readViewportText: () => readViewportText(terminal),
+            readResourceStats: () => ({
+                tabId,
+                cols: terminal.cols,
+                rows: terminal.rows,
+                bufferLength: terminal.buffer.active.length,
+                scrollback: TERMINAL_SCROLLBACK,
+                imageStorageLimitMb: IMAGE_STORAGE_LIMIT_MB,
+                imagePixelLimit: IMAGE_PIXEL_LIMIT,
+            }),
         });
         // Expose xterm's live bracketed-paste mode so the AI store can wrap
         // AI-driven pastes the same way xterm wraps manual ones. See
         // bracketed-paste.ts.
         registerBracketedPasteProvider(tabId, () => terminal?.modes.bracketedPasteMode ?? false);
+        if (import.meta.env.DEV) {
+            console.debug("[rssh] terminal resources", app.terminalResourceSnapshot());
+        }
 
         // Copy-on-select (left-button mouseup) + right-click action (capture
         // phase — required so preventDefault can suppress the native menu before
@@ -1684,8 +1719,18 @@
         // Connect
         if (destroyed) return;
         const generation = connectGeneration + 1;
-        await connectAndWire();
+        const initialOk = await connectAndWire();
         if (destroyed || connectGeneration !== generation) return;
+        if (!initialOk) {
+            if (!initialConnectionFailureReported) {
+                reportInitialConnectionFailure(new Error("Initial terminal connection failed"));
+            }
+            initialConnection = false;
+            if (initialConnectionFailureHandled) return;
+            setupReconnect();
+            return;
+        }
+        initialConnection = false;
         setupReconnect();
 
         terminal.onTitleChange((title) => {
