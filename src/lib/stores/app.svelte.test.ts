@@ -611,3 +611,32 @@ describe("mobile key modifier lock", () => {
     expect(app.altActive()).toBe(true);
   });
 });
+
+describe("soft keyboard gate", () => {
+  // The system keyboard opens ONLY from the keybar's keyboard button; terminal
+  // taps never pop it (issue #225). The pane owns show/hide and registers the
+  // toggle here; the store mirrors the open state for the button's styling.
+
+  it("routes toggleSoftKeyboard to the registered pane controller", async () => {
+    const app = await loadAppModule();
+    let calls = 0;
+    app.registerSoftKeyboardToggle(() => { calls += 1; });
+
+    app.toggleSoftKeyboard();
+
+    expect(calls).toBe(1);
+  });
+
+  it("mirrors the open state and resets it when the pane unregisters", async () => {
+    const app = await loadAppModule();
+    app.registerSoftKeyboardToggle(() => {});
+    app.setSoftKeyboardOpen(true);
+    expect(app.softKeyboardOpen()).toBe(true);
+
+    app.unregisterSoftKeyboardToggle();
+
+    expect(app.softKeyboardOpen()).toBe(false);
+    // No controller registered — a tap is a silent no-op, not a throw.
+    app.toggleSoftKeyboard();
+  });
+});

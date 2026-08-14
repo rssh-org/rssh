@@ -127,6 +127,7 @@
     <button class="key" onpointerdown={prevent} onclick={() => arrow('D')}>←</button>
     <button class="key" onpointerdown={prevent} onclick={() => arrow('C')}>→</button>
     <button class="key" class:active={extOpen} title="More keys" aria-label="More keys" onpointerdown={prevent} onclick={() => extOpen = !extOpen}>⋯</button>
+    <button class="key" class:active={app.softKeyboardOpen()} title="Keyboard" aria-label="Keyboard" onpointerdown={prevent} onclick={() => app.toggleSoftKeyboard()}>⌨</button>
     {#if extOpen}
         <!-- Transparent: a tap on the terminal area above dismisses the panel. -->
         <div class="ext-backdrop" onpointerdown={() => { extOpen = false; }}></div>

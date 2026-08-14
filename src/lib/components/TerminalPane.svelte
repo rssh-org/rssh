@@ -1410,10 +1410,13 @@
 
         function onPointerUp(ev: PointerEvent) {
             if (!gesture || gesture.pointerId !== ev.pointerId) return;
-            const shouldOpenKeyboard = !gesture.longPress && !gesture.moved;
+            const tap = !gesture.longPress && !gesture.moved;
             clearGestureTimer();
             gesture = null;
-            if (shouldOpenKeyboard) showKeyboard();
+            // A terminal tap must never POP the soft keyboard (issue #225) —
+            // opening is the keybar keyboard button's job. A tap only DISMISSES
+            // a keyboard that is already open; otherwise keep the helper locked.
+            if (!tap || document.activeElement === helper) hideKeyboard();
             else lockKeyboard();
         }
 
@@ -1432,13 +1435,26 @@
             // ev.stopImmediatePropagation();
         }
 
+        function onFocus() {
+            app.setSoftKeyboardOpen(true);
+        }
+
         function onBlur() {
+            app.setSoftKeyboardOpen(false);
             lockKeyboard();
         }
 
+        // The keybar's keyboard button is the ONLY way to pop the keyboard;
+        // route it through the store (single-slot, same pattern as the writer).
+        app.registerSoftKeyboardToggle(() => {
+            if (document.activeElement === helper) hideKeyboard();
+            else showKeyboard();
+        });
+        app.setSoftKeyboardOpen(false);
         pinKeyboardHelper();
         lockKeyboard();
         helper.blur();
+        helper.addEventListener("focus", onFocus);
         helper.addEventListener("blur", onBlur);
         helper.addEventListener("input", keepKeyboardHelperInView);
         helper.addEventListener("keydown", keepKeyboardHelperInView);
@@ -1459,7 +1475,9 @@
             if (helperPinRaf) cancelAnimationFrame(helperPinRaf);
             if (originalHelperStyle === null) helper.removeAttribute("style");
             else helper.setAttribute("style", originalHelperStyle);
+            helper.removeEventListener("focus", onFocus);
             helper.removeEventListener("blur", onBlur);
+            app.unregisterSoftKeyboardToggle();
             helper.removeEventListener("input", keepKeyboardHelperInView);
             helper.removeEventListener("keydown", keepKeyboardHelperInView);
             helper.removeEventListener("compositionstart", keepKeyboardHelperInView);

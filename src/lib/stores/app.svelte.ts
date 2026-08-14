@@ -520,6 +520,19 @@ export function clearModifiers() {
   if (!_altLocked) _altActive = false;
 }
 
+/* ─── Mobile soft keyboard gate ─── */
+// The system keyboard opens ONLY from the keybar's keyboard button — terminal
+// taps never pop it (issue #225). The pane owns show/hide (it holds the hidden
+// helper textarea); the store just routes the toggle and mirrors the open state
+// for the button's active styling.
+let _softKeyboardOpen = $state(false);
+export function softKeyboardOpen() { return _softKeyboardOpen; }
+export function setSoftKeyboardOpen(v: boolean) { _softKeyboardOpen = v; }
+let _softKeyboardToggle: (() => void) | null = null;
+export function registerSoftKeyboardToggle(fn: () => void) { _softKeyboardToggle = fn; }
+export function unregisterSoftKeyboardToggle() { _softKeyboardToggle = null; _softKeyboardOpen = false; }
+export function toggleSoftKeyboard() { _softKeyboardToggle?.(); }
+
 /* ─── Send to active terminal ─── */
 let _terminalWriter: ((text: string) => void) | null = null;
 export function registerTerminalWriter(fn: (text: string) => void) { _terminalWriter = fn; }
