@@ -72,7 +72,6 @@ mod tests {
     }
 }
 
-
 /// One `arboard::Clipboard` for the whole process, created lazily.
 ///
 /// On X11 the clipboard is a *selection ownership* protocol, not a store: the
