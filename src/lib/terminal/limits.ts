@@ -30,7 +30,7 @@ export function commandBlockFoldCacheLines(maxVisibleLines: number): number {
   return TERMINAL_SCROLLBACK_LINES - normalizeCommandBlockMaxLines(maxVisibleLines) - 1;
 }
 
-// ── Flood backlog (see docs/terminal-flood-design.md) ──
+// ── Flood backlog ──
 /** Pending bytes above which the backlog badge becomes visible. */
 export const BACKLOG_INDICATOR_BYTES = 64 * 1024;
 /** Ctrl+C only releases the backlog above this much pending data. */

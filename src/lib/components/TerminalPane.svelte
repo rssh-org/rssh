@@ -1046,9 +1046,16 @@
 
         dataDisposable = terminal.onData((data: string) => {
             if (destroyed || disconnected || sessionId !== sid) return;
-            maybeReleaseBacklog(data);
-            if (streamOpts) { streamOnData(data); return; }
-            invoke(writeCmd, { sessionId: sid, data: Array.from(new TextEncoder().encode(processInput(data))) });
+            if (streamOpts) {
+                maybeReleaseBacklog(data);
+                streamOnData(data);
+                return;
+            }
+            // processInput can synthesize \x03 (mobile keybar Ctrl + c), so
+            // the release valve must see the transformed bytes, not the raw key.
+            const processed = processInput(data);
+            maybeReleaseBacklog(processed);
+            invoke(writeCmd, { sessionId: sid, data: Array.from(new TextEncoder().encode(processed)) });
         });
         resizeDisposable = terminal.onResize(({ cols, rows }) => {
             if (!destroyed && !disconnected && sessionId === sid && resizeCmd) {

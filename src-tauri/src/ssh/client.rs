@@ -115,27 +115,34 @@ pub(crate) fn null_logger() -> LogFn {
 }
 
 /// 默认 SSH 客户端配置：开启 keepalive，远端死了 90 秒内能断开。
+/// Standalone bulk connections (SFTP's own connection, sftp.rs). Keep the
+/// russh default window (2MB): a small window would cap transfer throughput
+/// at ~window/RTT on high-latency links.
 pub fn default_client_config() -> Arc<client::Config> {
-    client_config_for_algorithms(&crate::models::SshAlgorithms::default())
+    client_config_for_algorithms(&crate::models::SshAlgorithms::default(), 2 * 1024 * 1024)
 }
 
+/// Interactive shell sessions. Uses a reduced flow-control window.
 pub fn client_config_for_profile(profile: &Profile) -> Arc<client::Config> {
-    client_config_for_algorithms(&profile.algorithms)
+    client_config_for_algorithms(&profile.algorithms, 256 * 1024)
 }
 
-fn client_config_for_algorithms(algorithms: &crate::models::SshAlgorithms) -> Arc<client::Config> {
+/// The channel window bounds how far the remote (sshd + its TCP send buffer)
+/// may run ahead of our consumption. russh's 2MB default lets a slow link bank
+/// several MB of output — after Ctrl+C kills the producer, that banked data
+/// keeps streaming for tens of seconds. 256KB collapses the queue: sshd
+/// blocks, the remote pty fills, the producer blocks in write(). Channels
+/// opened on the interactive connection (SFTP-from-shell-tab, forwarding)
+/// inherit it; standalone SFTP keeps the 2MB default.
+fn client_config_for_algorithms(
+    algorithms: &crate::models::SshAlgorithms,
+    window_size: u32,
+) -> Arc<client::Config> {
     let mut cfg = client::Config::default();
     crate::ssh::algorithms::apply_to_config(&mut cfg, algorithms);
     cfg.keepalive_interval = Some(Duration::from_secs(30));
     cfg.keepalive_max = 3;
-    // Flow control: the channel window bounds how far the remote (sshd + its
-    // TCP send buffer) may run ahead of our consumption. russh's 2MB default
-    // lets a slow link bank several MB of output — after Ctrl+C kills the
-    // producer, that banked data keeps streaming for tens of seconds. 256KB
-    // collapses the queue: sshd blocks, the remote pty fills, the producer
-    // blocks in write(). Interactive output never needs more; SFTP over a
-    // high-RTT link is capped at ~window/RTT (LAN unaffected).
-    cfg.window_size = 256 * 1024;
+    cfg.window_size = window_size;
     Arc::new(cfg)
 }
 

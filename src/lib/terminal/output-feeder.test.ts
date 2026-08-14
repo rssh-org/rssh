@@ -136,6 +136,15 @@ describe("createOutputFeeder", () => {
         f.dispose();       // no throw
     });
 
+    it("string chunks are accounted in UTF-8 bytes, not UTF-16 code units", () => {
+        const w = stubWrite();
+        const f = createOutputFeeder({ write: w.write, maxPendingBytes: 1024 });
+        f.push("汉");          // 1 code unit, 3 UTF-8 bytes
+        expect(f.pendingBytes()).toBe(3);
+        f.push("aé");          // 2 code units, 3 UTF-8 bytes
+        expect(f.pendingBytes()).toBe(6);
+    });
+
     it("integration: feeds a real Terminal and pending settles to 0", async () => {
         const term = new Terminal({ allowProposedApi: true, scrollback: 1000 });
         const f = createOutputFeeder({
@@ -144,7 +153,12 @@ describe("createOutputFeeder", () => {
         });
         f.push("hello\r\nworld\r\n");
         f.push("third line\r\n");
-        await new Promise((r) => setTimeout(r, 100));  // xterm drains via its own timers
+        // Poll until the feeder reports drained (bounded), instead of a fixed
+        // sleep that flakes on loaded CI.
+        const deadline = Date.now() + 5000;
+        while (f.pendingBytes() > 0 && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 10));
+        }
         expect(f.pendingBytes()).toBe(0);
         expect(term.buffer.active.getLine(2)!.translateToString(true)).toBe("third line");
         term.dispose();

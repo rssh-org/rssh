@@ -17,6 +17,16 @@ interface QueuedChunk {
     size: number;
 }
 
+// Backlog is accounted in bytes. `String.length` counts UTF-16 code units, so
+// a CJK string under-reports ~3x and could sneak past the memory cap.
+const utf8Encoder = new TextEncoder();
+
+function chunkSize(data: Uint8Array | string): number {
+    return typeof data === "string"
+        ? utf8Encoder.encode(data).byteLength
+        : data.byteLength;
+}
+
 export interface OutputFeeder {
     push(data: Uint8Array | string): void;
     /** Bytes not yet parsed by the terminal: queued + the one in flight. */
@@ -75,7 +85,7 @@ export function createOutputFeeder(opts: OutputFeederOptions): OutputFeeder {
                 quiesceTimer = setTimer(() => { quiesceTimer = null; }, quiesceMs);
                 return;
             }
-            const chunk = { data, size: data.length };
+            const chunk = { data, size: chunkSize(data) };
             // Memory cap: drop OLDEST whole chunks. Flood output is garbage
             // the user is about to interrupt anyway; the seam may mis-render
             // one line. Acceptable.
