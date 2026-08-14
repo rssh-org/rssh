@@ -128,6 +128,14 @@ fn client_config_for_algorithms(algorithms: &crate::models::SshAlgorithms) -> Ar
     crate::ssh::algorithms::apply_to_config(&mut cfg, algorithms);
     cfg.keepalive_interval = Some(Duration::from_secs(30));
     cfg.keepalive_max = 3;
+    // Flow control: the channel window bounds how far the remote (sshd + its
+    // TCP send buffer) may run ahead of our consumption. russh's 2MB default
+    // lets a slow link bank several MB of output — after Ctrl+C kills the
+    // producer, that banked data keeps streaming for tens of seconds. 256KB
+    // collapses the queue: sshd blocks, the remote pty fills, the producer
+    // blocks in write(). Interactive output never needs more; SFTP over a
+    // high-RTT link is capped at ~window/RTT (LAN unaffected).
+    cfg.window_size = 256 * 1024;
     Arc::new(cfg)
 }
 

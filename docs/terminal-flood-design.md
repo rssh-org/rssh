@@ -109,7 +109,7 @@ createOutputFeeder(opts: {
 
 ## 4. 明确不做
 
-- **Rust 侧背压**（pause/resume + SSH 窗口收缩让 grep 阻塞在 write()）：指示器落地后拿真实数据说话，真需要再做。
+- ~~**Rust 侧背压**（pause/resume + SSH 窗口收缩让 grep 阻塞在 write()）~~ → **已做窗口收缩**（2026-08-14 补记）：实测远端慢链路场景下，本地零积压（徽标缺席证明），积压全在远端 sshd/TCP 出口队列——russh 默认 2MB channel 窗口允许远端超前消费 2MB+，Ctrl+C 后尾巴以链路速度流完（慢链路 = 几十秒）。修法：`Config.window_size = 256KB`（client.rs `client_config_for_algorithms`），队列塌缩回远端内核小缓冲，Ctrl+C 尾巴亚秒级。代价：高 RTT 链路 SFTP 吞吐上限 ≈ 窗口/RTT（局域网不受影响）。动态 pause/resume 仍不做。
 - **`Vec<u8>` → JSON number[] 膨胀改 base64/binary**：约 10 倍削减主线程解析成本，但要动 4 个传输的 Rust 发射端 + 前端监听端 + headless ws server，独立 PR。
 - 定时器式 batch/flush：#213 已删，不复活。
 
