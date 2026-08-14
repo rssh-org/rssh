@@ -23,12 +23,13 @@
         TERMINAL_SCROLLBACK_LINES,
         commandBlockFoldCacheLines,
         BACKLOG_DROP_TRIGGER_BYTES,
+        BACKLOG_INDICATOR_BYTES,
         BACKLOG_MAX_PENDING_BYTES,
         BACKLOG_MAX_PENDING_BYTES_MOBILE,
         BACKLOG_QUIESCENCE_MS,
     } from "../terminal/limits.ts";
     import {createPaintScheduler, type PaintScheduler} from "../terminal/paint-scheduler.ts";
-    import {createOutputFeeder, type OutputFeeder} from "../terminal/output-feeder.ts";
+    import {createOutputFeeder, formatBacklogBytes, type OutputFeeder} from "../terminal/output-feeder.ts";
 
     import {extractBlockTexts, extractBlocksText} from "../terminal/block-content.ts";
     import {redactCommandBlockTexts} from "../terminal/command-block-redaction.ts";
@@ -258,9 +259,30 @@
         if (dimensionsChanged) foldStore?.enforceAutoFold();
     }
 
+    // Backlog badge: value written at most once per animation frame. The rAF
+    // chain self-sustains while pending > 0 (drain progress) and stops on 0.
+    let backlogBytes = $state(0);
+    let backlogRaf: number | null = null;
+
+    function scheduleBacklogUpdate() {
+        if (backlogRaf !== null) return;
+        backlogRaf = requestAnimationFrame(updateBacklog);
+    }
+
+    function updateBacklog() {
+        backlogRaf = null;
+        const pending = outputFeeder?.pendingBytes() ?? 0;
+        if (pending !== backlogBytes) backlogBytes = pending;
+        if (pending > 0) scheduleBacklogUpdate();
+    }
+
     function writeRawOutput(raw: Uint8Array) {
-        if (outputFeeder) outputFeeder.push(raw);
-        else terminal.write(raw);
+        if (outputFeeder) {
+            outputFeeder.push(raw);
+            scheduleBacklogUpdate();
+        } else {
+            terminal.write(raw);
+        }
     }
 
     /** Kernel-tty SIGINT semantics: with a big backlog pending, Ctrl+C must
@@ -1861,6 +1883,8 @@
         paintScheduler?.dispose();
         outputFeeder?.dispose();
         outputFeeder = undefined;
+        if (backlogRaf !== null) cancelAnimationFrame(backlogRaf);
+        backlogRaf = null;
         foldStore?.dispose();
         blockTracker?.dispose();
         app.unregisterTerminalWriter();
@@ -1913,6 +1937,12 @@
     {/if}
     <div class="term-wrap" class:is-mobile={app.isMobile} class:no-block-bar={!app.commandBlockBar()}>
         <div class="xterm-host" bind:this={containerEl}></div>
+        {#if backlogBytes > BACKLOG_INDICATOR_BYTES}
+            <div class="backlog-badge">
+                <span>{formatBacklogBytes(backlogBytes)}</span>
+                <span class="backlog-hint">{t("terminal.backlog.skip_hint")}</span>
+            </div>
+        {/if}
         {#if app.commandBlockBar()}
             <!-- 染色层：整行宽的半透明色块，用块自身的色条颜色。pointer-events:none
                  让点击/选中穿透到 xterm 与 .block-hit。坐标同 fold-label：block-bar
@@ -2051,6 +2081,28 @@
     }
     /* 折叠角标：行末右侧贴一个灰字 "⋯ N lines"。
        pointer-events: none 让 xterm 选中、链接、滚动手势全部穿透。 */
+    .backlog-badge {
+        position: absolute;
+        top: 8px;
+        right: 24px;          /* clear of fold labels and the block bar */
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        font-size: 11px;
+        padding: 2px 8px;
+        color: var(--text-sub);
+        background: var(--surface);
+        border: 1px solid var(--divider);
+        border-radius: 4px;
+        pointer-events: none;
+        white-space: nowrap;
+        z-index: 6;
+    }
+
+    .backlog-hint {
+        color: var(--text-dim);
+    }
+
     .fold-label {
         position: absolute;
         right: 8px;

@@ -226,6 +226,7 @@ const en = {
   "terminal.block.menu.copy_image": "Copy as image",
   "terminal.block.menu.copy_image_n": "Copy {n} blocks as image",
   "terminal.block.copy_image_unavailable": "Clipboard image copy is unavailable",
+  "terminal.backlog.skip_hint": "Ctrl+C skips the backlog",
   "terminal.block.menu.color": "Colorize",
   "terminal.block.menu.uncolor": "Remove color",
   "terminal.block.menu.send_ai": "Send to AI",
