@@ -1265,19 +1265,9 @@
     }
 
     function setupMobileSoftKeyboard(helper: HTMLTextAreaElement) {
-        const longPressMs = 360;
-        const moveSlopPx = 12;
         const originalHelperStyle = helper.getAttribute("style");
         let scrollResetRaf = 0;
         let helperPinRaf = 0;
-        let gesture: {
-            pointerId: number;
-            x: number;
-            y: number;
-            longPress: boolean;
-            moved: boolean;
-            timer: number | undefined;
-        } | null = null;
 
         function resetDocumentScroll() {
             if (scrollResetRaf) return;
@@ -1372,70 +1362,16 @@
             resetDocumentScroll();
         }
 
-        function clearGestureTimer() {
-            if (gesture?.timer) {
-                window.clearTimeout(gesture.timer);
-                gesture.timer = undefined;
-            }
-        }
-
-        function shouldHandleTouch(ev: PointerEvent) {
-            return ev.pointerType === "touch" || ev.pointerType === "pen";
-        }
-
-        function onPointerDown(ev: PointerEvent) {
-            if (!shouldHandleTouch(ev)) return;
-            clearGestureTimer();
-            gesture = {
-                pointerId: ev.pointerId,
-                x: ev.clientX,
-                y: ev.clientY,
-                longPress: false,
-                moved: false,
-                timer: undefined,
-            };
-            gesture.timer = window.setTimeout(() => {
-                if (!gesture || gesture.pointerId !== ev.pointerId) return;
-                gesture.longPress = true;
-                hideKeyboard();
-            }, longPressMs);
-        }
-
-        function onPointerMove(ev: PointerEvent) {
-            if (!gesture || gesture.pointerId !== ev.pointerId) return;
-            const dx = ev.clientX - gesture.x;
-            const dy = ev.clientY - gesture.y;
-            if (Math.hypot(dx, dy) <= moveSlopPx) return;
-            gesture.moved = true;
-            clearGestureTimer();
-            hideKeyboard();
-        }
-
-        function onPointerUp(ev: PointerEvent) {
-            if (!gesture || gesture.pointerId !== ev.pointerId) return;
-            const tap = !gesture.longPress && !gesture.moved;
-            clearGestureTimer();
-            gesture = null;
-            // A terminal tap must never POP the soft keyboard (issue #225) —
-            // opening is the keybar keyboard button's job. A tap only DISMISSES
-            // a keyboard that is already open; otherwise keep the helper locked.
-            if (!tap || document.activeElement === helper) hideKeyboard();
-            else lockKeyboard();
-        }
-
-        function onPointerCancel(ev: PointerEvent) {
-            if (!gesture || gesture.pointerId !== ev.pointerId) return;
-            clearGestureTimer();
-            gesture = null;
-            lockKeyboard();
-        }
-
-        function onContextMenu(_ev: Event) {
-            // 长按定时器 (360ms) 通常已经先锁过键盘了，这里只是兜底。
-            // 不要 preventDefault：那会连带掐掉系统的复制/粘贴菜单。
-            hideKeyboard();
-            // ev.preventDefault();
-            // ev.stopImmediatePropagation();
+        // The keyboard opens ONLY from the keybar button, so terminal touches
+        // need no tap/drag/long-press classification — that state machine
+        // existed to decide whether a tap should OPEN it. Any touch on the
+        // terminal just dismisses a keyboard that is open, at pointerdown:
+        // sooner than the old drag-slop / long-press-timer paths ever did.
+        // No preventDefault anywhere: long-press must still reach the native
+        // copy/paste menu.
+        function onTerminalTouchDown(ev: PointerEvent) {
+            if (ev.pointerType !== "touch" && ev.pointerType !== "pen") return;
+            if (document.activeElement === helper) hideKeyboard();
         }
 
         function onFocus() {
@@ -1467,14 +1403,9 @@
         window.addEventListener("scroll", onWindowScroll, { passive: true });
         window.visualViewport?.addEventListener("scroll", onViewportChange, { passive: true });
         window.visualViewport?.addEventListener("resize", onViewportChange, { passive: true });
-        containerEl.addEventListener("pointerdown", onPointerDown, { capture: true, passive: true });
-        containerEl.addEventListener("pointermove", onPointerMove, { capture: true, passive: true });
-        containerEl.addEventListener("pointerup", onPointerUp, { capture: true, passive: true });
-        containerEl.addEventListener("pointercancel", onPointerCancel, { capture: true, passive: true });
-        containerEl.addEventListener("contextmenu", onContextMenu, { capture: true });
+        containerEl.addEventListener("pointerdown", onTerminalTouchDown, { capture: true, passive: true });
 
         return () => {
-            clearGestureTimer();
             if (scrollResetRaf) cancelAnimationFrame(scrollResetRaf);
             if (helperPinRaf) cancelAnimationFrame(helperPinRaf);
             if (originalHelperStyle === null) helper.removeAttribute("style");
@@ -1490,11 +1421,7 @@
             window.removeEventListener("scroll", onWindowScroll);
             window.visualViewport?.removeEventListener("scroll", onViewportChange);
             window.visualViewport?.removeEventListener("resize", onViewportChange);
-            containerEl.removeEventListener("pointerdown", onPointerDown, { capture: true });
-            containerEl.removeEventListener("pointermove", onPointerMove, { capture: true });
-            containerEl.removeEventListener("pointerup", onPointerUp, { capture: true });
-            containerEl.removeEventListener("pointercancel", onPointerCancel, { capture: true });
-            containerEl.removeEventListener("contextmenu", onContextMenu, { capture: true });
+            containerEl.removeEventListener("pointerdown", onTerminalTouchDown, { capture: true });
         };
     }
 
@@ -1562,9 +1489,8 @@
             fitTerminal();
         });
 
-        // 移动端：xterm 的 helper-textarea 一旦 focus 就会召系统键盘，
-        // 而长按选择需要避开这个 focus。短按终端时解锁并 focus；长按、
-        // 拖选或 contextmenu 时立刻锁回去。
+        // 移动端：键盘只从 keybar 的 ⌨ 按钮弹出（issue #225）。终端上任何
+        // 触摸只负责收起已打开的键盘；helper 常态锁定，长按选择不受影响。
         if (app.isMobile) {
             const helper = terminal.textarea ?? containerEl.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
             if (helper) {
