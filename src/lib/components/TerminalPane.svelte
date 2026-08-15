@@ -1546,15 +1546,21 @@
         // and drowns on flood output. WebGL draws from a texture atlas — the
         // "GPU acceleration" every modern terminal ships. Any failure (old
         // GPU, RDP, WebView without WebGL2) falls back to the DomRenderer.
-        try {
-            const webglAddon = new WebglAddon();
-            webglAddon.onContextLoss(() => {
-                console.warn("[terminal] WebGL context lost — falling back to DOM renderer");
-                webglAddon.dispose();
-            });
-            terminal.loadAddon(webglAddon);
-        } catch (e) {
-            console.warn("[terminal] WebGL renderer unavailable, using DOM:", e);
+        // NOT on mobile: WebGL paints glyphs into a canvas, leaving no DOM
+        // text — iOS's native long-press selection (the blue handles) has
+        // nothing to grab. Mobile keeps the DOM renderer (selection beats
+        // paint throughput; the output feeder already bounds flood pacing).
+        if (!app.isMobile) {
+            try {
+                const webglAddon = new WebglAddon();
+                webglAddon.onContextLoss(() => {
+                    console.warn("[terminal] WebGL context lost — falling back to DOM renderer");
+                    webglAddon.dispose();
+                });
+                terminal.loadAddon(webglAddon);
+            } catch (e) {
+                console.warn("[terminal] WebGL renderer unavailable, using DOM:", e);
+            }
         }
         ime229WorkaroundCleanup = setupXtermIme229Workaround({
             terminal,
