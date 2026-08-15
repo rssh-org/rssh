@@ -270,6 +270,7 @@ const en = {
   // scene chips (used as both labels and aria descriptions)
   "welcome.scene.ai.chip": "AI Diagnostics",
   "welcome.scene.blocks.chip": "Command Block Colors",
+  "welcome.scene.discovery.chip": "Dynamic Discovery",
   "welcome.scene.sync.chip": "Security & Sync",
   "welcome.scene.cli.chip": "CLI-First",
 
@@ -292,7 +293,13 @@ const en = {
   "welcome.scene.blocks.caption_kw3": "share",
   "welcome.scene.blocks.caption_join": " · ",
 
-  // scene 3 — sync
+  // scene 3 — dynamic discovery
+  "welcome.scene.discovery.caption_kw1": "sources persist",
+  "welcome.scene.discovery.caption_kw2": "targets appear live",
+  "welcome.scene.discovery.caption_kw3": "ephemeral exec",
+  "welcome.scene.discovery.caption_join": " · ",
+
+  // scene 4 — sync
   "welcome.scene.sync.node_rssh": "RSSH",
   "welcome.scene.sync.node_rssh_sub": "your machine",
   "welcome.scene.sync.node_keyserver": "OS KEY STORE",
@@ -312,7 +319,7 @@ const en = {
   "welcome.scene.sync.caption_kw3": "synced everywhere",
   "welcome.scene.sync.caption_join": " · ",
 
-  // scene 4 — CLI
+  // scene 5 — CLI
   "welcome.scene.cli.confirm": "opened",
   "welcome.scene.cli.gui_waiting": "waiting for command…",
   "welcome.scene.cli.gui_hint": "any terminal can drive me",

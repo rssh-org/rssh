@@ -272,6 +272,7 @@ const zh: Messages = {
   // scene chips
   "welcome.scene.ai.chip": "AI 排障",
   "welcome.scene.blocks.chip": "命令块上色",
+  "welcome.scene.discovery.chip": "动态发现",
   "welcome.scene.sync.chip": "安全与同步",
   "welcome.scene.cli.chip": "CLI 优先",
 
@@ -294,7 +295,13 @@ const zh: Messages = {
   "welcome.scene.blocks.caption_kw3": "分享",
   "welcome.scene.blocks.caption_join": " · ",
 
-  // scene 3 — sync
+  // scene 3 — dynamic discovery
+  "welcome.scene.discovery.caption_kw1": "来源即配置",
+  "welcome.scene.discovery.caption_kw2": "目标实时出现",
+  "welcome.scene.discovery.caption_kw3": "用完即走",
+  "welcome.scene.discovery.caption_join": " · ",
+
+  // scene 4 — sync
   "welcome.scene.sync.node_rssh": "RSSH",
   "welcome.scene.sync.node_rssh_sub": "运行在本机",
   "welcome.scene.sync.node_keyserver": "系统密钥服务",
@@ -314,7 +321,7 @@ const zh: Messages = {
   "welcome.scene.sync.caption_kw3": "全设备同步",
   "welcome.scene.sync.caption_join": " · ",
 
-  // scene 4 — CLI
+  // scene 5 — CLI
   "welcome.scene.cli.confirm": "已打开",
   "welcome.scene.cli.gui_waiting": "等待命令…",
   "welcome.scene.cli.gui_hint": "任意终端都能驱动我",

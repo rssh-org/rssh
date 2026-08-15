@@ -1,5 +1,5 @@
 <!--
-  Scene 4 — CLI-First.
+  Scene 5 — CLI-First.
   Split stage: left is a mock OS terminal where someone types
   `rssh profile open prod`; right is the rssh GUI. After Enter, a beam shoots
   from the terminal into the GUI's tab strip, and a new "prod" tab

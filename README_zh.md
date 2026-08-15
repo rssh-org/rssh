@@ -15,7 +15,9 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/shihuili1218/rssh)
 
 <p align="center">
-  <img src="docs/img_local.png" alt="RSSH —— 问一句，AI 提议命令，你点同意才执行" width="820">
+  <img src="docs/img_local.png" alt="RSSH —— 问一句，AI 提议命令，你点同意才执行" height="180">
+  <img src="docs/img_blocks_context_menu.png" alt="彩色命令块与右键菜单" height="180">
+  <img src="docs/img_ai_panel.png" alt="RSSH —— AI 面板读终端上下文，提议命令待批准" height="180"> 
 </p>
 
 <p align="center"><b><a href="https://github.com/shihuili1218/rssh/releases">⬇️ 下载最新版</a></b> &nbsp;·&nbsp; <a href="docs/article_zh.md">为什么是 RSSH？</a></p>
@@ -33,6 +35,11 @@
 每条命令和它的输出自动成块、左侧按色分隔。上千行滚屏里，一眼找到上一条命令的输出在哪儿。**纯本地渲染**，零远端依赖、不在服务器上装任何 agent。
 
 ![彩色命令块：左侧分色定位](docs/welcome-blocks.gif)
+
+### 🐳 动态发现（Docker/K8S）
+容器和 Pod 时时刻刻都在变，别把它们做成一堆死 Profile。RSSH 只保存"来源"——本机的 docker / kubectl context；正在运行的容器和 Pod 会实时出现在 Home 里，和 SSH Profile 平级排列，点开就是一个临时 exec 终端（`docker exec -it` / `kubectl exec -it`）。服务器零 agent，也不会留下过期配置；[为什么需要动态发现](docs/article_dynamic_discovery_zh.md)。
+
+![动态发现：容器和 Pod 实时出现在 Home，点开即 exec 终端](docs/welcome-discovery.gif)
 
 ### ⌨️ 一处配置，处处可用
 `rssh profile open prod` 从任意终端直接拉起会话——CLI 与 GUI 共用同一个 SQLite 库。同一套主机和密钥，还能跑在**手机**和 **JetBrains** 工具窗口里。

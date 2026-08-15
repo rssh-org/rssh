@@ -15,7 +15,9 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/shihuili1218/rssh)
 
 <p align="center">
-  <img src="docs/img_local.png" alt="RSSH — ask a question, the AI proposes commands, you approve before they run" width="820">
+  <img src="docs/img_local.png" alt="RSSH — ask a question, the AI proposes commands, you approve before they run" height="180">
+  <img src="docs/img_blocks_context_menu.png" alt="Color-coded command blocks with their context menu" height="180">
+  <img src="docs/img_ai_panel.png" alt="RSSH — the AI panel reads the terminal and proposes commands for approval" height="180">  
 </p>
 
 <p align="center"><b><a href="https://github.com/shihuili1218/rssh/releases/latest">⬇️ Download latest</a></b> &nbsp;·&nbsp; <a href="docs/article_en.md">Why RSSH?</a></p>
@@ -33,6 +35,11 @@ Not another chat box. It reads what is **actually happening** in your terminal, 
 Every command and its output become a block with a color-coded left edge. In a thousand-line scrollback you spot the previous command's output at a glance. Rendered **fully locally** — zero remote dependency, no agent installed on the server.
 
 ![Color-coded command blocks: locate output at a glance](docs/welcome-blocks.gif)
+
+### 🐳 Dynamic discovery (Docker/K8S)
+Containers and pods churn hourly — don't embalm them as profiles. RSSH persists only a *source*: your local `docker` / `kubectl` context. Running containers and pods then appear live in Home, side by side with your SSH profiles; click one and an ephemeral exec terminal opens (`docker exec -it` / `kubectl exec -it`). No agent on any server, no stale configs to clean up.
+
+![Dynamic discovery: containers and pods appear live in Home, click opens an exec terminal](docs/welcome-discovery.gif)
 
 ### ⌨️ Configure once, use everywhere
 `rssh profile open prod` launches a session from any terminal — the CLI and GUI share one SQLite store. The same hosts and keys also run on **mobile** and inside a **JetBrains** tool window.

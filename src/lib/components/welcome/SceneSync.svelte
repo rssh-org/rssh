@@ -1,5 +1,5 @@
 <!--
-  Scene 3 — Security & Sync, modelled after the flow:
+  Scene 4 — Security & Sync, modelled after the flow:
 
       RSSH ──┬──→ OS_KeyServer  (keys stay here, never travel)
              └──→ Profile_DB ──[encrypted]──→ GitHub repo ──┬──→ Windows
