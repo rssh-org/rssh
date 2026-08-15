@@ -26,25 +26,44 @@
 
 ## 为什么选 RSSH
 
-### 🤖 AI 排障
-不是又一个聊天框。它读终端里**真实发生**的事，提议**只读优先**的命令，每条都标注副作用、要你点「执行」才会跑。payload 离机前过 shape 校验 + 本地脱敏——你的密钥、内网地址不会原样发出去。
+<table>
+<tr>
+<td width="50%" valign="top">
 
-![AI 排障面板：AI 提议命令，等你批准](docs/welcome-ai.gif)
+### 🤖 AI 排障
+不是又一个聊天框，它不需要你在服务器上装任何软件，它模拟人类的操作，直接读取终端的输入输出。
+
+<img src="docs/welcome-ai.gif" alt="AI 排障：读终端，提议命令" width="400">
+
+</td>
+<td width="50%" valign="top">
 
 ### 🎨 彩色命令块
-每条命令和它的输出自动成块、左侧按色分隔。上千行滚屏里，一眼找到上一条命令的输出在哪儿。**纯本地渲染**，零远端依赖、不在服务器上装任何 agent。
+每条命令和它的输出自动成块、左侧按色分隔，一眼找到上一条命令的输出在哪儿。**纯本地渲染**，零远端依赖。
 
-![彩色命令块：左侧分色定位](docs/welcome-blocks.gif)
+<img src="docs/welcome-blocks.gif" alt="彩色命令块" width="400">
 
-### 🐳 动态发现（Docker/K8S）
-容器和 Pod 时时刻刻都在变，别把它们做成一堆死 Profile。RSSH 只保存"来源"——本机的 docker / kubectl context；正在运行的容器和 Pod 会实时出现在 Home 里，和 SSH Profile 平级排列，点开就是一个临时 exec 终端（`docker exec -it` / `kubectl exec -it`）。服务器零 agent，也不会留下过期配置；[为什么需要动态发现](docs/article_dynamic_discovery_zh.md)。
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
 
-![动态发现：容器和 Pod 实时出现在 Home，点开即 exec 终端](docs/welcome-discovery.gif)
+### 🐳 动态发现
+容器和 Pod 时时刻刻都在变，过去通过 IP 连接服务器的方案已经过时了，RSSH 会动态发现本地生产测试的容器。
 
-### ⌨️ 一处配置，处处可用
-`rssh profile open prod` 从任意终端直接拉起会话——CLI 与 GUI 共用同一个 SQLite 库。同一套主机和密钥，还能跑在**手机**和 **JetBrains** 工具窗口里。
+<img src="docs/welcome-discovery.gif" alt="动态发现：容器实时出现在 Home" width="400">
 
-![CLI 直连：rssh profile open prod](docs/welcome-cli.gif)
+</td>
+<td width="50%" valign="top">
+
+### 🔐 多平台数据同步
+密钥保存在你本地的 keyserver 程序中，连接配置加密后保存在你的 GitHub 私有仓库里面，不需要保存在第三方服务器。
+
+<img src="docs/welcome-sync.gif" alt="安全与同步：密钥进钥匙串，配置加密到 GitHub" width="400">
+
+</td>
+</tr>
+</table>
 
 ---
 
