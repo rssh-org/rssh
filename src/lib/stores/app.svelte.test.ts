@@ -646,15 +646,19 @@ describe("soft keyboard gate", () => {
     // stale pane being destroyed must not wipe the current owner.
     const app = await loadAppModule();
     const stale = () => {};
-    const active = () => {};
+    let activeCalls = 0;
+    const active = () => { activeCalls += 1; };
     app.registerSoftKeyboardToggle(stale);
     app.registerSoftKeyboardToggle(active);
+    app.setSoftKeyboardOpen(true);
 
     app.unregisterSoftKeyboardToggle(stale);
 
-    let called = false;
-    app.registerSoftKeyboardToggle(() => { called = true; });
+    // No re-registration after the stale unregister: if it had wrongly cleared
+    // the slot, the toggle would be a no-op (activeCalls 0); if it had wrongly
+    // reset the state, softKeyboardOpen would read false.
     app.toggleSoftKeyboard();
-    expect(called).toBe(true); // the current owner still receives the toggle
+    expect(activeCalls).toBe(1);
+    expect(app.softKeyboardOpen()).toBe(true);
   });
 });
