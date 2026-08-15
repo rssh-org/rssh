@@ -1428,24 +1428,13 @@
         // The keyboard opens ONLY from the keybar button, so terminal touches
         // need no tap/drag/long-press classification — that state machine
         // existed to decide whether a tap should OPEN it. Any touch on the
-        // terminal just dismisses a keyboard that is open. No preventDefault
-        // anywhere: long-press must still reach the native copy/paste menu.
-        //
-        // The dismiss must NOT run synchronously inside the pointerdown
-        // dispatch. iOS's long-press text-selection recognizer hangs off the
-        // same touch, and a focus mutation during dispatch cancels it — the
-        // blue selection handles never appear. The old gesture machine always
-        // blurred from a 360ms TIMER, i.e. async; deferring to a task keeps
-        // that property (async focus changes leave the recognizer alone).
-        let dismissTimer = 0;
+        // terminal just dismisses a keyboard that is open, at pointerdown:
+        // sooner than the old drag-slop / long-press-timer paths ever did.
+        // No preventDefault anywhere: long-press must still reach the native
+        // copy/paste menu.
         function onTerminalTouchDown(ev: PointerEvent) {
             if (ev.pointerType !== "touch" && ev.pointerType !== "pen") return;
-            if (document.activeElement !== helper) return;
-            if (dismissTimer) window.clearTimeout(dismissTimer);
-            dismissTimer = window.setTimeout(() => {
-                dismissTimer = 0;
-                if (document.activeElement === helper) hideKeyboard();
-            }, 0);
+            if (document.activeElement === helper) hideKeyboard();
         }
 
         function onFocus() {
@@ -1480,7 +1469,6 @@
         containerEl.addEventListener("pointerdown", onTerminalTouchDown, { capture: true, passive: true });
 
         return () => {
-            if (dismissTimer) window.clearTimeout(dismissTimer);
             if (scrollResetRaf) cancelAnimationFrame(scrollResetRaf);
             if (helperPinRaf) cancelAnimationFrame(helperPinRaf);
             if (originalHelperStyle === null) helper.removeAttribute("style");
