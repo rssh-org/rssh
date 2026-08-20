@@ -377,6 +377,13 @@
             flex-wrap: wrap;
         }
 
+        /* Download count inside buttons — inherits the button ink, dimmed */
+        .dl-count {
+            font-size: 0.9em;
+            font-weight: 500;
+            opacity: 0.62;
+        }
+
         .btn {
             display: inline-flex;
             align-items: center;
@@ -833,70 +840,6 @@
 
         .feat .sec-sub { font-size: 16.5px; max-width: 560px; }
 
-        /* ---------- runs on ---------- */
-
-        .runs {
-            margin-top: clamp(96px, 12vw, 150px);
-            padding: 34px 0;
-            border-top: 1px solid var(--line);
-            border-bottom: 1px solid var(--line);
-        }
-
-        .runs .wrap {
-            display: flex;
-            align-items: baseline;
-            justify-content: center;
-            gap: 14px;
-            flex-wrap: wrap;
-            font-family: var(--mono);
-            font-size: 14.5px;
-            color: var(--muted);
-            letter-spacing: 0.04em;
-        }
-
-        .runs .runs-cap {
-            color: var(--dim);
-            font-size: 12px;
-            letter-spacing: 0.16em;
-            text-transform: uppercase;
-            margin-right: 8px;
-        }
-
-        .runs i { color: #333d37; font-style: normal; }
-
-        /* ---------- value props ---------- */
-
-        .props {
-            margin-top: clamp(48px, 6vw, 72px);
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: clamp(32px, 5vw, 64px);
-            text-align: left;
-        }
-
-        .prop h3 {
-            margin: 0;
-            color: var(--dim);
-            font-size: 13px;
-            font-weight: 600;
-            letter-spacing: 0.04em;
-        }
-
-        .prop-line {
-            margin: 12px 0 0;
-            color: var(--ink);
-            font-size: 19px;
-            font-weight: 600;
-            letter-spacing: -0.01em;
-        }
-
-        .prop p {
-            margin: 14px 0 0;
-            color: var(--muted);
-            font-size: 15px;
-            line-height: 1.68;
-        }
-
         /* ---------- features ---------- */
 
         .feature-grid {
@@ -1147,7 +1090,6 @@
 
         @media (max-width: 700px) {
             .nav-links { display: none; }
-            .props { grid-template-columns: 1fr; gap: 40px; }
             .feature-grid { grid-template-columns: 1fr; }
             .hero { padding-top: 120px; }
             .btn { padding: 12px 22px; font-size: 14.5px; }
@@ -1181,12 +1123,17 @@
             <a href="#faq">FAQ</a>
         </div>
         <div class="nav-actions">
-            <a class="nav-download" href="#download">Download</a>
+            <a class="nav-download" href="#download">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                    <path d="M12 3v12m0 0 5-5m-5 5-5-5M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                Download <span class="dl-count js-downloads" hidden></span>
+            </a>
             <a class="github-badge" href="https://github.com/shihuili1218/rssh" target="_blank" rel="noopener">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                     <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.03 1.76 2.69 1.25 3.35.96.1-.75.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.05 0 0 .96-.31 3.16 1.18.92-.26 1.9-.38 2.88-.39.98 0 1.96.13 2.88.39 2.19-1.49 3.15-1.18 3.15-1.18.63 1.59.23 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.41-2.69 5.38-5.26 5.66.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .31.21.67.8.55A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z"/>
                 </svg>
-                Star · <b id="js-star">GitHub</b>
+                Star · <b class="js-star">GitHub</b>
             </a>
         </div>
     </div>
@@ -1197,19 +1144,19 @@
         <p class="hero-pill"><i></i>Open-source SSH workbench</p>
         <h1>A terminal<br/>that remembers<br/><span>what you did.</span></h1>
         <p class="hero-sub">Color-coded command blocks, AI triage, and a CLI over the same
-            database. macOS, Windows, Linux, Android.</p>
+            database.</p>
         <div class="hero-actions">
             <a class="btn btn-primary" href="#download">
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
                     <path d="M12 3v12m0 0 5-5m-5 5-5-5M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
-                Download
+                Download <span class="dl-count js-downloads" hidden></span>
             </a>
             <a class="btn btn-ghost" href="https://github.com/shihuili1218/rssh" target="_blank" rel="noopener">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                     <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.03 1.76 2.69 1.25 3.35.96.1-.75.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.18-3.09-.12-.29-.51-1.46.11-3.05 0 0 .96-.31 3.16 1.18.92-.26 1.9-.38 2.88-.39.98 0 1.96.13 2.88.39 2.19-1.49 3.15-1.18 3.15-1.18.63 1.59.23 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.41-2.69 5.38-5.26 5.66.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .31.21.67.8.55A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z"/>
                 </svg>
-                Star on GitHub
+                Star · <b class="js-star">GitHub</b>
             </a>
         </div>
     </div>
@@ -1336,20 +1283,9 @@
 
 <main id="main">
     <section id="highlights" aria-label="Highlights">
-        <article id="discovery" class="feat">
-            <div class="wrap">
-                <p class="eyebrow rv">01 · Dynamic discovery</p>
-                <h2 class="rv">Containers appear.<br/>So do your terminals.</h2>
-                <p class="sec-sub rv">Docker containers and Kubernetes pods show up live as they start.
-                    One click opens an ephemeral exec terminal — no static IPs, no bookmarks to maintain.</p>
-            </div>
-            <figure class="rv" data-scene="discovery"
-                aria-label="Demo: containers and pods appear live in the rssh home view"></figure>
-        </article>
-
         <article id="blocks" class="feat">
             <div class="wrap">
-                <p class="eyebrow rv">02 · Command blocks</p>
+                <p class="eyebrow rv">01 · Command blocks</p>
                 <h2 class="rv">Every command gets a boundary.</h2>
                 <p class="sec-sub rv">Sessions fold into color-coded blocks. Copy one command's output,
                     fold the noise, and keep a 10 000-line scrollback you can actually read.</p>
@@ -1360,13 +1296,24 @@
 
         <article id="ai" class="feat">
             <div class="wrap">
-                <p class="eyebrow rv">03 · AI triage</p>
+                <p class="eyebrow rv">02 · AI triage</p>
                 <h2 class="rv">Automated triage.<br/>Human-approved.</h2>
                 <p class="sec-sub rv">The AI reads your terminal like an operator and proposes the next command.
                     Nothing runs without your click, and secrets are redacted before anything leaves the machine.</p>
             </div>
             <figure class="rv" data-scene="ai"
                 aria-label="Demo: the AI panel proposes a command and waits for approval"></figure>
+        </article>
+
+        <article id="discovery" class="feat">
+            <div class="wrap">
+                <p class="eyebrow rv">03 · Dynamic discovery</p>
+                <h2 class="rv">Containers appear.<br/>So do your terminals.</h2>
+                <p class="sec-sub rv">Docker containers and Kubernetes pods show up live as they start.
+                    One click opens an ephemeral exec terminal — no static IPs, no bookmarks to maintain.</p>
+            </div>
+            <figure class="rv" data-scene="discovery"
+                aria-label="Demo: docker start in a terminal — rssh sees the container instantly; pods roll, and a click opens the container shell"></figure>
         </article>
 
         <article id="cli" class="feat">
@@ -1390,46 +1337,6 @@
             <figure class="rv" data-scene="sync"
                 aria-label="Demo: keys stay in the OS key store, encrypted profiles sync to your own repo"></figure>
         </article>
-    </section>
-
-    <div class="runs" aria-label="Supported platforms">
-        <div class="wrap">
-            <span class="runs-cap">Runs on</span>
-            <span>macOS</span><i>·</i>
-            <span>Windows</span><i>·</i>
-            <span>Linux</span><i>·</i>
-            <span>Android</span><i>·</i>
-            <span>iOS</span>
-        </div>
-    </div>
-
-    <section id="security" class="sec">
-        <div class="wrap">
-            <div class="sec-head">
-                <p class="eyebrow rv">Principles</p>
-                <h2 class="rv">Built like infrastructure software.</h2>
-            </div>
-            <div class="props">
-                <div class="prop rv">
-                    <h3>Open source</h3>
-                    <p class="prop-line">Read every line.</p>
-                    <p>MIT-licensed and developed in the open. An SSH client holds your private keys —
-                        that is exactly the software you should be able to audit.</p>
-                </div>
-                <div class="prop rv">
-                    <h3>Private by design</h3>
-                    <p class="prop-line">Nothing leaves your machine.</p>
-                    <p>Keys live in your operating system's keychain. Encrypted sync goes to your own
-                        private repo — no RSSH cloud, no accounts, no analytics.</p>
-                </div>
-                <div class="prop rv">
-                    <h3>Human-approved AI</h3>
-                    <p class="prop-line">Every command pauses.</p>
-                    <p>The AI proposes, you decide. Output is redacted locally before any request,
-                        and the model key is your own.</p>
-                </div>
-            </div>
-        </div>
     </section>
 
     <section id="features" class="sec">
@@ -1570,7 +1477,8 @@
             <div class="sec-head">
                 <p class="eyebrow rv">Download</p>
                 <h2 class="rv">Free, open source, MIT licensed.</h2>
-                <p class="sec-sub rv">Grab the latest release for your platform — every asset is on GitHub.</p>
+                <p class="sec-sub rv">Grab the latest release for your platform — desktop and Android on
+                    GitHub, iOS on the App Store.</p>
             </div>
             <div class="dl-chips rv">
                 <a class="chip" data-asset="-macos-aarch64.dmg" href="https://github.com/shihuili1218/rssh/releases/latest" target="_blank" rel="noopener">
@@ -1584,6 +1492,9 @@
                 </a>
                 <a class="chip" data-asset="-android-universal.apk" href="https://github.com/shihuili1218/rssh/releases/latest" target="_blank" rel="noopener">
                     <b>Android</b><span>.apk · universal</span><span class="arrow">↓</span>
+                </a>
+                <a class="chip" href="https://apps.apple.com/sg/app/rssh/id6787936118" target="_blank" rel="noopener">
+                    <b>iOS</b><span>App Store</span><span class="arrow">↓</span>
                 </a>
                 <a class="chip ghost" href="https://github.com/shihuili1218/rssh/releases/latest" target="_blank" rel="noopener">
                     <b>All releases</b><span class="arrow">→</span>
@@ -1647,9 +1558,10 @@
     fetch('https://api.github.com/repos/shihuili1218/rssh')
         .then((response) => response.json())
         .then((repo) => {
-            const badge = document.getElementById('js-star');
-            if (badge && typeof repo.stargazers_count === 'number') {
-                badge.textContent = formatStars(repo.stargazers_count);
+            if (typeof repo.stargazers_count === 'number') {
+                document.querySelectorAll('.js-star').forEach((badge) => {
+                    badge.textContent = formatStars(repo.stargazers_count);
+                });
             }
         })
         .catch(() => {});
@@ -1663,6 +1575,24 @@
                 const asset = assets.find((item) => item.name.endsWith(suffix));
                 if (asset) chip.href = asset.browser_download_url;
             });
+        })
+        .catch(() => {});
+
+    // Total downloads via the shields.io endpoint (same figure as the badge):
+    // it queries GitHub server-side, so visitors never touch the
+    // api.github.com anonymous rate limit (60/h per IP).
+    fetch('https://img.shields.io/github/downloads/shihuili1218/rssh/total.json')
+        .then((response) => response.json())
+        .then((data) => {
+            const raw = String(data.message || '').replace(/,/g, '').trim();
+            const n = Number(raw);
+            const text = Number.isFinite(n) && raw !== '' ? formatStars(n) : raw;
+            if (text) {
+                document.querySelectorAll('.js-downloads').forEach((badge) => {
+                    badge.textContent = text;
+                    badge.hidden = false;
+                });
+            }
         })
         .catch(() => {});
 </script>

@@ -53,11 +53,11 @@
                 0 0 0 1px rgba(255, 255, 255, 0.05);
         }
 
-        /* Single-window scenes fill the stage; cli's two windows are grid
-           children of its stage and must NOT be absolutely positioned. */
+        /* Single-window scenes fill the stage; cli's and discovery's two
+           windows are grid children of their stage and must NOT be
+           absolutely positioned. */
         .sc-ai .mock-app,
-        .sc-blocks .mock-app,
-        .sc-discovery .mock-app {
+        .sc-blocks .mock-app {
             position: absolute;
             inset: 0;
         }
@@ -603,58 +603,105 @@
         }
 
         /* ── scene: discovery ──────────────────────────────────────── */
+        /* Two windows: left = docker terminal, right = rssh Home. The
+           loop performs the watch contract: a container started on the
+           left is discovered on the right (pulse + card) and a pod
+           rolls — then a click opens the container shell as a new
+           sidebar tab. */
 
-        .sc-discovery .stage { max-width: 980px; margin: 0 auto; }
-
-        .sc-discovery .sources {
-            display: flex;
-            gap: 10px;
-            padding: 10px 16px 0;
-            opacity: 0;
-            transform: translateY(-6px);
-            transition: opacity 400ms ease, transform 400ms cubic-bezier(0.22, 1, 0.36, 1);
-            flex-shrink: 0;
+        .sc-discovery .stage {
+            display: grid;
+            grid-template-columns: 1fr 1.18fr;
+            gap: 24px;
         }
-        .sc-discovery.st-sources .sources { opacity: 1; transform: translateY(0); }
-        .sc-discovery .source {
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-            padding: 5px 11px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 999px;
-            background: rgba(255, 255, 255, 0.04);
-            color: var(--text-sub);
+
+        /* Left window: docker terminal */
+        .sc-discovery .term-body {
+            flex: 1;
+            padding: 14px 16px;
             font-family: "SF Mono", Menlo, Consolas, monospace;
-            font-size: 11px;
-            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+            font-size: 12.5px;
+            line-height: 1.75;
+            color: #d4d8e2;
         }
-        .sc-discovery .source .ic { color: var(--accent); }
-        .sc-discovery .source:nth-child(2) .ic { color: var(--purple); }
-        .sc-discovery.st-scan .source {
-            border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-            box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 25%, transparent);
+        .sc-discovery .ln { white-space: pre-wrap; }
+        .sc-discovery .ln.out { color: #9aa3b5; }
+        .sc-discovery .ln.thead { color: var(--text-dim); }
+        .sc-discovery .cid { color: var(--text-dim); }
+        .sc-discovery .st-up { color: var(--success); }
+        .sc-discovery .st-ex { color: var(--warning); }
+        .sc-discovery .ps1 { color: var(--success); font-weight: 700; margin-right: 6px; }
+        .sc-discovery .typed { color: var(--text); }
+        .sc-discovery .caret { color: var(--accent); animation: blink 1s steps(1, start) infinite; font-weight: 700; }
+        .sc-discovery .caret-main { display: inline; }
+        .sc-discovery.st-sent .caret-main { display: none; }
+        .sc-discovery .enter-key {
+            display: none;
+            margin-left: 8px;
+            width: 22px;
+            height: 18px;
+            border-radius: 4px;
+            background: var(--accent);
+            color: var(--white);
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 20%, transparent);
+            vertical-align: middle;
         }
+        .sc-discovery.st-sent .enter-key { display: inline-flex; animation: enter-flash 360ms ease-out; }
+        /* docker start output + following prompt appear after Enter */
+        .sc-discovery .d-out, .sc-discovery .d-prompt { display: none; }
+        .sc-discovery.st-sent .d-out { display: block; color: var(--success); }
+        .sc-discovery.st-sent .d-prompt { display: block; }
 
+        /* Pulse link: left terminal → right Home card, drawn on demand */
+        .sc-discovery .pulse-link {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            pointer-events: none;
+            z-index: 6;
+            overflow: visible;
+        }
+        .sc-discovery.st-pulse .pulse-link { opacity: 1; }
+        .sc-discovery.st-found .pulse-link { opacity: 0; transition: opacity 380ms ease 300ms; }
+        .sc-discovery .pl-base {
+            fill: none;
+            stroke: color-mix(in srgb, var(--success) 45%, transparent);
+            stroke-width: 2;
+            stroke-dasharray: 100;
+            stroke-dashoffset: 100;
+        }
+        .sc-discovery.st-pulse .pl-base { animation: pl-draw 500ms ease-out forwards; }
+        @keyframes pl-draw { to { stroke-dashoffset: 0; } }
+        .sc-discovery .pl-dash {
+            fill: none;
+            stroke: var(--success);
+            stroke-width: 3;
+            stroke-linecap: round;
+            stroke-dasharray: 16 84;
+            stroke-dashoffset: 16;
+            opacity: 0;
+            filter: drop-shadow(0 0 5px color-mix(in srgb, var(--success) 60%, transparent));
+        }
+        .sc-discovery.st-pulse .pl-dash { opacity: 1; animation: pl-flow 420ms linear infinite; }
+        @keyframes pl-flow { from { stroke-dashoffset: 16; } to { stroke-dashoffset: -84; } }
+
+        /* Right window: Home list */
         .sc-discovery .home-list {
-            position: relative;
             flex: 1;
             min-height: 0;
-            padding: 8px 16px 8px;
+            padding: 10px 14px;
             display: flex;
             flex-direction: column;
             justify-content: center;
-            gap: clamp(6px, 1.5vh, 12px);
+            gap: clamp(6px, 1.6vh, 13px);
             overflow: hidden;
         }
-        .sc-discovery .hsection.h-docker { display: none; }
-        .sc-discovery.st-docker .hsection.h-docker { display: block; animation: section-in 420ms ease both; }
-        .sc-discovery .hsection.h-k8s { display: none; }
-        .sc-discovery.st-k8s .hsection.h-k8s { display: block; animation: section-in 420ms ease both; }
-        @keyframes section-in {
-            from { opacity: 0; transform: translateY(6px); }
-            to   { opacity: 1; transform: translateY(0); }
-        }
+        .sc-discovery.st-tab .home-list { display: none; }
         .sc-discovery .hlabel {
             font-family: "SF Mono", Menlo, Consolas, monospace;
             font-size: 10px;
@@ -669,7 +716,6 @@
             grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 8px;
         }
-
         .sc-discovery .tcard {
             display: flex;
             align-items: center;
@@ -679,27 +725,11 @@
             background: rgba(255, 255, 255, 0.04);
             border: 1px solid rgba(255, 255, 255, 0.05);
             min-width: 0;
-            transition: box-shadow 0.25s ease;
         }
-        .sc-discovery .tcard.pop { animation: card-pop 460ms cubic-bezier(0.22, 1, 0.36, 1) both; }
-        .sc-discovery .tcard.pop.d2 { animation-delay: 120ms; }
         @keyframes card-pop {
             from { opacity: 0; transform: scale(0.85) translateY(8px); }
             to   { opacity: 1; transform: scale(1) translateY(0); }
         }
-        .sc-discovery .tcard.flash {
-            border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-            box-shadow:
-                0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent),
-                0 0 18px color-mix(in srgb, var(--accent) 30%, transparent);
-            animation: card-flash 900ms ease-out both;
-        }
-        @keyframes card-flash {
-            0% { transform: scale(0.97); }
-            40% { transform: scale(1.04); }
-            100% { transform: scale(1); }
-        }
-
         .sc-discovery .ticon {
             width: 28px; height: 28px;
             border-radius: 8px;
@@ -729,47 +759,81 @@
             text-overflow: ellipsis;
         }
 
-        .sc-discovery .scanline {
-            position: absolute;
-            left: 0;
-            right: 0;
-            top: 0;
-            height: 2px;
-            background: linear-gradient(90deg, transparent, var(--accent) 30%, var(--accent) 70%, transparent);
-            box-shadow: 0 0 14px var(--accent);
-            opacity: 0;
-            pointer-events: none;
+        /* Event: worker-7 discovered — pops in with halo + tag, fades to plain.
+           No overflow clipping here: the tag rides above the card edge. */
+        .sc-discovery .tcard.found {
+            display: none;
+            position: relative;
         }
-        .sc-discovery.st-scan .scanline { animation: scan 1000ms cubic-bezier(0.4, 0, 0.6, 1) forwards; }
-        @keyframes scan {
-            0%   { top: 0; opacity: 0.9; }
-            100% { top: 100%; opacity: 0; }
+        .sc-discovery.st-found .tcard.found { display: flex; animation: found-in 1700ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+        /* Note: the final frame must NOT set opacity/transform — fill-forwards
+           would pin them and override the later st-exit1 desaturation. */
+        @keyframes found-in {
+            0%   { opacity: 0; transform: scale(0.85) translateY(8px); }
+            16%  { opacity: 1; transform: scale(1) translateY(0);
+                   box-shadow: 0 0 0 2px color-mix(in srgb, var(--success) 70%, transparent),
+                               0 8px 26px color-mix(in srgb, var(--success) 30%, transparent); }
+            72%  { box-shadow: 0 0 0 2px color-mix(in srgb, var(--success) 70%, transparent),
+                               0 8px 26px color-mix(in srgb, var(--success) 30%, transparent); }
+            100% { box-shadow: 0 0 0 0 transparent; }
+        }
+        .sc-discovery.st-found .tcard.found::after {
+            content: 'discovered';
+            position: absolute;
+            top: -8px;
+            right: 8px;
+            font-family: "SF Mono", Menlo, Consolas, monospace;
+            font-size: 8.5px;
+            font-weight: 700;
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+            color: var(--success);
+            background: #14151b;
+            border: 1px solid color-mix(in srgb, var(--success) 45%, transparent);
+            padding: 2px 6px;
+            border-radius: 999px;
+            animation: tag-fade 1700ms ease both;
+        }
+        @keyframes tag-fade {
+            0%   { opacity: 0; transform: translateY(3px); }
+            16%  { opacity: 1; transform: translateY(0); }
+            72%  { opacity: 1; }
+            100% { opacity: 0; }
         }
 
-        .sc-discovery .term-strip {
+        /* Event: pod rollout — Updating… blinks, old card leaves, new card takes the slot */
+        .sc-discovery .roll-wrap { grid-column: 1 / -1; position: relative; }
+        .sc-discovery .roll-new { position: absolute; inset: 0; opacity: 0; }
+        .sc-discovery.st-roll1 .roll-old .tsub { color: var(--warning); animation: update-blink 700ms ease-in-out infinite; }
+        @keyframes update-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .sc-discovery.st-roll2 .roll-old { animation: roll-out 420ms ease forwards; }
+        @keyframes roll-out { to { opacity: 0; transform: translateY(-8px) scale(0.97); } }
+        .sc-discovery.st-roll2 .roll-new { animation: card-pop 460ms cubic-bezier(0.22, 1, 0.36, 1) 140ms both; }
+
+        /* Finale: docker tab pops in, focus moves home → container shell */
+        .sc-discovery .tab-docker {
+            transform: scale(0.4);
+            opacity: 0;
+            width: 0;
+            overflow: hidden;
+            border: 1px solid transparent;
+        }
+        .sc-discovery.st-tab .tab-docker {
+            transform: scale(1);
+            opacity: 1;
+            width: 32px;
+            animation: tab-in 520ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+        }
+        .sc-discovery .gui-term {
             display: none;
-            flex-shrink: 0;
-            margin: 0 16px 12px;
-            padding: 9px 14px;
-            border-radius: 9px;
-            background: #14151b;
-            border: 1px solid rgba(255, 255, 255, 0.06);
             font-family: "SF Mono", Menlo, Consolas, monospace;
-            font-size: 12.5px;
-            line-height: 1.8;
+            font-size: 12px;
+            line-height: 1.7;
             color: #d4d8e2;
+            opacity: 0;
         }
-        .sc-discovery.st-open .term-strip { display: block; animation: term-in 420ms cubic-bezier(0.22, 1, 0.36, 1) both; }
-        @keyframes term-in {
-            from { opacity: 0; transform: translateY(10px); }
-            to   { opacity: 1; transform: translateY(0); }
-        }
-        .sc-discovery .tln { white-space: pre; }
-        .sc-discovery .ps1 { color: var(--success); font-weight: 700; margin-right: 6px; }
+        .sc-discovery.st-tab .gui-term { display: block; animation: gui-fade 480ms ease forwards; }
         .sc-discovery .root { color: var(--accent); font-weight: 700; margin-right: 6px; }
-        .sc-discovery .caret { color: var(--accent); animation: blink 1s steps(1, start) infinite; font-weight: 700; }
-        .sc-discovery .t-root { display: none; }
-        .sc-discovery.st-typed .t-root { display: block; }
 
         /* ── scene: sync ───────────────────────────────────────────── */
 
@@ -1110,8 +1174,9 @@
         .sc-cli .ln-welcome, .sc-cli .ln-remote { display: none; }
         .sc-cli.st-connect .ln-welcome, .sc-cli.st-connect .ln-remote { display: block; }
 
-        .sc-cli .gui-body { flex: 1; display: flex; min-height: 0; }
-        .sc-cli .gui-sidebar {
+        /* Shared GUI-window chrome (right window of cli + discovery). */
+        .rssh-scene .gui-body { flex: 1; display: flex; min-height: 0; }
+        .rssh-scene .gui-sidebar {
             width: 44px;
             padding: 6px;
             background: #181920;
@@ -1121,7 +1186,7 @@
             gap: 4px;
             align-items: center;
         }
-        .sc-cli .gui-tab {
+        .rssh-scene .gui-tab {
             width: 32px;
             height: 32px;
             border-radius: 7px;
@@ -1136,13 +1201,13 @@
             position: relative;
             transition: background 0.18s ease, color 0.18s ease, box-shadow 0.2s ease, width 0.3s ease;
         }
-        .sc-cli .gui-sep { width: 22px; height: 1px; background: rgba(255, 255, 255, 0.06); margin: 4px 0; }
-        .sc-cli .gui-spacer { flex: 1; }
+        .rssh-scene .gui-sep { width: 22px; height: 1px; background: rgba(255, 255, 255, 0.06); margin: 4px 0; }
+        .rssh-scene .gui-spacer { flex: 1; }
 
-        .sc-cli .tab-add { color: var(--text-dim); }
+        .rssh-scene .tab-add { color: var(--text-dim); }
 
-        /* Focused tab (local at first, prod once it opens) */
-        .sc-cli .gui-tab.active {
+        /* Focused tab (local at first, prod/docker once it opens) */
+        .rssh-scene .gui-tab.active {
             background: color-mix(in srgb, var(--accent) 28%, transparent);
             color: var(--accent);
             box-shadow:
@@ -1169,7 +1234,7 @@
             100% { transform: scale(1) rotate(0deg); opacity: 1; }
         }
 
-        .sc-cli .gui-content {
+        .rssh-scene .gui-content {
             flex: 1;
             padding: 14px;
             background: var(--bg);
@@ -1218,7 +1283,7 @@
                 width: 100%;
                 zoom: 0.5;
             }
-            .sc-cli .stage { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+            .sc-cli .stage, .sc-discovery .stage { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -1414,63 +1479,81 @@
         `,
 
         discovery: `
-            <div class="mock-app">
+            <div class="mock-app term-side">
+                <div class="app-header">
+                    <div class="dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+                    <div class="app-title">~ — zsh</div>
+                    <span class="header-spacer"></span>
+                </div>
+                <div class="term-body">
+                    <div class="ln"><span class="ps1">~ ❯</span> docker ps -a</div>
+                    <div class="ln out thead">CONTAINER ID   IMAGE       STATUS        NAMES</div>
+                    <div class="ln out"><span class="cid">a1b2c3d4e5f6</span>   nginx:1.27  <span class="st-up">Up 2 hours</span>    api-1</div>
+                    <div class="ln out"><span class="cid">9f8e7d6c5b4a</span>   worker:2.4  <span class="st-ex">Exited (0)</span>  <span data-from>worker-7</span></div>
+                    <div class="ln"><span class="ps1">~ ❯</span> <span class="typed" data-typed></span><span class="caret caret-main">▍</span><span class="enter-key">⏎</span></div>
+                    <div class="ln d-out">worker-7</div>
+                    <div class="ln d-prompt"><span class="ps1">~ ❯</span> <span class="caret">▍</span></div>
+                </div>
+            </div>
+
+            <div class="mock-app gui-side">
                 <div class="app-header">
                     <div class="dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
                     <div class="app-title">RSSH</div>
                     <span class="header-spacer"></span>
                 </div>
-
-                <div class="sources">
-                    <div class="source">
-                        <svg class="ic" width="13" height="13"><use href="#i-docker"/></svg>
-                        <span class="src-text">docker · dev-remote</span>
-                    </div>
-                    <div class="source">
-                        <svg class="ic" width="13" height="13"><use href="#i-k8s"/></svg>
-                        <span class="src-text">kubectl · staging/api</span>
-                    </div>
-                </div>
-
-                <div class="home-list">
-                    <div class="hsection">
-                        <div class="hlabel">Profiles</div>
-                        <div class="hcards">
-                            <div class="tcard"><span class="ticon"><svg class="ic" width="15" height="15"><use href="#i-ssh"/></svg></span>
-                                <span class="tbody"><span class="tname">bastion</span><span class="tsub">ops@10.0.0.9:22</span></span></div>
-                            <div class="tcard"><span class="ticon"><svg class="ic" width="15" height="15"><use href="#i-ssh"/></svg></span>
-                                <span class="tbody"><span class="tname">prod-db</span><span class="tsub">dba@db.int:5432</span></span></div>
+                <div class="gui-body">
+                    <nav class="gui-sidebar">
+                        <div class="gui-tab tab-home active" title="Home"><svg class="ic" width="14" height="14"><use href="#i-home"/></svg></div>
+                        <div class="gui-tab tab-add" title="New"><svg class="ic" width="14" height="14"><use href="#i-add"/></svg></div>
+                        <div class="gui-sep"></div>
+                        <div class="gui-tab tab-local" title="local"><svg class="ic" width="14" height="14"><use href="#i-terminal"/></svg></div>
+                        <div class="gui-tab tab-docker" title="api-1"><svg class="ic" width="14" height="14"><use href="#i-docker"/></svg></div>
+                        <div class="gui-spacer"></div>
+                    </nav>
+                    <div class="gui-content">
+                        <div class="home-list">
+                            <div class="hsection">
+                                <div class="hlabel">Profiles</div>
+                                <div class="hcards">
+                                    <div class="tcard"><span class="ticon"><svg class="ic" width="15" height="15"><use href="#i-ssh"/></svg></span>
+                                        <span class="tbody"><span class="tname">bastion</span><span class="tsub">ops@10.0.0.9:22</span></span></div>
+                                </div>
+                            </div>
+                            <div class="hsection">
+                                <div class="hlabel">Docker</div>
+                                <div class="hcards">
+                                    <div class="tcard" data-click><span class="ticon"><svg class="ic" width="15" height="15"><use href="#i-docker"/></svg></span>
+                                        <span class="tbody"><span class="tname">api-1</span><span class="tsub">nginx:1.27 · Up 2h</span></span></div>
+                                    <div class="tcard found"><span class="ticon"><svg class="ic" width="15" height="15"><use href="#i-docker"/></svg></span>
+                                        <span class="tbody"><span class="tname">worker-7</span><span class="tsub">worker:2.4 · Up</span></span></div>
+                                </div>
+                            </div>
+                            <div class="hsection">
+                                <div class="hlabel">Kubernetes</div>
+                                <div class="hcards">
+                                    <div class="roll-wrap">
+                                        <div class="tcard roll-old"><span class="ticon k8s"><svg class="ic" width="15" height="15"><use href="#i-k8s"/></svg></span>
+                                            <span class="tbody"><span class="tname">api-7f9c6d</span><span class="tsub" data-rollsub>api · Running · staging</span></span></div>
+                                        <div class="tcard roll-new"><span class="ticon k8s"><svg class="ic" width="15" height="15"><use href="#i-k8s"/></svg></span>
+                                            <span class="tbody"><span class="tname">api-8h2d1b</span><span class="tsub">api · Running · 4m</span></span></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="gui-term">
+                            <div class="gln"><span class="ps1">~ ❯</span> docker exec -it api-1 sh</div>
+                            <div class="gln"><span class="root">#</span> <span class="caret">▍</span></div>
                         </div>
                     </div>
-
-                    <div class="hsection h-docker">
-                        <div class="hlabel">Docker</div>
-                        <div class="hcards">
-                            <div class="tcard pop d1" data-flash><span class="ticon"><svg class="ic" width="15" height="15"><use href="#i-docker"/></svg></span>
-                                <span class="tbody"><span class="tname">api-1</span><span class="tsub">nginx:1.27 · Up 2h</span></span></div>
-                            <div class="tcard pop d2"><span class="ticon"><svg class="ic" width="15" height="15"><use href="#i-docker"/></svg></span>
-                                <span class="tbody"><span class="tname">worker-7</span><span class="tsub">worker:2.4 · Up 26h</span></span></div>
-                        </div>
-                    </div>
-
-                    <div class="hsection h-k8s">
-                        <div class="hlabel">Kubernetes</div>
-                        <div class="hcards">
-                            <div class="tcard pop d1" data-pod><span class="ticon k8s"><svg class="ic" width="15" height="15"><use href="#i-k8s"/></svg></span>
-                                <span class="tbody"><span class="tname" data-pod-name>api-7f9c6d</span><span class="tsub" data-pod-sub>api · Running · staging</span></span></div>
-                            <div class="tcard pop d2"><span class="ticon k8s"><svg class="ic" width="15" height="15"><use href="#i-k8s"/></svg></span>
-                                <span class="tbody"><span class="tname">debug-shell</span><span class="tsub">tools · Running</span></span></div>
-                        </div>
-                    </div>
-
-                    <div class="scanline" aria-hidden="true"></div>
-                </div>
-
-                <div class="term-strip">
-                    <div class="tln"><span class="ps1">$</span> <span data-typed></span><span class="caret" data-typing>▍</span></div>
-                    <div class="tln t-root"><span class="root">#</span> <span class="caret">▍</span></div>
                 </div>
             </div>
+
+            <svg class="pulse-link" viewBox="0 0 1000 625" preserveAspectRatio="none" aria-hidden="true">
+                <path class="pl-base" d="" pathLength="100" vector-effect="non-scaling-stroke"/>
+                <path class="pl-dash" d="" pathLength="100" vector-effect="non-scaling-stroke"/>
+            </svg>
+            ${CURSOR}
         `,
 
         sync: `
@@ -1819,47 +1902,75 @@
         },
 
         discovery: {
-            loop: 8300,
+            loop: 11000,
             beats(fig) {
-                const CMD = 'docker exec -it api-1 sh';
+                const CMD = 'docker start worker-7';
+                const stage = fig.querySelector('.stage');
+                const cursor = fig.querySelector('.mock-cursor');
                 const typed = fig.querySelector('[data-typed]');
-                const typingCaret = fig.querySelector('[data-typing]');
-                const podName = fig.querySelector('[data-pod-name]');
-                const podSub = fig.querySelector('[data-pod-sub]');
-                const podCard = fig.querySelector('[data-pod]');
-                const typeEnd = 3800 + CMD.length * 45;
+                const typeEnd = 600 + CMD.length * 60;
+
+                // Pulse link: measured from the worker-7 row in the left
+                // terminal to the api-1 card in the right window (worker-7
+                // will take the slot beside it).
+                const drawLink = () => {
+                    const base = fig.querySelector('.pl-base');
+                    const dash = fig.querySelector('.pl-dash');
+                    const from = fig.querySelector('[data-from]');
+                    const to = fig.querySelector('[data-click]');
+                    if (!base || !from || !to) return;
+                    const s = stage.getBoundingClientRect();
+                    const a = from.getBoundingClientRect();
+                    const b = to.getBoundingClientRect();
+                    const x1 = ((a.right - s.left) / s.width) * 1000;
+                    const y1 = ((a.top + a.height / 2 - s.top) / s.height) * 625;
+                    const x2 = ((b.left - s.left) / s.width) * 1000;
+                    const y2 = ((b.top + b.height / 2 - s.top) / s.height) * 625;
+                    const d = `M ${x1.toFixed(1)} ${y1.toFixed(1)} C ${(x1 + 34).toFixed(1)} ${(y1 - 44).toFixed(1)}, ${(x2 - 34).toFixed(1)} ${(y2 - 44).toFixed(1)}, ${x2.toFixed(1)} ${y2.toFixed(1)}`;
+                    base.setAttribute('d', d);
+                    dash.setAttribute('d', d);
+                };
+                const moveTo = (sel) => () => {
+                    const t = stage.querySelector(sel);
+                    if (!t) return;
+                    const s = stage.getBoundingClientRect();
+                    const r = t.getBoundingClientRect();
+                    cursor.style.left = (r.left - s.left + r.width / 2).toFixed(1) + 'px';
+                    cursor.style.top = (r.top - s.top + r.height / 2).toFixed(1) + 'px';
+                };
                 return [
-                    [400, () => fig.classList.add('st-sources')],
-                    [1000, () => fig.classList.add('st-scan')],
-                    [1500, () => fig.classList.add('st-docker')],
-                    [2100, () => fig.classList.add('st-k8s')],
-                    [2900, () => {
-                        podName.textContent = 'api-8h2d1b';
-                        podSub.textContent = 'api · Running · 4m';
-                        podCard.classList.remove('pop');
-                        void podCard.offsetWidth;
-                        podCard.classList.add('pop');
+                    ...typeBeats(600, 60, CMD, (t) => { typed.textContent = t; }),
+                    [typeEnd, () => fig.classList.add('st-sent')],
+                    [typeEnd + 700, () => { drawLink(); fig.classList.add('st-pulse'); }],
+                    [typeEnd + 1900, () => fig.classList.add('st-found')],
+                    // The discovered tag fades over 1700ms from st-found;
+                    // start the rollout 500ms after it is fully gone.
+                    [typeEnd + 4100, () => {
+                        fig.querySelector('[data-rollsub]').textContent = 'api · Updating…';
+                        fig.classList.add('st-roll1');
                     }],
-                    [3600, () => {
-                        fig.classList.add('st-open');
-                        const flash = fig.querySelector('[data-flash]');
-                        flash.classList.remove('flash');
-                        void flash.offsetWidth;
-                        flash.classList.add('flash');
+                    [typeEnd + 4800, () => fig.classList.add('st-roll2')],
+                    [typeEnd + 5400, () => cursor.classList.add('visible')],
+                    [typeEnd + 5600, moveTo('[data-click]')],
+                    [typeEnd + 6700, () => cursor.classList.add('clicking')],
+                    [typeEnd + 6880, () => {
+                        cursor.classList.remove('clicking');
+                        fig.classList.add('st-tab');
+                        fig.querySelector('.tab-home').classList.remove('active');
+                        fig.querySelector('.tab-docker').classList.add('active');
                     }],
-                    ...typeBeats(3800, 45, CMD, (t) => { typed.textContent = t; }),
-                    [typeEnd, () => { typingCaret.style.display = 'none'; fig.classList.add('st-typed'); }],
                 ];
             },
             reset(fig) {
-                fig.classList.remove('st-sources', 'st-scan', 'st-docker', 'st-k8s', 'st-open', 'st-typed');
+                fig.classList.remove('st-sent', 'st-pulse', 'st-found', 'st-roll1', 'st-roll2', 'st-tab');
                 fig.querySelector('[data-typed]').textContent = '';
-                const caret = fig.querySelector('[data-typing]');
-                if (caret) caret.style.display = '';
-                fig.querySelector('[data-pod-name]').textContent = 'api-7f9c6d';
-                fig.querySelector('[data-pod-sub]').textContent = 'api · Running · staging';
-                const flash = fig.querySelector('[data-flash]');
-                if (flash) flash.classList.remove('flash');
+                fig.querySelector('[data-rollsub]').textContent = 'api · Running · staging';
+                fig.querySelector('.tab-home').classList.add('active');
+                fig.querySelector('.tab-docker').classList.remove('active');
+                const cursor = fig.querySelector('.mock-cursor');
+                cursor.classList.remove('visible', 'clicking');
+                cursor.style.left = '108%';
+                cursor.style.top = '108%';
             },
         },
 
