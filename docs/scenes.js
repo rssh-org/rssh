@@ -175,12 +175,15 @@
             line-height: 1.65;
             color: #d4d8e2;
             min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
         }
         .sc-ai .ln { white-space: pre-wrap; }
         .sc-ai .ln.out { color: #b8bcc8; }
         .sc-ai .ln.out.warn { color: #f0c674; }
-        .sc-ai .ln.app { display: none; }
-        .sc-ai.st-approved .ln.app { display: block; animation: ln-app-in 320ms ease both; }
+        .sc-ai .block.app { display: none; }
+        .sc-ai.st-approved .block.app { display: flex; animation: ln-app-in 320ms ease both; }
         @keyframes ln-app-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
         .sc-ai .ln .hot { color: #ff6b6b; font-weight: 700; }
         .sc-ai .prompt { color: var(--success); margin-right: 6px; }
@@ -429,7 +432,10 @@
             gap: 12px;
         }
 
-        .sc-blocks .block {
+        /* Command-block chrome shared by every rssh terminal on the site
+           (blocks, ai, cli's GUI window, discovery's finale). External
+           zsh windows never get bars — the bar is an rssh feature. */
+        .rssh-scene .block {
             position: relative;
             display: flex;
             gap: 14px;
@@ -441,18 +447,18 @@
                 filter 360ms ease,
                 opacity 360ms ease;
         }
-        .sc-blocks .bar {
+        .rssh-scene .bar {
             width: 3px;
             background: rgba(255, 255, 255, 0.08);
             border-radius: 0 2px 2px 0;
             flex-shrink: 0;
             transition: background 400ms ease, box-shadow 400ms ease;
         }
-        .sc-blocks .block.lit .bar {
+        .rssh-scene .block.lit .bar {
             background: var(--bar);
             box-shadow: 0 0 10px color-mix(in srgb, var(--bar) 50%, transparent);
         }
-        .sc-blocks .block-body { flex: 1; min-width: 0; }
+        .rssh-scene .block-body { flex: 1; min-width: 0; }
         .sc-blocks .ln {
             white-space: pre-wrap;
             max-height: 36px;
@@ -801,8 +807,10 @@
             100% { opacity: 0; }
         }
 
-        /* Event: pod rollout — Updating… blinks, old card leaves, new card takes the slot */
-        .sc-discovery .roll-wrap { grid-column: 1 / -1; position: relative; }
+        /* Event: pod rollout — Updating… blinks, old card leaves, new card
+           takes the slot. No grid-column span: the card keeps the standard
+           half-column width of every other Home card. */
+        .sc-discovery .roll-wrap { position: relative; }
         .sc-discovery .roll-new { position: absolute; inset: 0; opacity: 0; }
         .sc-discovery.st-roll1 .roll-old .tsub { color: var(--warning); animation: update-blink 700ms ease-in-out infinite; }
         @keyframes update-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
@@ -1360,11 +1368,26 @@
 
                 <div class="app-body">
                     <div class="term-pane">
-                        <div class="ln"><span class="prompt">$</span> <span>uptime</span></div>
-                        <div class="ln out">up 14 days · load avg 1.42</div>
-                        <div class="ln app"><span class="prompt">$</span> <span>df -h /</span></div>
-                        <div class="ln out warn app">/dev/sda1   480G  478G    2G   <span class="hot">100%</span>  /</div>
-                        <div class="ln"><span class="prompt">$</span> <span class="cur-blink">_</span></div>
+                        <div class="block lit" style="--bar: var(--success);">
+                            <span class="bar" aria-hidden="true"></span>
+                            <div class="block-body">
+                                <div class="ln"><span class="prompt">$</span> <span>uptime</span></div>
+                                <div class="ln out">up 14 days · load avg 1.42</div>
+                            </div>
+                        </div>
+                        <div class="block lit app" style="--bar: var(--accent);">
+                            <span class="bar" aria-hidden="true"></span>
+                            <div class="block-body">
+                                <div class="ln"><span class="prompt">$</span> <span>df -h /</span></div>
+                                <div class="ln out warn">/dev/sda1   480G  478G    2G   <span class="hot">100%</span>  /</div>
+                            </div>
+                        </div>
+                        <div class="block lit" style="--bar: var(--accent);">
+                            <span class="bar" aria-hidden="true"></span>
+                            <div class="block-body">
+                                <div class="ln"><span class="prompt">$</span> <span class="cur-blink">_</span></div>
+                            </div>
+                        </div>
                     </div>
 
                     <aside class="ai-pane">
@@ -1542,8 +1565,13 @@
                             </div>
                         </div>
                         <div class="gui-term">
-                            <div class="gln"><span class="ps1">~ ❯</span> docker exec -it api-1 sh</div>
-                            <div class="gln"><span class="root">#</span> <span class="caret">▍</span></div>
+                            <div class="block lit" style="--bar: var(--accent);">
+                                <span class="bar" aria-hidden="true"></span>
+                                <div class="block-body">
+                                    <div class="gln"><span class="ps1">~ ❯</span> docker exec -it api-1 sh</div>
+                                    <div class="gln"><span class="root">#</span> <span class="caret">▍</span></div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1729,13 +1757,23 @@
                     <div class="gui-content">
                         <div class="gui-content-inner">
                             <div class="gui-local-term">
-                                <div class="gln"><span class="ps1">~ ❯</span> <span class="typed" data-typed2></span><span class="caret g-caret">▍</span><span class="enter-key">⏎</span></div>
-                                <div class="gln g-opened">→ opened <span class="hl">ssh:prod</span></div>
+                                <div class="block lit" style="--bar: var(--accent);">
+                                    <span class="bar" aria-hidden="true"></span>
+                                    <div class="block-body">
+                                        <div class="gln"><span class="ps1">~ ❯</span> <span class="typed" data-typed2></span><span class="caret g-caret">▍</span><span class="enter-key">⏎</span></div>
+                                        <div class="gln g-opened">→ opened <span class="hl">ssh:prod</span></div>
+                                    </div>
+                                </div>
                             </div>
                             <div class="gui-term-mock">
-                                <div class="gln"><span class="ps1g">prod ❯</span> uptime</div>
-                                <div class="gln out">up 14 days · load 1.42</div>
-                                <div class="gln"><span class="ps1g">prod ❯</span> <span class="caret">_</span></div>
+                                <div class="block lit" style="--bar: var(--success);">
+                                    <span class="bar" aria-hidden="true"></span>
+                                    <div class="block-body">
+                                        <div class="gln"><span class="ps1g">prod ❯</span> uptime</div>
+                                        <div class="gln out">up 14 days · load 1.42</div>
+                                        <div class="gln"><span class="ps1g">prod ❯</span> <span class="caret">_</span></div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
