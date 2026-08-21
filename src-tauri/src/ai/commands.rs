@@ -117,14 +117,28 @@ pub fn export_ai_settings(
     Ok(json!({ "active_provider": active, "providers": providers }))
 }
 
-/// Apply an `ai` payload section. Additive: only provided fields are written,
-/// nothing is deleted. Unknown providers are ignored so a payload can't write
-/// arbitrary setting keys. `api_key` is written to the SecretStore.
+/// Apply an `ai` payload section — full replace (mirror): local AI config
+/// becomes exactly what the payload carries. Providers absent from the payload
+/// are cleared (settings + api_key), and a blank model/endpoint/api_key inside
+/// a carried row means unset (export never emits blanks, so absence is the only
+/// "not configured" form that can arrive). `api_key` lives in the SecretStore.
+///
+/// `active_provider` mirrors with the same rule: a payload value is applied
+/// only when it names a known provider; missing/null/unsupported clears the
+/// selection. Keeping a stale selection would point at a backend whose config
+/// the mirror just cleared — a half-replaced state.
 pub fn import_ai_settings(
     db: &crate::db::Db,
     ss: &dyn crate::secret::SecretStore,
     ai: &serde_json::Value,
 ) -> AppResult<()> {
+    // Mirror starts from a clean slate: every synced provider's local config
+    // goes away, then the payload's rows are the only truth.
+    for p in SYNC_PROVIDERS {
+        crate::db::settings::delete(db, &key_model(p))?;
+        crate::db::settings::delete(db, &key_endpoint(p))?;
+        ss.delete(&key_api_key(p))?;
+    }
     if let Some(arr) = ai.get("providers").and_then(|v| v.as_array()) {
         for entry in arr {
             let Some(name) = entry.get("provider").and_then(|v| v.as_str()) else {
@@ -133,9 +147,7 @@ pub fn import_ai_settings(
             if !SYNC_PROVIDERS.contains(&name) {
                 continue; // refuse to write keys for unknown providers
             }
-            // Trim, then blank/whitespace == "not set" → no-op, never overwrite.
-            // Additive merge must not let a blank (old/hand-edited/corrupted
-            // payload) wipe a configured value; matches api_key/active_provider.
+            // Trim, then blank/whitespace == "not set" — mirrors export.
             if let Some(m) = entry
                 .get("model")
                 .and_then(|v| v.as_str())
@@ -162,13 +174,12 @@ pub fn import_ai_settings(
             }
         }
     }
-    // Allowlist active_provider too — provider rows above are filtered, so
-    // accepting an unsupported active value would point ai_provider at a
-    // backend with no config row (broken AI until the user fixes it manually).
+    // Clear first, then apply only a known provider: the selection can never
+    // dangle at a backend whose config the mirror just cleared.
+    crate::db::settings::delete(db, &key_provider())?;
     if let Some(active) = ai
         .get("active_provider")
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
         .filter(|s| SYNC_PROVIDERS.contains(s))
     {
         crate::db::settings::set(db, &key_provider(), active)?;

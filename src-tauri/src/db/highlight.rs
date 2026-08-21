@@ -138,6 +138,13 @@ pub fn delete_by_keyword(db: &Db, keyword: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Sync replace semantics: wipe the whole keyword set (payload rows follow).
+pub fn clear_all(db: &Db) -> AppResult<()> {
+    let conn = db.lock()?;
+    conn.execute("DELETE FROM highlights", [])?;
+    Ok(())
+}
+
 /// Update an existing highlight rule, addressed by its current keyword.
 /// Supports renaming (the new keyword may differ from old_keyword). The schema
 /// has no UNIQUE constraint on `keyword`, so when renaming we explicitly check

@@ -58,6 +58,13 @@ pub fn delete(db: &Db, id: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Sync replace semantics: wipe the whole rule set (payload rows follow).
+pub fn clear_all(db: &Db) -> AppResult<()> {
+    let conn = db.lock()?;
+    conn.execute("DELETE FROM ai_redact_rules", [])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
