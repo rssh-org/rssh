@@ -179,13 +179,16 @@
         };
     }
 
-    /** 激活某行（列表里的单选）。 */
-    async function activate(id: string) {
+    /** Activate a provider row (the list's radio). On failure, roll back the
+     * radio's native check so the visuals stay in sync with activeId (the
+     * backend's single source of truth). */
+    async function activate(id: string, input?: HTMLInputElement) {
         if (id === activeId) return;
         try {
             await ai.activateProvider(id);
             activeId = id;
         } catch (e: any) {
+            if (input) input.checked = false;
             setByokNote(t("ai.settings.note.save_failed", { error: errMsg(e) }));
         }
     }
@@ -577,18 +580,16 @@
             {:else}
                 <div class="provider-row">
                     <div class="provider-info">
-                        <button
-                            type="button"
-                            class="active-dot"
-                            class:on={activeId === p.id}
-                            title={t("ai.settings.provider.activate")}
-                            aria-pressed={activeId === p.id}
-                            onclick={() => activate(p.id)}
-                        ></button>
-                        <div class="provider-text">
-                            <div class="provider-name">{p.name}</div>
-                            <div class="provider-sub">{protocolLabel(p.protocol)} · {p.endpoint} · {p.model}</div>
-                        </div>
+                        <input type="radio" id={`ai-provider-r-${p.id}`} name="ai-provider" class="radio-state"
+                               checked={activeId === p.id}
+                               onchange={(e) => activate(p.id, e.currentTarget)} />
+                        <label for={`ai-provider-r-${p.id}`} class="radio-label" title={t("ai.settings.provider.activate")}>
+                            <span class="shell-radio-indicator" aria-hidden="true"></span>
+                            <div class="provider-text">
+                                <div class="provider-name">{p.name}</div>
+                                <div class="provider-sub">{protocolLabel(p.protocol)} · {p.endpoint} · {p.model}</div>
+                            </div>
+                        </label>
                     </div>
                     <div class="provider-actions">
                         {#if activeId === p.id}
@@ -963,7 +964,8 @@
         resize: vertical;
         min-height: 240px;
     }
-    /* Provider 列表行：active 单选圆点 + 名称/副行 + 操作。 */
+    /* Provider 列表行：激活单选照搬 ShellSettings 的 radio 骨架（隐藏 .radio-state +
+       label 内 .shell-radio-indicator，indicator 视觉走全局样式）+ 操作。 */
     .provider-row {
         display: flex;
         justify-content: space-between;
@@ -974,6 +976,7 @@
     }
     .provider-row:last-of-type { border-bottom: none; }
     .provider-info {
+        position: relative;
         display: flex;
         align-items: center;
         gap: 10px;
@@ -981,23 +984,34 @@
         flex: 0 1 auto;
         width: fit-content;
     }
-    .active-dot {
-        width: 14px;
-        height: 14px;
-        border-radius: 50%;
-        border: 1.5px solid var(--divider);
-        background: transparent;
-        cursor: pointer;
-        flex-shrink: 0;
+    /* 隐藏但可聚焦的真 input —— 同 ShellSettings .radio-state。pointer-events:none
+       让点击穿透到 label，label[for] 转发 focus。 */
+    .radio-state {
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 1px;
+        height: 1px;
+        opacity: 1e-5;
+        pointer-events: none;
+        margin: 0;
         padding: 0;
-        transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+        box-shadow: none;
     }
-    .active-dot:hover { border-color: var(--accent); }
-    .active-dot.on {
-        border-color: var(--accent);
-        background: var(--accent);
-        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+    .radio-label {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        cursor: pointer;
+        min-height: 20px;
+        /* 压掉全局 label 样式（11px/大写/600）——provider 名称与 URL 保持原大小写。 */
+        font-size: inherit;
+        font-weight: 400;
+        text-transform: none;
+        letter-spacing: normal;
+        color: var(--text);
     }
+    .radio-state:checked ~ .radio-label .provider-name { color: var(--accent); }
     .provider-text { min-width: 0; }
     .provider-name {
         font-weight: 600;

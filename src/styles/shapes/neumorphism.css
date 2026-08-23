@@ -142,3 +142,41 @@
     opacity: 0;
 }
 
+/* Custom radio indicator (.shell-radio-indicator) —— neu variant: three
+   circular shadow layers (outer raised + inner reversed well + raised lid
+   ::after); :checked shrinks+sinks+fades the lid to reveal the well.
+   Checked state hooks the sibling label so any hidden radio + label pair
+   picks it up. */
+:root[data-shape="neumorphism"] .shell-radio-indicator {
+    box-shadow:
+        -5px -3px 5px 0px var(--shadow-light),
+        5px 3px 8px 0px var(--shadow-dark);
+}
+:root[data-shape="neumorphism"] .shell-radio-indicator::before,
+:root[data-shape="neumorphism"] .shell-radio-indicator::after {
+    content: "";
+    position: absolute;
+    top: 10%;
+    left: 10%;
+    height: 80%;
+    width: 80%;
+    border-radius: 50%;
+}
+:root[data-shape="neumorphism"] .shell-radio-indicator::before {
+    box-shadow:
+        -3px -1.5px 3px 0px var(--shadow-dark),
+        3px 1.5px 5px 0px var(--shadow-light);
+}
+:root[data-shape="neumorphism"] .shell-radio-indicator::after {
+    background-color: var(--surface);
+    box-shadow:
+        -3px -1.5px 3px 0px var(--shadow-light),
+        3px 1.5px 5px 0px var(--shadow-dark);
+    transform: scale3d(1, 1, 1);
+    transition: opacity 0.25s ease-in-out, transform 0.25s ease-in-out;
+}
+:root[data-shape="neumorphism"] input[type="radio"]:checked ~ label .shell-radio-indicator::after {
+    transform: scale3d(0.975, 0.975, 1) translate3d(0, 10%, 0);
+    opacity: 0;
+}
+
