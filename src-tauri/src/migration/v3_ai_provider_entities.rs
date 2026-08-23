@@ -256,4 +256,41 @@ mod tests {
         run(&db, &ss).unwrap();
         assert_eq!(rows(&db).len(), 1, "second run is a no-op");
     }
+
+    #[test]
+    fn upgraded_device_exports_the_new_sync_shape() {
+        // The upgrade journey end-to-end: legacy keys → v3 rows → the sync
+        // payload carries id/name/protocol/endpoint (+key).
+        let (db, ss) = fixture();
+        db::settings::set(&db, "ai_deepseek_model", "deepseek-chat").unwrap();
+        ss.set(&legacy_api_key("deepseek"), "sk-ds").unwrap();
+        db::settings::set(&db, "ai_provider", "deepseek").unwrap();
+        run(&db, &ss).unwrap();
+
+        let ai = crate::ai::commands::export_ai_settings(&db, &ss, true).unwrap();
+        let row = &ai["providers"][0];
+        assert_eq!(row["name"], "DeepSeek");
+        assert_eq!(row["protocol"], "deepseek-thinking");
+        assert_eq!(row["endpoint"], "https://api.deepseek.com/v1");
+        assert_eq!(row["api_key"], "sk-ds");
+        let new_id = row["provider"].as_str().unwrap();
+        assert_eq!(
+            ai["active_provider"].as_str().unwrap(),
+            new_id,
+            "active rides as the migrated row id"
+        );
+
+        // And the exported payload re-imports cleanly on a fresh device.
+        let (db2, ss2) = fixture();
+        crate::ai::commands::import_ai_settings(&db2, &ss2, &ai).unwrap();
+        let back = db::ai_provider::list(&db2).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].id, new_id);
+        assert_eq!(
+            ss2.get(&setting_key(&format!("ai_{new_id}_key")))
+                .unwrap()
+                .as_deref(),
+            Some("sk-ds")
+        );
+    }
 }
