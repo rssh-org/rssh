@@ -44,8 +44,6 @@
     let banner = $state<string | null>(null);
     let inputEl = $state<HTMLTextAreaElement | null>(null);
     let chatBoxEl = $state<HTMLDivElement | null>(null);
-    let showClearDialog = $state(false);
-    let clearDialogOwner = $state<PanelOwner | null>(null);
     let rollingBack = $state(false);
     let rollbackDialog = $state<{
         owner: PanelOwner;
@@ -61,7 +59,7 @@
     // 危险模式标记 —— 用户在 AI Settings 里切换后，标题旁的红色后缀立刻同步。
     // 走 ai.settings() 读 store 的 $state，自动响应式（不需要手动 loadSettings 触发）。
     let dangerMode = $derived(ai.settings()?.danger_mode === true);
-    // 本会话累计 token 用量（actor 生命周期，清上下文不归零——花掉的钱不会退）。
+    // 本会话累计 token 用量（结束会话/新开会话即归零重计）。
     let tokens = $derived(ai.tokenUsage(tabId));
     // Currently running model: prefer the model the active session actually started
     // with (authoritative — a later settings change doesn't affect a live session);
@@ -98,8 +96,6 @@
     // 草稿等面板内状态继续保留，只关闭越出 panel 边界的确认层。
     $effect(() => {
         if (active) return;
-        showClearDialog = false;
-        clearDialogOwner = null;
         rollbackDialog = null;
     });
 
@@ -270,34 +266,15 @@
         });
     }
 
-    /** 点扫帚按钮：开二次确认模态。actor 不在就不弹（清个空气没意义）。 */
-    function openClearDialog() {
-        if (!session || rollbackDialog || rollingBack) return;
-        clearDialogOwner = snapshotOwner();
-        showClearDialog = true;
-    }
-
-    function closeClearDialog() {
-        showClearDialog = false;
-        clearDialogOwner = null;
-    }
-
-    /** 用户在模态里点"清空"：actor 不死，只把 history 清空 —— 下条消息从头来过。
-     *  若正在流式响应，先把流停掉，避免 in-flight delta 落到已清空的气泡数组。 */
-    async function clearContext() {
-        const owner = clearDialogOwner;
-        const wasStreaming = owner ? ai.isStreaming(owner.tabId) : false;
-        closeClearDialog();
-        if (!owner || !ai.sessionForTab(owner.tabId)) return;
-        try {
-            if (wasStreaming) {
-                await ai.cancelStream(owner.tabId, owner.lease);
-            }
-            await ai.clearContext(owner.tabId, owner.lease);
-        } catch (e) {
-            console.error("[ai] clear context:", e);
-            banner = errMsg(e);
-        }
+    /** New session: end + archive the current conversation but keep the panel
+     *  open — the view falls back to the initial picker state. */
+    function newSession() {
+        auditOpen = false;
+        banner = null;
+        void ai.endConversation(tabId).catch((e) => {
+            console.warn("[ai] end conversation:", e);
+            toast.error(errMsg(e));
+        });
     }
 
     /** 打断当前流式响应；会话上下文保留，用户可立刻发下一条纠正。 */
@@ -338,7 +315,7 @@
     }
 
     function openRollbackDialog(itemIndex: number, text: string) {
-        if (rollingBack || rollbackDialog || showClearDialog || !session) return;
+        if (rollingBack || rollbackDialog || !session) return;
         rollbackDialog = {
             owner: snapshotOwner(),
             instanceId: session.instance_id,
@@ -390,7 +367,7 @@
         </span>
         <!-- Audit log toggle: file-text icon in chat view, chat bubble in audit view (= go back).
              Toolbar controls render unconditionally (stable layout); they disable until the
-             session lazy-starts on first send — no actor, nothing to audit or clear. -->
+             session lazy-starts on first send — no actor, nothing to audit. -->
         <button class="btn-icon" onclick={() => (auditOpen = !auditOpen)} disabled={!session}
                 title={auditOpen ? t("ai.toolbar.back_to_chat") : t("ai.toolbar.audit")}
                 aria-label={auditOpen ? t("ai.toolbar.back_to_chat") : t("ai.toolbar.audit")}>
@@ -404,17 +381,6 @@
                     <line x1="16" y1="17" x2="8" y2="17"/>
                     <polyline points="10 9 8 9"/>
                 {/if}
-            </svg>
-        </button>
-        <!-- 清理上下文：SVG 扫帚图标（22×22）跟"×"视觉重心对齐。 -->
-        <button class="btn-icon" onclick={openClearDialog} disabled={!session} title={t("ai.toolbar.clear_context")} aria-label={t("ai.toolbar.clear_context")}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M20 4 L13 11"/>
-                <path d="M11 9 L15 13"/>
-                <path d="M11 9 L5 15"/>
-                <path d="M12.33 10.33 L7 17"/>
-                <path d="M13.67 11.67 L9 18.5"/>
-                <path d="M15 13 L11 19.5"/>
             </svg>
         </button>
         <!-- Danger-mode toggle: always visible, selected (red) when ON. The toggle
@@ -435,6 +401,17 @@
                 </button>
             {/snippet}
         </DangerModeToggle>
+        <!-- New session: archive the current conversation and return to the
+             picker state; the panel stays open. Disabled when there is no
+             live conversation to end. -->
+        <button class="btn-icon" onclick={newSession} disabled={!session}
+                title={t("ai.toolbar.new_session")} aria-label={t("ai.toolbar.new_session")}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                <line x1="12" y1="8" x2="12" y2="16"/>
+                <line x1="8" y1="12" x2="16" y2="12"/>
+            </svg>
+        </button>
         <button class="btn-icon" onclick={closePanel} title={t("ai.toolbar.close_session")} aria-label={t("ai.toolbar.close_session")}>×</button>
     </div>
 
@@ -614,24 +591,6 @@
         </div>
     {/if}
 </div>
-
-<!-- Clear-context confirmation. Tauri webview drops native confirm() silently,
-     so we use the same custom modal pattern as AiSettings' danger-mode dialog. -->
-{#if showClearDialog}
-    <Modal onClose={closeClearDialog} class="stack"
-           aria-labelledby="clear-dialog-title" aria-describedby="clear-dialog-body">
-        <h3 id="clear-dialog-title" class="dialog-title">{t("ai.toolbar.clear_confirm_title")}</h3>
-        <div id="clear-dialog-body" class="dialog-body">{t("ai.toolbar.clear_confirm")}</div>
-        <div class="modal-actions">
-            <button class="btn btn-sm" onclick={closeClearDialog}>
-                {t("common.cancel")}
-            </button>
-            <button class="btn btn-sm btn-primary" onclick={clearContext}>
-                {t("ai.toolbar.clear_confirm_action")}
-            </button>
-        </div>
-    </Modal>
-{/if}
 
 {#if rollbackDialog}
     <Modal onClose={closeRollbackDialog} class="stack"
@@ -977,7 +936,7 @@
         box-shadow: 0 0 0 3px color-mix(in srgb, var(--purple) 18%, transparent);
     }
 
-    /* Clear-context confirmation modal — shell lives in Modal.svelte, typography
+    /* Rollback confirmation modal — shell lives in Modal.svelte, typography
        in global .dialog-title/.dialog-body; only the multi-line body is local. */
     .dialog-body {
         white-space: pre-line;

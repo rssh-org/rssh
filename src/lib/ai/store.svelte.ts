@@ -228,6 +228,14 @@ export function openPanel(tab_id: string) { _openByTab[tab_id] = true; }
 function hidePanel(tab_id: string) { delete _openByTab[tab_id]; }
 export function closePanel(tab_id: string): Promise<void> {
   hidePanel(tab_id);
+  return endConversation(tab_id);
+}
+
+/** End this tab's conversation: archive it and reset the panel-side state
+ *  (chat items, tokens, lease generation). Panel visibility is the caller's
+ *  concern — closePanel hides the panel; the "new session" button keeps it
+ *  open and lands straight on the initial picker state. */
+export function endConversation(tab_id: string): Promise<void> {
   clearPrefill(tab_id);
   // 面板关闭即结束这轮 conversation。先换 generation，所有迟到 listener/start
   // continuation 都失效；宽度是 tab 偏好，不属于 conversation，继续保留。
