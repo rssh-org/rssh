@@ -164,6 +164,9 @@
         if (ensureInFlight) return ensureInFlight;
         ensureInFlight = (async () => {
             const settings = ai.settings() ?? await ai.loadSettings();
+            if (!settings.provider) {
+                throw new Error(t("ai.error.no_provider"));
+            }
             if (!settings.has_api_key) {
                 throw new Error(t("ai.error.no_api_key"));
             }
@@ -199,6 +202,9 @@
         busy = true;
         try {
             const settings = ai.settings() ?? await ai.loadSettings();
+            if (!settings.provider) {
+                throw new Error(t("ai.error.no_provider"));
+            }
             if (!settings.has_api_key) {
                 throw new Error(t("ai.error.no_api_key"));
             }

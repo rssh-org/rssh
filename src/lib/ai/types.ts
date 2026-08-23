@@ -33,10 +33,24 @@ export interface CategoryGroup {
   commands: string[];
 }
 
-export type LlmProvider = "anthropic" | "openai" | "deepseek" | "glm";
+/** 三种协议类型 —— 与后端 db::ai_provider::PROTOCOLS 一一对应。 */
+export type LlmProtocol = "deepseek-thinking" | "openai-completions" | "anthropic-messages";
+
+/** 一条用户自定义 provider（ai_providers 表一行）。 */
+export interface AiProviderRecord {
+  id: string;
+  name: string;
+  protocol: LlmProtocol;
+  model: string;
+  endpoint: string;
+  has_api_key: boolean;
+}
 
 export interface AiSettings {
-  provider: LlmProvider;
+  /** active provider 行 id；空 = 未配置任何 provider。 */
+  provider: string;
+  provider_name: string;
+  protocol: LlmProtocol | "";
   model: string;
   endpoint: string | null;
   has_api_key: boolean;
@@ -175,7 +189,7 @@ export interface AiSessionInfo {
   target_id: string;
   skill: string;
   model: string;
-  provider: LlmProvider;
+  provider: string;
   /** ai_conversations 行 id —— timeline 自动保存按它写库；resume 沿用旧 id。 */
   conversation_id: string;
 }

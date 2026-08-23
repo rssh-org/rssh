@@ -3,19 +3,10 @@
     import { invoke } from "@tauri-apps/api/core";
     import * as ai from "../ai/store.svelte.ts";
     import { t, errMsg } from "../i18n/index.svelte.ts";
-    import type { CategoryGroup, LlmProvider, ModelInfo, RedactRuleRecord, SkillRecord } from "../ai/types.ts";
-    import Select from "./Select.svelte";
-    import SearchSelect from "./SearchSelect.svelte";
+    import type { AiProviderRecord, CategoryGroup, LlmProtocol, RedactRuleRecord, SkillRecord } from "../ai/types.ts";
+    import AiProviderForm from "./AiProviderForm.svelte";
     import DangerModeToggle from "../ai/DangerModeToggle.svelte";
     import AppIcon from "./AppIcon.svelte";
-
-    /** Provider 下拉选项 —— OpenAI 那项的翻译用 $derived 跟着 locale 自动重算。 */
-    let providerOptions = $derived([
-        { value: "anthropic", label: "Anthropic (Claude)" },
-        { value: "openai",    label: `OpenAI / ${t("ai.settings.provider.openai_compat")}` },
-        { value: "deepseek",  label: "DeepSeek" },
-        { value: "glm",       label: "GLM (智谱)" },
-    ]);
 
     function openExternal(e: MouseEvent, url: string) {
         e.preventDefault();
@@ -24,25 +15,44 @@
         );
     }
 
-    // ─── BYOK ─────────────────────────────────────────────────
-    let provider = $state<LlmProvider>("anthropic");
-    let model = $state("");
-    let endpoint = $state("");
-    // Official endpoint per provider — mirrors the Rust vendor defaults. Shown as
-    // the placeholder so a blank field visibly resolves to the official API.
-    // Display-only: the request always uses the backend default, so a stale value
-    // here is purely cosmetic (no correctness coupling).
-    const OFFICIAL_ENDPOINT: Record<LlmProvider, string> = {
-        anthropic: "https://api.anthropic.com/v1/messages",
-        openai: "https://api.openai.com/v1",
-        deepseek: "https://api.deepseek.com/v1",
-        glm: "https://open.bigmodel.cn/api/paas/v4",
-    };
-    let endpointPlaceholder = $derived(OFFICIAL_ENDPOINT[provider] ?? "");
-    let apiKey = $state("");
-    let hasKey = $state(false);
-    let savingByok = $state(false);
+    // ─── Provider 管理（动态发现式：列表 + 内联表单）────────────
+    // 数据模型：ai_providers 表一行一个 provider（name/protocol/endpoint/model
+    // + key 在 secret store）。协议三选一；endpoint 必填，chips 一键填官方值。
+    let providers = $state<AiProviderRecord[]>([]);
+    /** 当前 active 行 id（`ai_provider` settings 键的镜像）。 */
+    let activeId = $state("");
+    let adding = $state<AiProviderRecord | null>(null);
+    let addKey = $state(0);
+    let editId = $state<string | null>(null);
     let byokNote = $state<string | null>(null);
+    /** byokNote 自清 timer 句柄，避免后续动作被旧 timer 误清。 */
+    let byokNoteTimer: number | null = null;
+    // 二次点击删除确认（独立 timer，跟 skill/规则的管理段同款）。
+    let confirmingDeleteId = $state<string | null>(null);
+    let providerDeleteTimer: number | null = null;
+
+    /** 协议三卡 —— 表单顶部的类型选择（对应动态发现的 Docker/kubectl 卡）。 */
+    const PROTOCOL_CARDS: { protocol: LlmProtocol; label: string; sub: string }[] = [
+        { protocol: "deepseek-thinking", label: "DeepSeek Thinking", sub: "reasoning_content 回传" },
+        { protocol: "openai-completions", label: "OpenAI Completions", sub: "OpenAI / GLM / vLLM …" },
+        { protocol: "anthropic-messages", label: "Anthropic Messages", sub: "Claude 官方协议" },
+    ];
+
+    /** endpoint 快捷填充 —— 对应凭证页的 ~/.ssh/id_rsa / id_ed25519 chips。 */
+    const ENDPOINT_CHIPS: Record<LlmProtocol, { label: string; url: string }[]> = {
+        "deepseek-thinking": [{ label: "DeepSeek", url: "https://api.deepseek.com/v1" }],
+        "openai-completions": [
+            { label: "OpenAI", url: "https://api.openai.com/v1" },
+            { label: "GLM", url: "https://open.bigmodel.cn/api/paas/v4" },
+        ],
+        "anthropic-messages": [
+            { label: "Anthropic", url: "https://api.anthropic.com/v1/messages" },
+        ],
+    };
+
+    function protocolLabel(protocol: string): string {
+        return PROTOCOL_CARDS.find((c) => c.protocol === protocol)?.label ?? protocol;
+    }
 
     // ─── Danger mode（全局，跟 provider 无关）────────────────────────
     // dangerMode 直接派生自 store —— DangerModeToggle 改动后这里自动同步，不再维护
@@ -118,17 +128,6 @@
             savingAuto = false;
         }
     }
-    let modelOptions = $state<ModelInfo[]>([]);
-    /** Model dropdown options — id as value, display name (or id) as label. */
-    let modelSelectOptions = $derived(
-        modelOptions.map((m) => ({ value: m.id, label: m.display_name ?? m.id })),
-    );
-    let loadingModels = $state(false);
-    /** byokNote 自清 timer 句柄，避免后续动作被旧 timer 误清。 */
-    let byokNoteTimer: number | null = null;
-    /** 切 provider 的代际号：在途的 loadSettings 解到一半时如果代际过期，丢弃结果。 */
-    let providerGen = 0;
-
     function setByokNote(msg: string | null, autoClearMs?: number) {
         if (byokNoteTimer !== null) {
             clearTimeout(byokNoteTimer);
@@ -143,65 +142,89 @@
         }
     }
 
-    /**
-     * 切换 provider：清空所有字段，从后端拉**该 provider** 已保存的快照回显。
-     * 没存过 → 字段保持空。这是用户唯一显式触发数据替换的入口，不再用 $effect 做隐式同步。
-     */
-    async function onProviderChange() {
-        const gen = ++providerGen;
-        setByokNote(null);
-        modelOptions = [];
-        apiKey = "";
-        model = "";
-        endpoint = "";
-        hasKey = false;
-        const s = await ai.loadSettings(provider);
-        if (gen !== providerGen) return; // 用户又切了，丢弃过期结果
-        model = s.model;
-        endpoint = s.endpoint ?? "";
-        hasKey = s.has_api_key;
-        if (hasKey) void autoLoadModels();
-    }
-
-    /** 静默拉取（失败不打扰）。供 onMount / 切换 provider / apiKey 失焦使用。 */
-    async function autoLoadModels() {
+    async function refreshProviders() {
         try {
-            const list = await ai.listModels(
-                provider,
-                apiKey.trim() || undefined,
-                endpoint.trim() || undefined,
-            );
-            modelOptions = list;
-        } catch {
-            // 没填 key、网络错等，不打扰用户。手动按钮会显示真实错误。
+            providers = await ai.loadProviders();
+        } catch (e: any) {
+            setByokNote(t("ai.settings.note.providers_failed", { error: errMsg(e) }));
         }
     }
 
-    /** 显式按钮：失败要给反馈。 */
-    async function loadModels() {
-        if (!apiKey.trim() && !hasKey) {
-            setByokNote(t("ai.settings.note.api_key_required"));
+    /** 新建：空表单（默认协议 = 第一张卡）。 */
+    function startAdd() {
+        editId = null;
+        addKey += 1;
+        adding = blankProvider();
+    }
+
+    function startEdit(p: AiProviderRecord) {
+        adding = null;
+        editId = p.id;
+    }
+
+    function cancelForm() {
+        adding = null;
+        editId = null;
+    }
+
+    function blankProvider(): AiProviderRecord {
+        return {
+            id: "",
+            name: "",
+            protocol: "openai-completions",
+            model: "",
+            endpoint: "",
+            has_api_key: false,
+        };
+    }
+
+    /** 激活某行（列表里的单选）。 */
+    async function activate(id: string) {
+        if (id === activeId) return;
+        try {
+            await ai.activateProvider(id);
+            activeId = id;
+        } catch (e: any) {
+            setByokNote(t("ai.settings.note.save_failed", { error: errMsg(e) }));
+        }
+    }
+
+    async function removeProvider(p: AiProviderRecord) {
+        // 二次点击确认：3s 内不再点就回退。
+        if (confirmingDeleteId !== p.id) {
+            confirmingDeleteId = p.id;
+            if (providerDeleteTimer !== null) clearTimeout(providerDeleteTimer);
+            providerDeleteTimer = window.setTimeout(() => {
+                confirmingDeleteId = null;
+                providerDeleteTimer = null;
+            }, 3000);
             return;
         }
-        loadingModels = true;
-        setByokNote(null);
+        confirmingDeleteId = null;
+        if (providerDeleteTimer !== null) {
+            clearTimeout(providerDeleteTimer);
+            providerDeleteTimer = null;
+        }
         try {
-            const list = await ai.listModels(
-                provider,
-                apiKey.trim() || undefined,
-                endpoint.trim() || undefined,
-            );
-            modelOptions = list;
-            setByokNote(t("ai.settings.note.models_loaded", { count: list.length }), 2000);
-        } catch (e) {
-            setByokNote(t("ai.settings.note.models_failed", { error: errMsg(e) }));
-        } finally {
-            loadingModels = false;
+            await ai.deleteProvider(p.id);
+            if (editId === p.id) editId = null;
+            if (activeId === p.id) activeId = "";
+            await refreshProviders();
+        } catch (e: any) {
+            setByokNote(t("ai.settings.note.delete_failed", { error: errMsg(e) }));
         }
     }
 
-    function onApiKeyBlur() {
-        if (apiKey.trim()) void autoLoadModels();
+    /** 表单保存回调（新建/编辑共用；表单组件内部做校验）。 */
+    async function onProviderSaved(id: string) {
+        cancelForm();
+        await refreshProviders();
+        // 首个 provider 落地即激活 —— 消灭"建了 provider 但没有 active"的死角。
+        if (!activeId) {
+            await ai.activateProvider(id).catch(() => {});
+            activeId = id;
+        }
+        setByokNote(t("ai.settings.note.saved"), 2000);
     }
 
     // ─── Skill 管理 ────────────────────────────────────────────
@@ -243,10 +266,7 @@
 
     onMount(async () => {
         const s = await ai.loadSettings();
-        provider = s.provider as LlmProvider;
-        model = s.model;
-        endpoint = s.endpoint ?? "";
-        hasKey = s.has_api_key;
+        activeId = s.provider;
         autoRunCommand = s.auto_run_command;
         autoMatchFile = s.auto_match_file;
         autoDownloadFile = s.auto_download_file;
@@ -258,7 +278,7 @@
         autoWebSearch = s.auto_web_search;
         autoWebFetch = s.auto_web_fetch;
         autoDetectRemoteShell = s.auto_detect_remote_shell;
-        if (hasKey) void autoLoadModels();
+        await refreshProviders();
         await refreshSkills();
         await refreshRedactRules();
         await refreshBlacklist();
@@ -266,6 +286,7 @@
 
     onDestroy(() => {
         if (byokNoteTimer !== null) clearTimeout(byokNoteTimer);
+        if (providerDeleteTimer !== null) clearTimeout(providerDeleteTimer);
         if (confirmDeleteTimer !== null) clearTimeout(confirmDeleteTimer);
         if (confirmRuleDeleteTimer !== null) clearTimeout(confirmRuleDeleteTimer);
     });
@@ -275,27 +296,6 @@
             skills = await ai.listSkills();
         } catch (e) {
             skillNote = t("ai.settings.skills.error.load_failed", { error: errMsg(e) });
-        }
-    }
-
-    async function saveByok() {
-        savingByok = true;
-        setByokNote(null);
-        try {
-            await ai.saveSettings({
-                provider,
-                model: model.trim(),
-                endpoint: endpoint.trim() || null,
-                apiKey: apiKey.trim() || null,
-            });
-            const s = await ai.loadSettings();
-            hasKey = s.has_api_key;
-            apiKey = "";
-            setByokNote(t("ai.settings.note.saved"), 2000);
-        } catch (e) {
-            setByokNote(t("ai.settings.note.save_failed", { error: errMsg(e) }));
-        } finally {
-            savingByok = false;
         }
     }
 
@@ -518,8 +518,9 @@
 
 <div class="page">
     <div class="section-label">{t("ai.settings.section.provider")}</div>
-    <!-- Provider & Model + BYOK 警告合在一个 .card.surface-raised（跟 .danger-card / SyncScreen 同款）。
-         .warn 留在卡片顶部作"PAT hint"的等价位置，但保留自身警告样式（border-left + tint bg）。 -->
+    <!-- Provider 管理 + BYOK 警告合在一个 .card.surface-raised。
+         交互照动态发现：顶部"新建"，列表行（active 单选 / 编辑 / 删除二次确认），
+         新建或编辑时渲染内联表单 AiProviderForm（三协议卡 + endpoint chips）。 -->
     <div class="card surface-raised provider-card">
         <div class="warn">
             <AppIcon name="warning" size={16} />
@@ -532,47 +533,69 @@
             </span>
         </div>
 
-        <div class="row">
-            <label for="ai-provider">{t("ai.settings.label.provider")}</label>
-            <Select id="ai-provider"
-                    bind:value={provider as string}
-                    options={providerOptions}
-                    onchange={onProviderChange} />
+        <div class="card-head">
+            <span class="hint">{t("ai.settings.provider.hint")}</span>
+            {#if !adding}
+                <button class="btn btn-sm" onclick={startAdd}>{t("ai.settings.provider.new")}</button>
+            {/if}
         </div>
-        <div class="row">
-            <label for="ai-endpoint">{t("ai.settings.label.endpoint")}</label>
-            <input id="ai-endpoint" type="text" bind:value={endpoint} placeholder={endpointPlaceholder}/>
-        </div>
-        <div class="row">
-            <label for="ai-apikey">{t("ai.settings.label.api_key")}</label>
-            <input id="ai-apikey" type="password" bind:value={apiKey}
-                   onblur={onApiKeyBlur}
-                   placeholder={hasKey ? t("ai.settings.placeholder.api_key_set") : t("ai.settings.placeholder.api_key_unset")}/>
-        </div>
-        <div class="row">
-            <label for="ai-model">{t("ai.settings.label.model")}</label>
-            <div class="model-row">
-                <SearchSelect id="ai-model"
-                              bind:value={model}
-                              options={modelSelectOptions}
-                              allowCustom
-                              ariaLabel={t("ai.settings.label.model")}
-                              placeholder={t("ai.settings.placeholder.model")}
-                              searchPlaceholder={t("ai.settings.placeholder.model")}
-                              emptyText={t("ai.settings.model.empty")} />
-                <button type="button" class="btn btn-sm" onclick={loadModels}
-                        disabled={loadingModels}>
-                    {loadingModels ? t("ai.settings.btn.loading_models") : t("ai.settings.btn.load_models")}
-                </button>
-            </div>
-        </div>
-        <div class="actions">
-            <button class="btn btn-accent btn-sm" onclick={saveByok}
-                    disabled={savingByok || !model.trim()}>
-                {savingByok ? t("ai.settings.btn.saving") : t("common.save")}
-            </button>
-            {#if byokNote}<span class="note">{byokNote}</span>{/if}
-        </div>
+
+        {#if adding}
+            {#key addKey}
+                <AiProviderForm
+                    provider={adding}
+                    protocolCards={PROTOCOL_CARDS}
+                    endpointChips={ENDPOINT_CHIPS}
+                    onSave={onProviderSaved}
+                    onCancel={cancelForm}
+                />
+            {/key}
+        {/if}
+
+        {#each providers as p (p.id)}
+            {#if editId === p.id}
+                <AiProviderForm
+                    provider={p}
+                    protocolCards={PROTOCOL_CARDS}
+                    endpointChips={ENDPOINT_CHIPS}
+                    onSave={onProviderSaved}
+                    onCancel={cancelForm}
+                />
+            {:else}
+                <div class="provider-row">
+                    <div class="provider-info">
+                        <button
+                            type="button"
+                            class="active-dot"
+                            class:on={activeId === p.id}
+                            title={t("ai.settings.provider.activate")}
+                            aria-pressed={activeId === p.id}
+                            onclick={() => activate(p.id)}
+                        ></button>
+                        <div class="provider-text">
+                            <div class="provider-name">{p.name}</div>
+                            <div class="provider-sub">{protocolLabel(p.protocol)} · {p.endpoint} · {p.model}</div>
+                        </div>
+                    </div>
+                    <div class="provider-actions">
+                        {#if activeId === p.id}
+                            <span class="active-badge">{t("ai.settings.provider.active")}</span>
+                        {/if}
+                        <button class="btn btn-sm" onclick={() => startEdit(p)}>{t("common.edit")}</button>
+                        <button class="btn btn-sm btn-danger" class:confirming={confirmingDeleteId === p.id}
+                                onclick={() => removeProvider(p)}>
+                            {confirmingDeleteId === p.id ? t("ai.settings.provider.delete_confirm") : t("common.delete")}
+                        </button>
+                    </div>
+                </div>
+            {/if}
+        {:else}
+            {#if !adding}
+                <div class="placeholder">{t("ai.settings.provider.empty")}</div>
+            {/if}
+        {/each}
+
+        {#if byokNote}<span class="note">{byokNote}</span>{/if}
     </div>
 
     <div class="section-label">{t("ai.settings.danger.section")}</div>
@@ -927,12 +950,75 @@
         resize: vertical;
         min-height: 240px;
     }
-    .model-row {
+    /* Provider 列表行：active 单选圆点 + 名称/副行 + 操作。 */
+    .provider-row {
         display: flex;
-        gap: 8px;
-        align-items: stretch;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--divider);
     }
-    .model-row :global(.search-select) { flex: 1; min-width: 0; }
+    .provider-row:last-of-type { border-bottom: none; }
+    .provider-info {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+        flex: 0 1 auto;
+        width: fit-content;
+    }
+    .active-dot {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        border: 1.5px solid var(--divider);
+        background: transparent;
+        cursor: pointer;
+        flex-shrink: 0;
+        padding: 0;
+        transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+    }
+    .active-dot:hover { border-color: var(--accent); }
+    .active-dot.on {
+        border-color: var(--accent);
+        background: var(--accent);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+    }
+    .provider-text { min-width: 0; }
+    .provider-name {
+        font-weight: 600;
+        font-size: 14px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .provider-sub {
+        font-size: 12px;
+        color: var(--text-sub);
+        font-family: monospace;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .provider-actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-shrink: 0;
+    }
+    .active-badge {
+        font-size: 10px;
+        padding: 1px 6px;
+        border-radius: 3px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-weight: 500;
+    }
+    @media (max-width: 640px) {
+        .provider-row { align-items: flex-start; flex-direction: column; }
+        .provider-actions { align-self: flex-end; }
+    }
 
     .actions {
         display: flex;
