@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppResult;
 
-const SCHEMA_VERSION: u32 = 27;
+const SCHEMA_VERSION: u32 = 28;
 
 fn column_exists(conn: &Connection, table: &str, col: &str) -> AppResult<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
@@ -596,6 +596,25 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
                 "ALTER TABLE ai_conversations ADD COLUMN audit_json TEXT NOT NULL DEFAULT '[]';",
             )?;
         }
+    }
+
+    if version < 28 {
+        // User-defined AI providers (name + protocol + endpoint + model; the
+        // api_key stays in the SecretStore keyed by row id). Rows are created
+        // by the user or by `migration/v3_ai_provider_entities` from the old
+        // fixed-vendor settings keys — that data move needs secret-store
+        // access and therefore lives in the startup migrations, not here.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_providers (
+                 id         TEXT PRIMARY KEY,
+                 name       TEXT NOT NULL,
+                 protocol   TEXT NOT NULL,
+                 model      TEXT NOT NULL DEFAULT '',
+                 endpoint   TEXT NOT NULL,
+                 created_at INTEGER NOT NULL DEFAULT 0,
+                 updated_at INTEGER NOT NULL DEFAULT 0
+             );",
+        )?;
     }
 
     if version < SCHEMA_VERSION {

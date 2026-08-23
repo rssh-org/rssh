@@ -1038,15 +1038,23 @@ async fn dispatch_async(
         }
         "ai_list_models" => ok(crate::ai::commands::ai_list_models_impl(
             state,
-            arg(&args, "provider")?,
-            args.get("apiKey")
+            args.get("providerId")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            args.get("endpoint")
+            arg(&args, "protocol")?,
+            arg(&args, "endpoint")?,
+            args.get("apiKey")
                 .and_then(Value::as_str)
                 .map(str::to_string),
         )
         .await),
+        "ai_provider_list" => ok(crate::ai::commands::ai_provider_list_impl(state).await),
+        "ai_provider_save" => {
+            ok(crate::ai::commands::ai_provider_save_impl(state, arg(&args, "patch")?).await)
+        }
+        "ai_provider_delete" => {
+            ok(crate::ai::commands::ai_provider_delete_impl(state, arg(&args, "id")?).await)
+        }
         "ai_list_sessions" => ok(crate::ai::commands::ai_list_sessions_for_owner(
             state, owner,
         )),

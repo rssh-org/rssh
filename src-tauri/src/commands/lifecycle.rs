@@ -1201,10 +1201,6 @@ mod tests {
         async fn list_models(&self) -> AppResult<Vec<crate::ai::llm::ModelInfo>> {
             Ok(Vec::new())
         }
-
-        fn provider(&self) -> &'static str {
-            "test"
-        }
     }
 
     #[async_trait]
@@ -1220,10 +1216,6 @@ mod tests {
 
         async fn list_models(&self) -> AppResult<Vec<crate::ai::llm::ModelInfo>> {
             Ok(Vec::new())
-        }
-
-        fn provider(&self) -> &'static str {
-            "test"
         }
     }
 
@@ -1261,10 +1253,6 @@ mod tests {
 
         async fn list_models(&self) -> AppResult<Vec<crate::ai::llm::ModelInfo>> {
             Ok(Vec::new())
-        }
-
-        fn provider(&self) -> &'static str {
-            "test"
         }
     }
 
@@ -1316,6 +1304,7 @@ mod tests {
         };
         let pending = crate::ai::session::start(
             crate::ai::session::SessionConfig {
+                provider: "provider-test".into(),
                 tab_id: tab_id.to_owned(),
                 target_id: "target".into(),
                 skill: "general".into(),
@@ -1361,6 +1350,7 @@ mod tests {
         };
         let pending = crate::ai::session::start(
             crate::ai::session::SessionConfig {
+                provider: "provider-test".into(),
                 tab_id: tab_id.to_owned(),
                 target_id: "target".into(),
                 skill: "general".into(),
@@ -1404,6 +1394,7 @@ mod tests {
         };
         let pending = crate::ai::session::start(
             crate::ai::session::SessionConfig {
+                provider: "provider-test".into(),
                 tab_id: tab_id.to_owned(),
                 target_id: "target".into(),
                 skill: "general".into(),

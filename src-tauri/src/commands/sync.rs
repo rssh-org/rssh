@@ -958,25 +958,35 @@ mod tests {
 
     #[test]
     fn push_ai_toggle_gates_whole_block_including_key() {
-        // "AI 配置" is one switch (merged from the old sync_include_ai +
-        // sync_include_ai_key pair): on → provider config AND key are exported;
+        // "AI 配置" is one switch: on → provider rows AND keys are exported;
         // off → the whole "ai" section is omitted.
         let (db, ss, dir) = fixture();
-        crate::db::settings::set(&db, "ai_anthropic_model", "claude-x").unwrap();
-        ss.set(&setting_key("ai_anthropic_key"), "sk-secret")
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-push1".into(),
+                name: "Anthropic".into(),
+                protocol: "anthropic-messages".into(),
+                model: "claude-x".into(),
+                endpoint: "https://api.anthropic.com/v1/messages".into(),
+            },
+        )
+        .unwrap();
+        ss.set(&setting_key("ai_provider-push1_key"), "sk-secret")
             .unwrap();
 
-        // On (default): the key rides alongside model/endpoint.
+        // On (default): the key rides alongside name/protocol/endpoint/model.
         let prefs = read_sync_prefs(&db).unwrap();
         let v = build_payload(&db, &ss, dir.path(), &ExportMode::RemotePush(prefs)).unwrap();
-        let anth = v["ai"]["providers"]
+        let row = v["ai"]["providers"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|p| p["provider"] == "anthropic")
-            .expect("anthropic present (model configured)");
-        assert_eq!(anth["api_key"], "sk-secret", "key rides with the AI block");
-        assert_eq!(anth["model"], "claude-x");
+            .find(|p| p["provider"] == "provider-push1")
+            .expect("configured provider row exported");
+        assert_eq!(row["api_key"], "sk-secret", "key rides with the AI block");
+        assert_eq!(row["model"], "claude-x");
+        assert_eq!(row["protocol"], "anthropic-messages");
 
         // Off: the entire ai section is gone.
         crate::db::settings::set(&db, "sync_include_ai", "0").unwrap();

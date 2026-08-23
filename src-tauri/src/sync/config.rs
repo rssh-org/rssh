@@ -1625,73 +1625,90 @@ mod tests {
     #[test]
     fn merge_ai_providers_and_active() {
         let (db, ss, dir) = fixture();
-        // Local config on a provider the payload does not carry → wiped (mirror).
-        crate::db::settings::set(&db, "ai_glm_model", "glm-old").unwrap();
-        ss.set(&crate::secret::setting_key("ai_glm_key"), "glm-old-key")
-            .unwrap();
+        // Local row the payload does not carry → wiped (mirror), key removed.
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-local0".into(),
+                name: "GLM".into(),
+                protocol: "openai-completions".into(),
+                model: "glm-old".into(),
+                endpoint: "https://local".into(),
+            },
+        )
+        .unwrap();
+        ss.set(
+            &crate::secret::setting_key("ai_provider-local0_key"),
+            "glm-old-key",
+        )
+        .unwrap();
+
         let data = json!({
             "version": 1,
             "ai": {
-                "active_provider": "openai",
+                "active_provider": "provider-newa1",
                 "providers": [
-                    {"provider": "anthropic", "model": "claude-x",
-                     "endpoint": "https://e", "api_key": "sk-123"},
-                    {"provider": "bogus", "model": "x", "api_key": "y"},
+                    {"provider": "provider-newa1", "name": "DeepSeek", "protocol": "deepseek-thinking",
+                     "model": "deepseek-reasoner", "endpoint": "https://api.deepseek.com/v1",
+                     "api_key": "sk-123"},
                 ],
             },
         });
         merge_import(&db, &ss, dir.path(), &data).unwrap();
+
+        let rows = crate::db::ai_provider::list(&db).unwrap();
+        assert_eq!(rows.len(), 1, "local set fully replaced");
+        assert_eq!(rows[0].id, "provider-newa1");
+        assert_eq!(rows[0].protocol, "deepseek-thinking");
         assert_eq!(
-            crate::db::settings::get(&db, "ai_anthropic_model")
-                .unwrap()
-                .as_deref(),
-            Some("claude-x")
-        );
-        assert_eq!(
-            crate::db::settings::get(&db, "ai_provider")
-                .unwrap()
-                .as_deref(),
-            Some("openai"),
-            "active provider applied"
-        );
-        assert_eq!(
-            ss.get(&crate::secret::setting_key("ai_anthropic_key"))
+            ss.get(&crate::secret::setting_key("ai_provider-newa1_key"))
                 .unwrap()
                 .as_deref(),
             Some("sk-123"),
             "api key written to secret store"
         );
         assert!(
-            crate::db::settings::get(&db, "ai_glm_model")
+            crate::db::ai_provider::get(&db, "provider-local0")
                 .unwrap()
                 .is_none(),
             "provider absent from payload is cleared"
         );
         assert!(
-            ss.get(&crate::secret::setting_key("ai_glm_key"))
+            ss.get(&crate::secret::setting_key("ai_provider-local0_key"))
                 .unwrap()
                 .is_none(),
             "cleared provider's key is removed"
         );
-        assert!(
-            crate::db::settings::get(&db, "ai_bogus_model")
+        assert_eq!(
+            crate::db::settings::get(&db, "ai_provider")
                 .unwrap()
-                .is_none(),
-            "unknown provider ignored"
+                .as_deref(),
+            Some("provider-newa1"),
+            "active provider applied"
         );
     }
 
     #[test]
     fn merge_ai_unsupported_active_provider_clears_selection() {
         let (db, ss, dir) = fixture();
-        crate::db::settings::set(&db, "ai_provider", "anthropic").unwrap();
-        // Mirror semantics clears provider config first, so keeping the stale
-        // selection would point at a backend with no config row. An invalid
-        // active_provider is treated as unset — the selection clears, never
-        // dangles.
+        crate::db::settings::set(&db, "ai_provider", "provider-oldaa").unwrap();
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-oldaa".into(),
+                name: "OpenAI".into(),
+                protocol: "openai-completions".into(),
+                model: "gpt-4o".into(),
+                endpoint: "https://api.openai.com/v1".into(),
+            },
+        )
+        .unwrap();
+        // Mirror semantics wipes the local table first, so keeping a stale
+        // selection would dangle at a deleted row. An active_provider that
+        // names no carried row clears the selection.
         let data = json!({
             "version": 1,
-            "ai": { "active_provider": "bogus", "providers": [] },
+            "ai": { "active_provider": "provider-bogus", "providers": [] },
         });
         merge_import(&db, &ss, dir.path(), &data).unwrap();
         assert!(
@@ -1703,30 +1720,53 @@ mod tests {
     }
 
     #[test]
-    fn merge_ai_empty_model_endpoint_clears_local() {
+    fn merge_ai_legacy_payload_without_name_protocol_fails_and_keeps_local() {
+        // A pre-v3 payload (fixed vendor names, no name/protocol) must fail the
+        // whole category WITHOUT touching local rows — agreed behavior: error
+        // out, no compat mapping, never a half-wiped table.
         let (db, ss, dir) = fixture();
-        crate::db::settings::set(&db, "ai_anthropic_model", "claude-x").unwrap();
-        crate::db::settings::set(&db, "ai_anthropic_endpoint", "https://local").unwrap();
-        // Mirror semantics: a carried provider row IS the remote truth — blank
-        // model/endpoint (old/hand-edited payload) means unset, so local clears.
-        // This is the deliberate flip from the old additive keep-local behavior:
-        // without it "the other device unconfigured X" can never propagate.
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-keep1".into(),
+                name: "DeepSeek".into(),
+                protocol: "deepseek-thinking".into(),
+                model: "deepseek-chat".into(),
+                endpoint: "https://api.deepseek.com/v1".into(),
+            },
+        )
+        .unwrap();
         let data = json!({
             "version": 1,
-            "ai": { "providers": [{"provider": "anthropic", "model": "", "endpoint": ""}] },
+            "ai": {
+                "providers": [
+                    {"provider": "deepseek", "model": "deepseek-chat",
+                     "endpoint": "https://api.deepseek.com/v1"},
+                ],
+            },
         });
-        merge_import(&db, &ss, dir.path(), &data).unwrap();
+        merge_import(&db, &ss, dir.path(), &data).unwrap_err();
+        let rows = crate::db::ai_provider::list(&db).unwrap();
+        assert_eq!(rows.len(), 1, "local rows untouched by rejected payload");
+        assert_eq!(rows[0].id, "provider-keep1");
+    }
+
+    #[test]
+    fn merge_ai_row_with_invalid_protocol_fails_and_keeps_local() {
+        let (db, ss, dir) = fixture();
+        let data = json!({
+            "version": 1,
+            "ai": {
+                "providers": [
+                    {"provider": "provider-x0001", "name": "X", "protocol": "grpc",
+                     "endpoint": "https://x"},
+                ],
+            },
+        });
+        merge_import(&db, &ss, dir.path(), &data).unwrap_err();
         assert!(
-            crate::db::settings::get(&db, "ai_anthropic_model")
-                .unwrap()
-                .is_none(),
-            "empty model cleared local"
-        );
-        assert!(
-            crate::db::settings::get(&db, "ai_anthropic_endpoint")
-                .unwrap()
-                .is_none(),
-            "empty endpoint cleared local"
+            crate::db::ai_provider::list(&db).unwrap().is_empty(),
+            "invalid protocol never reaches the table"
         );
     }
 
@@ -1765,61 +1805,73 @@ mod tests {
     #[test]
     fn export_ai_settings_omits_local_only_prefs() {
         let (db, ss, _dir) = fixture();
-        crate::db::settings::set(&db, "ai_anthropic_model", "claude-x").unwrap();
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-exp01".into(),
+                name: "OpenAI".into(),
+                protocol: "openai-completions".into(),
+                model: "gpt-4o".into(),
+                endpoint: "https://api.openai.com/v1".into(),
+            },
+        )
+        .unwrap();
         crate::db::settings::set(&db, "ai_danger_mode", "1").unwrap();
         let ai = crate::ai::commands::export_ai_settings(&db, &ss, true).unwrap();
         let s = serde_json::to_string(&ai).unwrap();
-        assert!(s.contains("anthropic"));
+        assert!(s.contains("provider-exp01"));
         assert!(!s.contains("danger_mode"), "danger_mode not synced");
         assert!(!s.contains("auto_run"), "auto_run not synced");
     }
 
     #[test]
-    fn export_ai_omits_empty_model_and_endpoint() {
+    fn export_ai_omits_empty_model_and_keyless_rows() {
         let (db, ss, _dir) = fixture();
-        // Only an API key configured — model/endpoint unset. Export must NOT
-        // emit empty "model"/"endpoint": importing "" would wipe a populated
-        // value on another device (a destructive clear; additive-merge forbids).
-        ss.set(&crate::secret::setting_key("ai_anthropic_key"), "sk-zzz")
-            .unwrap();
+        // Rows always carry name/protocol/endpoint (NOT NULL); model is omitted
+        // when empty, api_key when absent/blank.
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-exp02".into(),
+                name: "GLM".into(),
+                protocol: "openai-completions".into(),
+                model: "".into(),
+                endpoint: "https://open.bigmodel.cn/api/paas/v4".into(),
+            },
+        )
+        .unwrap();
         let ai = crate::ai::commands::export_ai_settings(&db, &ss, true).unwrap();
-        let prov = ai["providers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["provider"] == "anthropic")
-            .expect("key-only provider still exported");
+        let prov = &ai["providers"][0];
         assert!(prov.get("model").is_none(), "empty model not emitted");
-        assert!(prov.get("endpoint").is_none(), "empty endpoint not emitted");
-        assert_eq!(prov["api_key"], "sk-zzz");
+        assert!(prov.get("api_key").is_none(), "missing key not emitted");
+        assert_eq!(prov["name"], "GLM");
+        assert_eq!(prov["protocol"], "openai-completions");
     }
 
     #[test]
-    fn export_ai_treats_whitespace_as_unset_and_trims() {
+    fn export_ai_trims_key() {
         let (db, ss, _dir) = fixture();
-        // Whitespace-only model/endpoint are "effectively unset" — not exported
-        // (they'd hide the official-endpoint placeholder + risk a destructive
-        // merge). A real key is trimmed before export.
-        crate::db::settings::set(&db, "ai_anthropic_model", "   ").unwrap();
-        crate::db::settings::set(&db, "ai_anthropic_endpoint", "\t").unwrap();
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-exp03".into(),
+                name: "DeepSeek".into(),
+                protocol: "deepseek-thinking".into(),
+                model: "deepseek-chat".into(),
+                endpoint: "https://api.deepseek.com/v1".into(),
+            },
+        )
+        .unwrap();
         ss.set(
-            &crate::secret::setting_key("ai_anthropic_key"),
+            &crate::secret::setting_key("ai_provider-exp03_key"),
             "  sk-zzz  ",
         )
         .unwrap();
         let ai = crate::ai::commands::export_ai_settings(&db, &ss, true).unwrap();
-        let prov = ai["providers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["provider"] == "anthropic")
-            .expect("provider present via key");
-        assert!(prov.get("model").is_none(), "whitespace model not emitted");
-        assert!(
-            prov.get("endpoint").is_none(),
-            "whitespace endpoint not emitted"
+        assert_eq!(
+            ai["providers"][0]["api_key"], "sk-zzz",
+            "key trimmed on export"
         );
-        assert_eq!(prov["api_key"], "sk-zzz", "key trimmed on export");
     }
 
     #[test]

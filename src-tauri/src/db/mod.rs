@@ -1,5 +1,6 @@
 pub mod ai_command_blacklist;
 pub mod ai_conversation;
+pub mod ai_provider;
 pub mod ai_redact_rule;
 pub mod ai_skill;
 pub mod command_block_redact_rule;
