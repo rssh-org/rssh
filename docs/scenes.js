@@ -1804,13 +1804,17 @@
                 // Aim at measured targets (AI button, Approve button) —
                 // never hand-tuned %, the stage aspect differs from the
                 // welcome screen's.
+                // gBCR deltas are visual px; cursor style px live in the
+                // stage's layout space. Under the ≤760px zoom: 0.5 those
+                // differ by exactly k, so divide it back out (k=1 on desktop).
                 const moveTo = (sel) => () => {
                     const t = stage.querySelector(sel);
                     if (!t) return;
                     const s = stage.getBoundingClientRect();
                     const r = t.getBoundingClientRect();
-                    cursor.style.left = (r.left - s.left + r.width / 2).toFixed(1) + 'px';
-                    cursor.style.top = (r.top - s.top + r.height / 2).toFixed(1) + 'px';
+                    const k = s.width / stage.offsetWidth || 1;
+                    cursor.style.left = ((r.left - s.left + r.width / 2) / k).toFixed(1) + 'px';
+                    cursor.style.top = ((r.top - s.top + r.height / 2) / k).toFixed(1) + 'px';
                 };
                 return [
                     [300, () => cursor.classList.add('visible')],
@@ -1858,13 +1862,15 @@
                     if (!target) return;
                     const s = stage.getBoundingClientRect();
                     const t = target.getBoundingClientRect();
-                    cursor.style.left = (t.left - s.left + t.width / 2).toFixed(1) + 'px';
-                    cursor.style.top = (t.top - s.top + t.height / 2).toFixed(1) + 'px';
+                    const k = s.width / stage.offsetWidth || 1; // visual→layout px (zoom: 0.5 on phones)
+                    cursor.style.left = ((t.left - s.left + t.width / 2) / k).toFixed(1) + 'px';
+                    cursor.style.top = ((t.top - s.top + t.height / 2) / k).toFixed(1) + 'px';
                 };
                 const offStage = () => {
                     const r = stage.getBoundingClientRect();
-                    cursor.style.left = (r.width + 24) + 'px';
-                    cursor.style.top = (r.height + 24) + 'px';
+                    const k = r.width / stage.offsetWidth || 1;
+                    cursor.style.left = (r.width + 24) / k + 'px';
+                    cursor.style.top = (r.height + 24) / k + 'px';
                 };
                 const click = (on) => cursor.classList.toggle('clicking', on);
                 const openMenu = (i) => {
@@ -1968,13 +1974,17 @@
                     base.setAttribute('d', d);
                     dash.setAttribute('d', d);
                 };
+                // gBCR deltas are visual px; cursor style px live in the
+                // stage's layout space. Under the ≤760px zoom: 0.5 those
+                // differ by exactly k, so divide it back out (k=1 on desktop).
                 const moveTo = (sel) => () => {
                     const t = stage.querySelector(sel);
                     if (!t) return;
                     const s = stage.getBoundingClientRect();
                     const r = t.getBoundingClientRect();
-                    cursor.style.left = (r.left - s.left + r.width / 2).toFixed(1) + 'px';
-                    cursor.style.top = (r.top - s.top + r.height / 2).toFixed(1) + 'px';
+                    const k = s.width / stage.offsetWidth || 1;
+                    cursor.style.left = ((r.left - s.left + r.width / 2) / k).toFixed(1) + 'px';
+                    cursor.style.top = ((r.top - s.top + r.height / 2) / k).toFixed(1) + 'px';
                 };
                 return [
                     ...typeBeats(600, 60, CMD, (t) => { typed.textContent = t; }),
