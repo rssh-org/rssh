@@ -160,36 +160,53 @@
 <style>
     .an-card {
         border: 1px solid var(--divider);
-        border-radius: 6px;
-        padding: calc(8px * var(--density)) calc(10px * var(--density));
-        margin: calc(4px * var(--density)) 0;
+        border-radius: 10px;
+        padding: calc(10px * var(--density)) calc(12px * var(--density));
+        margin: calc(2px * var(--density)) 0;
         background: var(--bg);
     }
+    /* Status spine + hairline tinted by state (scenes.js tool-card language);
+       --purple = the AI panel's identity accent (global.css). */
     .an-card.pending {
-        border-left: 3px solid var(--accent);
-        background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+        border-color: color-mix(in srgb, var(--purple) 30%, var(--divider));
+        border-left: 3px solid var(--purple);
+        background: color-mix(in srgb, var(--purple) 7%, var(--bg));
     }
-    .an-card.done { border-left: 3px solid var(--success); }
-    .an-card.rejected { opacity: 0.6; border-left: 3px solid var(--text-dim); }
+    .an-card.done {
+        border-color: color-mix(in srgb, var(--success) 25%, var(--divider));
+        border-left: 3px solid var(--success);
+        background: color-mix(in srgb, var(--success) 4%, var(--bg));
+    }
+    .an-card.rejected {
+        border-color: color-mix(in srgb, var(--text-dim) 30%, var(--divider));
+        border-left: 3px solid var(--text-dim);
+        opacity: 0.6;
+    }
 
     .head { display: flex; gap: 8px; align-items: center; }
     .tag {
         flex: none;
-        font-size: 11px;
-        background: var(--accent);
-        color: var(--white);
-        padding: 1px 6px;
-        border-radius: 3px;
-        font-weight: 600;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        background: color-mix(in srgb, var(--purple) 15%, transparent);
+        color: var(--purple);
+        border: 1px solid color-mix(in srgb, var(--purple) 38%, transparent);
+        padding: 2px 7px;
+        border-radius: 5px;
     }
     .target {
         font-family: monospace;
-        font-size: 12.5px;
+        font-size: 12px;
         flex: 1;
         min-width: 0;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        padding: 3px 8px;
+        border-radius: 6px;
+        background: color-mix(in srgb, var(--black) 22%, var(--bg));
     }
     .meta {
         margin-top: 4px;
@@ -207,16 +224,37 @@
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    .actions { margin-top: 8px; display: flex; gap: 8px; }
-    .btn { padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
-    .btn-approve { background: var(--success); color: var(--white); border: none; }
+    .actions { margin-top: 10px; display: flex; gap: 8px; }
+    .btn { padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+    /* Tinted outline buttons (scenes.js approve-btn language) — translucent, so
+       the global .btn neumorphic hover shadow must stay off (it would bleed
+       through the tint). */
+    .btn-approve {
+        background: color-mix(in srgb, var(--success) 15%, transparent);
+        color: var(--success);
+        border: 1px solid color-mix(in srgb, var(--success) 45%, transparent);
+        font-weight: 600;
+        box-shadow: none;
+    }
+    .btn-approve:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--success) 24%, transparent);
+        box-shadow: none;
+    }
     .btn-approve:disabled { opacity: 0.6; cursor: default; }
-    .btn-reject { background: transparent; border: 1px solid var(--text-dim); color: var(--text); }
-    .btn-ghost { background: transparent; border: 1px solid var(--divider); color: var(--text); }
-    .reject-form { margin-top: 8px; display: flex; gap: 6px; }
+    .btn-reject { background: transparent; border: 1px solid var(--text-dim); color: var(--text); box-shadow: none; }
+    .btn-ghost { background: transparent; border: 1px solid var(--divider); color: var(--text); box-shadow: none; }
+    .reject-form { margin-top: 10px; display: flex; gap: 6px; }
     .reject-form input {
-        flex: 1; padding: 4px 8px; border: 1px solid var(--divider);
-        border-radius: 4px; background: var(--bg); color: var(--text);
+        flex: 1; padding: 5px 9px; border: 1px solid var(--divider);
+        border-radius: 6px;
+        background: color-mix(in srgb, var(--black) 18%, var(--bg));
+        color: var(--text);
+        transition: border-color 150ms ease, box-shadow 150ms ease;
+    }
+    .reject-form input:focus {
+        outline: none;
+        border-color: color-mix(in srgb, var(--purple) 55%, transparent);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--purple) 18%, transparent);
     }
     .rejected-note { font-size: 12px; margin-top: 6px; color: var(--text-dim); }
     .result {

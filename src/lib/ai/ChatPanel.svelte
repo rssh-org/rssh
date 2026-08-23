@@ -665,6 +665,17 @@
         overflow: hidden;
         text-overflow: ellipsis;
     }
+    /* AI identity marker (scenes.js ai-dot language): a small purple dot
+       with a soft glow in front of the model name. Purely decorative —
+       renders even before the model name is known. */
+    .model::before {
+        content: "";
+        display: inline-block;
+        width: 6px; height: 6px; border-radius: 50%;
+        margin-right: 6px;
+        background: var(--purple);
+        box-shadow: 0 0 6px color-mix(in srgb, var(--purple) 80%, transparent);
+    }
     .tokens {
         font-size: 10.5px;
         font-family: monospace;
@@ -726,9 +737,9 @@
     .placeholder {
         padding: 24px; text-align: center;
         color: var(--text-dim);
-        line-height: 1.6;
+        line-height: 1.7;
     }
-    .placeholder.dim { font-size: 13px; padding: 32px 32px 8px; }
+    .placeholder.dim { font-size: 13px; padding: 40px 28px 12px; }
     .hint { font-size: 12px; }
 
     /* 历史对话 picker —— 仅空状态（无会话）时出现在欢迎语下方。 */
@@ -746,9 +757,11 @@
         background: transparent; border: none; cursor: pointer;
         border-radius: 4px; color: var(--text);
         text-align: left; font-size: 12.5px;
+        border-radius: 6px;
     }
     .history-item:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
     .history-item:disabled { opacity: 0.5; cursor: default; }
+    .history-del:hover { color: var(--error); }
     .history-name {
         flex: 1; min-width: 0;
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -760,10 +773,22 @@
     .history-del { font-size: 14px; padding: 2px 5px; color: var(--text-dim); }
 
     .chat {
-        flex: 1; overflow-y: auto; padding: 6px;
-        display: flex; flex-direction: column; gap: 3px;
+        flex: 1; overflow-y: auto; padding: 10px 12px;
+        display: flex; flex-direction: column; gap: 10px;
     }
-    .item { display: flex; flex-direction: column; gap: 1px; }
+    /* Bubble entrance (scenes.js language) — transform/opacity only, no
+       layout impact, so the scroll-to-bottom on new items is unaffected. */
+    .item {
+        display: flex; flex-direction: column; gap: 2px;
+        animation: bubble-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+    @keyframes bubble-in {
+        from { opacity: 0; transform: translateY(6px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .item { animation: none; }
+    }
     .user-message {
         display: flex; align-items: center; justify-content: flex-end; gap: 4px;
     }
@@ -801,19 +826,29 @@
     }
     .ts {
         font-size: 10px; color: var(--text-dim);
-        font-family: monospace;
+        font-family: monospace; letter-spacing: 0.03em;
     }
+    /* User timestamps sit over their right-aligned bubble; assistant ones
+       over the left-aligned bubble — the column reads as two rails. */
+    .item-user .ts { align-self: flex-end; margin-right: 2px; }
     .bubble {
-        padding: 5px 9px; border-radius: 6px;
-        max-width: 95%; word-break: break-word; white-space: pre-wrap;
-        font-size: 13px;
+        padding: 7px 11px; border-radius: 10px;
+        max-width: 92%; word-break: break-word; white-space: pre-wrap;
+        font-size: 13px; line-height: 1.5;
     }
+    /* Translucent tint + hairline border instead of a solid accent block;
+       the sharp corner on the tail side anchors each speaker. */
     .bubble.user {
-        background: var(--accent); color: var(--white);
+        background: color-mix(in srgb, var(--accent) 24%, transparent);
+        border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+        color: var(--text);
+        border-radius: 10px 10px 4px 10px;
     }
     .bubble.assistant {
-        background: color-mix(in srgb, var(--text) 8%, var(--bg));
+        background: color-mix(in srgb, var(--text) 7%, var(--bg));
+        border: 1px solid color-mix(in srgb, var(--text) 11%, transparent);
         align-self: flex-start;
+        border-radius: 10px 10px 10px 4px;
     }
     .bubble.assistant.streaming {
         position: relative;
@@ -824,7 +859,7 @@
         display: inline-block;
         margin-left: 6px;
         padding: 1px 6px;
-        border-radius: 3px;
+        border-radius: 4px;
         background: color-mix(in srgb, var(--text-dim) 18%, transparent);
         color: var(--text-dim);
         font-size: 10.5px;
@@ -836,7 +871,7 @@
         display: inline-block;
         margin-left: 2px;
         animation: blink 1s steps(2, start) infinite;
-        color: var(--text-dim);
+        color: var(--purple);
     }
     @keyframes blink {
         to { visibility: hidden; }
@@ -844,25 +879,26 @@
     /* Markdown 内容样式 — 极致紧凑 */
     /* 关键：覆盖 .bubble 默认的 pre-wrap。marked 输出的 HTML 标签间有 source-only `\n`，
        pre-wrap 会把那些 `\n` 渲染成可见空行——经典 bug，markdown 气泡必须用 normal。 */
-    .bubble.md { line-height: 1.32; font-size: 12.5px; white-space: normal; }
+    .bubble.md { line-height: 1.5; font-size: 12.5px; white-space: normal; }
     .bubble.md :global(> *:first-child) { margin-top: 0; }
     .bubble.md :global(> *:last-child) { margin-bottom: 0; }
     .bubble.md :global(p) { margin: 0; }
-    .bubble.md :global(p + p) { margin-top: 0; }
+    .bubble.md :global(p + p) { margin-top: 2px; }
     .bubble.md :global(br) { line-height: 1; }
     .bubble.md :global(code) {
         background: color-mix(in srgb, var(--text) 12%, transparent);
-        padding: 0 3px; border-radius: 2px;
+        padding: 1px 4px; border-radius: 3px;
         font-family: monospace; font-size: 11.5px;
     }
+    /* Code blocks read as dark insets (scenes.js tool-args language). */
     .bubble.md :global(pre) {
-        background: color-mix(in srgb, var(--text) 8%, var(--bg));
-        padding: 4px 6px; border-radius: 3px;
+        background: color-mix(in srgb, var(--black) 25%, var(--bg));
+        padding: 6px 8px; border-radius: 6px;
         overflow-x: auto; font-size: 11.5px;
-        margin: 2px 0; line-height: 1.3;
+        margin: 3px 0; line-height: 1.35;
     }
     .bubble.md :global(pre code) { background: transparent; padding: 0; font-size: inherit; }
-    .bubble.md :global(ul), .bubble.md :global(ol) { margin: 1px 0; padding-left: 16px; }
+    .bubble.md :global(ul), .bubble.md :global(ol) { margin: 2px 0; padding-left: 18px; }
     .bubble.md :global(li) { margin: 0; }
     .bubble.md :global(li > p) { margin: 0; }
     .bubble.md :global(li > ul), .bubble.md :global(li > ol) { margin: 0; }
@@ -873,29 +909,31 @@
     .bubble.md :global(h2),
     .bubble.md :global(h3),
     .bubble.md :global(h4) {
-        margin: 3px 0 1px; font-weight: 600; line-height: 1.2;
+        margin: 6px 0 2px; font-weight: 600; line-height: 1.25;
     }
     .bubble.md :global(:first-child:is(h1, h2, h3, h4)) { margin-top: 0; }
     .bubble.md :global(h1) { font-size: 14px; }
     .bubble.md :global(h2) { font-size: 13px; }
     .bubble.md :global(h3), .bubble.md :global(h4) { font-size: 12.5px; }
     .bubble.md :global(blockquote) {
-        border-left: 2px solid var(--divider);
-        padding-left: 5px; margin: 1px 0;
+        border-left: 3px solid color-mix(in srgb, var(--purple) 45%, transparent);
+        padding-left: 8px; margin: 3px 0;
         color: var(--text-dim);
     }
     .bubble.md :global(hr) {
         border: 0; border-top: 1px solid var(--divider);
-        margin: 3px 0;
+        margin: 6px 0;
     }
     .bubble.md :global(table) {
-        border-collapse: collapse; margin: 2px 0; font-size: 11.5px;
+        border-collapse: collapse; margin: 3px 0; font-size: 11.5px;
     }
+    .bubble.md :global(th) { background: color-mix(in srgb, var(--text) 6%, transparent); }
     .bubble.md :global(th), .bubble.md :global(td) {
-        border: 1px solid var(--divider); padding: 1px 5px;
+        border: 1px solid var(--divider); padding: 2px 6px;
     }
     .bubble.error {
         background: color-mix(in srgb, var(--error) 15%, var(--bg));
+        border: 1px solid color-mix(in srgb, var(--error) 35%, transparent);
         color: var(--error);
         font-size: 12px;
     }
@@ -908,15 +946,25 @@
     }
 
     .input-area {
-        display: flex; align-items: flex-end; gap: 8px; padding: 8px;
+        display: flex; align-items: flex-end; gap: 8px; padding: 10px;
         border-top: 1px solid var(--divider);
         flex-shrink: 0;
     }
+    /* Dark inset composer (scenes.js ai-input language); focus ring carries
+       the panel's purple AI identity. */
     textarea {
         flex: 1; min-height: 36px; max-height: 120px; resize: none;
-        padding: 6px 8px; border: 1px solid var(--divider);
-        border-radius: 4px; background: var(--bg); color: var(--text);
-        font-family: inherit; font-size: 13px;
+        padding: 8px 10px; border: 1px solid var(--divider);
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--black) 18%, var(--bg));
+        color: var(--text);
+        font-family: inherit; font-size: 13px; line-height: 1.45;
+        transition: border-color 150ms ease, box-shadow 150ms ease;
+    }
+    textarea:focus {
+        outline: none;
+        border-color: color-mix(in srgb, var(--purple) 55%, transparent);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--purple) 18%, transparent);
     }
 
     /* Clear-context confirmation modal — shell lives in Modal.svelte, typography
