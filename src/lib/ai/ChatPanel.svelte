@@ -773,7 +773,7 @@
     .history-del { font-size: 14px; padding: 2px 5px; color: var(--text-dim); }
 
     .chat {
-        flex: 1; overflow-y: auto; padding: 10px 12px;
+        flex: 1; overflow-y: auto; min-height: 0; padding: 10px 12px;
         display: flex; flex-direction: column; gap: 10px;
     }
     /* Bubble entrance (scenes.js language) — transform/opacity only, no
@@ -785,9 +785,6 @@
     @keyframes bubble-in {
         from { opacity: 0; transform: translateY(6px); }
         to { opacity: 1; transform: translateY(0); }
-    }
-    @media (prefers-reduced-motion: reduce) {
-        .item { animation: none; }
     }
     .user-message {
         display: flex; align-items: center; justify-content: flex-end; gap: 4px;
@@ -875,6 +872,13 @@
     }
     @keyframes blink {
         to { visibility: hidden; }
+    }
+    /* Placed AFTER the animated rules: same specificity means the later
+       declaration wins, so an earlier block would be overridden by the
+       plain animation rules above. */
+    @media (prefers-reduced-motion: reduce) {
+        .item { animation: none; }
+        .bubble.assistant.streaming::after { animation: none; }
     }
     /* Markdown 内容样式 — 极致紧凑 */
     /* 关键：覆盖 .bubble 默认的 pre-wrap。marked 输出的 HTML 标签间有 source-only `\n`，
