@@ -30,6 +30,9 @@
     // 二次点击删除确认（独立 timer，跟 skill/规则的管理段同款）。
     let confirmingDeleteId = $state<string | null>(null);
     let providerDeleteTimer: number | null = null;
+    // 激活串行化：同一时刻最多一个 activate 在途，radio 随之禁用 ——
+    // 慢失败的老请求不可能把过期的 previousId 盖到新选择上。
+    let activating = $state(false);
 
     /** 协议三卡 —— 表单顶部的类型选择（对应动态发现的 Docker/kubectl 卡）。
      * 副行文案走 i18n，卡标题是专有名词不翻译。 */
@@ -182,16 +185,20 @@
     /** Activate a provider row (the list's radio). The check follows activeId
      * optimistically — Svelte re-applies both rows on every change, so a
      * failure restores the previous selection (a native radio group never
-     * re-checks the old member by itself). */
+     * re-checks the old member by itself). With one activation in flight at
+     * a time, that restore can never clobber a newer selection. */
     async function activate(id: string) {
         const previousId = activeId;
-        if (id === previousId) return;
+        if (id === previousId || activating) return;
+        activating = true;
         activeId = id;
         try {
             await ai.activateProvider(id);
         } catch (e: any) {
             activeId = previousId;
             setByokNote(t("ai.settings.note.save_failed", { error: errMsg(e) }));
+        } finally {
+            activating = false;
         }
     }
 
@@ -584,7 +591,8 @@
                     <div class="provider-info">
                         <input type="radio" id={`ai-provider-r-${p.id}`} name="ai-provider" class="radio-state"
                                checked={activeId === p.id}
-                               onchange={() => activate(p.id)} />
+                               onchange={() => activate(p.id)}
+                               disabled={activating} />
                         <label for={`ai-provider-r-${p.id}`} class="radio-label" title={t("ai.settings.provider.activate")}>
                             <span class="shell-radio-indicator" aria-hidden="true"></span>
                             <div class="provider-text">
