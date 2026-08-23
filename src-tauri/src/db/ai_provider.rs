@@ -61,22 +61,27 @@ pub fn list(db: &Db) -> AppResult<Vec<ProviderRow>> {
 
 pub fn get(db: &Db, id: &str) -> AppResult<Option<ProviderRow>> {
     let conn = db.lock()?;
-    let res = conn
-        .query_row(
-            "SELECT id, name, protocol, model, endpoint FROM ai_providers WHERE id = ?1",
-            [id],
-            |r| {
-                Ok(ProviderRow {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    protocol: r.get(2)?,
-                    model: r.get(3)?,
-                    endpoint: r.get(4)?,
-                })
-            },
-        )
-        .ok();
-    Ok(res)
+    // Only "no such row" is None. A bare .ok() would flatten real DB failures
+    // (disk I/O, corruption) into "provider not found" — callers act on that
+    // (session start errors, sync's orphan-secret cleanup DELETES keys), so a
+    // transient error must propagate, not masquerade as a missing row.
+    match conn.query_row(
+        "SELECT id, name, protocol, model, endpoint FROM ai_providers WHERE id = ?1",
+        [id],
+        |r| {
+            Ok(ProviderRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                protocol: r.get(2)?,
+                model: r.get(3)?,
+                endpoint: r.get(4)?,
+            })
+        },
+    ) {
+        Ok(row) => Ok(Some(row)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn upsert_tx(conn: &rusqlite::Connection, row: &ProviderRow) -> AppResult<()> {

@@ -1736,7 +1736,12 @@ pub async fn ai_provider_save_impl(state: &AppState, patch: AiProviderPatch) -> 
         },
     )?;
     match patch.api_key.as_deref().map(str::trim) {
-        Some("") | None => {} // keep stored key
+        None => {} // field absent — keep the stored key
+        Some("") => {
+            // Explicit clear (matches the AiProviderPatch doc). The UI form
+            // sends None for a blank box (keep); only an explicit "" clears.
+            state.secret_store.delete(&key_api_key(&id))?;
+        }
         Some(k) => {
             state.secret_store.set(&key_api_key(&id), k)?;
         }

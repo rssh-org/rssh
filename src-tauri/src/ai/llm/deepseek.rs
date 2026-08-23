@@ -139,24 +139,18 @@ struct DsToolCallFn {
     arguments: String,
 }
 
-// ─── 主入口：流式 chat ─────────────────────────────────────────────
-
-async fn chat(
-    http: &reqwest::Client,
-    endpoint: &str,
-    api_key: &str,
-    req: ChatRequest,
-    sink: DeltaSink,
-) -> AppResult<ChatResponse> {
-    let mut messages: Vec<DsMsg> = Vec::with_capacity(req.messages.len() + 1);
+/// Map the shared ChatMessage history onto the DeepSeek wire shape. Extracted
+/// from `chat()` so the reasoning_content echo is directly testable.
+fn build_messages(system: &str, history: &[ChatMessage]) -> Vec<DsMsg> {
+    let mut messages: Vec<DsMsg> = Vec::with_capacity(history.len() + 1);
     messages.push(DsMsg {
         role: "system",
-        content: Some(req.system_prompt.clone()),
+        content: Some(system.to_string()),
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
     });
-    for m in &req.messages {
+    for m in history {
         match m {
             ChatMessage::User { content } => messages.push(DsMsg {
                 role: "user",
@@ -219,6 +213,19 @@ async fn chat(
             }
         }
     }
+    messages
+}
+
+// ─── 主入口：流式 chat ─────────────────────────────────────────────
+
+async fn chat(
+    http: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    req: ChatRequest,
+    sink: DeltaSink,
+) -> AppResult<ChatResponse> {
+    let messages = build_messages(&req.system_prompt, &req.messages);
 
     let tools: Vec<serde_json::Value> = req
         .tools
@@ -371,34 +378,16 @@ mod tests {
 
     /// DeepSeek must serialize the thinking chain BACK on assistant messages —
     /// the wire contract that keeps tool-calling multi-turn conversations from
-    /// 400ing ("reasoning_content must be passed back").
+    /// 400ing ("reasoning_content must be passed back"). Runs the production
+    /// mapping (`build_messages`), not a hand-built struct.
     #[test]
     fn assistant_reasoning_content_is_echoed() {
-        let msg = ChatMessage::Assistant {
+        let history = vec![ChatMessage::Assistant {
             content: "answer".into(),
             tool_calls: vec![],
             reasoning_content: Some("chain".into()),
-        };
-        let ChatMessage::Assistant {
-            content,
-            tool_calls,
-            reasoning_content,
-        } = &msg
-        else {
-            unreachable!()
-        };
-        let ds = DsMsg {
-            role: "assistant",
-            content: Some(content.clone()),
-            tool_calls: if tool_calls.is_empty() {
-                None
-            } else {
-                Some(vec![])
-            },
-            tool_call_id: None,
-            reasoning_content: reasoning_content.clone(),
-        };
-        let s = serde_json::to_string(&ds).unwrap();
+        }];
+        let s = serde_json::to_string(&build_messages("sys", &history)).unwrap();
         assert!(s.contains("\"reasoning_content\":\"chain\""));
     }
 

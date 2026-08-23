@@ -13,7 +13,7 @@
     onCancel,
   }: {
     provider: AiProviderRecord;
-    protocolCards: { protocol: LlmProtocol; label: string; sub: string }[];
+    protocolCards: { protocol: LlmProtocol; label: string; subKey: string }[];
     endpointChips: Record<LlmProtocol, { label: string; url: string }[]>;
     onSave: (id: string) => void;
     onCancel: () => void;
@@ -141,7 +141,7 @@
         <span class="protocol-icon"><AppIcon name="ai" size={17} /></span>
         <span class="protocol-text">
           <span class="protocol-title">{card.label}</span>
-          <span class="protocol-sub">{card.sub}</span>
+          <span class="protocol-sub">{t(card.subKey)}</span>
         </span>
       </button>
     {/each}
@@ -153,9 +153,16 @@
   </label>
 
   <div class="field">
-    <span class="label-text">{t("ai.settings.label.endpoint")}</span>
+    <span class="label-text" id={`endpoint-label-${formId || "new"}`}>{t("ai.settings.label.endpoint")}</span>
     <div class="endpoint-row">
-      <input type="text" class="mono" bind:value={formEndpoint} placeholder="https://…" onkeydown={handleKeydown} />
+      <input
+        type="text"
+        class="mono"
+        bind:value={formEndpoint}
+        placeholder="https://…"
+        aria-labelledby={`endpoint-label-${formId || "new"}`}
+        onkeydown={handleKeydown}
+      />
       <div class="chips">
         {#each endpointChips[formProtocol] as chip (chip.url)}
           <button type="button" class="chip" onclick={() => fillEndpoint(chip.url)}>{chip.label}</button>

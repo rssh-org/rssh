@@ -31,11 +31,12 @@
     let confirmingDeleteId = $state<string | null>(null);
     let providerDeleteTimer: number | null = null;
 
-    /** 协议三卡 —— 表单顶部的类型选择（对应动态发现的 Docker/kubectl 卡）。 */
-    const PROTOCOL_CARDS: { protocol: LlmProtocol; label: string; sub: string }[] = [
-        { protocol: "deepseek-thinking", label: "DeepSeek Thinking", sub: "reasoning_content 回传" },
-        { protocol: "openai-completions", label: "OpenAI Completions", sub: "OpenAI / GLM / vLLM …" },
-        { protocol: "anthropic-messages", label: "Anthropic Messages", sub: "Claude 官方协议" },
+    /** 协议三卡 —— 表单顶部的类型选择（对应动态发现的 Docker/kubectl 卡）。
+     * 副行文案走 i18n，卡标题是专有名词不翻译。 */
+    const PROTOCOL_CARDS: { protocol: LlmProtocol; label: string; subKey: string }[] = [
+        { protocol: "deepseek-thinking", label: "DeepSeek Thinking", subKey: "ai.settings.protocol.sub.deepseek" },
+        { protocol: "openai-completions", label: "OpenAI Completions", subKey: "ai.settings.protocol.sub.openai" },
+        { protocol: "anthropic-messages", label: "Anthropic Messages", subKey: "ai.settings.protocol.sub.anthropic" },
     ];
 
     /** endpoint 快捷填充 —— 对应凭证页的 ~/.ssh/id_rsa / id_ed25519 chips。 */
@@ -206,9 +207,15 @@
             providerDeleteTimer = null;
         }
         try {
+            const wasActive = activeId === p.id;
             await ai.deleteProvider(p.id);
             if (editId === p.id) editId = null;
-            if (activeId === p.id) activeId = "";
+            if (wasActive) {
+                // 后端已清 active；刷新全局 settings 快照，否则 ChatPanel 还
+                // 拿着已删 id 去 start（provider_not_found）。
+                await ai.loadSettings();
+                activeId = "";
+            }
             await refreshProviders();
         } catch (e: any) {
             setByokNote(t("ai.settings.note.delete_failed", { error: errMsg(e) }));
@@ -220,9 +227,15 @@
         cancelForm();
         await refreshProviders();
         // 首个 provider 落地即激活 —— 消灭"建了 provider 但没有 active"的死角。
+        // 激活失败要报出来且不认领 activeId，否则 UI 显示"使用中"是假的。
         if (!activeId) {
-            await ai.activateProvider(id).catch(() => {});
-            activeId = id;
+            try {
+                await ai.activateProvider(id);
+                activeId = id;
+            } catch (e: any) {
+                setByokNote(t("ai.settings.note.save_failed", { error: errMsg(e) }));
+                return;
+            }
         }
         setByokNote(t("ai.settings.note.saved"), 2000);
     }

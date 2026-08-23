@@ -73,7 +73,7 @@ pub fn run(db: &Db, store: &dyn SecretStore) -> AppResult<()> {
         return Ok(());
     }
 
-    let existing_ids = db::ai_provider::ids(db)?;
+    let mut existing_ids = db::ai_provider::ids(db)?;
     let mut new_id_for: Vec<(&str, String)> = Vec::new();
 
     for (legacy_name, display, protocol, default_endpoint) in LEGACY {
@@ -93,9 +93,11 @@ pub fn run(db: &Db, store: &dyn SecretStore) -> AppResult<()> {
         }
 
         // provider-{5位}，撞库重抽（uuid 前 5 位碰撞概率极低，循环兜底为零）。
+        // 选中后立刻登记进 existing_ids —— 同一批最多生成 4 个 id，互查。
         let id = loop {
             let candidate = db::ai_provider::ProviderRow::generate_id();
             if !existing_ids.contains(&candidate) {
+                existing_ids.push(candidate.clone());
                 break candidate;
             }
         };

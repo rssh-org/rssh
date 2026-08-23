@@ -108,23 +108,17 @@ struct OaiToolCallFn {
     arguments: String,
 }
 
-// ─── 主入口：流式 chat ─────────────────────────────────────────────
-
-pub async fn chat(
-    http: &reqwest::Client,
-    endpoint: &str,
-    api_key: &str,
-    req: ChatRequest,
-    sink: DeltaSink,
-) -> AppResult<ChatResponse> {
-    let mut messages: Vec<OaiMsg> = Vec::with_capacity(req.messages.len() + 1);
+/// Map the shared ChatMessage history onto the OpenAI wire shape. Extracted
+/// from `chat()` so the reasoning_content drop is directly testable.
+fn build_messages(system: &str, history: &[ChatMessage]) -> Vec<OaiMsg> {
+    let mut messages: Vec<OaiMsg> = Vec::with_capacity(history.len() + 1);
     messages.push(OaiMsg {
         role: "system",
-        content: Some(req.system_prompt.clone()),
+        content: Some(system.to_string()),
         tool_calls: None,
         tool_call_id: None,
     });
-    for m in &req.messages {
+    for m in history {
         match m {
             ChatMessage::User { content } => messages.push(OaiMsg {
                 role: "user",
@@ -185,6 +179,19 @@ pub async fn chat(
             }
         }
     }
+    messages
+}
+
+// ─── 主入口：流式 chat ─────────────────────────────────────────────
+
+pub async fn chat(
+    http: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    req: ChatRequest,
+    sink: DeltaSink,
+) -> AppResult<ChatResponse> {
+    let messages = build_messages(&req.system_prompt, &req.messages);
 
     let tools: Vec<serde_json::Value> = req
         .tools
@@ -371,35 +378,16 @@ mod tests {
     /// A history Assistant message carrying a DeepSeek-style thinking chain
     /// must serialize WITHOUT the reasoning_content field — the regression
     /// test for the cross-protocol leak (it used to ride the shared impl).
+    /// Runs the production mapping (`build_messages`), not a hand-built
+    /// struct, so a mapping regression actually fails here.
     #[test]
     fn assistant_reasoning_content_is_never_serialized() {
-        let msg = ChatMessage::Assistant {
+        let history = vec![ChatMessage::Assistant {
             content: "answer".into(),
             tool_calls: vec![],
             reasoning_content: Some("secret chain of thought".into()),
-        };
-        let oai = match &msg {
-            ChatMessage::Assistant {
-                content,
-                tool_calls,
-                ..
-            } => OaiMsg {
-                role: "assistant",
-                content: if content.is_empty() {
-                    None
-                } else {
-                    Some(content.clone())
-                },
-                tool_calls: if tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(vec![])
-                },
-                tool_call_id: None,
-            },
-            _ => unreachable!(),
-        };
-        let s = serde_json::to_string(&oai).unwrap();
+        }];
+        let s = serde_json::to_string(&build_messages("sys", &history)).unwrap();
         assert!(!s.contains("reasoning_content"));
         assert!(!s.contains("secret chain"));
     }
