@@ -379,12 +379,14 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
     // Command-block copy redaction is one category: prompt policy + independent
     // rules. New payloads use the generic key; the old image-specific key stays
     // readable for backups produced before text copying shared the policy. A
-    // missing category leaves local configuration untouched.
+    // missing or null category leaves local configuration untouched.
     let command_block_redaction = data
         .get("command_block_redaction")
+        .filter(|v| !v.is_null())
         .map(|value| ("command_block_redaction", value))
         .or_else(|| {
             data.get("command_block_image_redaction")
+                .filter(|v| !v.is_null())
                 .map(|value| ("command_block_image_redaction", value))
         });
     if let Some((category, value)) = command_block_redaction {
@@ -493,8 +495,11 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
             }),
         }
     }
-    // ai — provider settings (an object, not a list of rows); full mirror
-    if let Some(ai) = data.get("ai").filter(|v| !v.is_null()) {
+    // ai — provider settings (an object, not a list of rows); full mirror.
+    // Gate on the real shape: a malformed non-null value (scalar/array) must
+    // never reach the mirror, whose first move is clearing local config —
+    // same rule as every array category's as_array gate.
+    if let Some(ai) = data.get("ai").filter(|v| v.is_object()) {
         if let Err(e) = crate::ai::commands::import_ai_settings(db, ss, ai) {
             errors.push(ImportError {
                 kind: "ai_settings",
@@ -1449,6 +1454,41 @@ mod tests {
     }
 
     #[test]
+    fn null_command_block_redaction_key_keeps_local() {
+        // The contract: a null category is "not synced" — never a parse error
+        // (which would fail the whole import report), never a wipe. Both the
+        // current and the legacy key behave alike.
+        let (db, ss, dir) = fixture();
+        crate::db::settings::set(&db, "command_block_prompt_replacement", "local-prompt").unwrap();
+
+        merge_import(
+            &db,
+            &ss,
+            dir.path(),
+            &json!({ "version": 1, "command_block_redaction": null }),
+        )
+        .unwrap();
+        merge_import(
+            &db,
+            &ss,
+            dir.path(),
+            &json!({ "version": 1, "command_block_image_redaction": null }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            crate::db::settings::get(&db, "command_block_prompt_replacement")
+                .unwrap()
+                .as_deref(),
+            Some("local-prompt")
+        );
+        assert!(
+            !command_block_redact_rule::list(&db).unwrap().is_empty(),
+            "seeded rules untouched"
+        );
+    }
+
+    #[test]
     fn command_block_redaction_import_rejects_invalid_rule() {
         let (db, ss, dir) = fixture();
         let data = json!({
@@ -1687,6 +1727,38 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "empty endpoint cleared local"
+        );
+    }
+
+    #[test]
+    fn merge_ai_malformed_payload_keeps_local() {
+        // A non-object `ai` value must never reach the mirror — the mirror's
+        // first move is clearing every provider setting, so a scalar/array
+        // would silently wipe local AI config while restoring nothing. Wrong
+        // shape = "not synced", same as every array category's as_array gate.
+        let (db, ss, dir) = fixture();
+        crate::db::settings::set(&db, "ai_anthropic_model", "claude-local").unwrap();
+        ss.set(&crate::secret::setting_key("ai_anthropic_key"), "sk-local")
+            .unwrap();
+
+        for bad in [json!("oops"), json!(5), json!([]), json!(null)] {
+            let data = json!({ "version": 1, "ai": bad });
+            merge_import(&db, &ss, dir.path(), &data).unwrap();
+        }
+
+        assert_eq!(
+            crate::db::settings::get(&db, "ai_anthropic_model")
+                .unwrap()
+                .as_deref(),
+            Some("claude-local"),
+            "malformed ai payload left local config alone"
+        );
+        assert_eq!(
+            ss.get(&crate::secret::setting_key("ai_anthropic_key"))
+                .unwrap()
+                .as_deref(),
+            Some("sk-local"),
+            "api key survived malformed payloads"
         );
     }
 
