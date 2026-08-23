@@ -121,6 +121,33 @@ pub trait LlmClient: Send + Sync {
     async fn list_models(&self) -> AppResult<Vec<ModelInfo>>;
 }
 
+/// The closed set of protocols a provider row may declare. `parse` is the
+/// single source of truth — `build_client` matches the enum (exhaustive, so a
+/// new variant without a client arm fails to compile) and `protocol_valid`
+/// derives from it. Wire/DB values stay strings; the enum is internal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    DeepSeekThinking,
+    OpenAiCompletions,
+    AnthropicMessages,
+}
+
+impl Protocol {
+    pub fn parse(s: &str) -> Option<Protocol> {
+        match s {
+            "deepseek-thinking" => Some(Protocol::DeepSeekThinking),
+            "openai-completions" => Some(Protocol::OpenAiCompletions),
+            "anthropic-messages" => Some(Protocol::AnthropicMessages),
+            _ => None,
+        }
+    }
+}
+
+/// Validation derived from `Protocol::parse` — can never drift from dispatch.
+pub fn protocol_valid(p: &str) -> bool {
+    Protocol::parse(p).is_some()
+}
+
 /// Build the client for a provider row's protocol. `endpoint` is the row's
 /// explicit (required) endpoint — no compile-time vendor defaults anywhere.
 pub fn build_client(
@@ -128,13 +155,19 @@ pub fn build_client(
     api_key: String,
     endpoint: String,
 ) -> AppResult<Box<dyn LlmClient>> {
-    match protocol {
-        "deepseek-thinking" => Ok(Box::new(deepseek::DeepSeekClient::new(api_key, endpoint))),
-        "openai-completions" => Ok(Box::new(OpenAiCompletionsClient::new(api_key, endpoint))),
-        "anthropic-messages" => Ok(Box::new(anthropic::AnthropicClient::new(api_key, endpoint))),
-        other => Err(crate::error::AppError::config(
+    match Protocol::parse(protocol) {
+        Some(Protocol::DeepSeekThinking) => {
+            Ok(Box::new(deepseek::DeepSeekClient::new(api_key, endpoint)))
+        }
+        Some(Protocol::OpenAiCompletions) => {
+            Ok(Box::new(OpenAiCompletionsClient::new(api_key, endpoint)))
+        }
+        Some(Protocol::AnthropicMessages) => {
+            Ok(Box::new(anthropic::AnthropicClient::new(api_key, endpoint)))
+        }
+        None => Err(crate::error::AppError::config(
             "llm_unknown_protocol",
-            serde_json::json!({ "protocol": other }),
+            serde_json::json!({ "protocol": protocol }),
         )),
     }
 }

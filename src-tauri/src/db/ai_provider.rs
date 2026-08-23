@@ -9,17 +9,6 @@ use crate::error::AppResult;
 
 use super::Db;
 
-/// The three protocol types a provider can speak. Wire + DB values.
-pub const PROTOCOLS: &[&str] = &[
-    "deepseek-thinking",
-    "openai-completions",
-    "anthropic-messages",
-];
-
-pub fn protocol_valid(p: &str) -> bool {
-    PROTOCOLS.contains(&p)
-}
-
 #[derive(Debug, Clone)]
 pub struct ProviderRow {
     pub id: String,

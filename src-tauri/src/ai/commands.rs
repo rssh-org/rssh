@@ -138,7 +138,7 @@ pub fn import_ai_settings(
         let name = field("name")?;
         let protocol = field("protocol")?;
         let endpoint = field("endpoint")?;
-        if !crate::db::ai_provider::protocol_valid(&protocol) {
+        if !llm::protocol_valid(&protocol) {
             return Err(AppError::config(
                 "ai_payload_invalid",
                 json!({ "row": i, "field": "protocol", "value": protocol }),
@@ -1682,7 +1682,7 @@ pub async fn ai_provider_save_impl(state: &AppState, patch: AiProviderPatch) -> 
         .filter(|s| !s.is_empty())
         .ok_or_else(|| AppError::config("provider_field_required", json!({ "field": "protocol" })))?
         .to_string();
-    if !crate::db::ai_provider::protocol_valid(&protocol) {
+    if !llm::protocol_valid(&protocol) {
         return Err(AppError::config(
             "provider_protocol_invalid",
             json!({ "protocol": protocol }),
@@ -1759,9 +1759,12 @@ pub async fn ai_provider_delete(state: State<'_, AppState>, id: String) -> AppRe
 
 /// Transport-agnostic body shared by the Tauri command and the headless server.
 /// Deleting the active provider clears the selection (never dangles).
+/// Secret first, row second: if the secret delete fails the row survives, so a
+/// retry re-runs cleanly — the other order could orphan the encrypted key
+/// forever (nothing later inspects ids whose row is already gone).
 pub async fn ai_provider_delete_impl(state: &AppState, id: String) -> AppResult<()> {
-    crate::db::ai_provider::delete(&state.db, &id)?;
     state.secret_store.delete(&key_api_key(&id))?;
+    crate::db::ai_provider::delete(&state.db, &id)?;
     if crate::db::settings::get(&state.db, &key_provider())?.as_deref() == Some(id.as_str()) {
         crate::db::settings::delete(&state.db, &key_provider())?;
     }
