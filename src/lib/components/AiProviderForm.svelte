@@ -62,21 +62,6 @@
           : "",
   );
 
-  function chooseProtocol(protocol: LlmProtocol) {
-    if (protocol === formProtocol) return;
-    formProtocol = protocol;
-    // Endpoint follows the protocol switch unless the user typed a custom one —
-    // chips below re-fill it anyway, but a stale OpenAI URL under DeepSeek is a
-    // footgun. An endpoint that matches one of the known chip URLs is "not
-    // custom".
-    const knownUrls = new Set(
-      Object.values(endpointChips).flatMap((chips) => chips.map((c) => c.url)),
-    );
-    if (!formEndpoint.trim() || knownUrls.has(formEndpoint.trim())) {
-      formEndpoint = endpointChips[protocol][0]?.url ?? "";
-    }
-  }
-
   function fillEndpoint(url: string) {
     formEndpoint = url;
   }
@@ -136,7 +121,7 @@
         class:p-oai={card.protocol === "openai-completions"}
         class:p-ant={card.protocol === "anthropic-messages"}
         aria-pressed={formProtocol === card.protocol}
-        onclick={() => chooseProtocol(card.protocol)}
+        onclick={() => (formProtocol = card.protocol)}
       >
         <span class="protocol-icon"><AppIcon name="ai" size={17} /></span>
         <span class="protocol-text">
@@ -153,22 +138,20 @@
   </label>
 
   <div class="field">
-    <span class="label-text" id={`endpoint-label-${formId || "new"}`}>{t("ai.settings.label.endpoint")}</span>
-    <div class="endpoint-row">
-      <input
-        type="text"
-        class="mono"
-        bind:value={formEndpoint}
-        placeholder="https://…"
-        aria-labelledby={`endpoint-label-${formId || "new"}`}
-        onkeydown={handleKeydown}
-      />
-      <div class="chips">
-        {#each endpointChips[formProtocol] as chip (chip.url)}
-          <button type="button" class="chip" onclick={() => fillEndpoint(chip.url)}>{chip.label}</button>
-        {/each}
-      </div>
+    <div class="label-row">
+      <span class="label-text" id={`endpoint-label-${formId || "new"}`}>{t("ai.settings.label.endpoint")}</span>
+      {#each endpointChips[formProtocol] as chip (chip.url)}
+        <button type="button" class="chip" onclick={() => fillEndpoint(chip.url)}>{chip.label}</button>
+      {/each}
     </div>
+    <input
+      type="text"
+      class="mono"
+      bind:value={formEndpoint}
+      placeholder="https://…"
+      aria-labelledby={`endpoint-label-${formId || "new"}`}
+      onkeydown={handleKeydown}
+    />
   </div>
 
   <label class="field">
@@ -313,39 +296,24 @@
     font-size: 12px;
     color: var(--text-sub);
   }
-  .endpoint-row {
+  .label-row {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: 8px;
     flex-wrap: wrap;
   }
-  .endpoint-row input {
-    flex: 1 1 240px;
-    min-width: 0;
-    box-sizing: border-box;
-  }
-  .endpoint-row input.mono {
-    font-family: monospace;
-  }
-  .chips {
-    display: flex;
-    gap: 6px;
-    flex-shrink: 0;
-  }
+  /* Endpoint quick-fill chips — plain hyperlinks after the label, not pills. */
   .chip {
-    padding: 4px 10px;
-    border: 1px solid var(--divider);
-    border-radius: 999px;
-    background: var(--bg);
-    color: var(--text-sub);
-    font-size: 11px;
+    padding: 0;
+    border: none;
+    background: none;
     font-family: inherit;
+    font-size: 12px;
+    color: var(--accent);
     cursor: pointer;
-    transition: color 0.15s, border-color 0.15s;
   }
   .chip:hover {
-    color: var(--accent);
-    border-color: var(--accent);
+    text-decoration: underline;
   }
   .inline-form input[type="text"],
   .inline-form input[type="password"] {
@@ -385,13 +353,6 @@
   @media (max-width: 640px) {
     .protocol-grid {
       width: 100%;
-    }
-    .endpoint-row {
-      align-items: stretch;
-      flex-direction: column;
-    }
-    .chips {
-      align-self: flex-start;
     }
   }
 </style>
