@@ -179,16 +179,18 @@
         };
     }
 
-    /** Activate a provider row (the list's radio). On failure, roll back the
-     * radio's native check so the visuals stay in sync with activeId (the
-     * backend's single source of truth). */
-    async function activate(id: string, input?: HTMLInputElement) {
-        if (id === activeId) return;
+    /** Activate a provider row (the list's radio). The check follows activeId
+     * optimistically — Svelte re-applies both rows on every change, so a
+     * failure restores the previous selection (a native radio group never
+     * re-checks the old member by itself). */
+    async function activate(id: string) {
+        const previousId = activeId;
+        if (id === previousId) return;
+        activeId = id;
         try {
             await ai.activateProvider(id);
-            activeId = id;
         } catch (e: any) {
-            if (input) input.checked = false;
+            activeId = previousId;
             setByokNote(t("ai.settings.note.save_failed", { error: errMsg(e) }));
         }
     }
@@ -582,7 +584,7 @@
                     <div class="provider-info">
                         <input type="radio" id={`ai-provider-r-${p.id}`} name="ai-provider" class="radio-state"
                                checked={activeId === p.id}
-                               onchange={(e) => activate(p.id, e.currentTarget)} />
+                               onchange={() => activate(p.id)} />
                         <label for={`ai-provider-r-${p.id}`} class="radio-label" title={t("ai.settings.provider.activate")}>
                             <span class="shell-radio-indicator" aria-hidden="true"></span>
                             <div class="provider-text">
