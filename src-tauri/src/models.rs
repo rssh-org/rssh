@@ -32,7 +32,7 @@ pub struct Profile {
     pub port: u16,
     /// DB 列声明 `TEXT NOT NULL DEFAULT ''`，model 类型对齐成 String。
     /// **应用层不变量**：Profile.credential_id 永远是一个真实 Credential 的 id。
-    /// - 写入入口（`add.rs`/`edit.rs`/`ProfileEditor.svelte`/`do_import_ssh_entries`）
+    /// - 写入入口（`add.rs`/`edit.rs`/`ProfileEditor.svelte`）
     ///   强制必填，从源头保证不变量。
     /// - 读取端（`open.rs`/`ssh_builder.rs`/`forward.rs`/`session.rs`）直接
     ///   `credential::get(&id)`，引用错就 fail-fast 报 `*_cred_not_found`，

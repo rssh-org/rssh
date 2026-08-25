@@ -1,9 +1,9 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import * as app from "../stores/app.svelte.ts";
   import { t, errMsg } from "../i18n/index.svelte.ts";
   import { pickTextFile } from "../pick-file.ts";
   import { saveTextFile, fileStamp } from "../save-file.ts";
+  import { openMigrate } from "../migrate.ts";
 
   let importing = $state(false);
   let msg = $state("");
@@ -40,10 +40,6 @@
     finally { importing = false; }
     clearMsgLater();
   }
-
-  function gotoSshImport() {
-    app.settingsNavigate("import-ssh-config");
-  }
 </script>
 
 <div class="page">
@@ -71,10 +67,10 @@
 
   <div class="action-card surface-raised">
     <div class="action-info">
-      <div class="action-title">{t("import_export.ssh_title")}</div>
-      <div class="action-desc">{t("import_export.ssh_desc")}</div>
+      <div class="action-title">{t("import_export.migrate_title")}</div>
+      <div class="action-desc">{t("import_export.migrate_desc")}</div>
     </div>
-    <button class="btn btn-sm" onclick={gotoSshImport}>{t("common.open")}</button>
+    <button class="btn btn-sm" onclick={openMigrate}>{t("common.open")}</button>
   </div>
 </div>
 

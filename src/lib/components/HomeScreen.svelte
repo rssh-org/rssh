@@ -13,6 +13,7 @@
   } from "../stores/app.svelte.ts";
   import { errMsg, locale, t } from "../i18n/index.svelte.ts";
   import { toast } from "../stores/toast.svelte.ts";
+  import { openMigrate } from "../migrate.ts";
   import { createHomeRefresh } from "./home-refresh.ts";
   import { forwardDetail } from "./connection-list.ts";
   import AppIcon from "./AppIcon.svelte";
@@ -428,8 +429,12 @@
     {/each}
   {:else if allItems.length === 0}
     <div class="empty-state">
-      <p>No Profiles or Port Forwards yet</p>
-      <button class="btn btn-accent" onclick={() => app.navigate("settings")}>Go to Settings</button>
+      <p>{t("home.empty.title")}</p>
+      <p class="cta">{t("home.empty.cta")}</p>
+      <div class="empty-actions">
+        <button class="btn btn-accent" onclick={() => app.navigate("settings")}>{t("home.empty.go_settings")}</button>
+        <button class="btn" onclick={openMigrate}>{t("home.empty.migrate")}</button>
+      </div>
     </div>
   {/if}
 </div>
@@ -526,6 +531,8 @@
 
   .empty-state { text-align: center; padding: 60px 24px; color: var(--text-dim); }
   .empty-state p { margin-bottom: 12px; }
+  .empty-state .cta { font-size: 13px; }
+  .empty-actions { display: flex; justify-content: center; gap: 8px; }
 
   @media (max-width: 620px) {
     .logo { width: 100%; }

@@ -54,7 +54,6 @@ export type SettingsPage =
   | "highlights"
   | "sync"
   | "import-export"
-  | "import-ssh-config"
   | "recording-settings"
   | "playback"
   | "shell-settings"
@@ -470,7 +469,6 @@ export function openConnectionCopy(kind: ConnectionKind, sourceId: string) {
 export function settingsBack() {
   if (_settingsPage === "connection-edit") _settingsPage = "connections";
   else if (_settingsPage === "credential-edit") _settingsPage = "credentials";
-  else if (_settingsPage === "import-ssh-config") _settingsPage = "import-export";
   else _settingsPage = "menu";
 }
 

@@ -14,7 +14,6 @@
   import HighlightManager from "./HighlightManager.svelte";
   import SyncScreen from "./SyncScreen.svelte";
   import ImportExportScreen from "./ImportExportScreen.svelte";
-  import SshConfigImportScreen from "./SshConfigImportScreen.svelte";
   import RecordingSettings from "./RecordingSettings.svelte";
   import PlaybackScreen from "./PlaybackScreen.svelte";
   import ShortcutsScreen from "./ShortcutsScreen.svelte";
@@ -45,7 +44,6 @@
     "highlights":         { component: HighlightManager },
     "sync":               { component: SyncScreen },
     "import-export":      { component: ImportExportScreen },
-    "import-ssh-config":  { component: SshConfigImportScreen },
     "shell-settings":     { component: ShellSettings },
     "command-blocks":     { component: CommandBlockSettings },
     "recording-settings": { component: RecordingSettings },
@@ -116,7 +114,6 @@
     if (id === "connections" && p === "connection-edit") return true;
     if (id === "credentials" && p === "credential-edit") return true;
     if (id === "groups" && p === "group-edit") return true;
-    if (id === "import-export" && p === "import-ssh-config") return true;
     return false;
   }
 
