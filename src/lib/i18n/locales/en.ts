@@ -355,7 +355,7 @@ const en = {
   // ── Home screen ──
   "home.empty.title": "No profiles yet",
   "home.empty.cta": "Create one in Settings → Profiles to get started.",
-  "home.empty.migrate": "Migrate from other tools",
+  "home.empty.migrate": "Import from other tools",
   "home.empty.go_settings": "Go to Settings",
   "home.connect": "Connect",
   "home.display.aria": "Home display mode",
@@ -1139,7 +1139,7 @@ const en = {
   // Import / Export
   "import_export.export_title": "Export Config",
   "import_export.export_desc": "Save all Profiles, Credentials, and Port Forwards to a JSON file",
-  "import_export.migrate_title": "Migrate from Xshell / Tabby / SSH config",
+  "import_export.migrate_title": "Import from other tools",
   "import_export.migrate_desc": "Browser-based converter hosted on GitHub Pages — runs locally, nothing is uploaded",
   "import_export.import_title": "Import Config",
   "import_export.import_desc": "Load a previously exported JSON file. Merges into local config: matching entries (by id) are overwritten, others stay.",

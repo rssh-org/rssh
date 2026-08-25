@@ -3,7 +3,14 @@
   import { t, errMsg } from "../i18n/index.svelte.ts";
   import { pickTextFile } from "../pick-file.ts";
   import { saveTextFile, fileStamp } from "../save-file.ts";
-  import { openMigrate } from "../migrate.ts";
+
+  const MIGRATE_URL = "https://rssh-org.github.io/migrate/";
+
+  function openMigrate() {
+    invoke("open_external_url", { url: MIGRATE_URL }).catch((e) =>
+      console.error("open_external_url failed:", e),
+    );
+  }
 
   let importing = $state(false);
   let msg = $state("");

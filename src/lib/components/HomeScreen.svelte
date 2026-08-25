@@ -13,7 +13,6 @@
   } from "../stores/app.svelte.ts";
   import { errMsg, locale, t } from "../i18n/index.svelte.ts";
   import { toast } from "../stores/toast.svelte.ts";
-  import { openMigrate } from "../migrate.ts";
   import { createHomeRefresh } from "./home-refresh.ts";
   import { forwardDetail } from "./connection-list.ts";
   import AppIcon from "./AppIcon.svelte";
@@ -433,7 +432,7 @@
       <p class="cta">{t("home.empty.cta")}</p>
       <div class="empty-actions">
         <button class="btn btn-accent" onclick={() => app.navigate("settings")}>{t("home.empty.go_settings")}</button>
-        <button class="btn" onclick={openMigrate}>{t("home.empty.migrate")}</button>
+        <button class="btn" onclick={() => app.navigate("import-export")}>{t("home.empty.migrate")}</button>
       </div>
     </div>
   {/if}

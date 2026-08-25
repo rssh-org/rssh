@@ -357,7 +357,7 @@ const zh: Messages = {
   // ── 首页 ──
   "home.empty.title": "还没有 Profile",
   "home.empty.cta": "去 设置 → Profile 新建一个吧。",
-  "home.empty.migrate": "从其他工具迁移",
+  "home.empty.migrate": "从其他工具导入",
   "home.empty.go_settings": "前往设置",
   "home.connect": "连接",
   "home.display.aria": "首页展示方式",
@@ -1142,7 +1142,7 @@ const zh: Messages = {
   // 导入 / 导出
   "import_export.export_title": "导出配置",
   "import_export.export_desc": "将所有 Profile、凭证和端口转发保存到 JSON 文件",
-  "import_export.migrate_title": "从 Xshell / Tabby / SSH config 迁移",
+  "import_export.migrate_title": "从其他工具导入",
   "import_export.migrate_desc": "浏览器端转换器，由 GitHub Pages 托管 —— 全程本地运行，零上传",
   "import_export.import_title": "导入配置",
   "import_export.import_desc": "加载之前导出的 JSON 文件。合并到本地配置：按 id 匹配的条目会被覆盖，其余保留。",
