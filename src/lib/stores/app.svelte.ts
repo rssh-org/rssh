@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import * as ai from "../ai/store.svelte.ts";
-import { errMsg } from "../i18n/index.svelte.ts";
+import { errMsg, t } from "../i18n/index.svelte.ts";
 import { isIOS, isMobile } from "../platform.ts";
 import type {
   CommandBlockRedactionRule as RedactionRule,
@@ -29,6 +29,7 @@ export { isIOS, isMobile };
 export type TabType = "home" | "ssh" | "local" | "serial" | "telnet" | "docker_exec" | "kubectl_exec" | "forward" | "edit";
 /** Tab types that render a TerminalPane (byte-stream terminals). */
 export type TerminalTabType = Exclude<TabType, "home" | "forward" | "edit">;
+export type TerminalConnectionStatus = "connecting" | "connected" | "disconnected";
 export function isTerminalTabType(type: TabType): type is TerminalTabType {
   return type === "ssh" || type === "local" || type === "serial" || type === "telnet"
     || type === "docker_exec" || type === "kubectl_exec";
@@ -181,11 +182,13 @@ export interface RemoteEntry {
 /* ═══════════════════════════════════════════════════════
    Reactive state
    ═══════════════════════════════════════════════════════ */
-let _tabs = $state<Tab[]>([{ id: "home", type: "home", label: "Home" }]);
+let _tabs = $state<Tab[]>([{ id: "home", type: "home", label: "" }]);
 let _activeTabId = $state("home");
 let _activeWorkspaceId = $state("home");
 let _activePaneId = $state("home");
+let _focusedPaneByWorkspace = $state<Record<string, string>>({});
 let _layoutByWorkspace = $state<Record<string, TerminalLayout | null>>({});
+let _terminalConnectionStatusByTab = $state<Record<string, TerminalConnectionStatus>>({});
 let _settingsActive = $state(false);
 let _settingsPage = $state<SettingsPage>("menu");
 let _editingId = $state<string | null>(null);
@@ -341,6 +344,10 @@ export function activePaneId() { return _activePaneId; }
 export function workspaceTabs(): Tab[] {
   return _tabs.filter((tab) => tab.type !== "home" && !tab.paneOf);
 }
+
+export function tabLabel(tab: Tab): string {
+  return tab.id === "home" ? t("tab.home") : tab.label;
+}
 export function layoutForWorkspace(workspaceId: string): TerminalLayout | null {
   return _layoutByWorkspace[workspaceId] ?? null;
 }
@@ -367,8 +374,12 @@ export function setActiveWorkspace(id: string) {
   const tab = _tabs.find((candidate) => candidate.id === id && !candidate.paneOf);
   if (!tab) return;
   _activeWorkspaceId = id;
-  _activePaneId = id;
-  _activeTabId = id;
+  const focusedPaneId = _focusedPaneByWorkspace[id];
+  const paneId = focusedPaneId && paneIdsForWorkspace(id).includes(focusedPaneId)
+    ? focusedPaneId
+    : id;
+  _activePaneId = paneId;
+  _activeTabId = paneId;
   _settingsActive = false;
   const idx = _tabs.findIndex((candidate) => candidate.id === id);
   if (_tabMru && idx > 1) moveTab(idx, 1);
@@ -382,13 +393,14 @@ export function setActivePane(id: string) {
   if (tab.paneOf && !paneIdsForWorkspace(workspaceId).includes(id)) return;
   _activePaneId = id;
   _activeTabId = id;
+  _focusedPaneByWorkspace[workspaceId] = id;
   _settingsActive = false;
 }
 
-export type PaneSide = "left" | "right" | "top" | "bottom" | SplitDirection;
+export type PaneSide = "left" | "right" | "top" | "bottom";
 
 function directionForSide(side: PaneSide): SplitDirection {
-  return side === "top" || side === "bottom" || side === "vertical" ? "vertical" : "horizontal";
+  return side === "top" || side === "bottom" ? "vertical" : "horizontal";
 }
 
 function swapInsertedPane(layout: TerminalLayout, targetId: string, newId: string): TerminalLayout {
@@ -446,13 +458,13 @@ export function addPane(workspaceId: string, side: PaneSide, tab: Tab): string |
   if (pane.type === "ssh") _sftpPanelWidthByTab[pane.id] = _sftpPanelDefaultWidth;
   _tabs.push(pane);
   setActiveWorkspace(workspaceId);
-  _activePaneId = pane.id;
-  _activeTabId = pane.id;
+  setActivePane(pane.id);
   return pane.id;
 }
 
 function disposeTabResources(id: string) {
   delete _terminalTitles[id];
+  delete _terminalConnectionStatusByTab[id];
   if (_sftpOpenByTab[id]) {
     const next = { ..._sftpOpenByTab };
     delete next[id];
@@ -476,8 +488,11 @@ export function closePane(id: string) {
   _layoutByWorkspace[pane.workspaceId] = nextLayout;
   _tabs = _tabs.filter((tab) => tab.id !== id);
   disposeTabResources(id);
+  if (_focusedPaneByWorkspace[pane.workspaceId] === id) {
+    _focusedPaneByWorkspace[pane.workspaceId] = collectLeafIds(nextLayout)[0] ?? pane.workspaceId;
+  }
   if (wasActive) {
-    const nextPaneId = collectLeafIds(nextLayout)[0] ?? pane.workspaceId;
+    const nextPaneId = _focusedPaneByWorkspace[pane.workspaceId];
     _activePaneId = nextPaneId;
     _activeTabId = nextPaneId;
   }
@@ -512,6 +527,7 @@ export function addTab(tab: Tab) {
   _activeWorkspaceId = rootTab.id;
   _activePaneId = rootTab.id;
   _activeTabId = rootTab.id;
+  _focusedPaneByWorkspace[rootTab.id] = rootTab.id;
   _settingsActive = false;
   recordRecentHomeItem(rootTab);
 }
@@ -575,14 +591,13 @@ export function closeTab(id: string) {
   _tabs = _tabs.filter((candidate) => !idsToClose.includes(candidate.id));
   for (const tabId of idsToClose) disposeTabResources(tabId);
   delete _layoutByWorkspace[id];
+  delete _focusedPaneByWorkspace[id];
 
   if (wasActiveWorkspace) {
     const remaining = workspaceTabs();
     const next = remaining[Math.min(Math.max(visibleIndex, 0), remaining.length - 1)];
     const nextId = next?.id ?? "home";
-    _activeWorkspaceId = nextId;
-    _activePaneId = nextId;
-    _activeTabId = nextId;
+    setActiveWorkspace(nextId);
   }
 }
 
@@ -682,16 +697,6 @@ export function unregisterTerminalArrowSender() { _terminalArrowSender = null; }
 export function sendArrow(dir: ArrowDir, mod: number) { _terminalArrowSender?.(dir, mod); }
 
 /* ─── Per-tab terminal copy/paste controls ─── */
-export interface TerminalResourceStats {
-  tabId: string;
-  cols: number;
-  rows: number;
-  bufferLength: number;
-  scrollback: number;
-  imageStorageLimitMb: number;
-  imagePixelLimit: number;
-}
-
 interface TerminalControls {
   getSelection(): string;
   paste(text: string): void;
@@ -707,7 +712,6 @@ interface TerminalControls {
   /** Read-only text of the visible viewport, one string per row, for the
    *  hover preview. Optional, same as readViewport. */
   readViewportText?(): string[] | null;
-  readResourceStats?(): TerminalResourceStats;
 }
 
 const _terminalControls = new Map<string, TerminalControls>();
@@ -747,22 +751,6 @@ export function readTerminalViewport(tabId: string): ViewportSnapshot | null {
 export function readTerminalViewportText(tabId: string): string[] | null {
   return _terminalControls.get(tabId)?.readViewportText?.() ?? null;
 }
-/** Read-only resource configuration and buffer size for a tab, or null when
- *  the tab is not registered or does not expose resource stats. */
-export function readTerminalResourceStats(tabId: string): TerminalResourceStats | null {
-  return _terminalControls.get(tabId)?.readResourceStats?.() ?? null;
-}
-
-/** Read-only resource snapshots in stable tab-id order. */
-export function terminalResourceSnapshot(): TerminalResourceStats[] {
-  return [..._terminalControls.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .flatMap(([, controls]) => {
-      const stats = controls.readResourceStats?.();
-      return stats ? [stats] : [];
-    });
-}
-
 /* ─── Session registry (for broadcast) ─── */
 interface SessionEntry {
   tabId: string;
@@ -773,6 +761,16 @@ export interface SessionInfo extends SessionEntry {
   label: string;
 }
 let _sessions = $state<SessionEntry[]>([]);
+
+export function terminalConnectionStatus(tabId: string): TerminalConnectionStatus {
+  return _terminalConnectionStatusByTab[tabId] ?? "connecting";
+}
+export function setTerminalConnectionStatus(tabId: string, status: TerminalConnectionStatus) {
+  _terminalConnectionStatusByTab[tabId] = status;
+}
+export function clearTerminalConnectionStatus(tabId: string) {
+  delete _terminalConnectionStatusByTab[tabId];
+}
 
 /**
  * Pending `waitForSession` calls keyed by tabId. A poll-loop in AppShell

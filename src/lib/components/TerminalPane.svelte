@@ -1497,7 +1497,6 @@
     let unsubscribeFont: (() => void) | null = null;
 
     onMount(async () => {
-        const TERMINAL_SCROLLBACK = 1000;
         const IMAGE_STORAGE_LIMIT_MB = app.isMobile ? 32 : 128;
         const IMAGE_PIXEL_LIMIT = app.isMobile ? 4_000_000 : 16_000_000;
 
@@ -1507,7 +1506,6 @@
             fontSize: theme.termFontSize(),
             fontFamily: theme.currentTermFontStack(),
             allowProposedApi: true,
-            scrollback: TERMINAL_SCROLLBACK,
             /*
             // When an app enables mouse tracking (zellij/tmux/vim), xterm hands
             // drags to that app instead of selecting text. Holding a modifier
@@ -1583,24 +1581,11 @@
             focus: () => terminal.focus(),
             readViewport: () => readViewportSnapshot(terminal),
             readViewportText: () => readViewportText(terminal),
-            readResourceStats: () => ({
-                tabId,
-                cols: terminal.cols,
-                rows: terminal.rows,
-                bufferLength: terminal.buffer.active.length,
-                scrollback: TERMINAL_SCROLLBACK,
-                imageStorageLimitMb: IMAGE_STORAGE_LIMIT_MB,
-                imagePixelLimit: IMAGE_PIXEL_LIMIT,
-            }),
         });
         // Expose xterm's live bracketed-paste mode so the AI store can wrap
         // AI-driven pastes the same way xterm wraps manual ones. See
         // bracketed-paste.ts.
         registerBracketedPasteProvider(tabId, () => terminal?.modes.bracketedPasteMode ?? false);
-        if (import.meta.env.DEV) {
-            console.debug("[rssh] terminal resources", app.terminalResourceSnapshot());
-        }
-
         // Copy-on-select (left-button mouseup) + right-click action (capture
         // phase — required so preventDefault can suppress the native menu before
         // xterm/WebView handle the event). See onSelectMouseUp / onTerminalContextMenu.
@@ -1754,6 +1739,17 @@
         resizeObs.observe(containerEl);
     });
 
+    // A missing session id is ambiguous during initial connect and reconnect.
+    // Publish the pane's explicit lifecycle state for the split header.
+    $effect(() => {
+        const connectionStatus: app.TerminalConnectionStatus = disconnected
+            ? "disconnected"
+            : sessionId
+                ? "connected"
+                : "connecting";
+        untrack(() => app.setTerminalConnectionStatus(tabId, connectionStatus));
+    });
+
     // Register session in global registry for broadcast
     $effect(() => {
         if (sessionId && !disconnected) {
@@ -1871,6 +1867,7 @@
         app.unregisterTerminalControls(tabId);
         unregisterBracketedPasteProvider(tabId);
         app.unregisterSession(tabId);
+        app.clearTerminalConnectionStatus(tabId);
         highlightDecorator?.dispose();
         terminal?.dispose();
     });

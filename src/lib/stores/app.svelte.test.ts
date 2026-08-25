@@ -146,6 +146,17 @@ describe("tab MRU ordering", () => {
     expect(app.activeTabId()).toBe("home");
   });
 
+  it("derives the fixed Home tab label from the active locale", async () => {
+    const app = await loadAppModule();
+    const { setLocale } = await import("../i18n/index.svelte.ts");
+    const home = app.tabs()[0];
+
+    expect(app.tabLabel(home)).toBe("Home");
+    setLocale("zh");
+
+    expect(app.tabLabel(home)).toBe("首页");
+  });
+
   it("inserts each new tab at the front of the session region (after home)", async () => {
     const app = await loadAppModule();
     await app.setTabMru(true);
@@ -557,6 +568,45 @@ describe("command block line limit", () => {
 });
 
 describe("terminal workspaces", () => {
+  it("tracks explicit terminal connection states and clears stale state", async () => {
+    const app = await loadAppModule();
+
+    expect(app.terminalConnectionStatus("pane")).toBe("connecting");
+    app.setTerminalConnectionStatus("pane", "connected");
+    expect(app.terminalConnectionStatus("pane")).toBe("connected");
+    app.setTerminalConnectionStatus("pane", "disconnected");
+    expect(app.terminalConnectionStatus("pane")).toBe("disconnected");
+    app.clearTerminalConnectionStatus("pane");
+    expect(app.terminalConnectionStatus("pane")).toBe("connecting");
+  });
+
+  it("restores the most recently focused pane when returning to a workspace", async () => {
+    const app = await loadAppModule();
+    app.addTab({ id: "first", type: "local", label: "First" });
+    app.addPane("first", "right", { id: "first-child", type: "local", label: "First child" });
+    app.setActivePane("first-child");
+    app.addTab({ id: "second", type: "local", label: "Second" });
+
+    app.setActiveWorkspace("first");
+
+    expect(app.activeWorkspaceId()).toBe("first");
+    expect(app.activePaneId()).toBe("first-child");
+  });
+
+  it("restores the most recently focused pane after closing the active workspace", async () => {
+    const app = await loadAppModule();
+    app.addTab({ id: "first", type: "local", label: "First" });
+    app.addPane("first", "right", { id: "first-child", type: "local", label: "First child" });
+    app.setActivePane("first-child");
+    app.addTab({ id: "second", type: "local", label: "Second" });
+
+    app.closeTab("second");
+
+    expect(app.activeWorkspaceId()).toBe("first");
+    expect(app.activePaneId()).toBe("first-child");
+    expect(app.activeTabId()).toBe("first-child");
+  });
+
   it("keeps split children out of the top-level tab list", async () => {
     const app = await loadAppModule();
     app.addTab({ id: "root", type: "local", label: "Root" });

@@ -347,7 +347,7 @@
             getCurrentWindow().setTitle("Settings");
         } else if (workspace || pane) {
             const terminalTitle = app.terminalTitle(app.activePaneId());
-            getCurrentWindow().setTitle(terminalTitle || workspace?.label || pane?.label || "RSSH");
+            getCurrentWindow().setTitle(terminalTitle || (workspace && app.tabLabel(workspace)) || (pane && app.tabLabel(pane)) || "RSSH");
         } else {
             getCurrentWindow().setTitle("RSSH");
         }
@@ -575,7 +575,7 @@
        flat navItems is what the keyboard shortcut cycles through. */
     let navSections = $derived<{ header: NavItem[]; middle: NavItem[]; footer: NavItem[] }>({
         header: [
-            {kind: "tab" as const, tab: {id: "home", type: "home", label: t("tab.home")} },
+            {kind: "tab" as const, tab: {id: "home", type: "home", label: app.tabLabel(app.tabs().find((tab) => tab.id === "home")!)} },
             ...(app.isMobile ? [] : [{kind: "new-tab" as const}, {kind: "new-edit" as const}]),
             // Horizontal strip would burst sideways with N pinned profiles — collapse
             // them into one star button that pops a menu. Vertical sidebar keeps the list.
@@ -749,9 +749,9 @@
         if (!app.isTerminalTabType(tab.type) || tab.type === "serial") return;
         const workspaceId = tab.workspaceId ?? tab.id;
         if (!app.isTerminalWorkspace(workspaceId)) return;
-        const sourcePaneId = tab.id;
         if (tab.paneOf) app.setActivePane(tab.id);
         else app.setActiveWorkspace(workspaceId);
+        const sourcePaneId = app.activePaneId();
 
         const newId = `${tab.type}:${crypto.randomUUID()}`;
         const newTab: Tab = {

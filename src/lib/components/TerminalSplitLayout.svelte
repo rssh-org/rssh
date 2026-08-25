@@ -8,6 +8,7 @@
         type SplitDirection,
         type TerminalLayout,
     } from "../terminal/layout.ts";
+    import {t} from "../i18n/index.svelte.ts";
     import TerminalPane from "./TerminalPane.svelte";
 
     let {
@@ -117,7 +118,7 @@
             style={boundsStyle(pane)}
             role="button"
             tabindex="0"
-            aria-label={`Activate ${tab.label}`}
+            aria-label={t("terminal.pane.activate", {label: tab.label})}
             onclick={() => onActivate(tab.id)}
             onkeydown={(event) => {
                 if (event.currentTarget !== event.target) return;
@@ -131,28 +132,38 @@
                 onContextMenu(event, tab.id);
             }}
         >
-            <header class="pane-header">
-                <span class="pane-title">{tab.label}</span>
-                <span
-                    class="session-status"
-                    class:connected={!!app.sessionIdForTab(tab.id)}
-                    class:disconnected={!app.sessionIdForTab(tab.id)}
-                >
-                    {app.sessionIdForTab(tab.id) ? "Connected" : "Disconnected"}
-                </span>
-                <button
-                    class="close-button"
-                    type="button"
-                    aria-label={`Close ${tab.label}`}
-                    title="Close pane"
-                    onclick={(event) => {
-                        event.stopPropagation();
-                        onClose(tab.id);
-                    }}
-                >
-                    &times;
-                </button>
-            </header>
+            {#if paneLeaves.length > 1}
+                {@const connectionStatus = app.terminalConnectionStatus(tab.id)}
+                <header class="pane-header">
+                    <span class="pane-title">{tab.label}</span>
+                    <span
+                        class="session-status"
+                        class:connecting={connectionStatus === "connecting"}
+                        class:connected={connectionStatus === "connected"}
+                        class:disconnected={connectionStatus === "disconnected"}
+                    >
+                        {t(connectionStatus === "connecting"
+                            ? "common.connecting"
+                            : connectionStatus === "connected"
+                                ? "common.connected"
+                                : "common.disconnected")}
+                    </span>
+                    {#if tab.paneOf}
+                        <button
+                            class="close-button"
+                            type="button"
+                            aria-label={t("terminal.pane.close")}
+                            title={t("terminal.pane.close")}
+                            onclick={(event) => {
+                                event.stopPropagation();
+                                onClose(tab.id);
+                            }}
+                        >
+                            &times;
+                        </button>
+                    {/if}
+                </header>
+            {/if}
             <div class="pane-content">
                 <TerminalPane
                     tabId={tab.id}
@@ -182,7 +193,7 @@
                         ? `left:calc(${ratio * 100}% - 3px);top:0;width:6px;height:100%;`
                         : `left:0;top:calc(${ratio * 100}% - 3px);width:100%;height:6px;`}
                     role="separator"
-                    aria-label="Resize panes"
+                    aria-label={t("terminal.pane.resize")}
                     aria-orientation={node.direction === "horizontal" ? "vertical" : "horizontal"}
                     onpointerdown={(event) => startResize(event, path, node.direction)}
                 ></div>
@@ -278,6 +289,10 @@
 
     .session-status.connected {
         color: var(--success);
+    }
+
+    .session-status.connecting {
+        color: var(--accent);
     }
 
     .session-status.disconnected {
