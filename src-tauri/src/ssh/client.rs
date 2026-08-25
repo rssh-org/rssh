@@ -177,9 +177,9 @@ impl client::Handler for SshHandler {
         connected_port: u32,
         _originator_address: &str,
         _originator_port: u32,
-        session: &mut client::Session,
+        reply: russh::client::ChannelOpenHandle,
+        _session: &mut client::Session,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        let channel_id = channel.id();
         let delivered = self
             .forwarded_channels
             .lock()
@@ -192,11 +192,17 @@ impl client::Handler for SshHandler {
                     .cloned()
             })
             .is_some_and(|tx| tx.send(channel).is_ok());
-        if !delivered {
-            log::warn!("no forward route for remote port {connected_port}; closing channel");
-            let _ = session.close(channel_id);
+        async move {
+            if delivered {
+                reply.accept().await;
+            } else {
+                log::warn!("no forward route for remote port {connected_port}; rejecting channel");
+                reply
+                    .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                    .await;
+            }
+            Ok(())
         }
-        async { Ok(()) }
     }
 
     fn check_server_key(
