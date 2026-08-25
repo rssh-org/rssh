@@ -1,15 +1,14 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { t, errMsg } from "../i18n/index.svelte.ts";
+  import { toast } from "../stores/toast.svelte.ts";
   import { pickTextFile } from "../pick-file.ts";
   import { saveTextFile, fileStamp } from "../save-file.ts";
 
   const MIGRATE_URL = "https://rssh-org.github.io/migrate/";
 
   function openMigrate() {
-    invoke("open_external_url", { url: MIGRATE_URL }).catch((e) =>
-      console.error("open_external_url failed:", e),
-    );
+    invoke("open_external_url", { url: MIGRATE_URL }).catch((e) => toast.error(errMsg(e)));
   }
 
   let importing = $state(false);

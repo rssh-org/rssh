@@ -1145,7 +1145,6 @@ const en = {
   "import_export.import_desc": "Load a previously exported JSON file. Merges into local config: matching entries (by id) are overwritten, others stay.",
   "import_export.exported_to": "Exported to {path}",
   "import_export.imported_from": "Imported from {path}",
-  // SSH config import
   // Shell settings
   "settings.shell.pick_hint": "Pick a shell to use for new local terminals, or choose Custom and type your own path.",
   "settings.shell.custom_placeholder": "/usr/local/bin/fish",

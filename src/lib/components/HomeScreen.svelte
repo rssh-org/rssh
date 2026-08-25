@@ -531,7 +531,7 @@
   .empty-state { text-align: center; padding: 60px 24px; color: var(--text-dim); }
   .empty-state p { margin-bottom: 12px; }
   .empty-state .cta { font-size: 13px; }
-  .empty-actions { display: flex; justify-content: center; gap: 8px; }
+  .empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 
   @media (max-width: 620px) {
     .logo { width: 100%; }

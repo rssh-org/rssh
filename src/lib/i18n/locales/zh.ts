@@ -1148,7 +1148,6 @@ const zh: Messages = {
   "import_export.import_desc": "加载之前导出的 JSON 文件。合并到本地配置：按 id 匹配的条目会被覆盖，其余保留。",
   "import_export.exported_to": "已导出到 {path}",
   "import_export.imported_from": "已从 {path} 导入",
-  // SSH config 导入
   // Shell 设置
   "settings.shell.pick_hint": "选择新建本地终端使用的 shell，或选 Custom 自填路径。",
   "settings.shell.custom_placeholder": "/usr/local/bin/fish",
