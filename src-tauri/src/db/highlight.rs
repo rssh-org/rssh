@@ -102,8 +102,8 @@ pub fn insert(db: &Db, rule: &HighlightRule) -> AppResult<()> {
     // keyed `each` in HighlightManager). The schema has no UNIQUE constraint, so
     // a second row with an existing keyword would slip in and crash the settings
     // panel on its duplicate key. Reject it here, mirroring update()'s rename-
-    // collision guard. (ERROR/WARN/INFO/DEBUG/IPv4 are seeded, so "add ERROR" is
-    // the common trigger.)
+    // collision guard. (The default set is seeded, so re-adding one of those
+    // keywords is the common trigger.)
     let exists: i64 = conn.query_row(
         "SELECT COUNT(*) FROM highlights WHERE keyword = ?1",
         params![rule.keyword],
@@ -225,14 +225,14 @@ pub fn upsert_by_keyword(db: &Db, rule: &HighlightRule) -> AppResult<()> {
     Ok(())
 }
 
-/// The default highlight set: what a fresh install seeds (the v19 migration
-/// block) and what "Reset to Defaults" restores. Entries are (keyword, name,
-/// color); every default is an enabled, case-insensitive regex. Order matters
-/// twice over — it is the list order in the settings UI and the overlap
-/// priority at match time (earlier rule wins). Curated from
-/// community-contributed configs (issue #249); prose-prone words like
-/// no/not/yes/ok/any are deliberately excluded because as global defaults
-/// they would fire on ordinary text.
+/// The default highlight set: what a fresh install converges on (the v29
+/// migration block upserts this into every database) and what "Reset to
+/// Defaults" restores. Entries are (keyword, name, color); every default is an
+/// enabled, case-insensitive regex. Order matters twice over — it is the list
+/// order in the settings UI and the overlap priority at match time (earlier
+/// rule wins). Curated from community-contributed configs (issue #249);
+/// prose-prone words like no/not/yes/ok/any are deliberately excluded because
+/// as global defaults they would fire on ordinary text.
 pub const DEFAULT_RULES: [(&str, &str, &str); 9] = [
     // Log levels — literal, case-sensitive as always.
     ("INFO", "INFO", "#6EDAA0"),
@@ -273,9 +273,9 @@ pub const DEFAULT_RULES: [(&str, &str, &str); 9] = [
     ),
 ];
 
-/// Insert the default set. The caller owns the policy: the v19 migration
-/// calls this right after clearing the bare v9 seeds; reset_defaults deletes
-/// everything first.
+/// Insert the default set. Used by reset_defaults (which deletes everything
+/// first). The v29 migration upserts DEFAULT_RULES instead — it must not wipe
+/// the user's custom rules.
 pub fn insert_defaults(conn: &Connection) -> AppResult<()> {
     for (keyword, name, color) in DEFAULT_RULES {
         conn.execute(
@@ -310,13 +310,13 @@ mod tests {
 
     #[test]
     fn insert_rejects_seeded_keyword() {
-        // C1 repro: a fresh DB seeds ERROR/WARN/INFO/DEBUG/IPv4. Adding "ERROR"
-        // via the New form used to INSERT a duplicate row; the keyword-keyed
-        // each-block in HighlightManager then threw on the duplicate key and the
-        // settings panel went blank on a routine action. insert now rejects it.
+        // C1 repro: a fresh DB seeds the default set. Adding a seeded keyword
+        // ("INFO") via the New form used to INSERT a duplicate row; the
+        // keyword-keyed each-block in HighlightManager then threw on the
+        // duplicate key and the settings panel went blank. insert rejects it.
         let db = Db::open_in_memory().unwrap();
         assert_eq!(
-            insert(&db, &rule("ERROR")).unwrap_err().code(),
+            insert(&db, &rule("INFO")).unwrap_err().code(),
             "highlight_keyword_conflict"
         );
     }
@@ -424,7 +424,7 @@ mod tests {
             .map(|r| (r.keyword, r.name, r.color))
             .collect();
         insert(&db, &rule("CUSTOM")).unwrap();
-        delete_by_keyword(&db, "ERROR").unwrap();
+        delete_by_keyword(&db, "INFO").unwrap();
         reset_defaults(&db).unwrap();
         let after: Vec<_> = list(&db)
             .unwrap()

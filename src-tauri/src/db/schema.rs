@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppResult;
 
-const SCHEMA_VERSION: u32 = 28;
+const SCHEMA_VERSION: u32 = 29;
 
 fn column_exists(conn: &Connection, table: &str, col: &str) -> AppResult<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
@@ -615,6 +615,36 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
                  updated_at INTEGER NOT NULL DEFAULT 0
              );",
         )?;
+    }
+
+    if version < 29 {
+        // Richer default highlights, curated from community configs (issue #249):
+        // converge every database on db::highlight::DEFAULT_RULES. Upsert each
+        // entry (insert missing, refresh existing to stock values) and retire
+        // the bare ERROR/WARN literals — the case-insensitive Errors/Warnings
+        // classes subsume them, so what the terminal shows is unchanged. Rules
+        // with other keywords (the user's own) are untouched.
+        //
+        // table_exists guard: real databases have had highlights since v9, but
+        // the minimal fixture DBs in the migration tests reach v29 without it.
+        if table_exists(conn, "highlights")? {
+            conn.execute(
+                "DELETE FROM highlights WHERE keyword IN ('ERROR', 'WARN')",
+                [],
+            )?;
+            for (keyword, name, color) in crate::db::highlight::DEFAULT_RULES {
+                let affected = conn.execute(
+                    "UPDATE highlights SET name = ?2, color = ?3, enabled = 1, is_regex = 1, is_case_sensitive = 0 WHERE keyword = ?1",
+                    params![keyword, name, color],
+                )?;
+                if affected == 0 {
+                    conn.execute(
+                        "INSERT INTO highlights (keyword, name, color, enabled, is_regex, is_case_sensitive) VALUES (?1, ?2, ?3, 1, 1, 0)",
+                        params![keyword, name, color],
+                    )?;
+                }
+            }
+        }
     }
 
     if version < SCHEMA_VERSION {
