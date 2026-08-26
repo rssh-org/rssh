@@ -1,13 +1,15 @@
-// Re-record docs/welcome-*.gif from the live site scenes (docs/index.html +
-// docs/scenes.js). Drives headless Chrome over raw CDP — no puppeteer needed —
-// and captures Page.screencast frames for exactly ONE loop of each scene,
-// aligned to the player's own reset boundary so every GIF starts from the
-// empty/initial state and ends on the final-state hold.
+// Re-record welcome-*.gif from the live site scenes. The site lives in the
+// sibling rssh-docs checkout (github.com/rssh-org/docs, serves rssh.ofcoder.com);
+// this script drives its index.html + scenes.js. Headless Chrome over raw CDP —
+// no puppeteer needed — captures Page.screencast frames for exactly ONE loop of
+// each scene, aligned to the player's own reset boundary so every GIF starts
+// from the empty/initial state and ends on the final-state hold.
 //
 //     node scripts/record-welcome-gifs.mjs [scene ...]   // e.g. "ai sync"
 //
-// Output: docs/welcome-<scene>.gif — 1280×800 @ 20fps, same filenames the
-// READMEs and articles already reference (in-place refresh, zero doc edits).
+// Output: welcome-<scene>.gif in the docs repo root — 1280×800 @ 20fps, same
+// filenames the site and READMEs already reference (in-place refresh, zero doc
+// edits).
 import { spawn } from "node:child_process";
 import { mkdtemp, rm, copyFile, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -15,14 +17,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PAGE_URL = "file://" + path.join(ROOT, "docs", "index.html");
+const DOCS = process.env.RSSH_DOCS_DIR || path.resolve(ROOT, "..", "rssh-docs");
+const PAGE_URL = "file://" + path.join(DOCS, "index.html");
 const CHROME = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const PORT = 9333;
 const VIEW = { width: 1300, height: 1100 }; // scene = min(1020px, 92vw) wide
 const FPS = 20;
 const OUT_SIZE = { w: 1280 };
 
-// Keep in sync with SCENES[*].loop in docs/scenes.js — the player restarts
+// Keep in sync with SCENES[*].loop in the docs repo's scenes.js — the player restarts
 // itself every `loop` ms, which is both our record duration and our trim mark.
 const SCENES = {
     ai: 9600,
@@ -271,7 +274,7 @@ function encode(scene, cap) {
         `scale=${OUT_SIZE.w}:-2:flags=lanczos`, // height follows the scene's own aspect
         "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
     ].join(",");
-    const out = path.join(ROOT, "docs", `welcome-${scene}.gif`);
+    const out = path.join(DOCS, `welcome-${scene}.gif`);
     if (process.env.DEBUG) console.log(`[rect] ${JSON.stringify(cap.rect)} crop=${crop}`);
     const args = ["-y", "-loglevel", "error", "-framerate", String(FPS), "-i", path.join(cap.seq, "f%05d.png"),
         "-vf", vf, "-loop", "0", out];

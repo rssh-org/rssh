@@ -1,4 +1,4 @@
-//! AI 排障模块。详细约束见 docs/ai-diagnose-design.md。
+//! AI 排障模块。详细约束见 https://github.com/rssh-org/docs/blob/main/ai-diagnose-design.md 。
 //!
 //! 子模块：
 //! - sanitize  脱敏 + 截断 + 命令形态校验

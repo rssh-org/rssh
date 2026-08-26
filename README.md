@@ -15,12 +15,12 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/shihuili1218/rssh)
 
 <p align="center">
-  <img src="docs/img_local.png" alt="RSSH — ask a question, the AI proposes commands, you approve before they run" height="180">
-  <img src="docs/img_blocks_context_menu.png" alt="Color-coded command blocks with their context menu" height="180">
-  <img src="docs/img_ai_panel.png" alt="RSSH — the AI panel reads the terminal and proposes commands for approval" height="180">  
+  <img src="https://rssh.ofcoder.com/img_local.png" alt="RSSH — ask a question, the AI proposes commands, you approve before they run" height="180">
+  <img src="https://rssh.ofcoder.com/img_blocks_context_menu.png" alt="Color-coded command blocks with their context menu" height="180">
+  <img src="https://rssh.ofcoder.com/img_ai_panel.png" alt="RSSH — the AI panel reads the terminal and proposes commands for approval" height="180">  
 </p>
 
-<p align="center"><b><a href="https://github.com/shihuili1218/rssh/releases/latest">⬇️ Download latest</a></b> &nbsp;·&nbsp; <a href="docs/article_en.md">Why RSSH?</a></p>
+<p align="center"><b><a href="https://github.com/shihuili1218/rssh/releases/latest">⬇️ Download latest</a></b> &nbsp;·&nbsp; <a href="https://github.com/rssh-org/docs/blob/main/article_en.md">Why RSSH?</a></p>
 
 ---
 
@@ -33,7 +33,7 @@
 ### 🤖 AI triage
 Not another chat box. Nothing to install on your servers — it works like a human operator, reading the terminal's input and output directly.
 
-<img src="docs/welcome-ai.gif" alt="AI triage: reads the terminal, proposes commands" width="400">
+<img src="https://rssh.ofcoder.com/welcome-ai.gif" alt="AI triage: reads the terminal, proposes commands" width="400">
 
 </td>
 <td width="50%" valign="top">
@@ -41,7 +41,7 @@ Not another chat box. Nothing to install on your servers — it works like a hum
 ### 🎨 Color-coded command blocks
 Every command and its output become a block with a color-coded left edge — spot the last command's output at a glance. **Rendered fully locally**, zero remote dependency.
 
-<img src="docs/welcome-blocks.gif" alt="Color-coded command blocks" width="400">
+<img src="https://rssh.ofcoder.com/welcome-blocks.gif" alt="Color-coded command blocks" width="400">
 
 </td>
 </tr>
@@ -51,7 +51,7 @@ Every command and its output become a block with a color-coded left edge — spo
 ### 🐳 Dynamic discovery
 Containers and pods change by the minute — connecting to servers by static IP is obsolete. RSSH dynamically discovers the containers in your local dev and test environments.
 
-<img src="docs/welcome-discovery.gif" alt="Dynamic discovery: containers appear live in Home" width="400">
+<img src="https://rssh.ofcoder.com/welcome-discovery.gif" alt="Dynamic discovery: containers appear live in Home" width="400">
 
 </td>
 <td width="50%" valign="top">
@@ -59,7 +59,7 @@ Containers and pods change by the minute — connecting to servers by static IP 
 ### 🔐 Multi-platform data sync
 Keys stay in your local OS keyserver; connection configs are encrypted into your own private GitHub repo — nothing sits on a third-party server.
 
-<img src="docs/welcome-sync.gif" alt="Security and sync: keys in keychain, profiles encrypted to GitHub" width="400">
+<img src="https://rssh.ofcoder.com/welcome-sync.gif" alt="Security and sync: keys in keychain, profiles encrypted to GitHub" width="400">
 
 </td>
 </tr>

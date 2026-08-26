@@ -278,7 +278,7 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
         //
         // history_json holds UNREDACTED terminal output — same trust domain as
         // the credentials/secrets tables in this same local DB; redaction stays
-        // at the LLM boundary (see docs/ai-diagnose-design.md).
+        // at the LLM boundary (see ai-diagnose-design.md in rssh-org/docs).
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS ai_conversations (
