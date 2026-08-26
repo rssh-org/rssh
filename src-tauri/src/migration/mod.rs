@@ -20,6 +20,7 @@ use crate::secret::SecretStore;
 
 mod v1_unified_secret_storage;
 pub(crate) mod v2_telnet_login_script;
+mod v3_ai_provider_entities;
 
 /// 跑所有迁移，按顺序串行。大多数迁移用 marker 跳过；v2 还会扫描旧客户端
 /// 可能重新写入的 legacy Telnet 列。
@@ -34,5 +35,6 @@ pub fn run_migrations(
 ) -> AppResult<()> {
     v1_unified_secret_storage::run(db, raw_keyring, new_store)?;
     v2_telnet_login_script::run(db, new_store)?;
+    v3_ai_provider_entities::run(db, new_store)?;
     Ok(())
 }

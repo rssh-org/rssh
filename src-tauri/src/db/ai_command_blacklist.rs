@@ -54,8 +54,7 @@ pub fn replace_category(db: &Db, category: &str, names: &[String]) -> AppResult<
     Ok(())
 }
 
-/// Additive single-row upsert for sync merge — never deletes other rows
-/// (honoring the no-delete-propagation rule). `name` is the PK, so
+/// Additive single-row upsert for sync merge. `name` is the PK, so
 /// `INSERT OR REPLACE` moves a command into `category` if it already existed
 /// under a different one, preserving the "one command, one category" invariant.
 pub fn upsert(db: &Db, row: &BlacklistRow) -> AppResult<()> {
@@ -64,6 +63,13 @@ pub fn upsert(db: &Db, row: &BlacklistRow) -> AppResult<()> {
         "INSERT OR REPLACE INTO ai_command_blacklist (name, category) VALUES (?1, ?2)",
         params![row.name, row.category],
     )?;
+    Ok(())
+}
+
+/// Sync replace semantics: wipe the whole blacklist (payload rows follow).
+pub fn clear_all(db: &Db) -> AppResult<()> {
+    let conn = db.lock()?;
+    conn.execute("DELETE FROM ai_command_blacklist", [])?;
     Ok(())
 }
 

@@ -258,11 +258,6 @@ fn dispatch(
             &arg::<String>(&args, "id")?,
         )),
         "ssh_algorithm_catalog" => ok(Ok::<_, AppError>(crate::ssh::algorithms::catalog())),
-        // Parse-only (no native dialog): the frontend reads ~/.ssh/config text and
-        // sends it; returns the parsed entries. import_ssh_config returns a bare Vec.
-        "import_ssh_config" => ok(Ok::<_, AppError>(
-            crate::commands::profile::import_ssh_config(arg::<String>(&args, "content")?),
-        )),
         // List the local shells the host offers (pure engine, no UI).
         "refresh_shells" => ok(crate::commands::pty::refresh_shells()),
 
@@ -668,16 +663,9 @@ fn dispatch(
             arg(&args, "name")?,
         )),
 
-        // ---- ssh config import ----
-        "read_ssh_config_default" => ok(crate::commands::profile::read_ssh_config_default()),
         "read_default_key_file" => ok(crate::commands::profile::read_default_key_file(arg(
             &args, "name",
         )?)),
-        "import_ssh_entries" => ok(crate::commands::profile::do_import_ssh_entries(
-            &state.db,
-            state.secret_store.as_ref(),
-            arg(&args, "entries")?,
-        )),
 
         // ---- config import/export (JSON-string core; the *_to_file / *_from_file
         //      dialog variants are handled browser-side by the IPC shim) ----
@@ -1036,15 +1024,23 @@ async fn dispatch_async(
         }
         "ai_list_models" => ok(crate::ai::commands::ai_list_models_impl(
             state,
-            arg(&args, "provider")?,
-            args.get("apiKey")
+            args.get("providerId")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            args.get("endpoint")
+            arg(&args, "protocol")?,
+            arg(&args, "endpoint")?,
+            args.get("apiKey")
                 .and_then(Value::as_str)
                 .map(str::to_string),
         )
         .await),
+        "ai_provider_list" => ok(crate::ai::commands::ai_provider_list_impl(state).await),
+        "ai_provider_save" => {
+            ok(crate::ai::commands::ai_provider_save_impl(state, arg(&args, "patch")?).await)
+        }
+        "ai_provider_delete" => {
+            ok(crate::ai::commands::ai_provider_delete_impl(state, arg(&args, "id")?).await)
+        }
         "ai_list_sessions" => ok(crate::ai::commands::ai_list_sessions_for_owner(
             state, owner,
         )),

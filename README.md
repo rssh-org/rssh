@@ -15,7 +15,9 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/shihuili1218/rssh)
 
 <p align="center">
-  <img src="docs/img_local.png" alt="RSSH — ask a question, the AI proposes commands, you approve before they run" width="820">
+  <img src="docs/img_local.png" alt="RSSH — ask a question, the AI proposes commands, you approve before they run" height="180">
+  <img src="docs/img_blocks_context_menu.png" alt="Color-coded command blocks with their context menu" height="180">
+  <img src="docs/img_ai_panel.png" alt="RSSH — the AI panel reads the terminal and proposes commands for approval" height="180">  
 </p>
 
 <p align="center"><b><a href="https://github.com/shihuili1218/rssh/releases/latest">⬇️ Download latest</a></b> &nbsp;·&nbsp; <a href="docs/article_en.md">Why RSSH?</a></p>
@@ -24,20 +26,44 @@
 
 ## Why RSSH
 
-### 🤖 AI triage
-Not another chat box. It reads what is **actually happening** in your terminal, proposes **read-first** commands, each annotated with its side effects and gated behind an explicit "Run" click. Before any payload leaves your machine it passes a shape validator and local redaction — your keys and internal addresses never go out verbatim.
+<table>
+<tr>
+<td width="50%" valign="top">
 
-![AI triage panel: the AI proposes commands and waits for your approval](docs/welcome-ai.gif)
+### 🤖 AI triage
+Not another chat box. Nothing to install on your servers — it works like a human operator, reading the terminal's input and output directly.
+
+<img src="docs/welcome-ai.gif" alt="AI triage: reads the terminal, proposes commands" width="400">
+
+</td>
+<td width="50%" valign="top">
 
 ### 🎨 Color-coded command blocks
-Every command and its output become a block with a color-coded left edge. In a thousand-line scrollback you spot the previous command's output at a glance. Rendered **fully locally** — zero remote dependency, no agent installed on the server.
+Every command and its output become a block with a color-coded left edge — spot the last command's output at a glance. **Rendered fully locally**, zero remote dependency.
 
-![Color-coded command blocks: locate output at a glance](docs/welcome-blocks.gif)
+<img src="docs/welcome-blocks.gif" alt="Color-coded command blocks" width="400">
 
-### ⌨️ Configure once, use everywhere
-`rssh profile open prod` launches a session from any terminal — the CLI and GUI share one SQLite store. The same hosts and keys also run on **mobile** and inside a **JetBrains** tool window.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
 
-![CLI: rssh profile open prod](docs/welcome-cli.gif)
+### 🐳 Dynamic discovery
+Containers and pods change by the minute — connecting to servers by static IP is obsolete. RSSH dynamically discovers the containers in your local dev and test environments.
+
+<img src="docs/welcome-discovery.gif" alt="Dynamic discovery: containers appear live in Home" width="400">
+
+</td>
+<td width="50%" valign="top">
+
+### 🔐 Multi-platform data sync
+Keys stay in your local OS keyserver; connection configs are encrypted into your own private GitHub repo — nothing sits on a third-party server.
+
+<img src="docs/welcome-sync.gif" alt="Security and sync: keys in keychain, profiles encrypted to GitHub" width="400">
+
+</td>
+</tr>
+</table>
 
 ---
 

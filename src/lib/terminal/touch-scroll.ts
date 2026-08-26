@@ -1,5 +1,7 @@
 import type { Terminal } from "@xterm/xterm";
 
+import { terminalRowHeight } from "./row-height.ts";
+
 /**
  * Mobile touch-scroll for an xterm terminal. xterm 6.0.0 vendors a VS Code
  * touch-gesture service (with inertia!) but never calls addTarget(), so
@@ -33,10 +35,10 @@ export function accumulateScroll(
 }
 
 // Tunables (device-feel; adjust on real hardware). Velocity is px/ms.
-// Keep TAKEOVER_PX == the soft-keyboard handler's moveSlopPx (12, in TerminalPane)
-// AND match its boundary: we claim only when travel EXCEEDS it (the check below uses
-// `<=`), exactly when that handler flips to "moved" (hypot > slop). Otherwise a small
-// drag could scroll yet still pop the keyboard on release.
+// The dead zone lets a stationary tap (focus) and long-press (native text
+// selection) pass through untouched; only a real drag scrolls. (It was sized
+// to match a keyboard gesture slop in TerminalPane — that coupling is dead
+// since the soft keyboard moved behind its own keybar button.)
 const TAKEOVER_PX = 12;   // claim the gesture as a scroll once travel exceeds this
 const FLING_MIN_V = 0.12; // release faster than this (~120 px/s) starts a fling
 const STOP_V = 0.02;      // fling ends once it decays below this (~20 px/s)
@@ -69,8 +71,7 @@ export function setupTouchScroll(host: HTMLElement, terminal: Terminal): () => v
   // rows forces a synchronous layout reflow on every touchmove/fling frame (layout
   // thrash). Cached in rowH.
   function measureRowHeight(): number {
-    const row = host.querySelector(".xterm-rows")?.firstElementChild as HTMLElement | null;
-    return row?.offsetHeight ?? 0;
+    return terminalRowHeight(terminal, host);
   }
 
   // Finger down (dy>0) = reveal earlier output = scroll up → negate.

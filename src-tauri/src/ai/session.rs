@@ -298,6 +298,10 @@ pub struct SessionConfig {
     /// `load_skill` 工具从这里查内容，会话期间不重读 DB，避免用户中途改 skill 影响当前会话。
     pub user_skills_cache: Vec<SkillRecord>,
     pub model: String,
+    /// Provider row id（`provider-xxxxx`）。会话身份的一部分：resume 后
+    /// timeline / audit 都靠它对上当时的 provider。协议归 client 管，
+    /// 身份归这里 —— client 不再自带 provider 概念。
+    pub provider: String,
     pub client: Box<dyn LlmClient>,
     pub redact_rules: Vec<RedactRule>,
     /// 命令黑名单：启动时从 DB 一次性物化（fail-closed，见 command_blacklist::load）。
@@ -400,7 +404,7 @@ pub fn start(mut cfg: SessionConfig, app: crate::emitter::Host) -> AppResult<Pen
     let (actor_done_tx, actor_done_rx) = watch::channel(false);
     let terminal_mutations = Arc::new(Mutex::new(Vec::new()));
 
-    let provider = cfg.client.provider().to_string();
+    let provider = cfg.provider.clone();
     let session = DiagnoseSession {
         tab_id: cfg.tab_id.clone(),
         instance_id: uuid::Uuid::nil(),

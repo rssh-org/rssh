@@ -32,7 +32,7 @@ import type {
   CommandResult,
   ConversationMeta,
   PtyExecution,
-  LlmProvider,
+  AiProviderRecord,
   ModelInfo,
   RedactRuleRecord,
   ShellKind,
@@ -228,6 +228,14 @@ export function openPanel(tab_id: string) { _openByTab[tab_id] = true; }
 function hidePanel(tab_id: string) { delete _openByTab[tab_id]; }
 export function closePanel(tab_id: string): Promise<void> {
   hidePanel(tab_id);
+  return endConversation(tab_id);
+}
+
+/** End this tab's conversation: archive it and reset the panel-side state
+ *  (chat items, tokens, lease generation). Panel visibility is the caller's
+ *  concern — closePanel hides the panel; the "new session" button keeps it
+ *  open and lands straight on the initial picker state. */
+export function endConversation(tab_id: string): Promise<void> {
   clearPrefill(tab_id);
   // 面板关闭即结束这轮 conversation。先换 generation，所有迟到 listener/start
   // continuation 都失效；宽度是 tab 偏好，不属于 conversation，继续保留。
@@ -1682,10 +1690,8 @@ export async function saveAuditWithDialog(session: SessionInstanceRef): Promise<
 export function settings() { return _settings; }
 
 type AiSettingsPatch = Partial<{
+  /** Active provider row id. */
   provider: string;
-  model: string;
-  endpoint: string | null;
-  apiKey: string | null;
   dangerMode: boolean;
   autoRunCommand: boolean;
   autoMatchFile: boolean;
@@ -1812,9 +1818,9 @@ function revokeDisallowedCommandApprovals(settings: AiSettings): void {
 
 /**
  * provider 为空 → 拉 active provider 的快照，**更新**全局 `_settings`（ChatPanel 起 session 读它）；
- * provider 非空 → 仅返回该 provider 的快照，**不动**全局缓存（避免设置页切下拉污染聊天）。
+ * provider 非空 → 仅返回该 provider 行的快照，**不动**全局缓存。
  */
-export async function loadSettings(provider?: LlmProvider): Promise<AiSettings> {
+export async function loadSettings(provider?: string): Promise<AiSettings> {
   const snapshot = await invoke<AiSettings>("ai_settings_get", { provider: provider || null });
   if (!provider) {
     // Commands can be hidden behind AuditPanel and have no mounted dialog to
@@ -1837,20 +1843,53 @@ export async function saveSettings(s: AiSettingsPatch) {
   installGlobalSettings(snapshot);
 }
 
+// ─── Provider 实体（设置页列表/表单）──────────────────────────────
+
+export async function loadProviders(): Promise<AiProviderRecord[]> {
+  return invoke<AiProviderRecord[]>("ai_provider_list");
+}
+
+export interface ProviderSaveInput {
+  /** 空 = 新建（后端生成 id）。 */
+  id?: string;
+  name: string;
+  protocol: LlmProtocol;
+  model: string;
+  endpoint: string;
+  /** 空串=删除已存 key；undefined=保留。 */
+  apiKey?: string;
+  activate?: boolean;
+}
+
+/** 新建/更新一行，返回行 id。 */
+export async function saveProvider(p: ProviderSaveInput): Promise<string> {
+  return invoke<string>("ai_provider_save", { patch: p });
+}
+
+export async function deleteProvider(id: string): Promise<void> {
+  await invoke("ai_provider_delete", { id });
+}
+
+/** 设为当前 provider（刷新全局 settings 快照）。 */
+export async function activateProvider(id: string): Promise<void> {
+  await saveSettings({ provider: id });
+}
+
 /**
- * 拉取指定 provider 的模型列表。
- * apiKey/endpoint 为空时后端从 secret_store 取已保存值。
- * GLM 没有公开 /models，会返回硬编码白名单。
+ * 拉模型列表（表单"拉取"按钮）。protocol+endpoint 用表单当前值（未保存也能试）；
+ * apiKey 缺省时后端按 providerId 从 secret_store 取已存值。
+ * 服务端不开放 /models（如智谱）会报错 —— 下拉留空即可。
  */
 export async function listModels(
-  provider: LlmProvider,
-  apiKey?: string,
-  endpoint?: string,
+  protocol: LlmProtocol,
+  endpoint: string,
+  opts?: { providerId?: string; apiKey?: string },
 ): Promise<ModelInfo[]> {
   return invoke<ModelInfo[]>("ai_list_models", {
-    provider,
-    apiKey: apiKey || null,
-    endpoint: endpoint || null,
+    providerId: opts?.providerId || null,
+    protocol,
+    endpoint,
+    apiKey: opts?.apiKey || null,
   });
 }
 

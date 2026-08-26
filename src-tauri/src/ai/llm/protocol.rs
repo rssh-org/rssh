@@ -1,42 +1,69 @@
-//! OpenAI Chat Completions 协议的共享实现。
+//! OpenAI Completions 协议客户端。
 //!
-//! 所有"OpenAI 兼容"的厂商（OpenAI / DeepSeek / 智谱 GLM / vLLM / Together / Groq …）
-//! 在 wire 层面跑的就是这套协议，没有任何差异。本文件把请求构造、SSE 解析、
-//! `/models` 列表查询统一收口；vendor 文件只负责"端点 + 默认模型 + 认证差异"。
+//! 覆盖所有走 Chat Completions wire 格式的服务端（OpenAI / 智谱 GLM /
+//! vLLM / Together / Groq …）。DeepSeek Thinking 是**独立协议文件**
+//! （`deepseek.rs`）——它的 reasoning_content 回传语义不属于这里，共享
+//! 实现曾把思考链发给不认识它的服务端（跨协议泄漏），已结构性消灭。
 //!
 //! 参考：https://platform.openai.com/docs/api-reference/chat
 
 use std::collections::BTreeMap;
 
+use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::json;
 
 use super::{
-    ChatDelta, ChatMessage, ChatRequest, ChatResponse, DeltaSink, ModelInfo, SseParser, ToolCall,
+    ChatDelta, ChatMessage, ChatRequest, ChatResponse, DeltaSink, LlmClient, ModelInfo, SseParser,
+    ToolCall,
 };
 use crate::error::{error_chain, AppError, AppResult};
 
-/// 把用户配置的 endpoint 归一化成"chat completions URL"。
-/// 接受两种输入：
+/// Client for the OpenAI Completions protocol. `endpoint` is required —
+/// callers pass the provider row's explicit value.
+pub struct OpenAiCompletionsClient {
+    api_key: String,
+    chat_endpoint: String,
+    http: reqwest::Client,
+}
+
+impl OpenAiCompletionsClient {
+    pub fn new(api_key: String, endpoint: String) -> Self {
+        Self {
+            api_key,
+            chat_endpoint: normalize_chat_endpoint(endpoint),
+            http: reqwest::Client::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmClient for OpenAiCompletionsClient {
+    async fn chat(&self, req: ChatRequest, sink: DeltaSink) -> AppResult<ChatResponse> {
+        chat(&self.http, &self.chat_endpoint, &self.api_key, req, sink).await
+    }
+
+    async fn list_models(&self) -> AppResult<Vec<ModelInfo>> {
+        let url = models_endpoint_from_chat(&self.chat_endpoint);
+        list_models(&self.http, &url, &self.api_key).await
+    }
+}
+
+/// 归一化成"chat completions URL"。接受两种输入：
 ///   - 完整 chat URL（`.../v1/chat/completions`）—— 直接用
 ///   - base URL（`.../v1`）—— 自动拼 `/chat/completions`
-/// `None` → 落到 vendor 的默认值。
-pub fn resolve_chat_endpoint(custom: Option<String>, default: &str) -> String {
-    let raw = custom
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| default.to_string());
-    let trimmed = raw.trim_end_matches('/');
+fn normalize_chat_endpoint(raw: String) -> String {
+    let trimmed = raw.trim().trim_end_matches('/').to_string();
     if trimmed.ends_with("/chat/completions") {
-        trimmed.to_string()
+        trimmed
     } else {
         format!("{trimmed}/chat/completions")
     }
 }
 
 /// 从 chat endpoint 推 `/models` URL。OpenAI 兼容惯例：把 `/chat/completions` 换成 `/models`。
-pub fn models_endpoint_from_chat(chat_endpoint: &str) -> String {
+fn models_endpoint_from_chat(chat_endpoint: &str) -> String {
     if let Some(base) = chat_endpoint.strip_suffix("/chat/completions") {
         format!("{base}/models")
     } else {
@@ -65,10 +92,6 @@ struct OaiMsg {
     tool_calls: Option<Vec<OaiToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
-    /// DeepSeek `deepseek-reasoner` 多轮要求把上轮的思考链原样塞回去。
-    /// 其他模型给 None，不会序列化出去，无副作用。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_content: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -85,36 +108,30 @@ struct OaiToolCallFn {
     arguments: String,
 }
 
-// ─── 主入口：流式 chat ─────────────────────────────────────────────
-
-pub async fn chat(
-    http: &reqwest::Client,
-    endpoint: &str,
-    api_key: &str,
-    req: ChatRequest,
-    sink: DeltaSink,
-) -> AppResult<ChatResponse> {
-    let mut messages: Vec<OaiMsg> = Vec::with_capacity(req.messages.len() + 1);
+/// Map the shared ChatMessage history onto the OpenAI wire shape. Extracted
+/// from `chat()` so the reasoning_content drop is directly testable.
+fn build_messages(system: &str, history: &[ChatMessage]) -> Vec<OaiMsg> {
+    let mut messages: Vec<OaiMsg> = Vec::with_capacity(history.len() + 1);
     messages.push(OaiMsg {
         role: "system",
-        content: Some(req.system_prompt.clone()),
+        content: Some(system.to_string()),
         tool_calls: None,
         tool_call_id: None,
-        reasoning_content: None,
     });
-    for m in &req.messages {
+    for m in history {
         match m {
             ChatMessage::User { content } => messages.push(OaiMsg {
                 role: "user",
                 content: Some(content.clone()),
                 tool_calls: None,
                 tool_call_id: None,
-                reasoning_content: None,
             }),
+            // `reasoning_content`（DeepSeek 思考链）在这里被显式丢弃：本协议
+            // 的服务端不认识该字段，透传是脏数据泄漏（还可能 400）。
             ChatMessage::Assistant {
                 content,
                 tool_calls,
-                reasoning_content,
+                ..
             } => {
                 let oai_calls: Vec<OaiToolCall> = tool_calls
                     .iter()
@@ -140,7 +157,6 @@ pub async fn chat(
                         Some(oai_calls)
                     },
                     tool_call_id: None,
-                    reasoning_content: reasoning_content.clone(),
                 });
             }
             ChatMessage::ToolResult {
@@ -159,11 +175,23 @@ pub async fn chat(
                     content: Some(body),
                     tool_calls: None,
                     tool_call_id: Some(tool_call_id.clone()),
-                    reasoning_content: None,
                 });
             }
         }
     }
+    messages
+}
+
+// ─── 主入口：流式 chat ─────────────────────────────────────────────
+
+pub async fn chat(
+    http: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    req: ChatRequest,
+    sink: DeltaSink,
+) -> AppResult<ChatResponse> {
+    let messages = build_messages(&req.system_prompt, &req.messages);
 
     let tools: Vec<serde_json::Value> = req
         .tools
@@ -209,7 +237,6 @@ pub async fn chat(
     }
 
     let mut text_out = String::new();
-    let mut reasoning_out = String::new();
     let mut tool_calls: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
     let mut finish_reason = String::new();
     let mut tokens_in: Option<u32> = None;
@@ -242,12 +269,6 @@ pub async fn chat(
                     if !content.is_empty() {
                         text_out.push_str(content);
                         sink(ChatDelta::Text(content.to_string()));
-                    }
-                }
-                // DeepSeek reasoner：累积思考链；不往 sink 推（不渲染到 UI），但要还回去
-                if let Some(rc) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
-                    if !rc.is_empty() {
-                        reasoning_out.push_str(rc);
                     }
                 }
                 if let Some(tcs_arr) = delta.get("tool_calls").and_then(|t| t.as_array()) {
@@ -301,17 +322,15 @@ pub async fn chat(
         stop_reason: finish_reason,
         tokens_in,
         tokens_out,
-        reasoning_content: if reasoning_out.is_empty() {
-            None
-        } else {
-            Some(reasoning_out)
-        },
+        // The OpenAI Completions protocol carries no thinking chain.
+        reasoning_content: None,
     })
 }
 
 // ─── /models 列表 ──────────────────────────────────────────────────
 
 /// GET {endpoint}，Bearer 认证，解析 `{ "data": [{ "id": ... }, ...] }`。
+/// 服务端不开放该接口（如智谱）时返回错误 —— UI 层下拉留空即可。
 pub async fn list_models(
     http: &reqwest::Client,
     endpoint: &str,
@@ -350,4 +369,38 @@ pub async fn list_models(
         .collect();
     models.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A history Assistant message carrying a DeepSeek-style thinking chain
+    /// must serialize WITHOUT the reasoning_content field — the regression
+    /// test for the cross-protocol leak (it used to ride the shared impl).
+    /// Runs the production mapping (`build_messages`), not a hand-built
+    /// struct, so a mapping regression actually fails here.
+    #[test]
+    fn assistant_reasoning_content_is_never_serialized() {
+        let history = vec![ChatMessage::Assistant {
+            content: "answer".into(),
+            tool_calls: vec![],
+            reasoning_content: Some("secret chain of thought".into()),
+        }];
+        let s = serde_json::to_string(&build_messages("sys", &history)).unwrap();
+        assert!(!s.contains("reasoning_content"));
+        assert!(!s.contains("secret chain"));
+    }
+
+    #[test]
+    fn normalizes_base_and_full_chat_urls() {
+        assert_eq!(
+            normalize_chat_endpoint("https://api.openai.com/v1".into()),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_chat_endpoint("https://api.openai.com/v1/chat/completions/".into()),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
 }

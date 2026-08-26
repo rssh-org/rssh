@@ -373,54 +373,8 @@
     min-height: 20px;
   }
 
-  /* indicator 视觉按主题分化：neu 在这里写（三层阴影），flat / material 各自在
-     styles/shapes/*.css 接管。class 用 :global() 暴露给外部 shape selector hook。
-     裸默认（无主题匹配时）= 透明圆，避免空白 fallback 难看。 */
-  :global(.shell-radio-indicator) {
-    position: relative;
-    flex-shrink: 0;
-    border-radius: 50%;
-    height: 20px;
-    width: 20px;
-    overflow: hidden;
-  }
-
-  /* neu 主题：三层圆形阴影（外圈 raised + 内圈 reversed well + 凸起盖板）。
-     :checked 时盖板缩小+下移+淡出，露出底下的"井"。 */
-  :global(:root[data-shape="neumorphism"] .shell-radio-indicator) {
-    box-shadow:
-        -5px -3px 5px 0px var(--shadow-light),
-        5px 3px 8px 0px var(--shadow-dark);
-  }
-  :global(:root[data-shape="neumorphism"] .shell-radio-indicator::before),
-  :global(:root[data-shape="neumorphism"] .shell-radio-indicator::after) {
-    content: "";
-    position: absolute;
-    top: 10%;
-    left: 10%;
-    height: 80%;
-    width: 80%;
-    border-radius: 50%;
-  }
-  :global(:root[data-shape="neumorphism"] .shell-radio-indicator::before) {
-    box-shadow:
-        -3px -1.5px 3px 0px var(--shadow-dark),
-        3px 1.5px 5px 0px var(--shadow-light);
-  }
-  :global(:root[data-shape="neumorphism"] .shell-radio-indicator::after) {
-    background-color: var(--surface);
-    box-shadow:
-        -3px -1.5px 3px 0px var(--shadow-light),
-        3px 1.5px 5px 0px var(--shadow-dark);
-    transform: scale3d(1, 1, 1);
-    transition: opacity 0.25s ease-in-out, transform 0.25s ease-in-out;
-  }
-  /* :checked 用 input[type="radio"] + sibling label 的 element selector，
-     避免 scoped class hash 问题；.shell-radio-indicator 限定只命中本组件的 radio。 */
-  :global(:root[data-shape="neumorphism"] input[type="radio"]:checked ~ label .shell-radio-indicator::after) {
-    transform: scale3d(0.975, 0.975, 1) translate3d(0, 10%, 0);
-    opacity: 0;
-  }
+  /* indicator 视觉（.shell-radio-indicator）已提升为全局样式：基座在
+     styles/global.css，neu / flat / material 三主题都在 styles/shapes/*.css。 */
 
   /* 文字：name + path 单行 inline 排列。
      opacity 1 不衰减 —— 之前 0.6→1 的微交互是参考里 `:focus ~` 那套的辅助效果，

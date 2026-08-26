@@ -150,10 +150,7 @@ pub fn run() {
             commands::profile::create_credential,
             commands::profile::update_credential,
             commands::profile::delete_credential,
-            commands::profile::import_ssh_config,
-            commands::profile::read_ssh_config_default,
             commands::profile::read_default_key_file,
-            commands::profile::import_ssh_entries,
             // groups
             commands::group::list_groups,
             commands::group::create_group,
@@ -350,6 +347,9 @@ pub fn run() {
             ai::commands::ai_settings_get,
             ai::commands::ai_settings_set,
             ai::commands::ai_list_models,
+            ai::commands::ai_provider_list,
+            ai::commands::ai_provider_save,
+            ai::commands::ai_provider_delete,
         ])
         .run(tauri::generate_context!())
         .expect("RSSH startup failed");

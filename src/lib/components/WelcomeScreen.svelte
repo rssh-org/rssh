@@ -14,6 +14,7 @@
   import SceneIntro from "./welcome/SceneIntro.svelte";
   import SceneAi from "./welcome/SceneAi.svelte";
   import SceneBlocks from "./welcome/SceneBlocks.svelte";
+  import SceneDiscovery from "./welcome/SceneDiscovery.svelte";
   import SceneSync from "./welcome/SceneSync.svelte";
   import SceneCli from "./welcome/SceneCli.svelte";
   import SceneCta from "./welcome/SceneCta.svelte";
@@ -21,19 +22,19 @@
   let { onDismiss }: { onDismiss: () => void } = $props();
 
   // Linear scene flow. CTA is terminal — its "Next" is dismiss.
-  type Scene = "intro" | "ai" | "blocks" | "sync" | "cli" | "cta";
+  type Scene = "intro" | "ai" | "blocks" | "discovery" | "sync" | "cli" | "cta";
   const FLOW: readonly Scene[] = isMobile
-    ? ["intro", "ai", "blocks", "sync", "cta"]
-    : ["intro", "ai", "blocks", "sync", "cli", "cta"];
+    ? ["intro", "ai", "blocks", "discovery", "sync", "cta"]
+    : ["intro", "ai", "blocks", "discovery", "sync", "cli", "cta"];
 
   let scene = $state<Scene>("intro");
   // Bumping this remounts the active scene to replay it from the start.
   let replayKey = $state(0);
 
-  // Demo-scene indicator only shows for the 4 "feature" scenes.
+  // Demo-scene indicator only shows for the "feature" scenes.
   const FEATURE_SCENES: Scene[] = isMobile
-    ? ["ai", "blocks", "sync"]
-    : ["ai", "blocks", "sync", "cli"];
+    ? ["ai", "blocks", "discovery", "sync"]
+    : ["ai", "blocks", "discovery", "sync", "cli"];
   let featureIdx = $derived(FEATURE_SCENES.indexOf(scene));
   let showIndicator = $derived(featureIdx >= 0);
 
@@ -133,6 +134,8 @@
         <SceneAi onNext={advance} />
       {:else if scene === "blocks"}
         <SceneBlocks onNext={advance} />
+      {:else if scene === "discovery"}
+        <SceneDiscovery onNext={advance} />
       {:else if scene === "sync"}
         <SceneSync onNext={advance} />
       {:else if scene === "cli"}
@@ -160,7 +163,7 @@
               e.stopPropagation();
             }
           }}
-          aria-label={t(`welcome.scene.${s}.chip` as `welcome.scene.${"ai"|"blocks"|"sync"|"cli"}.chip`)}
+          aria-label={t(`welcome.scene.${s}.chip` as `welcome.scene.${"ai"|"blocks"|"discovery"|"sync"|"cli"}.chip`)}
         ></button>
       {/each}
     </div>

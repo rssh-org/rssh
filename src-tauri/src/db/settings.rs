@@ -26,6 +26,15 @@ pub fn set(db: &Db, key: &str, value: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Unset a key (absent again, not empty-string). Sync's replace semantics needs
+/// a real delete: readers treat `Some("")` and `None` differently in places,
+/// and an empty string would linger in exports as "configured but blank".
+pub fn delete(db: &Db, key: &str) -> AppResult<()> {
+    let conn = db.lock()?;
+    conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

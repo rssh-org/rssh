@@ -44,8 +44,6 @@
     let banner = $state<string | null>(null);
     let inputEl = $state<HTMLTextAreaElement | null>(null);
     let chatBoxEl = $state<HTMLDivElement | null>(null);
-    let showClearDialog = $state(false);
-    let clearDialogOwner = $state<PanelOwner | null>(null);
     let rollingBack = $state(false);
     let rollbackDialog = $state<{
         owner: PanelOwner;
@@ -61,7 +59,7 @@
     // 危险模式标记 —— 用户在 AI Settings 里切换后，标题旁的红色后缀立刻同步。
     // 走 ai.settings() 读 store 的 $state，自动响应式（不需要手动 loadSettings 触发）。
     let dangerMode = $derived(ai.settings()?.danger_mode === true);
-    // 本会话累计 token 用量（actor 生命周期，清上下文不归零——花掉的钱不会退）。
+    // 本会话累计 token 用量（结束会话/新开会话即归零重计）。
     let tokens = $derived(ai.tokenUsage(tabId));
     // Currently running model: prefer the model the active session actually started
     // with (authoritative — a later settings change doesn't affect a live session);
@@ -98,8 +96,6 @@
     // 草稿等面板内状态继续保留，只关闭越出 panel 边界的确认层。
     $effect(() => {
         if (active) return;
-        showClearDialog = false;
-        clearDialogOwner = null;
         rollbackDialog = null;
     });
 
@@ -164,6 +160,9 @@
         if (ensureInFlight) return ensureInFlight;
         ensureInFlight = (async () => {
             const settings = ai.settings() ?? await ai.loadSettings();
+            if (!settings.provider) {
+                throw new Error(t("ai.error.no_provider"));
+            }
             if (!settings.has_api_key) {
                 throw new Error(t("ai.error.no_api_key"));
             }
@@ -199,6 +198,9 @@
         busy = true;
         try {
             const settings = ai.settings() ?? await ai.loadSettings();
+            if (!settings.provider) {
+                throw new Error(t("ai.error.no_provider"));
+            }
             if (!settings.has_api_key) {
                 throw new Error(t("ai.error.no_api_key"));
             }
@@ -264,34 +266,15 @@
         });
     }
 
-    /** 点扫帚按钮：开二次确认模态。actor 不在就不弹（清个空气没意义）。 */
-    function openClearDialog() {
-        if (!session || rollbackDialog || rollingBack) return;
-        clearDialogOwner = snapshotOwner();
-        showClearDialog = true;
-    }
-
-    function closeClearDialog() {
-        showClearDialog = false;
-        clearDialogOwner = null;
-    }
-
-    /** 用户在模态里点"清空"：actor 不死，只把 history 清空 —— 下条消息从头来过。
-     *  若正在流式响应，先把流停掉，避免 in-flight delta 落到已清空的气泡数组。 */
-    async function clearContext() {
-        const owner = clearDialogOwner;
-        const wasStreaming = owner ? ai.isStreaming(owner.tabId) : false;
-        closeClearDialog();
-        if (!owner || !ai.sessionForTab(owner.tabId)) return;
-        try {
-            if (wasStreaming) {
-                await ai.cancelStream(owner.tabId, owner.lease);
-            }
-            await ai.clearContext(owner.tabId, owner.lease);
-        } catch (e) {
-            console.error("[ai] clear context:", e);
-            banner = errMsg(e);
-        }
+    /** New session: end + archive the current conversation but keep the panel
+     *  open — the view falls back to the initial picker state. */
+    function newSession() {
+        auditOpen = false;
+        banner = null;
+        void ai.endConversation(tabId).catch((e) => {
+            console.warn("[ai] end conversation:", e);
+            toast.error(errMsg(e));
+        });
     }
 
     /** 打断当前流式响应；会话上下文保留，用户可立刻发下一条纠正。 */
@@ -332,7 +315,7 @@
     }
 
     function openRollbackDialog(itemIndex: number, text: string) {
-        if (rollingBack || rollbackDialog || showClearDialog || !session) return;
+        if (rollingBack || rollbackDialog || !session) return;
         rollbackDialog = {
             owner: snapshotOwner(),
             instanceId: session.instance_id,
@@ -384,7 +367,7 @@
         </span>
         <!-- Audit log toggle: file-text icon in chat view, chat bubble in audit view (= go back).
              Toolbar controls render unconditionally (stable layout); they disable until the
-             session lazy-starts on first send — no actor, nothing to audit or clear. -->
+             session lazy-starts on first send — no actor, nothing to audit. -->
         <button class="btn-icon" onclick={() => (auditOpen = !auditOpen)} disabled={!session}
                 title={auditOpen ? t("ai.toolbar.back_to_chat") : t("ai.toolbar.audit")}
                 aria-label={auditOpen ? t("ai.toolbar.back_to_chat") : t("ai.toolbar.audit")}>
@@ -398,17 +381,6 @@
                     <line x1="16" y1="17" x2="8" y2="17"/>
                     <polyline points="10 9 8 9"/>
                 {/if}
-            </svg>
-        </button>
-        <!-- 清理上下文：SVG 扫帚图标（22×22）跟"×"视觉重心对齐。 -->
-        <button class="btn-icon" onclick={openClearDialog} disabled={!session} title={t("ai.toolbar.clear_context")} aria-label={t("ai.toolbar.clear_context")}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M20 4 L13 11"/>
-                <path d="M11 9 L15 13"/>
-                <path d="M11 9 L5 15"/>
-                <path d="M12.33 10.33 L7 17"/>
-                <path d="M13.67 11.67 L9 18.5"/>
-                <path d="M15 13 L11 19.5"/>
             </svg>
         </button>
         <!-- Danger-mode toggle: always visible, selected (red) when ON. The toggle
@@ -429,6 +401,17 @@
                 </button>
             {/snippet}
         </DangerModeToggle>
+        <!-- New session: archive the current conversation and return to the
+             picker state; the panel stays open. Disabled when there is no
+             live conversation to end. -->
+        <button class="btn-icon" onclick={newSession} disabled={!session}
+                title={t("ai.toolbar.new_session")} aria-label={t("ai.toolbar.new_session")}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                <line x1="12" y1="8" x2="12" y2="16"/>
+                <line x1="8" y1="12" x2="16" y2="12"/>
+            </svg>
+        </button>
         <button class="btn-icon" onclick={closePanel} title={t("ai.toolbar.close_session")} aria-label={t("ai.toolbar.close_session")}>×</button>
     </div>
 
@@ -609,24 +592,6 @@
     {/if}
 </div>
 
-<!-- Clear-context confirmation. Tauri webview drops native confirm() silently,
-     so we use the same custom modal pattern as AiSettings' danger-mode dialog. -->
-{#if showClearDialog}
-    <Modal onClose={closeClearDialog} class="stack"
-           aria-labelledby="clear-dialog-title" aria-describedby="clear-dialog-body">
-        <h3 id="clear-dialog-title" class="dialog-title">{t("ai.toolbar.clear_confirm_title")}</h3>
-        <div id="clear-dialog-body" class="dialog-body">{t("ai.toolbar.clear_confirm")}</div>
-        <div class="modal-actions">
-            <button class="btn btn-sm" onclick={closeClearDialog}>
-                {t("common.cancel")}
-            </button>
-            <button class="btn btn-sm btn-primary" onclick={clearContext}>
-                {t("ai.toolbar.clear_confirm_action")}
-            </button>
-        </div>
-    </Modal>
-{/if}
-
 {#if rollbackDialog}
     <Modal onClose={closeRollbackDialog} class="stack"
            aria-labelledby="rollback-dialog-title" aria-describedby="rollback-dialog-body">
@@ -664,6 +629,17 @@
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+    }
+    /* AI identity marker (scenes.js ai-dot language): a small purple dot
+       with a soft glow in front of the model name. Purely decorative —
+       renders even before the model name is known. */
+    .model::before {
+        content: "";
+        display: inline-block;
+        width: 6px; height: 6px; border-radius: 50%;
+        margin-right: 6px;
+        background: var(--purple);
+        box-shadow: 0 0 6px color-mix(in srgb, var(--purple) 80%, transparent);
     }
     .tokens {
         font-size: 10.5px;
@@ -726,9 +702,9 @@
     .placeholder {
         padding: 24px; text-align: center;
         color: var(--text-dim);
-        line-height: 1.6;
+        line-height: 1.7;
     }
-    .placeholder.dim { font-size: 13px; padding: 32px 32px 8px; }
+    .placeholder.dim { font-size: 13px; padding: 40px 28px 12px; }
     .hint { font-size: 12px; }
 
     /* 历史对话 picker —— 仅空状态（无会话）时出现在欢迎语下方。 */
@@ -746,9 +722,11 @@
         background: transparent; border: none; cursor: pointer;
         border-radius: 4px; color: var(--text);
         text-align: left; font-size: 12.5px;
+        border-radius: 6px;
     }
     .history-item:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
     .history-item:disabled { opacity: 0.5; cursor: default; }
+    .history-del:hover { color: var(--error); }
     .history-name {
         flex: 1; min-width: 0;
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -760,10 +738,19 @@
     .history-del { font-size: 14px; padding: 2px 5px; color: var(--text-dim); }
 
     .chat {
-        flex: 1; overflow-y: auto; padding: 6px;
-        display: flex; flex-direction: column; gap: 3px;
+        flex: 1; overflow-y: auto; min-height: 0; padding: 10px 12px;
+        display: flex; flex-direction: column; gap: 10px;
     }
-    .item { display: flex; flex-direction: column; gap: 1px; }
+    /* Bubble entrance (scenes.js language) — transform/opacity only, no
+       layout impact, so the scroll-to-bottom on new items is unaffected. */
+    .item {
+        display: flex; flex-direction: column; gap: 2px;
+        animation: bubble-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+    @keyframes bubble-in {
+        from { opacity: 0; transform: translateY(6px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
     .user-message {
         display: flex; align-items: center; justify-content: flex-end; gap: 4px;
     }
@@ -801,19 +788,29 @@
     }
     .ts {
         font-size: 10px; color: var(--text-dim);
-        font-family: monospace;
+        font-family: monospace; letter-spacing: 0.03em;
     }
+    /* User timestamps sit over their right-aligned bubble; assistant ones
+       over the left-aligned bubble — the column reads as two rails. */
+    .item-user .ts { align-self: flex-end; margin-right: 2px; }
     .bubble {
-        padding: 5px 9px; border-radius: 6px;
-        max-width: 95%; word-break: break-word; white-space: pre-wrap;
-        font-size: 13px;
+        padding: 7px 11px; border-radius: 10px;
+        max-width: 92%; word-break: break-word; white-space: pre-wrap;
+        font-size: 13px; line-height: 1.5;
     }
+    /* Translucent tint + hairline border instead of a solid accent block;
+       the sharp corner on the tail side anchors each speaker. */
     .bubble.user {
-        background: var(--accent); color: var(--white);
+        background: color-mix(in srgb, var(--accent) 24%, transparent);
+        border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+        color: var(--text);
+        border-radius: 10px 10px 4px 10px;
     }
     .bubble.assistant {
-        background: color-mix(in srgb, var(--text) 8%, var(--bg));
+        background: color-mix(in srgb, var(--text) 7%, var(--bg));
+        border: 1px solid color-mix(in srgb, var(--text) 11%, transparent);
         align-self: flex-start;
+        border-radius: 10px 10px 10px 4px;
     }
     .bubble.assistant.streaming {
         position: relative;
@@ -824,7 +821,7 @@
         display: inline-block;
         margin-left: 6px;
         padding: 1px 6px;
-        border-radius: 3px;
+        border-radius: 4px;
         background: color-mix(in srgb, var(--text-dim) 18%, transparent);
         color: var(--text-dim);
         font-size: 10.5px;
@@ -836,33 +833,41 @@
         display: inline-block;
         margin-left: 2px;
         animation: blink 1s steps(2, start) infinite;
-        color: var(--text-dim);
+        color: var(--purple);
     }
     @keyframes blink {
         to { visibility: hidden; }
     }
+    /* Placed AFTER the animated rules: same specificity means the later
+       declaration wins, so an earlier block would be overridden by the
+       plain animation rules above. */
+    @media (prefers-reduced-motion: reduce) {
+        .item { animation: none; }
+        .bubble.assistant.streaming::after { animation: none; }
+    }
     /* Markdown 内容样式 — 极致紧凑 */
     /* 关键：覆盖 .bubble 默认的 pre-wrap。marked 输出的 HTML 标签间有 source-only `\n`，
        pre-wrap 会把那些 `\n` 渲染成可见空行——经典 bug，markdown 气泡必须用 normal。 */
-    .bubble.md { line-height: 1.32; font-size: 12.5px; white-space: normal; }
+    .bubble.md { line-height: 1.5; font-size: 12.5px; white-space: normal; }
     .bubble.md :global(> *:first-child) { margin-top: 0; }
     .bubble.md :global(> *:last-child) { margin-bottom: 0; }
     .bubble.md :global(p) { margin: 0; }
-    .bubble.md :global(p + p) { margin-top: 0; }
+    .bubble.md :global(p + p) { margin-top: 2px; }
     .bubble.md :global(br) { line-height: 1; }
     .bubble.md :global(code) {
         background: color-mix(in srgb, var(--text) 12%, transparent);
-        padding: 0 3px; border-radius: 2px;
+        padding: 1px 4px; border-radius: 3px;
         font-family: monospace; font-size: 11.5px;
     }
+    /* Code blocks read as dark insets (scenes.js tool-args language). */
     .bubble.md :global(pre) {
-        background: color-mix(in srgb, var(--text) 8%, var(--bg));
-        padding: 4px 6px; border-radius: 3px;
+        background: color-mix(in srgb, var(--black) 25%, var(--bg));
+        padding: 6px 8px; border-radius: 6px;
         overflow-x: auto; font-size: 11.5px;
-        margin: 2px 0; line-height: 1.3;
+        margin: 3px 0; line-height: 1.35;
     }
     .bubble.md :global(pre code) { background: transparent; padding: 0; font-size: inherit; }
-    .bubble.md :global(ul), .bubble.md :global(ol) { margin: 1px 0; padding-left: 16px; }
+    .bubble.md :global(ul), .bubble.md :global(ol) { margin: 2px 0; padding-left: 18px; }
     .bubble.md :global(li) { margin: 0; }
     .bubble.md :global(li > p) { margin: 0; }
     .bubble.md :global(li > ul), .bubble.md :global(li > ol) { margin: 0; }
@@ -873,29 +878,31 @@
     .bubble.md :global(h2),
     .bubble.md :global(h3),
     .bubble.md :global(h4) {
-        margin: 3px 0 1px; font-weight: 600; line-height: 1.2;
+        margin: 6px 0 2px; font-weight: 600; line-height: 1.25;
     }
     .bubble.md :global(:first-child:is(h1, h2, h3, h4)) { margin-top: 0; }
     .bubble.md :global(h1) { font-size: 14px; }
     .bubble.md :global(h2) { font-size: 13px; }
     .bubble.md :global(h3), .bubble.md :global(h4) { font-size: 12.5px; }
     .bubble.md :global(blockquote) {
-        border-left: 2px solid var(--divider);
-        padding-left: 5px; margin: 1px 0;
+        border-left: 3px solid color-mix(in srgb, var(--purple) 45%, transparent);
+        padding-left: 8px; margin: 3px 0;
         color: var(--text-dim);
     }
     .bubble.md :global(hr) {
         border: 0; border-top: 1px solid var(--divider);
-        margin: 3px 0;
+        margin: 6px 0;
     }
     .bubble.md :global(table) {
-        border-collapse: collapse; margin: 2px 0; font-size: 11.5px;
+        border-collapse: collapse; margin: 3px 0; font-size: 11.5px;
     }
+    .bubble.md :global(th) { background: color-mix(in srgb, var(--text) 6%, transparent); }
     .bubble.md :global(th), .bubble.md :global(td) {
-        border: 1px solid var(--divider); padding: 1px 5px;
+        border: 1px solid var(--divider); padding: 2px 6px;
     }
     .bubble.error {
         background: color-mix(in srgb, var(--error) 15%, var(--bg));
+        border: 1px solid color-mix(in srgb, var(--error) 35%, transparent);
         color: var(--error);
         font-size: 12px;
     }
@@ -908,18 +915,28 @@
     }
 
     .input-area {
-        display: flex; align-items: flex-end; gap: 8px; padding: 8px;
+        display: flex; align-items: flex-end; gap: 8px; padding: 10px;
         border-top: 1px solid var(--divider);
         flex-shrink: 0;
     }
+    /* Dark inset composer (scenes.js ai-input language); focus ring carries
+       the panel's purple AI identity. */
     textarea {
         flex: 1; min-height: 36px; max-height: 120px; resize: none;
-        padding: 6px 8px; border: 1px solid var(--divider);
-        border-radius: 4px; background: var(--bg); color: var(--text);
-        font-family: inherit; font-size: 13px;
+        padding: 8px 10px; border: 1px solid var(--divider);
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--black) 18%, var(--bg));
+        color: var(--text);
+        font-family: inherit; font-size: 13px; line-height: 1.45;
+        transition: border-color 150ms ease, box-shadow 150ms ease;
+    }
+    textarea:focus {
+        outline: none;
+        border-color: color-mix(in srgb, var(--purple) 55%, transparent);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--purple) 18%, transparent);
     }
 
-    /* Clear-context confirmation modal — shell lives in Modal.svelte, typography
+    /* Rollback confirmation modal — shell lives in Modal.svelte, typography
        in global .dialog-title/.dialog-body; only the multi-line body is local. */
     .dialog-body {
         white-space: pre-line;

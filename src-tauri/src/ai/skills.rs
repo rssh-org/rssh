@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::{Db, ai_skill};
+use crate::db::{ai_skill, Db};
 use crate::error::AppResult;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

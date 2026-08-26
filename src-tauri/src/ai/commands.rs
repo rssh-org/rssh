@@ -18,31 +18,25 @@ use super::sanitize;
 use super::session::{self, DiagnoseSession, UserAction};
 use super::skills::{self, SkillRecord};
 
-// ─── BYOK 设置存储键 ────────────────────────────────────────────────
+// ─── BYOK 设置存储 ─────────────────────────────────────────────────
 //
 // 分两类存储：
 //   - API key：真 secret，走 state.secret_store（= HybridStore，ChaCha20-Poly1305
 //     加密后落 DB.secrets 表；主密钥在 keychain 或 master.key 文件），带 "setting:"
 //     命名空间前缀。
-//   - 其它（provider/model/endpoint/danger_mode/auto_*）：行为偏好，走 DB.settings 表
-//     （明文裸 key），跟 locale / theme / verbose_log 同档次。
+//   - provider 实体（name/protocol/model/endpoint）：DB.ai_providers 表一行一个；
+//     active 选择（`ai_provider` settings 键，值 = 行 id）与 danger_mode/auto_*
+//     等行为偏好走 DB.settings 表，跟 locale / theme 同档次。
 //
-// 之前历史版本所有 ai_* 都塞进 keychain，把 keychain 当通用键值库用 ——
-// 滥用 keychain 容量、增加 OS 解锁次数（mac Touch ID 弹窗）、语义错乱（行为偏好
-// 不是 secret）。PR #59 把行为偏好迁出 keychain；PR #60 把 secret 统一走 HybridStore
-// 加密 DB 解决 Windows Credential Manager 2560 字节硬限。
+// 历史包袱已清：v3 之前的散键（ai_{vendor}_model / ai_{vendor}_endpoint）由
+// `migration/v3_ai_provider_entities` 迁进表后删除，这里不再有任何按厂商名
+// 拼键的代码。
 
 fn key_provider() -> String {
     "ai_provider".into()
 }
-fn key_model(provider: &str) -> String {
-    format!("ai_{provider}_model")
-}
-fn key_endpoint(provider: &str) -> String {
-    format!("ai_{provider}_endpoint")
-}
-/// API key 走 keychain —— 唯一真 secret，命名空间带 "setting:" 前缀以跟其它
-/// secret（cred:* 等）隔离。
+/// API key 走 SecretStore —— 唯一真 secret，命名空间带 "setting:" 前缀以跟其它
+/// secret（cred:* 等）隔离。参数是 provider 行 id。
 fn key_api_key(provider: &str) -> String {
     setting_key(&format!("ai_{provider}_key"))
 }
@@ -66,19 +60,15 @@ fn key_auto_detect_remote_shell() -> String {
     "ai_auto_detect_remote_shell".into()
 }
 
-// ─── Sync (export/import of provider settings) ─────────────────────
+// ─── Sync (export/import of provider rows) ─────────────────────────
 //
-// Providers eligible for sync. Per-provider config (model/endpoint/api_key) is
-// emitted as a list so multiple platforms round-trip. `danger_mode` and the
-// `auto_*` family are deliberately NOT synced — they are per-device safety
-// preferences, not portable config.
-
-/// Providers whose `{model, endpoint, api_key}` participate in GitHub sync.
-pub const SYNC_PROVIDERS: &[&str] = &["anthropic", "openai", "deepseek", "glm"];
+// `danger_mode` and the `auto_*` family are deliberately NOT synced — they are
+// per-device safety preferences, not portable config.
 
 /// Build the `ai` payload section: `{ active_provider, providers: [...] }`.
-/// Only providers the user has actually configured (any non-empty field) are
-/// included. `include_keys` gates the plaintext `api_key` field (the AI-key
+/// Rows come from the `ai_providers` table — every row the user created rides
+/// along (a row IS intent; there is no "never-configured" partial state to
+/// filter). `include_keys` gates the plaintext `api_key` field (the AI-key
 /// sync toggle); the value comes from the SecretStore decrypted, and the whole
 /// payload is encrypted as one blob before leaving the device.
 pub fn export_ai_settings(
@@ -87,29 +77,21 @@ pub fn export_ai_settings(
     include_keys: bool,
 ) -> AppResult<serde_json::Value> {
     let mut providers = Vec::new();
-    for p in SYNC_PROVIDERS {
-        // Trim and treat blank/whitespace as unset — only ever emit what the user
-        // actually configured. A blank value would otherwise overwrite a populated
-        // field on another device (additive merge forbids destructive clears) and
-        // suppress the official-endpoint placeholder there.
-        let model = crate::db::settings::get(db, &key_model(p))?.unwrap_or_default();
-        let model = model.trim();
-        let endpoint = crate::db::settings::get(db, &key_endpoint(p))?.unwrap_or_default();
-        let endpoint = endpoint.trim();
-        let api_key = ss.get(&key_api_key(p))?.unwrap_or_default();
-        let api_key = api_key.trim();
-        if model.is_empty() && endpoint.is_empty() && api_key.is_empty() {
-            continue; // never-configured provider — nothing to sync
+    for row in crate::db::ai_provider::list(db)? {
+        let mut obj = json!({
+            "provider": row.id,
+            "name": row.name,
+            "protocol": row.protocol,
+            "endpoint": row.endpoint,
+        });
+        if !row.model.is_empty() {
+            obj["model"] = json!(row.model);
         }
-        let mut obj = json!({ "provider": p });
-        if !model.is_empty() {
-            obj["model"] = json!(model);
-        }
-        if !endpoint.is_empty() {
-            obj["endpoint"] = json!(endpoint);
-        }
-        if include_keys && !api_key.is_empty() {
-            obj["api_key"] = json!(api_key);
+        if include_keys {
+            let api_key = ss.get(&key_api_key(&row.id))?.unwrap_or_default();
+            if !api_key.trim().is_empty() {
+                obj["api_key"] = json!(api_key.trim());
+            }
         }
         providers.push(obj);
     }
@@ -117,61 +99,106 @@ pub fn export_ai_settings(
     Ok(json!({ "active_provider": active, "providers": providers }))
 }
 
-/// Apply an `ai` payload section. Additive: only provided fields are written,
-/// nothing is deleted. Unknown providers are ignored so a payload can't write
-/// arbitrary setting keys. `api_key` is written to the SecretStore.
+/// Apply an `ai` payload section — full replace (mirror): the local table
+/// becomes exactly what the payload carries. Rows absent from the payload are
+/// deleted (row + api_key).
+///
+/// **Validate-then-mutate**: every row is parsed and checked (id/name/protocol/
+/// endpoint non-empty, protocol one of the three) BEFORE the mirror's first
+/// move — the mirror starts by clearing the local table, so writing any part
+/// of a payload that fails validation mid-way would leave a half-wiped state.
+/// An invalid row (e.g. a legacy fixed-vendor payload without name/protocol)
+/// fails the whole category with `ai_payload_invalid`; local config is never
+/// touched. That is the agreed behavior for old payloads: error out, no
+/// compat mapping.
 pub fn import_ai_settings(
     db: &crate::db::Db,
     ss: &dyn crate::secret::SecretStore,
     ai: &serde_json::Value,
 ) -> AppResult<()> {
-    if let Some(arr) = ai.get("providers").and_then(|v| v.as_array()) {
-        for entry in arr {
-            let Some(name) = entry.get("provider").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            if !SYNC_PROVIDERS.contains(&name) {
-                continue; // refuse to write keys for unknown providers
-            }
-            // Trim, then blank/whitespace == "not set" → no-op, never overwrite.
-            // Additive merge must not let a blank (old/hand-edited/corrupted
-            // payload) wipe a configured value; matches api_key/active_provider.
-            if let Some(m) = entry
-                .get("model")
+    let arr = ai
+        .get("providers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut rows = Vec::with_capacity(arr.len());
+    for (i, entry) in arr.iter().enumerate() {
+        let field = |name: &str| -> AppResult<String> {
+            entry
+                .get(name)
                 .and_then(|v| v.as_str())
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-            {
-                crate::db::settings::set(db, &key_model(name), m)?;
-            }
-            if let Some(e) = entry
-                .get("endpoint")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                crate::db::settings::set(db, &key_endpoint(name), e)?;
-            }
-            if let Some(k) = entry
-                .get("api_key")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                ss.set(&key_api_key(name), k)?;
-            }
+                .map(String::from)
+                .ok_or_else(|| {
+                    AppError::config("ai_payload_invalid", json!({ "row": i, "field": name }))
+                })
+        };
+        let id = field("provider")?;
+        let name = field("name")?;
+        let protocol = field("protocol")?;
+        let endpoint = field("endpoint")?;
+        if !llm::protocol_valid(&protocol) {
+            return Err(AppError::config(
+                "ai_payload_invalid",
+                json!({ "row": i, "field": "protocol", "value": protocol }),
+            ));
+        }
+        let model = entry
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let api_key = entry
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        rows.push((
+            crate::db::ai_provider::ProviderRow {
+                id,
+                name,
+                protocol,
+                model,
+                endpoint,
+            },
+            api_key,
+        ));
+    }
+
+    // Mirror: wipe + insert atomically. Validation above already guaranteed
+    // every row's shape, so the transaction only guards against DB-level
+    // failures mid-insert — a half-replaced table can never be observable.
+    let old_ids = crate::db::ai_provider::ids(db)?;
+    db.with_transaction(|tx| {
+        crate::db::ai_provider::clear_all_tx(tx)?;
+        for (row, _) in &rows {
+            crate::db::ai_provider::upsert_tx(tx, row)?;
+        }
+        Ok(())
+    })?;
+    // Secrets ride outside the transaction: write the carried keys, then drop
+    // the secrets of rows the mirror deleted. A failure here leaves consistent
+    // rows and surfaces as an import error — never a half-wiped table.
+    for (row, api_key) in &rows {
+        if let Some(k) = api_key {
+            ss.set(&key_api_key(&row.id), k)?;
         }
     }
-    // Allowlist active_provider too — provider rows above are filtered, so
-    // accepting an unsupported active value would point ai_provider at a
-    // backend with no config row (broken AI until the user fixes it manually).
-    if let Some(active) = ai
-        .get("active_provider")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .filter(|s| SYNC_PROVIDERS.contains(s))
-    {
-        crate::db::settings::set(db, &key_provider(), active)?;
+    for id in &old_ids {
+        if crate::db::ai_provider::get(db, id)?.is_none() {
+            ss.delete(&key_api_key(id))?;
+        }
+    }
+    // Active selection: apply only when it names a carried row; anything else
+    // clears it (never dangle at a row the mirror just deleted).
+    crate::db::settings::delete(db, &key_provider())?;
+    if let Some(active) = ai.get("active_provider").and_then(|v| v.as_str()) {
+        if rows.iter().any(|(r, _)| r.id == active) {
+            crate::db::settings::set(db, &key_provider(), active)?;
+        }
     }
     Ok(())
 }
@@ -399,12 +426,17 @@ pub async fn ai_session_start_impl(
         }
     }
 
-    // 1. API key（走 keychain）+ endpoint（走 DB settings 明文）
+    // 1. Provider 行（协议 + endpoint）+ API key（SecretStore）。
+    // provider 参数是行 id —— 协议分发行查，不在请求里猜。
+    let provider_row = crate::db::ai_provider::get(&state.db, &provider)?.ok_or_else(|| {
+        AppError::not_found("provider_not_found", json!({ "provider": provider }))
+    })?;
     let api_key = state
         .secret_store
-        .get(&key_api_key(&provider))?
-        .ok_or_else(|| AppError::config("api_key_missing", json!({ "provider": provider })))?;
-    let endpoint = crate::db::settings::get(&state.db, &key_endpoint(&provider))?;
+        .get(&key_api_key(&provider_row.id))?
+        .ok_or_else(|| {
+            AppError::config("api_key_missing", json!({ "provider": provider_row.id }))
+        })?;
 
     // 2. 校验 target 存在 + 抓 SSH handle（给 download_file 工具复用）+ 推断初始 shell。
     //
@@ -492,7 +524,11 @@ pub async fn ai_session_start_impl(
         }
     };
 
-    let client = llm::build_client(&provider, api_key, endpoint)?;
+    let client = llm::build_client(
+        &provider_row.protocol,
+        api_key,
+        provider_row.endpoint.clone(),
+    )?;
 
     // system prompt = 内置 general 规则集 + lazy Skill 目录（id + description）。
     // 其它内置 Skill 和用户 Skill 走 load_skill 工具按需加载，
@@ -552,6 +588,7 @@ pub async fn ai_session_start_impl(
         system_prompt,
         user_skills_cache,
         model,
+        provider: provider_row.id.clone(),
         client,
         // DB 读规则失败直接向上抛 —— fail-closed。脱敏策略读不出来就让会话起步失败、
         // 报错给用户，绝不静默回退默认：用户可能删过 / 改严过默认规则，回退会悄悄套用
@@ -1414,7 +1451,11 @@ pub fn ai_conversation_delete_impl(state: &AppState, id: &str) -> AppResult<()> 
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct AiSettings {
+    /// Active (or requested) provider row id. Empty = nothing configured.
     pub provider: String,
+    /// Display name / protocol of that row (empty alongside `provider`).
+    pub provider_name: String,
+    pub protocol: String,
     pub model: String,
     pub endpoint: Option<String>,
     pub has_api_key: bool,
@@ -1449,8 +1490,9 @@ fn read_auto(state: &AppState, name: &str) -> AppResult<bool> {
         .unwrap_or_else(|| auto_default(name)))
 }
 
-/// `provider` 入参：传 `Some(p)` → 拉该 provider 的快照（不改 active）；
-/// `None` → 拉当前 active provider 的快照。无任何兜底默认值，未存就是空。
+/// `provider` 入参：传 `Some(p)` → 拉该 provider 行的快照（不改 active）；
+/// `None` → 拉当前 active provider 行的快照。没有配置任何 provider 时
+/// provider 字段为空串，其余字段为默认值 —— 无兜底厂商。
 #[tauri::command]
 pub async fn ai_settings_get(
     state: State<'_, AppState>,
@@ -1464,18 +1506,24 @@ pub async fn ai_settings_get_impl(
     state: &AppState,
     provider: Option<String>,
 ) -> AppResult<AiSettings> {
-    let provider = match provider.filter(|s| !s.is_empty()) {
-        Some(p) => p,
-        None => crate::db::settings::get(&state.db, &key_provider())?
-            .unwrap_or_else(|| "anthropic".into()),
+    let provider_id = match provider.filter(|s| !s.is_empty()) {
+        Some(p) => Some(p),
+        None => crate::db::settings::get(&state.db, &key_provider())?,
     };
-    let model = crate::db::settings::get(&state.db, &key_model(&provider))?.unwrap_or_default();
-    let endpoint = crate::db::settings::get(&state.db, &key_endpoint(&provider))?;
+    // Row absent (deleted active / never configured) → empty provider fields,
+    // never a fabricated default.
+    let row = match &provider_id {
+        Some(id) => crate::db::ai_provider::get(&state.db, id)?,
+        None => None,
+    };
     // 只查存在性，**不解密** —— 解密会加载 master key（=钥匙串授权弹窗），
     // 仅仅为了渲染设置 / 给"发送到 AI"做置灰判断而弹钥匙串是不可接受的。
-    // 空 key 在 ai_settings_set 里走 delete（不存空串），所以"存在"==有真 key，
-    // 跟旧的 .filter(!empty).is_some() 语义一致。真正的解密留给发起 LLM 请求时。
-    let has_api_key = state.secret_store.exists(&key_api_key(&provider))?;
+    // 空 key 在 ai_provider_save 里走 delete（不存空串），所以"存在"==有真
+    // key。真正的解密留给发起 LLM 请求时。
+    let has_api_key = match &row {
+        Some(r) => state.secret_store.exists(&key_api_key(&r.id))?,
+        None => false,
+    };
     let danger_mode = crate::db::settings::get(&state.db, &key_danger_mode())?
         .map(|v| v == "1")
         .unwrap_or(false);
@@ -1484,9 +1532,11 @@ pub async fn ai_settings_get_impl(
             .map(|v| v == "1")
             .unwrap_or(false);
     Ok(AiSettings {
-        provider,
-        model,
-        endpoint,
+        provider: row.as_ref().map(|r| r.id.clone()).unwrap_or_default(),
+        provider_name: row.as_ref().map(|r| r.name.clone()).unwrap_or_default(),
+        protocol: row.as_ref().map(|r| r.protocol.clone()).unwrap_or_default(),
+        model: row.as_ref().map(|r| r.model.clone()).unwrap_or_default(),
+        endpoint: row.as_ref().map(|r| r.endpoint.clone()),
         has_api_key,
         danger_mode,
         auto_run_command: read_auto(state, "run_command")?,
@@ -1503,50 +1553,222 @@ pub async fn ai_settings_get_impl(
     })
 }
 
-/// 拉取指定 provider 的模型列表。
+/// 拉取模型列表（设置页表单的"拉取模型"按钮）。
 ///
-/// 优先用入参 `api_key` / `endpoint`（"试一下再保存"流程）；缺省时回落到
-/// secret_store 里已保存的值。GLM 这种官方不开放 `/models` 的厂商，会返回
-/// 硬编码白名单（见 `llm::glm`）。
+/// `protocol` + `endpoint` 来自表单当前值（未保存也能试）；`api_key` 优先用
+/// 入参（"试一下再保存"），缺省回落到 `provider_id` 行已存的 key。服务端
+/// 不开放 /models（如智谱）时报错上浮 —— 前端下拉留空即可。
 #[tauri::command]
 pub async fn ai_list_models(
     state: State<'_, AppState>,
-    provider: String,
+    provider_id: Option<String>,
+    protocol: String,
+    endpoint: String,
     api_key: Option<String>,
-    endpoint: Option<String>,
 ) -> AppResult<Vec<llm::ModelInfo>> {
-    ai_list_models_impl(&state, provider, api_key, endpoint).await
+    ai_list_models_impl(&state, provider_id, protocol, endpoint, api_key).await
 }
 
 /// Transport-agnostic body shared by the Tauri command and the headless server.
 pub async fn ai_list_models_impl(
     state: &AppState,
-    provider: String,
+    provider_id: Option<String>,
+    protocol: String,
+    endpoint: String,
     api_key: Option<String>,
-    endpoint: Option<String>,
 ) -> AppResult<Vec<llm::ModelInfo>> {
     // 入参先 trim：纯空白当作"未提供"，回落到 secret_store
+    let endpoint = endpoint.trim().to_string();
+    if endpoint.is_empty() {
+        return Err(AppError::config("endpoint_missing", json!({})));
+    }
     let api_key = match api_key
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
     {
         Some(k) => k,
-        None => state
-            .secret_store
-            .get(&key_api_key(&provider))?
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| AppError::config("api_key_missing", json!({ "provider": provider })))?,
+        None => match provider_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(id) => state
+                .secret_store
+                .get(&key_api_key(id))?
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| AppError::config("api_key_missing", json!({ "provider": id })))?,
+            None => {
+                return Err(AppError::config(
+                    "api_key_missing",
+                    json!({ "provider": "" }),
+                ));
+            }
+        },
     };
-    let endpoint = endpoint
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            crate::db::settings::get(&state.db, &key_endpoint(&provider))
-                .ok()
-                .flatten()
-        });
-    let client = llm::build_client(&provider, api_key, endpoint)?;
+    let client = llm::build_client(&protocol, api_key, endpoint)?;
     client.list_models().await
+}
+
+// ─── Provider 实体管理（设置页列表/表单的后端）──────────────────────
+
+#[derive(Serialize)]
+pub struct AiProviderInfo {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub model: String,
+    pub endpoint: String,
+    pub has_api_key: bool,
+}
+
+#[tauri::command]
+pub async fn ai_provider_list(state: State<'_, AppState>) -> AppResult<Vec<AiProviderInfo>> {
+    ai_provider_list_impl(&state).await
+}
+
+/// Transport-agnostic body shared by the Tauri command and the headless server.
+pub async fn ai_provider_list_impl(state: &AppState) -> AppResult<Vec<AiProviderInfo>> {
+    let mut out = Vec::new();
+    for row in crate::db::ai_provider::list(&state.db)? {
+        // 同 ai_settings_get：只查存在性，不解密。
+        let has_api_key = state.secret_store.exists(&key_api_key(&row.id))?;
+        out.push(AiProviderInfo {
+            id: row.id,
+            name: row.name,
+            protocol: row.protocol,
+            model: row.model,
+            endpoint: row.endpoint,
+            has_api_key,
+        });
+    }
+    Ok(out)
+}
+
+/// Create/update one provider. `id` empty → create (id generated here);
+/// non-empty → update that row (unknown id → `provider_not_found`).
+/// `api_key`: `Some("")` deletes the stored key, `None` keeps it as-is.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiProviderPatch {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub protocol: Option<String>,
+    pub model: Option<String>,
+    pub endpoint: Option<String>,
+    pub api_key: Option<String>,
+    /// Also make this provider the active selection.
+    #[serde(default)]
+    pub activate: bool,
+}
+
+#[tauri::command]
+pub async fn ai_provider_save(
+    state: State<'_, AppState>,
+    patch: AiProviderPatch,
+) -> AppResult<String> {
+    ai_provider_save_impl(&state, patch).await
+}
+
+/// Transport-agnostic body shared by the Tauri command and the headless server.
+/// Returns the row id (generated on create).
+pub async fn ai_provider_save_impl(state: &AppState, patch: AiProviderPatch) -> AppResult<String> {
+    let name = patch
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::config("provider_field_required", json!({ "field": "name" })))?
+        .to_string();
+    let protocol = patch
+        .protocol
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::config("provider_field_required", json!({ "field": "protocol" })))?
+        .to_string();
+    if !llm::protocol_valid(&protocol) {
+        return Err(AppError::config(
+            "provider_protocol_invalid",
+            json!({ "protocol": protocol }),
+        ));
+    }
+    let endpoint = patch
+        .endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::config("provider_field_required", json!({ "field": "endpoint" })))?
+        .to_string();
+    let model = patch
+        .model
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+
+    let id = match patch.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => {
+            if crate::db::ai_provider::get(&state.db, id)?.is_none() {
+                return Err(AppError::not_found(
+                    "provider_not_found",
+                    json!({ "provider": id }),
+                ));
+            }
+            id.to_string()
+        }
+        None => {
+            // Generate until unique (5 chars of uuid — collision odds are tiny,
+            // the loop makes it zero).
+            let existing = crate::db::ai_provider::ids(&state.db)?;
+            loop {
+                let candidate = crate::db::ai_provider::ProviderRow::generate_id();
+                if !existing.contains(&candidate) {
+                    break candidate;
+                }
+            }
+        }
+    };
+
+    crate::db::ai_provider::upsert(
+        &state.db,
+        &crate::db::ai_provider::ProviderRow {
+            id: id.clone(),
+            name,
+            protocol,
+            model,
+            endpoint,
+        },
+    )?;
+    match patch.api_key.as_deref().map(str::trim) {
+        None => {} // field absent — keep the stored key
+        Some("") => {
+            // Explicit clear (matches the AiProviderPatch doc). The UI form
+            // sends None for a blank box (keep); only an explicit "" clears.
+            state.secret_store.delete(&key_api_key(&id))?;
+        }
+        Some(k) => {
+            state.secret_store.set(&key_api_key(&id), k)?;
+        }
+    }
+    if patch.activate {
+        crate::db::settings::set(&state.db, &key_provider(), &id)?;
+    }
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn ai_provider_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    ai_provider_delete_impl(&state, id).await
+}
+
+/// Transport-agnostic body shared by the Tauri command and the headless server.
+/// Deleting the active provider clears the selection (never dangles).
+/// Secret first, row second: if the secret delete fails the row survives, so a
+/// retry re-runs cleanly — the other order could orphan the encrypted key
+/// forever (nothing later inspects ids whose row is already gone).
+pub async fn ai_provider_delete_impl(state: &AppState, id: String) -> AppResult<()> {
+    state.secret_store.delete(&key_api_key(&id))?;
+    crate::db::ai_provider::delete(&state.db, &id)?;
+    if crate::db::settings::get(&state.db, &key_provider())?.as_deref() == Some(id.as_str()) {
+        crate::db::settings::delete(&state.db, &key_provider())?;
+    }
+    Ok(())
 }
 
 /// A partial update of the AI settings: each field is "set this if `Some`, leave
@@ -1556,10 +1778,8 @@ pub async fn ai_list_models_impl(
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiSettingsPatch {
+    /// Set the active provider (row id). Must name an existing row.
     pub provider: Option<String>,
-    pub model: Option<String>,
-    pub endpoint: Option<String>,
-    pub api_key: Option<String>,
     pub danger_mode: Option<bool>,
     pub auto_run_command: Option<bool>,
     pub auto_match_file: Option<bool>,
@@ -1583,9 +1803,6 @@ pub async fn ai_settings_set(state: State<'_, AppState>, patch: AiSettingsPatch)
 pub async fn ai_settings_set_impl(state: &AppState, patch: AiSettingsPatch) -> AppResult<()> {
     let AiSettingsPatch {
         provider,
-        model,
-        endpoint,
-        api_key,
         danger_mode,
         auto_run_command,
         auto_match_file,
@@ -1599,30 +1816,16 @@ pub async fn ai_settings_set_impl(state: &AppState, patch: AiSettingsPatch) -> A
         auto_web_fetch,
         auto_detect_remote_shell,
     } = patch;
-    if let Some(p) = provider.as_ref() {
-        crate::db::settings::set(&state.db, &key_provider(), p)?;
-    }
-    let active_provider = provider
-        .clone()
-        .or_else(|| {
-            crate::db::settings::get(&state.db, &key_provider())
-                .ok()
-                .flatten()
-        })
-        .unwrap_or_else(|| "anthropic".into());
-    if let Some(m) = model.as_ref() {
-        crate::db::settings::set(&state.db, &key_model(&active_provider), m)?;
-    }
-    if let Some(e) = endpoint {
-        crate::db::settings::set(&state.db, &key_endpoint(&active_provider), &e)?;
-    }
-    // API key 仍走 keychain；空串语义保留（用 delete 抹掉而不是存空）
-    if let Some(k) = api_key {
-        if k.is_empty() {
-            state.secret_store.delete(&key_api_key(&active_provider))?;
-        } else {
-            state.secret_store.set(&key_api_key(&active_provider), &k)?;
+    // provider 字段 = 激活哪个行（校验存在，fail-fast）。行本身的
+    // name/protocol/model/endpoint/api_key 归 ai_provider_save 管。
+    if let Some(p) = provider.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if crate::db::ai_provider::get(&state.db, p)?.is_none() {
+            return Err(AppError::not_found(
+                "provider_not_found",
+                json!({ "provider": p }),
+            ));
         }
+        crate::db::settings::set(&state.db, &key_provider(), p)?;
     }
     if let Some(on) = danger_mode {
         // 用 "1"/"0" 而不是 delete on false——显式记录用户的"我关了"，
@@ -1667,15 +1870,13 @@ mod tests {
         // Frontend sends camelCase keys; the headless server deserializes the same
         // object. Pin that contract so a field rename can't silently break it.
         let p: AiSettingsPatch = serde_json::from_value(json!({
-            "provider": "anthropic",
-            "apiKey": "sk-x",
+            "provider": "provider-ab12c",
             "dangerMode": true,
             "autoRunCommand": false,
             "autoDetectRemoteShell": true,
         }))
         .unwrap();
-        assert_eq!(p.provider.as_deref(), Some("anthropic"));
-        assert_eq!(p.api_key.as_deref(), Some("sk-x"));
+        assert_eq!(p.provider.as_deref(), Some("provider-ab12c"));
         assert_eq!(p.danger_mode, Some(true));
         assert_eq!(p.auto_run_command, Some(false));
         assert_eq!(p.auto_detect_remote_shell, Some(true));
@@ -1685,10 +1886,9 @@ mod tests {
     fn patch_absent_fields_are_none() {
         // A partial update touches only the present keys; everything else stays None
         // so the impl leaves those settings untouched.
-        let p: AiSettingsPatch = serde_json::from_value(json!({ "model": "claude" })).unwrap();
-        assert_eq!(p.model.as_deref(), Some("claude"));
+        let p: AiSettingsPatch = serde_json::from_value(json!({ "dangerMode": true })).unwrap();
+        assert_eq!(p.danger_mode, Some(true));
         assert!(p.provider.is_none());
-        assert!(p.danger_mode.is_none());
         assert!(p.auto_patch_mv.is_none());
     }
 

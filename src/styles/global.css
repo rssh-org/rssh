@@ -256,6 +256,19 @@ input[type="radio"]:checked::after {
   background: var(--white);
 }
 
+/* Shared custom radio indicator — the 20px circle used next to a hidden
+   .radio-state input (ShellSettings local-shell picker, AiSettings provider
+   list). Base shape only; theme variants live in shapes/*.css. Bare default
+   (no shape matched) is a transparent circle. */
+.shell-radio-indicator {
+  position: relative;
+  flex-shrink: 0;
+  border-radius: 50%;
+  height: 20px;
+  width: 20px;
+  overflow: hidden;
+}
+
 /* ═══════════════════════════════════════════════════════
    Switch Toggle (card-style, like Flutter verbose log)
    ═══════════════════════════════════════════════════════ */

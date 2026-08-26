@@ -1,27 +1,29 @@
-//! Config sync: incremental merge (upsert by identity), never destructive.
+//! Config sync — one import path, two merge tiers.
 //!
 //! **merge_import** is the single import entry point for every path — file
 //! `import` / `rssh config import` AND `github_pull` / `webdav_pull` /
 //! `rssh config github pull` / `rssh config webdav pull`.
-//! It does NOT clear local data: each entity is upserted by its identity key,
-//! local-only entities survive, and a delete on one device is never propagated
-//! to another (additive semantics — the deliberate trade-off chosen for sync).
-//! Per-row failures are collected and reported together, never aborting the
-//! rest of the import.
+//!
+//! Tier 1 — grouped entities (credentials / profiles / forwards / groups /
+//! serial_profiles / telnet_profiles): incremental upsert by identity. Each
+//! device's host inventory is additive — local-only rows survive and a delete
+//! on one device is never propagated to another.
+//!
+//! Tier 2 — everything else (skills / highlights / snippets / ai_redact_rules
+//! / command_block_redaction / ai_command_blacklist / ai): full replace.
+//! These are preferences, not per-device inventory: when a category key is
+//! present the local set becomes exactly the payload's content (an explicit
+//! empty array wipes it) — delete propagation is the point.
+//!
+//! A missing (or null) top-level key means "that category was not synced" →
+//! the corresponding local table is left untouched. Per-row failures are
+//! collected and reported together, never aborting the rest of the import.
 //!
 //! Credential `secret` of None or empty is treated as "keep local". Telnet
 //! login scripts carry an explicit upload-policy bit: empty + disabled means
 //! preserve (scrubbed), while empty + enabled means propagate an intentional
-//! script clear.
-//!
-//! Accepts a `serde_json::Value` of the shape:
-//! ```json
-//! { "version": 1, "profiles": [..], "credentials": [..],
-//!   "forwards": [..], "serial_profiles": [..], "telnet_profiles": [..],
-//!   "groups": [..], "skills": [..] }
-//! ```
-//! A missing top-level key means "that category was not synced" → the
-//! corresponding local table is left untouched.
+//! script clear. Dynamic discovery sources are device-local and never sync;
+//! a legacy payload carrying that key is ignored.
 
 use std::path::Path;
 
@@ -36,8 +38,8 @@ use crate::db::{
 };
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    Credential, DynamicDiscoverySource, Forward, ForwardRule, Group, HighlightRule, Profile,
-    SerialProfile, Snippet, TelnetProfile,
+    Credential, Forward, ForwardRule, Group, HighlightRule, Profile, SerialProfile, Snippet,
+    TelnetProfile,
 };
 use crate::secret::{cred_secret_key, telnet_login_script_key, SecretStore};
 use crate::telnet_profile::{self as telnet_profiles, LoginScriptIntent};
@@ -118,12 +120,14 @@ fn aggregate_failure(errs: Vec<ImportError>) -> AppError {
 }
 
 // ---------------------------------------------------------------------------
-// merge_import — incremental, additive, never destructive
+// merge_import — grouped categories upsert, everything else replaces
 // ---------------------------------------------------------------------------
 
-/// Upsert every entity by identity. Does not clear local data; a single item's
-/// failure does not abort the others. `data_dir` is the app data directory,
-/// used by file-backed categories (snippets) that live outside the DB.
+/// Two-tier import (see the module doc): grouped categories upsert by identity
+/// and never propagate deletes; every other carried category fully replaces
+/// its local set. A single item's failure does not abort the others. `data_dir`
+/// is the app data directory, used by file-backed categories (snippets) that
+/// live outside the DB.
 pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value) -> AppResult<()> {
     let mut errors: Vec<ImportError> = Vec::new();
 
@@ -270,12 +274,20 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
             }
         }
     }
-    // skills: upsert by id; merge never clears local (even if payload has skills:[]).
+    // skills — full replace when the key is present (mirror semantics). Null
+    // (the scrubbed form) or a missing key leaves local skills untouched.
     if let Some(arr) = data
         .get("skills")
         .filter(|v| !v.is_null())
         .and_then(Value::as_array)
     {
+        if let Err(e) = crate::db::ai_skill::clear_all(db) {
+            errors.push(ImportError {
+                kind: "skill",
+                name: None,
+                code: e.code().to_string(),
+            });
+        }
         for item in arr {
             match parse_skill(item) {
                 Ok(Some(s)) => {
@@ -296,11 +308,21 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
             }
         }
     }
-    // highlights — identity = keyword (the local autoincrement id is not synced)
+    // highlights — full replace; identity = keyword (no id is synced)
     if let Some(arr) = data["highlights"].as_array() {
+        if let Err(e) = highlight::clear_all(db) {
+            errors.push(ImportError {
+                kind: "highlight",
+                name: None,
+                code: e.code().to_string(),
+            });
+        }
         for item in arr {
             match serde_json::from_value::<HighlightRule>(item.clone()) {
                 Ok(h) => {
+                    // upsert_by_keyword (not bare insert): it normalizes legacy
+                    // 3-field rows (name seeded from keyword, plain text escaped
+                    // to regex). After clear_all it always inserts — table is empty.
                     if let Err(e) = highlight::upsert_by_keyword(db, &h) {
                         errors.push(ImportError {
                             kind: "highlight",
@@ -317,8 +339,15 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
             }
         }
     }
-    // ai_redact_rules — identity = id, upsert
+    // ai_redact_rules — full replace
     if let Some(arr) = data["ai_redact_rules"].as_array() {
+        if let Err(e) = ai_redact_rule::clear_all(db) {
+            errors.push(ImportError {
+                kind: "ai_redact_rule",
+                name: None,
+                code: e.code().to_string(),
+            });
+        }
         for item in arr {
             match serde_json::from_value::<RedactRuleRow>(item.clone()) {
                 Ok(r) => {
@@ -350,12 +379,14 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
     // Command-block copy redaction is one category: prompt policy + independent
     // rules. New payloads use the generic key; the old image-specific key stays
     // readable for backups produced before text copying shared the policy. A
-    // missing category leaves local configuration untouched.
+    // missing or null category leaves local configuration untouched.
     let command_block_redaction = data
         .get("command_block_redaction")
+        .filter(|v| !v.is_null())
         .map(|value| ("command_block_redaction", value))
         .or_else(|| {
             data.get("command_block_image_redaction")
+                .filter(|v| !v.is_null())
                 .map(|value| ("command_block_image_redaction", value))
         });
     if let Some((category, value)) = command_block_redaction {
@@ -387,6 +418,15 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
                         code: e.code().to_string(),
                     });
                 }
+                // Full replace: the prompt policy AND the rule set mirror the
+                // payload — rules dropped on the source device disappear here.
+                if let Err(e) = command_block_redact_rule::clear_all(db) {
+                    errors.push(ImportError {
+                        kind: "command_block_redact_rule",
+                        name: None,
+                        code: e.code().to_string(),
+                    });
+                }
                 for rule in incoming.rules {
                     if let Err(e) = crate::commands::command_block::save_redact_rule(db, &rule) {
                         errors.push(ImportError {
@@ -404,8 +444,15 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
             }),
         }
     }
-    // ai_command_blacklist — identity = name; additive upsert (never deletes)
+    // ai_command_blacklist — full replace; identity = name
     if let Some(arr) = data["ai_command_blacklist"].as_array() {
+        if let Err(e) = ai_command_blacklist::clear_all(db) {
+            errors.push(ImportError {
+                kind: "ai_command_blacklist",
+                name: None,
+                code: e.code().to_string(),
+            });
+        }
         for item in arr {
             match serde_json::from_value::<BlacklistRow>(item.clone()) {
                 Ok(b) => {
@@ -425,7 +472,7 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
             }
         }
     }
-    // snippets — identity = name; file-backed, merged outside the DB
+    // snippets — full replace; file-backed, the file mirrors the payload
     if let Some(arr) = data["snippets"].as_array() {
         let parsed: Result<Vec<Snippet>, _> = arr
             .iter()
@@ -433,7 +480,7 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
             .collect();
         match parsed {
             Ok(snips) => {
-                if let Err(e) = snippet::merge_by_name(data_dir, &snips) {
+                if let Err(e) = snippet::save(data_dir, &snips) {
                     errors.push(ImportError {
                         kind: "snippet",
                         name: None,
@@ -448,31 +495,11 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
             }),
         }
     }
-    // dynamic_discovery_sources — identity = id; settings-backed, merged
-    // additively so a remote delete does not wipe local source config.
-    if let Some(v) = data
-        .get("dynamic_discovery_sources")
-        .filter(|v| !v.is_null())
-    {
-        match serde_json::from_value::<Vec<DynamicDiscoverySource>>(v.clone()) {
-            Ok(incoming) => {
-                if let Err(e) = merge_and_save_dynamic_discovery_sources(db, incoming) {
-                    errors.push(ImportError {
-                        kind: "dynamic_discovery_source",
-                        name: None,
-                        code: e.code().to_string(),
-                    });
-                }
-            }
-            Err(_) => errors.push(ImportError {
-                kind: "dynamic_discovery_source",
-                name: None,
-                code: "parse_failed".into(),
-            }),
-        }
-    }
-    // ai — provider settings (an object, not a list of rows)
-    if let Some(ai) = data.get("ai").filter(|v| !v.is_null()) {
+    // ai — provider settings (an object, not a list of rows); full mirror.
+    // Gate on the real shape: a malformed non-null value (scalar/array) must
+    // never reach the mirror, whose first move is clearing local config —
+    // same rule as every array category's as_array gate.
+    if let Some(ai) = data.get("ai").filter(|v| v.is_object()) {
         if let Err(e) = crate::ai::commands::import_ai_settings(db, ss, ai) {
             errors.push(ImportError {
                 kind: "ai_settings",
@@ -510,29 +537,6 @@ fn parse_skill(item: &Value) -> AppResult<Option<crate::db::ai_skill::UserSkill>
         description: s.description,
         content: s.content,
     }))
-}
-
-fn merge_dynamic_discovery_sources(
-    mut local: Vec<DynamicDiscoverySource>,
-    incoming: Vec<DynamicDiscoverySource>,
-) -> Vec<DynamicDiscoverySource> {
-    for source in incoming {
-        if let Some(existing) = local.iter_mut().find(|it| it.id == source.id) {
-            *existing = source;
-        } else {
-            local.push(source);
-        }
-    }
-    local
-}
-
-fn merge_and_save_dynamic_discovery_sources(
-    db: &Db,
-    incoming: Vec<DynamicDiscoverySource>,
-) -> AppResult<()> {
-    let local = crate::commands::discovery::read_dynamic_discovery_sources_from_db(db)?;
-    let merged = merge_dynamic_discovery_sources(local, incoming);
-    crate::commands::discovery::save_dynamic_discovery_sources_to_db(db, merged)
 }
 
 // ---------------------------------------------------------------------------
@@ -738,10 +742,6 @@ fn build_payload_inner(
         }
     }
     out.insert("telnet_profiles".into(), to_val(telnets)?);
-    out.insert(
-        "dynamic_discovery_sources".into(),
-        to_val(crate::commands::discovery::read_dynamic_discovery_sources_from_db(db)?)?,
-    );
     if on(|p| p.skills) {
         out.insert("skills".into(), to_val(crate::ai::skills::list_user(db)?)?);
     }
@@ -1039,18 +1039,6 @@ mod tests {
         profile.login_script
     }
 
-    fn docker_source(id: &str, name: &str, context: &str) -> DynamicDiscoverySource {
-        DynamicDiscoverySource {
-            id: id.into(),
-            name: name.into(),
-            enabled: true,
-            config: crate::models::DynamicDiscoveryConfig::Docker {
-                context: context.into(),
-                shell: "sh".into(),
-            },
-        }
-    }
-
     #[test]
     fn merge_missing_telnet_key_keeps_local() {
         // payload without a telnet_profiles key must not touch local telnet rows.
@@ -1210,85 +1198,62 @@ mod tests {
     }
 
     #[test]
-    fn export_includes_dynamic_discovery_sources() {
+    fn payload_never_contains_dynamic_discovery_sources() {
+        // Discovery sources are device-local (docker context, shells...) and are
+        // deliberately NOT synced. Old payloads that carry the key are ignored
+        // on import — never an error, never a local wipe.
         let (db, ss, dir) = fixture();
         crate::commands::discovery::save_dynamic_discovery_sources_to_db(
             &db,
-            vec![docker_source("dyn1", "Docker Dev", "desktop-linux")],
+            vec![crate::models::DynamicDiscoverySource {
+                id: "dyn1".into(),
+                name: "Docker Dev".into(),
+                enabled: true,
+                config: crate::models::DynamicDiscoveryConfig::Docker {
+                    context: "desktop-linux".into(),
+                    shell: "sh".into(),
+                },
+            }],
         )
         .unwrap();
 
-        let out = build_payload(&db, &ss, dir.path(), &ExportMode::LocalBackup).unwrap();
-        let arr = out["dynamic_discovery_sources"].as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["id"], "dyn1");
-        assert_eq!(arr[0]["name"], "Docker Dev");
-    }
+        for mode in [
+            ExportMode::LocalBackup,
+            ExportMode::RemotePush(read_sync_prefs(&db).unwrap()),
+        ] {
+            let out = build_payload(&db, &ss, dir.path(), &mode).unwrap();
+            assert!(
+                out.get("dynamic_discovery_sources").is_none(),
+                "discovery sources must not ride any payload"
+            );
+        }
 
-    #[test]
-    fn merge_dynamic_discovery_sources_by_id() {
-        let (db, ss, dir) = fixture();
-        crate::commands::discovery::save_dynamic_discovery_sources_to_db(
-            &db,
-            vec![
-                docker_source("keep", "Local Only", "local"),
-                docker_source("same", "Old", "old-context"),
-            ],
-        )
-        .unwrap();
-
+        // And a legacy payload carrying the key is ignored, not merged.
         let data = json!({
             "version": 1,
             "dynamic_discovery_sources": [
-                serde_json::to_value(docker_source("same", "New", "new-context")).unwrap(),
-                serde_json::to_value(docker_source("new", "Remote", "remote-context")).unwrap(),
+                serde_json::to_value(crate::models::DynamicDiscoverySource {
+                    id: "remote".into(),
+                    name: "Remote".into(),
+                    enabled: true,
+                    config: crate::models::DynamicDiscoveryConfig::Docker {
+                        context: "remote-context".into(),
+                        shell: "sh".into(),
+                    },
+                }).unwrap(),
             ],
         });
         merge_import(&db, &ss, dir.path(), &data).unwrap();
-
         let sources =
             crate::commands::discovery::read_dynamic_discovery_sources_from_db(&db).unwrap();
-        assert!(
-            sources.iter().any(|s| s.id == "keep"),
-            "local-only source survives"
-        );
-        let same = sources.iter().find(|s| s.id == "same").unwrap();
-        assert_eq!(same.name, "New", "same id overwritten");
-        assert!(sources.iter().any(|s| s.id == "new"), "remote source added");
-    }
-
-    #[test]
-    fn merge_keeps_invalid_local_discovery_settings_untouched() {
-        let (db, ss, dir) = fixture();
-        crate::db::settings::set(
-            &db,
-            crate::commands::discovery::SOURCES_SETTING_KEY,
-            "not-json",
-        )
-        .unwrap();
-        let data = json!({
-            "version": 1,
-            "dynamic_discovery_sources": [
-                serde_json::to_value(docker_source("remote", "Remote", "remote-context"))
-                    .unwrap(),
-            ],
-        });
-
-        let err = merge_import(&db, &ss, dir.path(), &data).unwrap_err();
-
-        assert_eq!(err.code(), "import_partial_failed");
-        assert_eq!(
-            crate::db::settings::get(&db, crate::commands::discovery::SOURCES_SETTING_KEY,)
-                .unwrap()
-                .as_deref(),
-            Some("not-json"),
-        );
+        assert_eq!(sources.len(), 1, "local sources untouched");
+        assert_eq!(sources[0].id, "dyn1");
     }
 
     // ── Phase 2: the five new categories ──────────────────────────────
 
     #[test]
-    fn merge_highlights_upsert_by_keyword() {
+    fn merge_highlights_replaces_local_set() {
         let (db, ss, dir) = fixture();
         // Use non-default keywords to be independent of any seeded defaults.
         highlight::insert(
@@ -1312,19 +1277,26 @@ mod tests {
         });
         merge_import(&db, &ss, dir.path(), &data).unwrap();
         let hs = highlight::list(&db).unwrap();
+        // Full replace: the seeded defaults AND the local-only rule are gone;
+        // local is exactly the payload's rows.
+        assert_eq!(hs.len(), 2, "local set fully replaced");
         let mk = hs.iter().find(|h| h.keyword == "MYKEY").unwrap();
         assert_eq!(mk.color, "#f00", "color overwritten");
         assert_eq!(mk.name, "Renamed", "name overwritten");
-        assert!(mk.is_regex, "is_regex overwritten");
         assert!(mk.is_case_sensitive, "is_case_sensitive overwritten");
         assert!(!mk.enabled);
-        let other = hs.iter().find(|h| h.keyword == "OTHER").unwrap();
-        assert_eq!(other.color, "#0f0", "new keyword added");
-        assert_eq!(
-            hs.iter().filter(|h| h.keyword == "MYKEY").count(),
-            1,
-            "no duplicate row"
-        );
+        assert!(hs.iter().any(|h| h.keyword == "OTHER"), "new keyword added");
+    }
+
+    #[test]
+    fn merge_highlights_empty_array_wipes_local() {
+        // Mirror semantics: an explicit empty array is "the other device has
+        // none" — local highlights become empty. (Key absent = untouched, a
+        // different case covered by merge_old_payload_without_new_keys_is_noop.)
+        let (db, ss, dir) = fixture();
+        let data = json!({ "version": 1, "highlights": [] });
+        merge_import(&db, &ss, dir.path(), &data).unwrap();
+        assert!(highlight::list(&db).unwrap().is_empty());
     }
 
     #[test]
@@ -1343,6 +1315,7 @@ mod tests {
         });
         merge_import(&db, &ss, dir.path(), &data).unwrap();
         let hs = highlight::list(&db).unwrap();
+        assert_eq!(hs.len(), 1, "replace leaves only the payload row");
         let h = hs.iter().find(|h| h.color == "#00f").unwrap();
         assert_eq!(
             h.keyword, r"a\.b",
@@ -1366,6 +1339,8 @@ mod tests {
         });
         merge_import(&db, &ss, dir.path(), &data).unwrap();
         let rules = crate::db::ai_redact_rule::list(&db).unwrap();
+        // Full replace: the 8 seeded defaults are gone, only the payload row is.
+        assert_eq!(rules.len(), 1, "local set fully replaced");
         assert!(rules.iter().any(|r| r.id == "u1" && r.replacement == "<X>"));
     }
 
@@ -1403,7 +1378,7 @@ mod tests {
     }
 
     #[test]
-    fn command_block_redaction_import_is_additive() {
+    fn command_block_redaction_import_replaces() {
         let (db, ss, dir) = fixture();
         let data = json!({
             "version": 1,
@@ -1429,8 +1404,9 @@ mod tests {
             Some("remote-prompt")
         );
         let rules = command_block_redact_rule::list(&db).unwrap();
-        assert_eq!(rules.len(), 9, "existing defaults are not deleted");
-        assert!(rules.iter().any(|rule| rule.id == "remote"));
+        // Full replace: seeded defaults do not survive a carried category.
+        assert_eq!(rules.len(), 1, "rules mirror the payload exactly");
+        assert_eq!(rules[0].id, "remote");
     }
 
     #[test]
@@ -1453,6 +1429,8 @@ mod tests {
                 .as_deref(),
             Some("legacy-prompt")
         );
+        // Empty rules array is a full replace: the seeded defaults drop too.
+        assert!(command_block_redact_rule::list(&db).unwrap().is_empty());
     }
 
     #[test]
@@ -1476,6 +1454,41 @@ mod tests {
     }
 
     #[test]
+    fn null_command_block_redaction_key_keeps_local() {
+        // The contract: a null category is "not synced" — never a parse error
+        // (which would fail the whole import report), never a wipe. Both the
+        // current and the legacy key behave alike.
+        let (db, ss, dir) = fixture();
+        crate::db::settings::set(&db, "command_block_prompt_replacement", "local-prompt").unwrap();
+
+        merge_import(
+            &db,
+            &ss,
+            dir.path(),
+            &json!({ "version": 1, "command_block_redaction": null }),
+        )
+        .unwrap();
+        merge_import(
+            &db,
+            &ss,
+            dir.path(),
+            &json!({ "version": 1, "command_block_image_redaction": null }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            crate::db::settings::get(&db, "command_block_prompt_replacement")
+                .unwrap()
+                .as_deref(),
+            Some("local-prompt")
+        );
+        assert!(
+            !command_block_redact_rule::list(&db).unwrap().is_empty(),
+            "seeded rules untouched"
+        );
+    }
+
+    #[test]
     fn command_block_redaction_import_rejects_invalid_rule() {
         let (db, ss, dir) = fixture();
         let data = json!({
@@ -1488,10 +1501,11 @@ mod tests {
         });
 
         merge_import(&db, &ss, dir.path(), &data).unwrap_err();
-        assert!(!command_block_redact_rule::list(&db)
+        // Replace cleared the local set; the invalid row never made it in.
+        assert!(command_block_redact_rule::list(&db)
             .unwrap()
             .iter()
-            .any(|rule| rule.id == "bad"));
+            .all(|rule| rule.id != "bad"));
     }
 
     #[test]
@@ -1505,31 +1519,39 @@ mod tests {
     }
 
     #[test]
-    fn merge_ai_blacklist_is_additive() {
+    fn merge_ai_blacklist_replaces() {
         let (db, ss, dir) = fixture();
-        // table is seeded with defaults; merge must add, not wipe.
-        let before = ai_command_blacklist::list(&db).unwrap().len();
         let data = json!({
             "version": 1,
-            "ai_command_blacklist": [{"name": "frobnicate", "category": "destructive"}],
+            "ai_command_blacklist": [
+                {"name": "frobnicate", "category": "destructive"},
+                {"name": "rm", "category": "destructive"},
+            ],
         });
         merge_import(&db, &ss, dir.path(), &data).unwrap();
         let rows = ai_command_blacklist::list(&db).unwrap();
+        // Full replace: the ~48 seeded defaults drop, the payload set remains.
+        assert_eq!(rows.len(), 2, "blacklist mirrors the payload exactly");
         assert!(rows
             .iter()
             .any(|r| r.name == "frobnicate" && r.category == "destructive"));
-        assert!(rows.len() > before, "additive, defaults kept");
     }
 
     #[test]
-    fn merge_snippets_by_name() {
+    fn merge_snippets_replaces() {
         let (db, ss, dir) = fixture();
         snippet::save(
             dir.path(),
-            &[Snippet {
-                name: "a".into(),
-                command: "old".into(),
-            }],
+            &[
+                Snippet {
+                    name: "a".into(),
+                    command: "old".into(),
+                },
+                Snippet {
+                    name: "local-only".into(),
+                    command: "gone".into(),
+                },
+            ],
         )
         .unwrap();
         let data = json!({
@@ -1541,164 +1563,315 @@ mod tests {
         });
         merge_import(&db, &ss, dir.path(), &data).unwrap();
         let snips = snippet::load(dir.path()).unwrap();
+        // Full replace: the file mirrors the payload, local-only rows drop.
+        assert_eq!(snips.len(), 2, "snippets mirror the payload exactly");
         assert_eq!(
             snips.iter().find(|s| s.name == "a").unwrap().command,
             "new",
             "same name overwritten"
         );
         assert!(snips.iter().any(|s| s.name == "b"), "new name added");
-        assert_eq!(snips.iter().filter(|s| s.name == "a").count(), 1);
+    }
+
+    #[test]
+    fn merge_skills_replaces_local_set() {
+        let (db, ss, dir) = fixture();
+        crate::db::ai_skill::upsert(
+            &db,
+            &crate::db::ai_skill::UserSkill {
+                id: "local".into(),
+                name: "Local".into(),
+                description: "d".into(),
+                content: "c".into(),
+            },
+        )
+        .unwrap();
+        let data = json!({
+            "version": 1,
+            "skills": [
+                {"id": "s1", "name": "Diagnose", "description": "d", "content": "c", "builtin": false},
+                // hand-edited payload claiming a builtin — skipped, never written
+                {"id": "b1", "name": "Fake builtin", "description": "d", "content": "c", "builtin": true},
+            ],
+        });
+        merge_import(&db, &ss, dir.path(), &data).unwrap();
+        let skills = crate::db::ai_skill::list(&db).unwrap();
+        assert_eq!(skills.len(), 1, "skills mirror the payload exactly");
+        assert_eq!(skills[0].id, "s1");
+    }
+
+    #[test]
+    fn merge_skills_null_key_keeps_local() {
+        // "skills": null is the scrubbed/absent form — never a wipe.
+        let (db, ss, dir) = fixture();
+        crate::db::ai_skill::upsert(
+            &db,
+            &crate::db::ai_skill::UserSkill {
+                id: "local".into(),
+                name: "Local".into(),
+                description: "d".into(),
+                content: "c".into(),
+            },
+        )
+        .unwrap();
+        let data = json!({ "version": 1, "skills": null });
+        merge_import(&db, &ss, dir.path(), &data).unwrap();
+        assert!(crate::db::ai_skill::list(&db)
+            .unwrap()
+            .iter()
+            .any(|s| s.id == "local"));
     }
 
     #[test]
     fn merge_ai_providers_and_active() {
         let (db, ss, dir) = fixture();
+        // Local row the payload does not carry → wiped (mirror), key removed.
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-local0".into(),
+                name: "GLM".into(),
+                protocol: "openai-completions".into(),
+                model: "glm-old".into(),
+                endpoint: "https://local".into(),
+            },
+        )
+        .unwrap();
+        ss.set(
+            &crate::secret::setting_key("ai_provider-local0_key"),
+            "glm-old-key",
+        )
+        .unwrap();
+
         let data = json!({
             "version": 1,
             "ai": {
-                "active_provider": "openai",
+                "active_provider": "provider-newa1",
                 "providers": [
-                    {"provider": "anthropic", "model": "claude-x",
-                     "endpoint": "https://e", "api_key": "sk-123"},
-                    {"provider": "bogus", "model": "x", "api_key": "y"},
+                    {"provider": "provider-newa1", "name": "DeepSeek", "protocol": "deepseek-thinking",
+                     "model": "deepseek-reasoner", "endpoint": "https://api.deepseek.com/v1",
+                     "api_key": "sk-123"},
                 ],
             },
         });
         merge_import(&db, &ss, dir.path(), &data).unwrap();
+
+        let rows = crate::db::ai_provider::list(&db).unwrap();
+        assert_eq!(rows.len(), 1, "local set fully replaced");
+        assert_eq!(rows[0].id, "provider-newa1");
+        assert_eq!(rows[0].protocol, "deepseek-thinking");
         assert_eq!(
-            crate::db::settings::get(&db, "ai_anthropic_model")
-                .unwrap()
-                .as_deref(),
-            Some("claude-x")
-        );
-        assert_eq!(
-            crate::db::settings::get(&db, "ai_provider")
-                .unwrap()
-                .as_deref(),
-            Some("openai"),
-            "active provider applied"
-        );
-        assert_eq!(
-            ss.get(&crate::secret::setting_key("ai_anthropic_key"))
+            ss.get(&crate::secret::setting_key("ai_provider-newa1_key"))
                 .unwrap()
                 .as_deref(),
             Some("sk-123"),
             "api key written to secret store"
         );
         assert!(
-            crate::db::settings::get(&db, "ai_bogus_model")
+            crate::db::ai_provider::get(&db, "provider-local0")
                 .unwrap()
                 .is_none(),
-            "unknown provider ignored"
+            "provider absent from payload is cleared"
         );
-    }
-
-    #[test]
-    fn merge_rejects_unsupported_active_provider() {
-        let (db, ss, dir) = fixture();
-        crate::db::settings::set(&db, "ai_provider", "anthropic").unwrap();
-        // active_provider must clear the same allowlist as provider rows —
-        // otherwise ai_provider points at a backend with no config row.
-        let data = json!({
-            "version": 1,
-            "ai": { "active_provider": "bogus", "providers": [] },
-        });
-        merge_import(&db, &ss, dir.path(), &data).unwrap();
+        assert!(
+            ss.get(&crate::secret::setting_key("ai_provider-local0_key"))
+                .unwrap()
+                .is_none(),
+            "cleared provider's key is removed"
+        );
         assert_eq!(
             crate::db::settings::get(&db, "ai_provider")
                 .unwrap()
                 .as_deref(),
-            Some("anthropic"),
-            "unsupported active_provider rejected, prior value kept"
+            Some("provider-newa1"),
+            "active provider applied"
         );
     }
 
     #[test]
-    fn merge_ai_empty_model_endpoint_keeps_local() {
+    fn merge_ai_unsupported_active_provider_clears_selection() {
         let (db, ss, dir) = fixture();
-        crate::db::settings::set(&db, "ai_anthropic_model", "claude-x").unwrap();
-        crate::db::settings::set(&db, "ai_anthropic_endpoint", "https://local").unwrap();
-        // A blank model/endpoint in the payload (old/hand-edited) must be a
-        // no-op, not a destructive clear — additive merge.
+        crate::db::settings::set(&db, "ai_provider", "provider-oldaa").unwrap();
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-oldaa".into(),
+                name: "OpenAI".into(),
+                protocol: "openai-completions".into(),
+                model: "gpt-4o".into(),
+                endpoint: "https://api.openai.com/v1".into(),
+            },
+        )
+        .unwrap();
+        // Mirror semantics wipes the local table first, so keeping a stale
+        // selection would dangle at a deleted row. An active_provider that
+        // names no carried row clears the selection.
         let data = json!({
             "version": 1,
-            "ai": { "providers": [{"provider": "anthropic", "model": "", "endpoint": ""}] },
+            "ai": { "active_provider": "provider-bogus", "providers": [] },
         });
         merge_import(&db, &ss, dir.path(), &data).unwrap();
+        assert!(
+            crate::db::settings::get(&db, "ai_provider")
+                .unwrap()
+                .is_none(),
+            "unsupported active_provider clears the selection"
+        );
+    }
+
+    #[test]
+    fn merge_ai_legacy_payload_without_name_protocol_fails_and_keeps_local() {
+        // A pre-v3 payload (fixed vendor names, no name/protocol) must fail the
+        // whole category WITHOUT touching local rows — agreed behavior: error
+        // out, no compat mapping, never a half-wiped table.
+        let (db, ss, dir) = fixture();
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-keep1".into(),
+                name: "DeepSeek".into(),
+                protocol: "deepseek-thinking".into(),
+                model: "deepseek-chat".into(),
+                endpoint: "https://api.deepseek.com/v1".into(),
+            },
+        )
+        .unwrap();
+        let data = json!({
+            "version": 1,
+            "ai": {
+                "providers": [
+                    {"provider": "deepseek", "model": "deepseek-chat",
+                     "endpoint": "https://api.deepseek.com/v1"},
+                ],
+            },
+        });
+        merge_import(&db, &ss, dir.path(), &data).unwrap_err();
+        let rows = crate::db::ai_provider::list(&db).unwrap();
+        assert_eq!(rows.len(), 1, "local rows untouched by rejected payload");
+        assert_eq!(rows[0].id, "provider-keep1");
+    }
+
+    #[test]
+    fn merge_ai_row_with_invalid_protocol_fails_and_keeps_local() {
+        let (db, ss, dir) = fixture();
+        let data = json!({
+            "version": 1,
+            "ai": {
+                "providers": [
+                    {"provider": "provider-x0001", "name": "X", "protocol": "grpc",
+                     "endpoint": "https://x"},
+                ],
+            },
+        });
+        merge_import(&db, &ss, dir.path(), &data).unwrap_err();
+        assert!(
+            crate::db::ai_provider::list(&db).unwrap().is_empty(),
+            "invalid protocol never reaches the table"
+        );
+    }
+
+    #[test]
+    fn merge_ai_malformed_payload_keeps_local() {
+        // A non-object `ai` value must never reach the mirror — the mirror's
+        // first move is clearing every provider setting, so a scalar/array
+        // would silently wipe local AI config while restoring nothing. Wrong
+        // shape = "not synced", same as every array category's as_array gate.
+        let (db, ss, dir) = fixture();
+        crate::db::settings::set(&db, "ai_anthropic_model", "claude-local").unwrap();
+        ss.set(&crate::secret::setting_key("ai_anthropic_key"), "sk-local")
+            .unwrap();
+
+        for bad in [json!("oops"), json!(5), json!([]), json!(null)] {
+            let data = json!({ "version": 1, "ai": bad });
+            merge_import(&db, &ss, dir.path(), &data).unwrap();
+        }
+
         assert_eq!(
             crate::db::settings::get(&db, "ai_anthropic_model")
                 .unwrap()
                 .as_deref(),
-            Some("claude-x"),
-            "empty model did not overwrite local"
+            Some("claude-local"),
+            "malformed ai payload left local config alone"
         );
         assert_eq!(
-            crate::db::settings::get(&db, "ai_anthropic_endpoint")
+            ss.get(&crate::secret::setting_key("ai_anthropic_key"))
                 .unwrap()
                 .as_deref(),
-            Some("https://local"),
-            "empty endpoint did not overwrite local"
+            Some("sk-local"),
+            "api key survived malformed payloads"
         );
     }
 
     #[test]
     fn export_ai_settings_omits_local_only_prefs() {
         let (db, ss, _dir) = fixture();
-        crate::db::settings::set(&db, "ai_anthropic_model", "claude-x").unwrap();
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-exp01".into(),
+                name: "OpenAI".into(),
+                protocol: "openai-completions".into(),
+                model: "gpt-4o".into(),
+                endpoint: "https://api.openai.com/v1".into(),
+            },
+        )
+        .unwrap();
         crate::db::settings::set(&db, "ai_danger_mode", "1").unwrap();
         let ai = crate::ai::commands::export_ai_settings(&db, &ss, true).unwrap();
         let s = serde_json::to_string(&ai).unwrap();
-        assert!(s.contains("anthropic"));
+        assert!(s.contains("provider-exp01"));
         assert!(!s.contains("danger_mode"), "danger_mode not synced");
         assert!(!s.contains("auto_run"), "auto_run not synced");
     }
 
     #[test]
-    fn export_ai_omits_empty_model_and_endpoint() {
+    fn export_ai_omits_empty_model_and_keyless_rows() {
         let (db, ss, _dir) = fixture();
-        // Only an API key configured — model/endpoint unset. Export must NOT
-        // emit empty "model"/"endpoint": importing "" would wipe a populated
-        // value on another device (a destructive clear; additive-merge forbids).
-        ss.set(&crate::secret::setting_key("ai_anthropic_key"), "sk-zzz")
-            .unwrap();
+        // Rows always carry name/protocol/endpoint (NOT NULL); model is omitted
+        // when empty, api_key when absent/blank.
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-exp02".into(),
+                name: "GLM".into(),
+                protocol: "openai-completions".into(),
+                model: "".into(),
+                endpoint: "https://open.bigmodel.cn/api/paas/v4".into(),
+            },
+        )
+        .unwrap();
         let ai = crate::ai::commands::export_ai_settings(&db, &ss, true).unwrap();
-        let prov = ai["providers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["provider"] == "anthropic")
-            .expect("key-only provider still exported");
+        let prov = &ai["providers"][0];
         assert!(prov.get("model").is_none(), "empty model not emitted");
-        assert!(prov.get("endpoint").is_none(), "empty endpoint not emitted");
-        assert_eq!(prov["api_key"], "sk-zzz");
+        assert!(prov.get("api_key").is_none(), "missing key not emitted");
+        assert_eq!(prov["name"], "GLM");
+        assert_eq!(prov["protocol"], "openai-completions");
     }
 
     #[test]
-    fn export_ai_treats_whitespace_as_unset_and_trims() {
+    fn export_ai_trims_key() {
         let (db, ss, _dir) = fixture();
-        // Whitespace-only model/endpoint are "effectively unset" — not exported
-        // (they'd hide the official-endpoint placeholder + risk a destructive
-        // merge). A real key is trimmed before export.
-        crate::db::settings::set(&db, "ai_anthropic_model", "   ").unwrap();
-        crate::db::settings::set(&db, "ai_anthropic_endpoint", "\t").unwrap();
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-exp03".into(),
+                name: "DeepSeek".into(),
+                protocol: "deepseek-thinking".into(),
+                model: "deepseek-chat".into(),
+                endpoint: "https://api.deepseek.com/v1".into(),
+            },
+        )
+        .unwrap();
         ss.set(
-            &crate::secret::setting_key("ai_anthropic_key"),
+            &crate::secret::setting_key("ai_provider-exp03_key"),
             "  sk-zzz  ",
         )
         .unwrap();
         let ai = crate::ai::commands::export_ai_settings(&db, &ss, true).unwrap();
-        let prov = ai["providers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["provider"] == "anthropic")
-            .expect("provider present via key");
-        assert!(prov.get("model").is_none(), "whitespace model not emitted");
-        assert!(
-            prov.get("endpoint").is_none(),
-            "whitespace endpoint not emitted"
+        assert_eq!(
+            ai["providers"][0]["api_key"], "sk-zzz",
+            "key trimmed on export"
         );
-        assert_eq!(prov["api_key"], "sk-zzz", "key trimmed on export");
     }
 
     #[test]

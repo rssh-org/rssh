@@ -3,6 +3,7 @@
     import {SvelteSet} from "svelte/reactivity";
     import {Terminal, type IDisposable} from "@xterm/xterm";
     import {FitAddon} from "@xterm/addon-fit";
+    import {WebglAddon} from "@xterm/addon-webgl";
     import {SearchAddon} from "@xterm/addon-search";
     import {Unicode11Addon} from "@xterm/addon-unicode11";
     import {ImageAddon} from "@xterm/addon-image";
@@ -19,8 +20,18 @@
     import {createCommandBlockTracker, type CommandBlock, type CommandBlockTracker} from "../terminal/command-blocks.ts";
     import {readViewportSnapshot, readViewportText} from "../terminal/viewport-snapshot.ts";
     import {createFoldStore, type FoldStore} from "../terminal/folds.ts";
-    import {TERMINAL_SCROLLBACK_LINES, commandBlockFoldCacheLines} from "../terminal/limits.ts";
+    import {
+        TERMINAL_SCROLLBACK_LINES,
+        commandBlockFoldCacheLines,
+        BACKLOG_DROP_TRIGGER_BYTES,
+        BACKLOG_INDICATOR_BYTES,
+        BACKLOG_MAX_PENDING_BYTES,
+        BACKLOG_MAX_PENDING_BYTES_MOBILE,
+        BACKLOG_QUIESCENCE_MS,
+    } from "../terminal/limits.ts";
     import {createPaintScheduler, type PaintScheduler} from "../terminal/paint-scheduler.ts";
+    import {createOutputFeeder, formatBacklogBytes, type OutputFeeder} from "../terminal/output-feeder.ts";
+    import {terminalRowHeight} from "../terminal/row-height.ts";
 
     import {extractBlockTexts, extractBlocksText} from "../terminal/block-content.ts";
     import {redactCommandBlockTexts} from "../terminal/command-block-redaction.ts";
@@ -235,6 +246,7 @@
     let blockTracker: CommandBlockTracker | undefined;
     let foldStore: FoldStore | undefined;
     let paintScheduler: PaintScheduler | undefined;
+    let outputFeeder: OutputFeeder | undefined;
     let paintTick = $state(0);
     let isAltBuffer = $state(false);
     // Per-tab: when true the fold store stops auto-folding new output (see
@@ -262,8 +274,42 @@
         if (dimensionsChanged) foldStore?.enforceAutoFold();
     }
 
+    // Backlog badge: value written at most once per animation frame. The rAF
+    // chain self-sustains while pending > 0 (drain progress) and stops on 0.
+    let backlogBytes = $state(0);
+    let backlogRaf: number | null = null;
+
+    function scheduleBacklogUpdate() {
+        if (backlogRaf !== null) return;
+        backlogRaf = requestAnimationFrame(updateBacklog);
+    }
+
+    function updateBacklog() {
+        backlogRaf = null;
+        const pending = outputFeeder?.pendingBytes() ?? 0;
+        if (pending !== backlogBytes) backlogBytes = pending;
+        if (pending > 0) scheduleBacklogUpdate();
+    }
+
     function writeRawOutput(raw: Uint8Array) {
-        terminal.write(raw);
+        if (outputFeeder) {
+            outputFeeder.push(raw);
+            scheduleBacklogUpdate();
+        } else {
+            terminal.write(raw);
+        }
+    }
+
+    /** Kernel-tty SIGINT semantics: with a big backlog pending, Ctrl+C must
+     * stop the DISPLAY, not just kill the producer. Drop everything not yet
+     * rendered, then discard stale bytes still in flight until the pipe goes
+     * quiet — otherwise the webview event queue refills the screen anyway. */
+    function maybeReleaseBacklog(text: string) {
+        if (!outputFeeder) return;
+        if (!text.includes("\x03")) return;
+        if (outputFeeder.pendingBytes() <= BACKLOG_DROP_TRIGGER_BYTES) return;
+        outputFeeder.dropPending();
+        outputFeeder.armQuiescentDrop(BACKLOG_QUIESCENCE_MS);
     }
 
     // 右键菜单状态。null = 不显示。
@@ -286,8 +332,7 @@
         // selectedBlockIds 是 SvelteSet，下方 .has() 调用自带 reactivity
         if (!app.commandBlockBar()) return [];
         if (!terminal || !blockTracker || !containerEl || isAltBuffer) return [];
-        const firstRow = containerEl.querySelector(".xterm-rows")?.firstElementChild as HTMLElement | null;
-        const rowHeight = firstRow?.offsetHeight ?? 0;
+        const rowHeight = terminalRowHeight(terminal, containerEl);
         if (!rowHeight) return [];
         const buf = terminal.buffer.active;
         const viewportY = buf.viewportY;
@@ -571,6 +616,9 @@
     let resizeObs: ResizeObserver;
     let ime229WorkaroundCleanup: (() => void) | undefined;
     let mobileKeyboardCleanup: (() => void) | undefined;
+    // The active pane's keyboard toggle, built by setupMobileSoftKeyboard and
+    // registered in the activation effect (see below for why not at mount).
+    let softKbToggle: (() => void) | null = null;
     let mobileTouchScrollCleanup: (() => void) | undefined;
 
     const isLocal = $derived(tabType === "local");
@@ -631,6 +679,8 @@
     function announceDisconnected(reason?: string) {
         if (destroyed || disconnected) return;
         disconnected = true;
+        // Stale flood must not keep flowing behind the disconnect banner.
+        outputFeeder?.dropPending();
         if (reason) terminal.write(`\r\n\x1b[31m${reason}\x1b[0m\r\n`);
         terminal.write("\r\n\x1b[31m--- Disconnected ---\x1b[0m\r\n");
         terminal.write("\x1b[90mPress any key to reconnect.\x1b[0m\r\n");
@@ -672,6 +722,7 @@
         tick();
     }
     function streamSendText(text: string) {
+        maybeReleaseBacklog(text);
         streamSendBytes(Array.from(new TextEncoder().encode(text)));
     }
     function streamEchoText(text: string) {
@@ -936,8 +987,15 @@
                 const raw = new Uint8Array(ev.payload);
                 if (streamOpts) {
                     stageLoginScript(raw);
-                    if (streamOpts.outputMode === "hex") { terminal.write(bytesToHex(raw)); return; }
-                    terminal.write(streamNormalizeOut(decoder.decode(raw, { stream: true })));
+                    if (streamOpts.outputMode === "hex") {
+                        const hex = bytesToHex(raw);
+                        if (outputFeeder) outputFeeder.push(hex); else terminal.write(hex);
+                        scheduleBacklogUpdate();
+                        return;
+                    }
+                    const text = streamNormalizeOut(decoder.decode(raw, { stream: true }));
+                    if (outputFeeder) outputFeeder.push(text); else terminal.write(text);
+                    scheduleBacklogUpdate();
                     return;
                 }
                 // Write the raw bytes untouched — keyword highlighting is a decoration
@@ -1004,8 +1062,16 @@
 
         dataDisposable = terminal.onData((data: string) => {
             if (destroyed || disconnected || sessionId !== sid) return;
-            if (streamOpts) { streamOnData(data); return; }
-            invoke(writeCmd, { sessionId: sid, data: Array.from(new TextEncoder().encode(processInput(data))) });
+            if (streamOpts) {
+                maybeReleaseBacklog(data);
+                streamOnData(data);
+                return;
+            }
+            // processInput can synthesize \x03 (mobile keybar Ctrl + c), so
+            // the release valve must see the transformed bytes, not the raw key.
+            const processed = processInput(data);
+            maybeReleaseBacklog(processed);
+            invoke(writeCmd, { sessionId: sid, data: Array.from(new TextEncoder().encode(processed)) });
         });
         resizeDisposable = terminal.onResize(({ cols, rows }) => {
             if (!destroyed && !disconnected && sessionId === sid && resizeCmd) {
@@ -1280,19 +1346,9 @@
     }
 
     function setupMobileSoftKeyboard(helper: HTMLTextAreaElement) {
-        const longPressMs = 360;
-        const moveSlopPx = 12;
         const originalHelperStyle = helper.getAttribute("style");
         let scrollResetRaf = 0;
         let helperPinRaf = 0;
-        let gesture: {
-            pointerId: number;
-            x: number;
-            y: number;
-            longPress: boolean;
-            moved: boolean;
-            timer: number | undefined;
-        } | null = null;
 
         function resetDocumentScroll() {
             if (scrollResetRaf) return;
@@ -1387,76 +1443,39 @@
             resetDocumentScroll();
         }
 
-        function clearGestureTimer() {
-            if (gesture?.timer) {
-                window.clearTimeout(gesture.timer);
-                gesture.timer = undefined;
-            }
+        // The keyboard opens ONLY from the keybar button, so terminal touches
+        // need no tap/drag/long-press classification — that state machine
+        // existed to decide whether a tap should OPEN it. Any touch on the
+        // terminal just dismisses a keyboard that is open, at pointerdown:
+        // sooner than the old drag-slop / long-press-timer paths ever did.
+        // No preventDefault anywhere: long-press must still reach the native
+        // copy/paste menu.
+        function onTerminalTouchDown(ev: PointerEvent) {
+            if (ev.pointerType !== "touch" && ev.pointerType !== "pen") return;
+            if (document.activeElement === helper) hideKeyboard();
         }
 
-        function shouldHandleTouch(ev: PointerEvent) {
-            return ev.pointerType === "touch" || ev.pointerType === "pen";
-        }
-
-        function onPointerDown(ev: PointerEvent) {
-            if (!shouldHandleTouch(ev)) return;
-            clearGestureTimer();
-            gesture = {
-                pointerId: ev.pointerId,
-                x: ev.clientX,
-                y: ev.clientY,
-                longPress: false,
-                moved: false,
-                timer: undefined,
-            };
-            gesture.timer = window.setTimeout(() => {
-                if (!gesture || gesture.pointerId !== ev.pointerId) return;
-                gesture.longPress = true;
-                hideKeyboard();
-            }, longPressMs);
-        }
-
-        function onPointerMove(ev: PointerEvent) {
-            if (!gesture || gesture.pointerId !== ev.pointerId) return;
-            const dx = ev.clientX - gesture.x;
-            const dy = ev.clientY - gesture.y;
-            if (Math.hypot(dx, dy) <= moveSlopPx) return;
-            gesture.moved = true;
-            clearGestureTimer();
-            hideKeyboard();
-        }
-
-        function onPointerUp(ev: PointerEvent) {
-            if (!gesture || gesture.pointerId !== ev.pointerId) return;
-            const shouldOpenKeyboard = !gesture.longPress && !gesture.moved;
-            clearGestureTimer();
-            gesture = null;
-            if (shouldOpenKeyboard) showKeyboard();
-            else lockKeyboard();
-        }
-
-        function onPointerCancel(ev: PointerEvent) {
-            if (!gesture || gesture.pointerId !== ev.pointerId) return;
-            clearGestureTimer();
-            gesture = null;
-            lockKeyboard();
-        }
-
-        function onContextMenu(_ev: Event) {
-            // 长按定时器 (360ms) 通常已经先锁过键盘了，这里只是兜底。
-            // 不要 preventDefault：那会连带掐掉系统的复制/粘贴菜单。
-            hideKeyboard();
-            // ev.preventDefault();
-            // ev.stopImmediatePropagation();
+        function onFocus() {
+            app.setSoftKeyboardOpen(true);
         }
 
         function onBlur() {
+            app.setSoftKeyboardOpen(false);
             lockKeyboard();
         }
 
+        // The keybar's keyboard button is the ONLY way to pop the keyboard.
+        // Only STORE the toggle here — registering at mount would let a hidden
+        // pane steal the store's single slot (panes stay mounted per tab); the
+        // activation effect registers it when THIS pane becomes the active tab.
+        softKbToggle = () => {
+            if (document.activeElement === helper) hideKeyboard();
+            else showKeyboard();
+        };
         pinKeyboardHelper();
         lockKeyboard();
         helper.blur();
+        helper.addEventListener("focus", onFocus);
         helper.addEventListener("blur", onBlur);
         helper.addEventListener("input", keepKeyboardHelperInView);
         helper.addEventListener("keydown", keepKeyboardHelperInView);
@@ -1465,19 +1484,17 @@
         window.addEventListener("scroll", onWindowScroll, { passive: true });
         window.visualViewport?.addEventListener("scroll", onViewportChange, { passive: true });
         window.visualViewport?.addEventListener("resize", onViewportChange, { passive: true });
-        containerEl.addEventListener("pointerdown", onPointerDown, { capture: true, passive: true });
-        containerEl.addEventListener("pointermove", onPointerMove, { capture: true, passive: true });
-        containerEl.addEventListener("pointerup", onPointerUp, { capture: true, passive: true });
-        containerEl.addEventListener("pointercancel", onPointerCancel, { capture: true, passive: true });
-        containerEl.addEventListener("contextmenu", onContextMenu, { capture: true });
+        containerEl.addEventListener("pointerdown", onTerminalTouchDown, { capture: true, passive: true });
 
         return () => {
-            clearGestureTimer();
             if (scrollResetRaf) cancelAnimationFrame(scrollResetRaf);
             if (helperPinRaf) cancelAnimationFrame(helperPinRaf);
             if (originalHelperStyle === null) helper.removeAttribute("style");
             else helper.setAttribute("style", originalHelperStyle);
+            helper.removeEventListener("focus", onFocus);
             helper.removeEventListener("blur", onBlur);
+            if (softKbToggle) app.unregisterSoftKeyboardToggle(softKbToggle);
+            softKbToggle = null;
             helper.removeEventListener("input", keepKeyboardHelperInView);
             helper.removeEventListener("keydown", keepKeyboardHelperInView);
             helper.removeEventListener("compositionstart", keepKeyboardHelperInView);
@@ -1485,11 +1502,7 @@
             window.removeEventListener("scroll", onWindowScroll);
             window.visualViewport?.removeEventListener("scroll", onViewportChange);
             window.visualViewport?.removeEventListener("resize", onViewportChange);
-            containerEl.removeEventListener("pointerdown", onPointerDown, { capture: true });
-            containerEl.removeEventListener("pointermove", onPointerMove, { capture: true });
-            containerEl.removeEventListener("pointerup", onPointerUp, { capture: true });
-            containerEl.removeEventListener("pointercancel", onPointerCancel, { capture: true });
-            containerEl.removeEventListener("contextmenu", onContextMenu, { capture: true });
+            containerEl.removeEventListener("pointerdown", onTerminalTouchDown, { capture: true });
         };
     }
 
@@ -1538,12 +1551,40 @@
             pixelLimit: IMAGE_PIXEL_LIMIT,
         }));
         terminal.open(containerEl);
+        // GPU renderer: the default DomRenderer rebuilds DOM spans per paint
+        // and drowns on flood output. WebGL draws from a texture atlas — the
+        // "GPU acceleration" every modern terminal ships. Any failure (old
+        // GPU, RDP, WebView without WebGL2) falls back to the DomRenderer.
+        // NOT on mobile: WebGL paints glyphs into a canvas, leaving no DOM
+        // text — iOS's native long-press selection (the blue handles) has
+        // nothing to grab. Mobile keeps the DOM renderer (selection beats
+        // paint throughput; the output feeder already bounds flood pacing).
+        if (!app.isMobile) {
+            try {
+                const webglAddon = new WebglAddon();
+                webglAddon.onContextLoss(() => {
+                    console.warn("[terminal] WebGL context lost — falling back to DOM renderer");
+                    webglAddon.dispose();
+                });
+                terminal.loadAddon(webglAddon);
+            } catch (e) {
+                console.warn("[terminal] WebGL renderer unavailable, using DOM:", e);
+            }
+        }
         ime229WorkaroundCleanup = setupXtermIme229Workaround({
             terminal,
             host: containerEl,
             enabled: keymap.isMac && !app.isMobile,
         });
         terminal.unicode.activeVersion = "11";
+        // Flood control: all data-event writes go through the feeder (see
+        // output-feeder.ts). Synthetic UI writes (prompts, banners) bypass it.
+        outputFeeder = createOutputFeeder({
+            write: (data, cb) => terminal.write(data, cb),
+            maxPendingBytes: app.isMobile
+                ? BACKLOG_MAX_PENDING_BYTES_MOBILE
+                : BACKLOG_MAX_PENDING_BYTES,
+        });
         // Keyword highlighting lives here: a decoration layer over the parsed
         // cell grid. The reactive $effect above feeds it the compiled rules.
         highlightDecorator = new HighlightDecorator(terminal);
@@ -1560,9 +1601,8 @@
             fitTerminal();
         });
 
-        // 移动端：xterm 的 helper-textarea 一旦 focus 就会召系统键盘，
-        // 而长按选择需要避开这个 focus。短按终端时解锁并 focus；长按、
-        // 拖选或 contextmenu 时立刻锁回去。
+        // 移动端：键盘只从 keybar 的 ⌨ 按钮弹出（issue #225）。终端上任何
+        // 触摸只负责收起已打开的键盘；helper 常态锁定，长按选择不受影响。
         if (app.isMobile) {
             const helper = terminal.textarea ?? containerEl.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
             if (helper) {
@@ -1796,6 +1836,7 @@
             requestAnimationFrame(() => requestAnimationFrame(fitTerminal));
             terminal?.focus();
             const writePty = (text: string) => {
+                maybeReleaseBacklog(text);
                 if (sessionId && !disconnected) {
                     if (streamOpts) {
                         streamSendText(text);
@@ -1816,6 +1857,10 @@
                     : `\x1b[1;${mod}${dir}`;
                 writePty(seq);
             });
+            // Same re-own-on-activation as the writer above: the visible tab's
+            // ⌨ button must always control this pane's helper, never a hidden
+            // pane that happened to mount later.
+            if (softKbToggle) app.registerSoftKeyboardToggle(softKbToggle);
         }
     });
 
@@ -1860,6 +1905,10 @@
         mobileKeyboardCleanup?.();
         mobileTouchScrollCleanup?.();
         paintScheduler?.dispose();
+        outputFeeder?.dispose();
+        outputFeeder = undefined;
+        if (backlogRaf !== null) cancelAnimationFrame(backlogRaf);
+        backlogRaf = null;
         foldStore?.dispose();
         blockTracker?.dispose();
         app.unregisterTerminalWriter();
@@ -1913,6 +1962,12 @@
     {/if}
     <div class="term-wrap" class:is-mobile={app.isMobile} class:no-block-bar={!app.commandBlockBar()}>
         <div class="xterm-host" bind:this={containerEl}></div>
+        {#if backlogBytes > BACKLOG_INDICATOR_BYTES}
+            <div class="backlog-badge">
+                <span>{formatBacklogBytes(backlogBytes)}</span>
+                <span class="backlog-hint">{t("terminal.backlog.skip_hint")}</span>
+            </div>
+        {/if}
         {#if app.commandBlockBar()}
             <!-- 染色层：整行宽的半透明色块，用块自身的色条颜色。pointer-events:none
                  让点击/选中穿透到 xterm 与 .block-hit。坐标同 fold-label：block-bar
@@ -2005,6 +2060,13 @@
     .xterm-host {
         width: 100%;
         height: 100%;
+        /* Contain the whole xterm paint (canvases + its z-indexed decoration
+           layers, incl. the GPU-composited WebGL canvas) in one stacking
+           context. Without this the WebGL layer composites over sibling
+           overlays unpredictably — the backlog badge was only visible while
+           devtools was open. */
+        position: relative;
+        z-index: 0;
     }
 
     /* Widen left padding 4px → 12px to make room for the block bar.
@@ -2049,6 +2111,28 @@
         pointer-events: none;
         overflow: visible;
     }
+    .backlog-badge {
+        position: absolute;
+        top: 8px;
+        right: 24px;          /* clear of fold labels and the block bar */
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        font-size: 11px;
+        padding: 2px 8px;
+        color: var(--text-sub);
+        background: var(--surface);
+        border: 1px solid var(--divider);
+        border-radius: 4px;
+        pointer-events: none;
+        white-space: nowrap;
+        z-index: 6;
+    }
+
+    .backlog-hint {
+        color: var(--text-dim);
+    }
+
     /* 折叠角标：行末右侧贴一个灰字 "⋯ N lines"。
        pointer-events: none 让 xterm 选中、链接、滚动手势全部穿透。 */
     .fold-label {

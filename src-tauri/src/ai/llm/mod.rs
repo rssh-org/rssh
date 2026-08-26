@@ -2,18 +2,21 @@
 //!
 //! 决议 #5：手写 reqwest + 自解析 SSE，零额外 SDK 依赖。
 //!
-//! 协议 → 厂商映射：
-//! - **Anthropic Messages API**（自家协议） → `anthropic.rs`
-//! - **OpenAI Chat Completions**（事实上的标准） → `protocol.rs` 实现，
-//!   被以下 vendor 文件复用：`openai.rs` / `deepseek.rs` / `glm.rs`
+//! 三种协议类型，一协议一文件，互不共享请求/解析逻辑：
+//! - `deepseek.rs`     —— DeepSeek Thinking（含 reasoning_content 回传）
+//! - `protocol.rs`     —— OpenAI Completions（OpenAI / GLM / vLLM / Groq …）
+//! - `anthropic.rs`    —— Anthropic Messages
 //!
-//! 新增厂商的步骤：写一个 ~40 行的 vendor 文件指定 endpoint + 默认模型 +
-//! list_models 实现，然后在 `build_client` 加一行分发即可。
+//! DeepSeek 与 OpenAI 协议曾共用一套实现，导致 DeepSeek 特有的思考链
+//! 回传逻辑长在共享层：换协议 resume 对话时会把 reasoning_content 发给
+//! 不认识它的服务端。拆分后思考链语义只存在于 deepseek.rs —— 结构上
+//! 消灭跨协议泄漏。
+//!
+//! `build_client` 按 provider 行的 protocol 字段三分发；endpoint 恒为
+//! 用户配置的显式值（必填），没有编译期默认端点。
 
 pub mod anthropic;
 pub mod deepseek;
-pub mod glm;
-pub mod openai;
 mod protocol;
 
 use std::sync::Arc;
@@ -22,6 +25,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppResult;
+
+pub use protocol::OpenAiCompletionsClient;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
@@ -114,24 +119,55 @@ pub type DeltaSink = Arc<dyn Fn(ChatDelta) + Send + Sync>;
 pub trait LlmClient: Send + Sync {
     async fn chat(&self, req: ChatRequest, sink: DeltaSink) -> AppResult<ChatResponse>;
     async fn list_models(&self) -> AppResult<Vec<ModelInfo>>;
-    fn provider(&self) -> &'static str;
 }
 
-pub fn build_client(
-    provider: &str,
-    api_key: String,
-    endpoint: Option<String>,
-) -> AppResult<Box<dyn LlmClient>> {
-    match provider {
-        "anthropic" => Ok(Box::new(anthropic::AnthropicClient::new(api_key, endpoint))),
-        "openai" | "openai-compatible" => {
-            Ok(Box::new(openai::OpenAiClient::new(api_key, endpoint)))
+/// The closed set of protocols a provider row may declare. `parse` is the
+/// single source of truth — `build_client` matches the enum (exhaustive, so a
+/// new variant without a client arm fails to compile) and `protocol_valid`
+/// derives from it. Wire/DB values stay strings; the enum is internal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    DeepSeekThinking,
+    OpenAiCompletions,
+    AnthropicMessages,
+}
+
+impl Protocol {
+    pub fn parse(s: &str) -> Option<Protocol> {
+        match s {
+            "deepseek-thinking" => Some(Protocol::DeepSeekThinking),
+            "openai-completions" => Some(Protocol::OpenAiCompletions),
+            "anthropic-messages" => Some(Protocol::AnthropicMessages),
+            _ => None,
         }
-        "deepseek" => Ok(Box::new(deepseek::DeepSeekClient::new(api_key, endpoint))),
-        "glm" => Ok(Box::new(glm::GlmClient::new(api_key, endpoint))),
-        other => Err(crate::error::AppError::config(
-            "llm_unknown_provider",
-            serde_json::json!({ "provider": other }),
+    }
+}
+
+/// Validation derived from `Protocol::parse` — can never drift from dispatch.
+pub fn protocol_valid(p: &str) -> bool {
+    Protocol::parse(p).is_some()
+}
+
+/// Build the client for a provider row's protocol. `endpoint` is the row's
+/// explicit (required) endpoint — no compile-time vendor defaults anywhere.
+pub fn build_client(
+    protocol: &str,
+    api_key: String,
+    endpoint: String,
+) -> AppResult<Box<dyn LlmClient>> {
+    match Protocol::parse(protocol) {
+        Some(Protocol::DeepSeekThinking) => {
+            Ok(Box::new(deepseek::DeepSeekClient::new(api_key, endpoint)))
+        }
+        Some(Protocol::OpenAiCompletions) => {
+            Ok(Box::new(OpenAiCompletionsClient::new(api_key, endpoint)))
+        }
+        Some(Protocol::AnthropicMessages) => {
+            Ok(Box::new(anthropic::AnthropicClient::new(api_key, endpoint)))
+        }
+        None => Err(crate::error::AppError::config(
+            "llm_unknown_protocol",
+            serde_json::json!({ "protocol": protocol }),
         )),
     }
 }

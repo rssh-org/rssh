@@ -567,95 +567,108 @@ describe("command block line limit", () => {
   });
 });
 
-describe("terminal workspaces", () => {
-  it("tracks explicit terminal connection states and clears stale state", async () => {
-    const app = await loadAppModule();
+describe("mobile key modifier lock", () => {
+  // Two ways to arm a modifier on the mobile keybar:
+  //  - short tap (setCtrl): one-shot — arms for the NEXT key, then clears
+  //  - long-press (lockCtrl): sticky — stays armed across many keys until tapped off
+  // The distinction lives entirely in clearModifiers: it clears one-shot arms but
+  // must leave locks untouched, so a locked Ctrl keeps producing Ctrl+arrow on
+  // every tap without re-arming.
 
-    expect(app.terminalConnectionStatus("pane")).toBe("connecting");
-    app.setTerminalConnectionStatus("pane", "connected");
-    expect(app.terminalConnectionStatus("pane")).toBe("connected");
-    app.setTerminalConnectionStatus("pane", "disconnected");
-    expect(app.terminalConnectionStatus("pane")).toBe("disconnected");
-    app.clearTerminalConnectionStatus("pane");
-    expect(app.terminalConnectionStatus("pane")).toBe("connecting");
+  it("a short tap is one-shot: armed until clearModifiers, then gone", async () => {
+    const app = await loadAppModule();
+    app.setCtrl(true);
+    expect(app.ctrlActive()).toBe(true);
+    expect(app.ctrlLocked()).toBe(false); // a tap never locks
+    app.clearModifiers();
+    expect(app.ctrlActive()).toBe(false); // one-shot cleared after the key
   });
 
-  it("restores the most recently focused pane when returning to a workspace", async () => {
+  it("a long-press lock survives clearModifiers", async () => {
     const app = await loadAppModule();
-    app.addTab({ id: "first", type: "local", label: "First" });
-    app.addPane("first", "right", { id: "first-child", type: "local", label: "First child" });
-    app.setActivePane("first-child");
-    app.addTab({ id: "second", type: "local", label: "Second" });
-
-    app.setActiveWorkspace("first");
-
-    expect(app.activeWorkspaceId()).toBe("first");
-    expect(app.activePaneId()).toBe("first-child");
+    app.lockCtrl();
+    expect(app.ctrlActive()).toBe(true);
+    expect(app.ctrlLocked()).toBe(true);
+    app.clearModifiers();
+    expect(app.ctrlActive()).toBe(true); // locked: NOT cleared
+    expect(app.ctrlLocked()).toBe(true);
   });
 
-  it("restores the most recently focused pane after closing the active workspace", async () => {
+  it("tapping a locked modifier off releases the lock", async () => {
     const app = await loadAppModule();
-    app.addTab({ id: "first", type: "local", label: "First" });
-    app.addPane("first", "right", { id: "first-child", type: "local", label: "First child" });
-    app.setActivePane("first-child");
-    app.addTab({ id: "second", type: "local", label: "Second" });
-
-    app.closeTab("second");
-
-    expect(app.activeWorkspaceId()).toBe("first");
-    expect(app.activePaneId()).toBe("first-child");
-    expect(app.activeTabId()).toBe("first-child");
+    app.lockCtrl();
+    app.setCtrl(false);
+    expect(app.ctrlActive()).toBe(false);
+    expect(app.ctrlLocked()).toBe(false);
   });
 
-  it("keeps split children out of the top-level tab list", async () => {
+  it("keeps ctrl and alt independent across one-shot and lock", async () => {
     const app = await loadAppModule();
-    app.addTab({ id: "root", type: "local", label: "Root" });
-    const child = app.addPane("root", "right", { id: "child", type: "local", label: "Child" });
-    expect(child).toEqual("child");
-    expect(app.workspaceTabs().map((tab) => tab.id)).toEqual(["root"]);
-    expect(app.paneIdsForWorkspace("root")).toEqual(["root", "child"]);
+    app.lockCtrl();      // ctrl sticky
+    app.setAlt(true);    // alt one-shot
+    app.clearModifiers();
+    expect(app.ctrlActive()).toBe(true);  // ctrl locked -> survives
+    expect(app.altActive()).toBe(false);  // alt one-shot -> cleared
+    expect(app.altLocked()).toBe(false);
   });
 
-  it("removes a pane without destroying its sibling workspace", async () => {
+  it("locks alt symmetrically", async () => {
     const app = await loadAppModule();
-    app.addTab({ id: "root", type: "local", label: "Root" });
-    app.addPane("root", "right", { id: "child", type: "local", label: "Child" });
-    app.closePane("child");
-    expect(app.tabs().map((tab) => tab.id)).toContain("root");
-    expect(app.paneIdsForWorkspace("root")).toEqual(["root"]);
-  });
-
-  it("closing a workspace closes all hidden pane tabs", async () => {
-    const app = await loadAppModule();
-    app.addTab({ id: "root", type: "local", label: "Root" });
-    app.addPane("root", "right", { id: "child", type: "local", label: "Child" });
-    app.closeTab("root");
-    expect(app.tabs().map((tab) => tab.id)).not.toContain("root");
-    expect(app.tabs().map((tab) => tab.id)).not.toContain("child");
+    app.lockAlt();
+    expect(app.altActive()).toBe(true);
+    expect(app.altLocked()).toBe(true);
+    app.clearModifiers();
+    expect(app.altActive()).toBe(true);
   });
 });
 
-describe("terminal workspace direction and MRU", () => {
-  it("orders the new pane according to each split side", async () => {
+describe("soft keyboard gate", () => {
+  // The system keyboard opens ONLY from the keybar's keyboard button; terminal
+  // taps never pop it (issue #225). The pane owns show/hide and registers the
+  // toggle here; the store mirrors the open state for the button's styling.
+
+  it("routes toggleSoftKeyboard to the registered pane controller", async () => {
     const app = await loadAppModule();
-    for (const [index, side] of (["left", "right", "top", "bottom"] as const).entries()) {
-      const rootId = `root-${index}`;
-      const childId = `child-${index}`;
-      app.addTab({ id: rootId, type: "local", label: rootId });
-      app.addPane(rootId, side, { id: childId, type: "local", label: childId });
-      expect(app.paneIdsForWorkspace(rootId)).toEqual(
-        side === "left" || side === "top" ? [childId, rootId] : [rootId, childId],
-      );
-    }
+    let calls = 0;
+    app.registerSoftKeyboardToggle(() => { calls += 1; });
+
+    app.toggleSoftKeyboard();
+
+    expect(calls).toBe(1);
   });
 
-  it("moves the focused workspace to the MRU front when adding a pane", async () => {
+  it("mirrors the open state and resets it when the pane unregisters", async () => {
     const app = await loadAppModule();
-    await app.setTabMru(true);
-    app.addTab({ id: "first", type: "local", label: "First" });
-    app.addTab({ id: "second", type: "local", label: "Second" });
-    app.setActiveTab("first");
-    app.addPane("second", "right", { id: "second-child", type: "local", label: "Second child" });
-    expect(app.tabs().map((tab) => tab.id)).toEqual(["home", "second", "first", "second-child"]);
+    const toggle = () => {};
+    app.registerSoftKeyboardToggle(toggle);
+    app.setSoftKeyboardOpen(true);
+    expect(app.softKeyboardOpen()).toBe(true);
+
+    app.unregisterSoftKeyboardToggle(toggle);
+
+    expect(app.softKeyboardOpen()).toBe(false);
+    // No controller registered — a tap is a silent no-op, not a throw.
+    app.toggleSoftKeyboard();
+  });
+
+  it("a hidden pane unregistering must not clear the active pane's slot", async () => {
+    // Panes stay mounted per tab; a later-mounted pane steals the slot, and a
+    // stale pane being destroyed must not wipe the current owner.
+    const app = await loadAppModule();
+    const stale = () => {};
+    let activeCalls = 0;
+    const active = () => { activeCalls += 1; };
+    app.registerSoftKeyboardToggle(stale);
+    app.registerSoftKeyboardToggle(active);
+    app.setSoftKeyboardOpen(true);
+
+    app.unregisterSoftKeyboardToggle(stale);
+
+    // No re-registration after the stale unregister: if it had wrongly cleared
+    // the slot, the toggle would be a no-op (activeCalls 0); if it had wrongly
+    // reset the state, softKeyboardOpen would read false.
+    app.toggleSoftKeyboard();
+    expect(activeCalls).toBe(1);
+    expect(app.softKeyboardOpen()).toBe(true);
   });
 });

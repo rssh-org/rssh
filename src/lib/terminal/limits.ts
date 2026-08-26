@@ -29,3 +29,14 @@ export function normalizeCommandBlockMaxLines(value: unknown): number {
 export function commandBlockFoldCacheLines(maxVisibleLines: number): number {
   return TERMINAL_SCROLLBACK_LINES - normalizeCommandBlockMaxLines(maxVisibleLines) - 1;
 }
+
+// ── Flood backlog ──
+/** Pending bytes above which the backlog badge becomes visible. */
+export const BACKLOG_INDICATOR_BYTES = 64 * 1024;
+/** Ctrl+C only releases the backlog above this much pending data. */
+export const BACKLOG_DROP_TRIGGER_BYTES = 256 * 1024;
+/** Silence window that ends a quiescent drop after Ctrl+C. */
+export const BACKLOG_QUIESCENCE_MS = 150;
+/** Feeder queue cap: drop-oldest beyond this (desktop / mobile). */
+export const BACKLOG_MAX_PENDING_BYTES = 128 * 1024 * 1024;
+export const BACKLOG_MAX_PENDING_BYTES_MOBILE = 32 * 1024 * 1024;

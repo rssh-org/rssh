@@ -17,8 +17,6 @@ use super::{
 };
 use crate::error::{error_chain, AppError, AppResult};
 
-const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
-const MODELS_ENDPOINT: &str = "https://api.anthropic.com/v1/models";
 const API_VERSION: &str = "2023-06-01";
 
 pub struct AnthropicClient {
@@ -28,14 +26,16 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    pub fn new(api_key: String, endpoint: Option<String>) -> Self {
-        // Empty / whitespace endpoint == "use the official default", matching the
-        // normalization the OpenAI-compatible vendors get from resolve_chat_endpoint.
-        // (Anthropic posts to a `/messages` URL, so it can't share that helper.)
-        let endpoint = endpoint
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
+    /// `endpoint` is required (the provider row's explicit value). A base URL
+    /// without the `/messages` suffix gets it appended; a full messages URL is
+    /// used as-is.
+    pub fn new(api_key: String, endpoint: String) -> Self {
+        let trimmed = endpoint.trim().trim_end_matches('/').to_string();
+        let endpoint = if trimmed.ends_with("/messages") {
+            trimmed
+        } else {
+            format!("{trimmed}/messages")
+        };
         Self {
             api_key,
             endpoint,
@@ -79,26 +79,17 @@ enum AnthropicBlock {
 }
 
 impl AnthropicClient {
-    /// 把 messages endpoint 替换成 models endpoint。
-    /// 先归一化（去尾斜杠/空白），再判等比较——避免 `.../messages/` 这种尾斜杠落到错误分支。
+    /// 把 messages endpoint 替换成 models endpoint（`.../messages` → `.../models`）。
     fn models_url(&self) -> String {
-        let ep = self.endpoint.trim().trim_end_matches('/');
-        if ep == DEFAULT_ENDPOINT {
-            MODELS_ENDPOINT.to_string()
-        } else if let Some(base) = ep.strip_suffix("/messages") {
-            format!("{}/models", base.trim_end_matches('/'))
-        } else {
-            format!("{ep}/models")
+        match self.endpoint.strip_suffix("/messages") {
+            Some(base) => format!("{base}/models"),
+            None => format!("{}/models", self.endpoint),
         }
     }
 }
 
 #[async_trait]
 impl LlmClient for AnthropicClient {
-    fn provider(&self) -> &'static str {
-        "anthropic"
-    }
-
     async fn list_models(&self) -> AppResult<Vec<ModelInfo>> {
         let url = self.models_url();
         let resp = self
@@ -342,18 +333,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_or_blank_endpoint_falls_back_to_default() {
-        // None / "" / whitespace all mean "use the official endpoint" — a stored
-        // empty setting must never become a POST to an empty URL.
-        for ep in [None, Some(String::new()), Some("   ".to_string())] {
-            let c = AnthropicClient::new("k".into(), ep);
-            assert_eq!(c.endpoint, DEFAULT_ENDPOINT);
-        }
+    fn base_url_gets_messages_suffix() {
+        let c = AnthropicClient::new("k".into(), "https://proxy.example/v1".into());
+        assert_eq!(c.endpoint, "https://proxy.example/v1/messages");
+        assert_eq!(c.models_url(), "https://proxy.example/v1/models");
     }
 
     #[test]
-    fn custom_endpoint_is_trimmed_and_kept() {
-        let c = AnthropicClient::new("k".into(), Some("  https://proxy/v1/messages  ".into()));
+    fn full_messages_url_is_trimmed_and_kept() {
+        let c = AnthropicClient::new("k".into(), "  https://proxy/v1/messages/ ".into());
         assert_eq!(c.endpoint, "https://proxy/v1/messages");
     }
 }
