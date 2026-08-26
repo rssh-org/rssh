@@ -1,4 +1,4 @@
-use rusqlite::params;
+use rusqlite::{params, Connection};
 
 use super::Db;
 use crate::error::{AppError, AppResult};
@@ -225,32 +225,74 @@ pub fn upsert_by_keyword(db: &Db, rule: &HighlightRule) -> AppResult<()> {
     Ok(())
 }
 
-pub fn reset_defaults(db: &Db) -> AppResult<()> {
-    let conn = db.lock()?;
-    conn.execute("DELETE FROM highlights", [])?;
-    // All defaults are regex now (the text/regex split is gone). ERROR/WARN/INFO/
-    // DEBUG carry no metacharacters, so as regexes they match exactly as before.
-    const DEFAULTS: [(&str, &str, &str, bool, bool, bool); 5] = [
-        ("ERROR", "ERROR", "#FF6B6B", true, true, false),
-        ("WARN", "WARN", "#FFD060", true, true, false),
-        ("INFO", "INFO", "#6EDAA0", true, true, false),
-        ("DEBUG", "DEBUG", "#40C8E0", true, true, false),
-        (
-            r"\b(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}\b",
-            "IPv4",
-            "#D86BFF",
-            true,
-            true,
-            false,
-        ),
-    ];
-    for (keyword, name, color, enabled, is_regex, is_case_sensitive) in &DEFAULTS {
+/// The default highlight set: what a fresh install seeds (schema.rs) and what
+/// "Reset to Defaults" restores. Entries are (keyword, name, color); every
+/// default is an enabled, case-insensitive regex. Order matters twice over —
+/// it is the list order in the settings UI and the overlap priority at match
+/// time (earlier rule wins). Curated from community-contributed configs
+/// (issue #249); prose-prone words like no/not/yes/ok/any are deliberately
+/// excluded because as global defaults they would fire on ordinary text.
+///
+/// The IPv4 pattern must stay byte-identical: the v19 migration keys its
+/// insert-if-absent on this exact string.
+pub const DEFAULT_RULES: [(&str, &str, &str); 11] = [
+    // Log levels — literal, case-sensitive as always.
+    ("ERROR", "ERROR", "#FF6B6B"),
+    ("WARN", "WARN", "#FFD060"),
+    ("INFO", "INFO", "#6EDAA0"),
+    ("DEBUG", "DEBUG", "#40C8E0"),
+    // Semantic status words (case-insensitive) for logs that don't shout in
+    // uppercase: "failed", "Access denied", "Build succeeded", "1 warning".
+    (
+        r"\b(?:error|fail(?:s|ed|ing|ures?)?|denied|refused|fatal|timed out|timeout|invalid)\b",
+        "Errors",
+        "#FF6B6B",
+    ),
+    (
+        r"\b(?:success(?:ful)?|succeeded|passed|completed)\b",
+        "Success",
+        "#6EDAA0",
+    ),
+    (r"\bwarn(?:ing)?\b", "Warnings", "#FFD060"),
+    // Data patterns.
+    (
+        r"\b\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?\b",
+        "Date/Time",
+        "#82AAFF",
+    ),
+    (
+        r"\b(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\b",
+        "MAC address",
+        "#D86BFF",
+    ),
+    (
+        r"\b(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}\b",
+        "IPv4",
+        "#D86BFF",
+    ),
+    (
+        r"\b\d+(?:\.\d+)?(?:[KMGTPE]i?B|[KMGTPE]|B)\b",
+        "File sizes",
+        "#E8A87C",
+    ),
+];
+
+/// Insert the default set. The caller owns the policy: the schema seed calls
+/// this only into an empty table, reset_defaults deletes first.
+pub fn insert_defaults(conn: &Connection) -> AppResult<()> {
+    for (keyword, name, color) in DEFAULT_RULES {
         conn.execute(
-            "INSERT INTO highlights (keyword, name, color, enabled, is_regex, is_case_sensitive) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![keyword, name, color, enabled, is_regex, is_case_sensitive],
+            "INSERT INTO highlights (keyword, name, color, enabled, is_regex, is_case_sensitive) VALUES (?1, ?2, ?3, 1, 1, 0)",
+            params![keyword, name, color],
         )?;
     }
     Ok(())
+}
+
+pub fn reset_defaults(db: &Db) -> AppResult<()> {
+    let conn = db.lock()?;
+    conn.execute("DELETE FROM highlights", [])?;
+    insert_defaults(&conn)
 }
 
 #[cfg(test)]
@@ -348,5 +390,50 @@ mod tests {
             insert(&db, &r).unwrap_err().code(),
             "highlight_name_required"
         );
+    }
+
+    #[test]
+    fn fresh_db_seeds_full_default_set() {
+        // The migration seed and DEFAULT_RULES must agree: every entry present,
+        // no duplicates, and every row a named regex — v21's legacy-text
+        // escaping must never fire on seeded rows (it would destroy patterns
+        // like \b(?:error|...)\b by escaping their metacharacters).
+        let db = Db::open_in_memory().unwrap();
+        let seeded = list(&db).unwrap();
+        assert_eq!(seeded.len(), DEFAULT_RULES.len());
+        let by_keyword: std::collections::HashMap<_, _> = seeded
+            .iter()
+            .map(|r| (r.keyword.as_str(), (r.name.as_str(), r.color.as_str())))
+            .collect();
+        for (keyword, name, color) in DEFAULT_RULES {
+            let (n, c) = by_keyword
+                .get(keyword)
+                .unwrap_or_else(|| panic!("seed missing rule {keyword}"));
+            assert_eq!((*n, *c), (name, color), "seed drifted for {keyword}");
+        }
+        assert!(seeded
+            .iter()
+            .all(|r| r.is_regex && !r.name.trim().is_empty()));
+    }
+
+    #[test]
+    fn reset_defaults_restores_the_seed_set() {
+        // Drift guard: "Reset to Defaults" and a fresh install converge on the
+        // same set in the same order (order = UI list order = overlap priority).
+        let db = Db::open_in_memory().unwrap();
+        let fresh: Vec<_> = list(&db)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.keyword, r.name, r.color))
+            .collect();
+        insert(&db, &rule("CUSTOM")).unwrap();
+        delete_by_keyword(&db, "ERROR").unwrap();
+        reset_defaults(&db).unwrap();
+        let after: Vec<_> = list(&db)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.keyword, r.name, r.color))
+            .collect();
+        assert_eq!(after, fresh);
     }
 }
