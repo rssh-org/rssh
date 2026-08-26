@@ -870,14 +870,6 @@
             }
             sections.push(items);
         }
-        if (isTextTerminal && tab.type !== "serial") {
-            sections.push([
-                {label: t("tab.context.split.left"), onClick: () => splitCurrentPane(tab, "left")},
-                {label: t("tab.context.split.right"), onClick: () => splitCurrentPane(tab, "right")},
-                {label: t("tab.context.split.top"), onClick: () => splitCurrentPane(tab, "top")},
-                {label: t("tab.context.split.bottom"), onClick: () => splitCurrentPane(tab, "bottom")},
-            ]);
-        }
 
         // Serial control lines: DTR/RTS assert/deassert + break. Runtime ops on
         // the open port (MCU reset, bootloader entry, break-to-debugger). Greyed
@@ -925,9 +917,24 @@
             ]);
         }
 
-        // Multi-window requires Tauri WebviewWindowBuilder — desktop only.
+        // Split panes + multi-window: one desktop-only terminal section.
+        // canOpenTabInNewWindow already excludes serial (panes would fight the
+        // exclusive port), so a single guard covers both items. Split follows
+        // the old directional open-new-window submenu idiom: the parent click
+        // runs the common default (split right, VS Code/iTerm style), the four
+        // directions live one hover away.
         if (canOpenTabInNewWindow(tab) && !app.isMobile) {
             sections.push([
+                {
+                    label: t("tab.context.split"),
+                    onClick: () => splitCurrentPane(tab, "right"),
+                    submenu: [
+                        {label: t("tab.context.split.top"), onClick: () => splitCurrentPane(tab, "top")},
+                        {label: t("tab.context.split.bottom"), onClick: () => splitCurrentPane(tab, "bottom")},
+                        {label: t("tab.context.split.left"), onClick: () => splitCurrentPane(tab, "left")},
+                        {label: t("tab.context.split.right"), onClick: () => splitCurrentPane(tab, "right")},
+                    ],
+                },
                 {
                     label: t("tab.context.open_new_window"),
                     shortcut: keymap.format("tab.openNewWindow"),
