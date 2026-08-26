@@ -225,20 +225,16 @@ pub fn upsert_by_keyword(db: &Db, rule: &HighlightRule) -> AppResult<()> {
     Ok(())
 }
 
-/// The default highlight set: what a fresh install seeds (schema.rs) and what
-/// "Reset to Defaults" restores. Entries are (keyword, name, color); every
-/// default is an enabled, case-insensitive regex. Order matters twice over —
-/// it is the list order in the settings UI and the overlap priority at match
-/// time (earlier rule wins). Curated from community-contributed configs
-/// (issue #249); prose-prone words like no/not/yes/ok/any are deliberately
-/// excluded because as global defaults they would fire on ordinary text.
-///
-/// The IPv4 pattern must stay byte-identical: the v19 migration keys its
-/// insert-if-absent on this exact string.
-pub const DEFAULT_RULES: [(&str, &str, &str); 11] = [
+/// The default highlight set: what a fresh install seeds (the v19 migration
+/// block) and what "Reset to Defaults" restores. Entries are (keyword, name,
+/// color); every default is an enabled, case-insensitive regex. Order matters
+/// twice over — it is the list order in the settings UI and the overlap
+/// priority at match time (earlier rule wins). Curated from
+/// community-contributed configs (issue #249); prose-prone words like
+/// no/not/yes/ok/any are deliberately excluded because as global defaults
+/// they would fire on ordinary text.
+pub const DEFAULT_RULES: [(&str, &str, &str); 9] = [
     // Log levels — literal, case-sensitive as always.
-    ("ERROR", "ERROR", "#FF6B6B"),
-    ("WARN", "WARN", "#FFD060"),
     ("INFO", "INFO", "#6EDAA0"),
     ("DEBUG", "DEBUG", "#40C8E0"),
     // Semantic status words (case-insensitive) for logs that don't shout in
@@ -277,8 +273,9 @@ pub const DEFAULT_RULES: [(&str, &str, &str); 11] = [
     ),
 ];
 
-/// Insert the default set. The caller owns the policy: the schema seed calls
-/// this only into an empty table, reset_defaults deletes first.
+/// Insert the default set. The caller owns the policy: the v19 migration
+/// calls this right after clearing the bare v9 seeds; reset_defaults deletes
+/// everything first.
 pub fn insert_defaults(conn: &Connection) -> AppResult<()> {
     for (keyword, name, color) in DEFAULT_RULES {
         conn.execute(

@@ -115,6 +115,14 @@ rg 'dynamic_discovery_sources|DynamicDiscoveredTarget|connectDynamicTarget' src 
 如果修改了同步的payload，需要保证新客户端运行没有任何问题，比如旧配置是：{a,b,c,d}，新配置是：{a, b: {c, d}}，新客户端在第一次启动或者拉取旧配置是，需要将c,d映射到b里面
 而旧客户端，使用新配置，如果有问题不用管，即新客户端生成的配置是：{a, b: {c, d}}，而不是{a, b: {c, d}, c, d}
 
+### R14. 历史迁移 SQL 是冻结的，永远不改
+`schema.rs` 里 `version < N` 的块（建表 / ALTER / 旧 seed）已经跑过就永远保持原样 —— 不要改低版本的 DDL，不要在旧版本块里加列或换 seed。
+同一个 `version` 在不同时间产出两种表结构，等于让迁移不再是版本的纯函数。要改默认数据或表结构，就开新版本块。
+
+```bash
+rg 'if version <' src-tauri/src/db/schema.rs   # 每个块只加不改
+```
+
 ---
 
 ## 事实（Facts）— 文件 + 概念 + 核对命令
@@ -303,3 +311,4 @@ rg 'invoke\("|generate_handler!|"[a-z_]+" =>' src/lib src-tauri/src/lib.rs src-t
 - 让 tab 根容器尺寸不明确或出现双层滚动（R4）
 - 复制本文行号字面量进代码或 PR 描述（开头免责声明）
 - 只为单一入口写功能而没声明其他入口的处理（R10）
+- 改历史迁移块里的建表 / ALTER / 旧 seed SQL（R14）

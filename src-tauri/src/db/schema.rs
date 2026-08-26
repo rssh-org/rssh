@@ -60,28 +60,27 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
             );
 
             CREATE TABLE IF NOT EXISTS highlights (
-                id                INTEGER PRIMARY KEY AUTOINCREMENT,
-                keyword           TEXT NOT NULL,
-                color             TEXT NOT NULL,
-                enabled           INTEGER NOT NULL DEFAULT 1,
-                is_regex          INTEGER NOT NULL DEFAULT 0,
-                is_case_sensitive INTEGER NOT NULL DEFAULT 0,
-                name              TEXT NOT NULL DEFAULT ''
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyword TEXT NOT NULL,
+                color   TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1
             );
             ",
         )?;
 
-        // Seed default highlights if table is empty. The table is born with
-        // all columns (matching the v18/v19 ALTER definitions verbatim, so
-        // those column_exists-guarded blocks are no-ops here) so the seed can
-        // insert named regexes directly — v21's legacy-text escaping never
-        // sees them. Only fresh installs and pre-v9 upgrades reach this block:
-        // an existing user's highlights are never touched.
+        // Seed default highlights if table is empty
         let count: u32 = conn
             .query_row("SELECT COUNT(*) FROM highlights", [], |r| r.get(0))
             .unwrap_or(0);
         if count == 0 {
-            crate::db::highlight::insert_defaults(conn)?;
+            conn.execute_batch(
+                "
+                INSERT INTO highlights (keyword, color, enabled) VALUES ('ERROR', '#FF6B6B', 1);
+                INSERT INTO highlights (keyword, color, enabled) VALUES ('WARN', '#FFD060', 1);
+                INSERT INTO highlights (keyword, color, enabled) VALUES ('INFO', '#6EDAA0', 1);
+                INSERT INTO highlights (keyword, color, enabled) VALUES ('DEBUG', '#40C8E0', 1);
+                ",
+            )?;
         }
     }
 
