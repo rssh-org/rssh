@@ -1,0 +1,55 @@
+name: Tests
+
+# Full test suite on every PR update targeting main. release.yml runs the
+# same suite but only on version tags — before this file, PRs carried no
+# checks at all, which is how a red test merged unnoticed (#253).
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+# Read-only: this workflow never pushes artifacts.
+permissions:
+  contents: read
+
+# A newer push to the same PR supersedes the previous run — cancel it
+# instead of burning runner minutes on an outdated head.
+concurrency:
+  group: ci-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Same recipe as release.yml's test job (proven there on tag builds):
+    # platform-neutral tests + protocol parsing, one ubuntu leg is enough.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # cargo test compiles the whole crate (wry / tauri included) and needs
+      # the same system deps as the Linux desktop build to link webkit2gtk.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev libudev-dev
+
+      - name: Frontend tests (vitest)
+        run: npm test
+
+      - name: Backend tests (cargo)
+        working-directory: src-tauri
+        run: cargo test
