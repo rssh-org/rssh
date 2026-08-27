@@ -415,8 +415,13 @@ mod tests {
 
     #[test]
     fn reset_defaults_restores_the_seed_set() {
-        // Drift guard: "Reset to Defaults" and a fresh install converge on the
-        // same set in the same order (order = UI list order = overlap priority).
+        // "Reset to Defaults" restores the stock set in DEFAULT_RULES order.
+        // The fresh-install order deliberately differs: migrations seed in
+        // historical layers (v19 inserted IPv4 third, before the richer v29
+        // set existed) and v29's upsert UPDATEs existing rows in place,
+        // preserving those slots. Sets must converge; orders are pinned
+        // separately below. The default patterns match disjoint text, so the
+        // priority difference is cosmetic.
         let db = Db::open_in_memory().unwrap();
         let fresh: Vec<_> = list(&db)
             .unwrap()
@@ -431,6 +436,26 @@ mod tests {
             .into_iter()
             .map(|r| (r.keyword, r.name, r.color))
             .collect();
-        assert_eq!(after, fresh);
+
+        // Same set, whatever the order.
+        let mut fresh_sorted = fresh.clone();
+        let mut after_sorted = after.clone();
+        fresh_sorted.sort();
+        after_sorted.sort();
+        assert_eq!(
+            after_sorted, fresh_sorted,
+            "reset must restore the seed set"
+        );
+
+        // Reset re-inserts in DEFAULT_RULES order (IPv4 eighth, behind MAC).
+        let expected: Vec<_> = DEFAULT_RULES
+            .iter()
+            .map(|(k, n, c)| (k.to_string(), n.to_string(), c.to_string()))
+            .collect();
+        assert_eq!(after, expected, "reset order follows DEFAULT_RULES");
+
+        // Fresh install keeps the migrations' historical slot: v19 seeded
+        // IPv4 third, ahead of the richer v29 set.
+        assert_eq!(fresh[2].1, "IPv4", "fresh install keeps the v19 IPv4 slot");
     }
 }
