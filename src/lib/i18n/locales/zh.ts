@@ -173,6 +173,8 @@ const zh: Messages = {
   "settings.appearance.term.cancel": "取消",
   "settings.appearance.term.bg_follow": "终端背景跟随主题",
   "settings.appearance.term.bg_follow_desc": "开启时，终端背景使用主题背景色，与应用外观融为一体；关闭时，保留所选配色方案自身的背景。",
+  "settings.appearance.term.gpu_render": "终端 GPU 渲染",
+  "settings.appearance.term.gpu_render_desc": "开启后终端经 WebGL 渲染，重输出更流畅；若出现字形乱码可关闭规避（自动回退 DOM 渲染器）。移动端默认关闭——画布渲染会使系统原生长按选字失效。",
   "settings.appearance.terminal_font": "终端字体",
   "settings.appearance.font.default": "默认",
   "settings.appearance.font.search": "搜索字体…",

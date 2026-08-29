@@ -171,6 +171,8 @@ const en = {
   "settings.appearance.term.cancel": "Cancel",
   "settings.appearance.term.bg_follow": "Terminal background follows theme",
   "settings.appearance.term.bg_follow_desc": "When on, the terminal background uses the app's theme color so the chrome and terminal blend. When off, the selected scheme keeps its own background.",
+  "settings.appearance.term.gpu_render": "GPU terminal rendering",
+  "settings.appearance.term.gpu_render_desc": "Renders the terminal via WebGL for smoother heavy output; turn it off if glyphs ever display corrupted (the DOM renderer is the fallback). Off by default on mobile — canvas rendering disables native long-press text selection.",
   "settings.appearance.terminal_font": "Terminal font",
   "settings.appearance.font.default": "Default",
   "settings.appearance.font.search": "Search fonts…",

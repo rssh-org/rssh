@@ -1508,6 +1508,15 @@
 
     let unsubscribeTheme: (() => void) | null = null;
     let unsubscribeFont: (() => void) | null = null;
+    let unsubscribeGpu: (() => void) | null = null;
+    // Current WebGL renderer addon, if any. Disposing it reverts xterm to
+    // the DOM renderer; null means we are on the DOM renderer right now.
+    let webglAddon: WebglAddon | null = null;
+
+    function disposeWebgl(): void {
+        webglAddon?.dispose();
+        webglAddon = null;
+    }
 
     onMount(async () => {
         const IMAGE_STORAGE_LIMIT_MB = app.isMobile ? 32 : 128;
@@ -1555,22 +1564,28 @@
         // and drowns on flood output. WebGL draws from a texture atlas — the
         // "GPU acceleration" every modern terminal ships. Any failure (old
         // GPU, RDP, WebView without WebGL2) falls back to the DomRenderer.
-        // NOT on mobile: WebGL paints glyphs into a canvas, leaving no DOM
-        // text — iOS's native long-press selection (the blue handles) has
-        // nothing to grab. Mobile keeps the DOM renderer (selection beats
-        // paint throughput; the output feeder already bounds flood pacing).
-        if (!app.isMobile) {
+        // The user toggle decides (theme.termGpuRender, live): it defaults
+        // off on mobile because WebGL paints glyphs into a canvas, leaving
+        // no DOM text — iOS's native long-press selection (the blue handles)
+        // has nothing to grab. Toggling mid-session swaps renderers in place.
+        unsubscribeGpu = theme.registerXtermGpuListener(on => {
+            if (!on) {
+                disposeWebgl();
+                return;
+            }
+            if (webglAddon) return;
             try {
-                const webglAddon = new WebglAddon();
-                webglAddon.onContextLoss(() => {
+                const addon = new WebglAddon();
+                addon.onContextLoss(() => {
                     console.warn("[terminal] WebGL context lost — falling back to DOM renderer");
-                    webglAddon.dispose();
+                    disposeWebgl();
                 });
-                terminal.loadAddon(webglAddon);
+                terminal.loadAddon(addon);
+                webglAddon = addon;
             } catch (e) {
                 console.warn("[terminal] WebGL renderer unavailable, using DOM:", e);
             }
-        }
+        });
         ime229WorkaroundCleanup = setupXtermIme229Workaround({
             terminal,
             host: containerEl,
@@ -1875,6 +1890,8 @@
         reservedSessionAttempt.destroy();
         unsubscribeTheme?.();
         unsubscribeFont?.();
+        unsubscribeGpu?.();
+        disposeWebgl();
         window.removeEventListener("mousedown", onWindowMouseDown);
         window.removeEventListener("keydown", onWindowKeyDown);
         containerEl?.removeEventListener("mouseup", onSelectMouseUp);

@@ -126,6 +126,12 @@
         }
     }
 
+    // ─── Terminal GPU rendering (WebGL addon vs DOM renderer) ────────
+    let gpuRender = $state<boolean>(theme.termGpuRender());
+    async function saveGpuRender() {
+        await theme.setTermGpuRender(gpuRender);
+    }
+
     // ─── Theme: terminal font ────────────────────────────────────────
     // Fonts come from the system (Rust list_fonts); the chosen family is
     // prepended to the base stack. Search + the monospace filter live inside
@@ -241,6 +247,22 @@
                 onkeydown={(e) => { if (e.key === "Enter") saveFontSize(); }}
                 aria-label={t("settings.appearance.font.size")}
             />
+        </div>
+
+        <div class="term-divider"></div>
+
+        <div class="term-row">
+            <div class="switch-card-body">
+                <div class="switch-card-title"
+                     class:on={gpuRender} class:off={!gpuRender}>
+                    {t("settings.appearance.term.gpu_render")}
+                </div>
+                <div class="switch-card-desc">{t("settings.appearance.term.gpu_render_desc")}</div>
+            </div>
+            <label class="switch">
+                <input type="checkbox" bind:checked={gpuRender} onchange={saveGpuRender} />
+                <span class="slider"></span>
+            </label>
         </div>
     </div>
     <div class="layout-grid" style="--preview-font: {composeTermFontStack(fontChoice)};">
