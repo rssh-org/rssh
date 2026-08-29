@@ -358,6 +358,17 @@
     let terminalWorkspaceTabs = $derived(
         app.workspaceTabs().filter((tab) => app.isTerminalWorkspace(tab.id)),
     );
+    // Edit panes stay mounted like terminal workspaces / SftpBrowser / ChatPanel:
+    // the broadcast editor's document lives only in its CodeMirror view, so an
+    // unmount on tab switch would wipe it. Visibility toggles per active tab.
+    let editTabs = $derived(
+        app.workspaceTabs().filter((tab) => tab.type === "edit"),
+    );
+    // Forward panes too: ForwardPane's onDestroy stops the tunnel, so unmounting
+    // on a tab switch would tear down live port-forwards and reconnect on return.
+    let forwardTabs = $derived(
+        app.workspaceTabs().filter((tab) => tab.type === "forward"),
+    );
     let activeRouteTab = $derived(
         app.activeWorkspaceId() === "home"
             ? app.tabs().find((tab) => tab.id === "home")
@@ -1234,6 +1245,28 @@
                 </div>
             {/each}
 
+            {#each editTabs as tab (tab.id)}
+                <div
+                    class="pane"
+                    class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId()}
+                    role="presentation"
+                    oncontextmenu={(event) => openRouteContextMenu(event, tab)}
+                >
+                    <EditPane tabId={tab.id} active={tab.id === app.activeWorkspaceId() && !app.settingsActive()} />
+                </div>
+            {/each}
+
+            {#each forwardTabs as tab (tab.id)}
+                <div
+                    class="pane"
+                    class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId() && resourcePanesAllowed}
+                    role="presentation"
+                    oncontextmenu={(event) => openRouteContextMenu(event, tab)}
+                >
+                    <ForwardPane tabId={tab.id} meta={tab.meta ?? {}}/>
+                </div>
+            {/each}
+
             {#if app.settingsActive()}
                 <div class="pane visible">
                     <SettingsLayout/>
@@ -1241,14 +1274,6 @@
             {:else if activeRouteTab?.type === "home"}
                 <div class="pane visible" role="presentation" oncontextmenu={(event) => openRouteContextMenu(event, activeRouteTab)}>
                     <HomeScreen/>
-                </div>
-            {:else if activeRouteTab?.type === "forward" && resourcePanesAllowed}
-                <div class="pane visible" role="presentation" oncontextmenu={(event) => openRouteContextMenu(event, activeRouteTab)}>
-                    <ForwardPane tabId={activeRouteTab.id} meta={activeRouteTab.meta ?? {}}/>
-                </div>
-            {:else if activeRouteTab?.type === "edit"}
-                <div class="pane visible" role="presentation" oncontextmenu={(event) => openRouteContextMenu(event, activeRouteTab)}>
-                    <EditPane tabId={activeRouteTab.id} />
                 </div>
             {/if}
         </div>

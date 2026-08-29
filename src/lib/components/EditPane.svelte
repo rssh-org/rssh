@@ -14,7 +14,7 @@
   import AppIcon from "./AppIcon.svelte";
   import { tabIconName } from "./app-icon";
 
-  let { tabId }: { tabId: string } = $props();
+  let { tabId, active = false }: { tabId: string; active?: boolean } = $props();
 
   let editorEl: HTMLDivElement;
   let view: EditorView;
@@ -132,6 +132,17 @@
   });
 
   onDestroy(() => { view?.destroy(); });
+
+  // The pane stays mounted while hidden (AppShell toggles visibility), so
+  // re-measure and focus when it becomes visible again: a display:none
+  // container hides CodeMirror's measurements, and onMount's focus no longer
+  // re-runs on tab switches.
+  $effect(() => {
+    if (active) {
+      view?.requestMeasure();
+      view?.focus();
+    }
+  });
 </script>
 
 <div class="edit-pane">
