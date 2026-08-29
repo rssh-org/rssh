@@ -35,4 +35,18 @@ describe("ForwardPane mounting", () => {
             "class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId() && resourcePanesAllowed}",
         );
     });
+
+    it("does not instantiate ForwardPane before startup reconciliation completes", () => {
+        // resourcePanesAllowed is false until reconcile_sessions finishes; a
+        // ForwardPane mounted in that window races its forward_start against
+        // reconcile_sessions({activeIds: []}), which closes every resource the
+        // window owns. Mirror the terminal pane gate: keyed shell, inner {#if}.
+        const forwardBlock = appShellSource.match(
+            /\{#each forwardTabs as tab \(tab\.id\)\}[\s\S]*?\{\/each\}/,
+        )?.[0] ?? "";
+        const gate = forwardBlock.indexOf("{#if resourcePanesAllowed}");
+        const paneUse = forwardBlock.indexOf("<ForwardPane tabId={tab.id}");
+        expect(gate).toBeGreaterThan(-1);
+        expect(paneUse).toBeGreaterThan(gate);
+    });
 });

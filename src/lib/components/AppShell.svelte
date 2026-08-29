@@ -1263,7 +1263,9 @@
                     role="presentation"
                     oncontextmenu={(event) => openRouteContextMenu(event, tab)}
                 >
-                    <ForwardPane tabId={tab.id} meta={tab.meta ?? {}}/>
+                    {#if resourcePanesAllowed}
+                        <ForwardPane tabId={tab.id} meta={tab.meta ?? {}}/>
+                    {/if}
                 </div>
             {/each}
 
