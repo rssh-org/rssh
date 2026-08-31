@@ -315,16 +315,26 @@ jobs:
             "${{ secrets.ANDROID_KEY_PASSWORD }}" \
             > src-tauri/gen/android/key.properties
 
-      - name: Build Android APK
+      # Two invocations: plain --apk builds the universal APK (all 4 ABIs,
+      # incl. x86 emulators); --split-per-abi replaces that output with one
+      # APK per requested target, so it must be a second run. The arm64 leg
+      # reuses the cargo cache from the universal build — only repackaging.
+      - name: Build Android APK (universal)
         run: npx tauri android build --apk
 
-      - name: Rename APK
+      - name: Build Android APK (arm64 split)
+        run: npx tauri android build --apk --split-per-abi --target aarch64
+
+      - name: Rename APKs
         shell: bash
         run: |
           VERSION="${{ steps.ver.outputs.v }}"
           mkdir -p dist
-          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -type f | head -1)
-          cp "$APK" "dist/rssh-${VERSION}-android-universal.apk"
+          APK_ROOT=src-tauri/gen/android/app/build/outputs/apk
+          UNIVERSAL=$(find "$APK_ROOT/universal" -name '*.apk' -type f | head -1)
+          ARM64=$(find "$APK_ROOT/arm64" -name '*.apk' -type f | head -1)
+          cp "$UNIVERSAL" "dist/rssh-${VERSION}-android-universal.apk"
+          cp "$ARM64" "dist/rssh-${VERSION}-android-arm64.apk"
           ls -lh dist/
 
       - name: Upload to pre-release
