@@ -40,8 +40,13 @@ done
 echo "=== 1. npm install ==="
 npm ci
 
-echo "=== 2. Build Tauri Android (APK) ==="
-npx tauri android build
+echo "=== 2. Build Tauri Android (universal APK) ==="
+npx tauri android build --apk
+
+# Split APKs land in different output dirs (--split-per-abi replaces the
+# universal output), so run it after the universal build. Same cargo cache.
+echo "=== 3. Build Tauri Android (arm64 split APK) ==="
+npx tauri android build --apk --split-per-abi --target aarch64
 
 echo "=== Done ==="
 echo ""

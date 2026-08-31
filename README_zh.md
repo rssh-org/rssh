@@ -99,7 +99,8 @@
 | Windows             | `rssh-{ver}-windows-x86_64.msi`          | 静默安装：`msiexec /i`      |
 | Windows             | `rssh-{ver}-windows-x86_64-setup.exe`    | 图形安装器                  |
 | Windows             | `rssh-{ver}-windows-x86_64-portable.zip` | 免安装 GUI + CLI          |
-| Android             | `rssh-{ver}-android-universal.apk`       |                        |
+| Android (arm64)     | `rssh-{ver}-android-arm64.apk`           | 64 位手机，体积约 1/3      |
+| Android             | `rssh-{ver}-android-universal.apk`       | 全 ABI（含模拟器）         |
 | iOS                 |                                          | AppStore，由 [@paradoxie](https://github.com/paradoxie) 维护 |
 
 ### IntelliJ / JetBrains 插件

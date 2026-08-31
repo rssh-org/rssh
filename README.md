@@ -99,7 +99,8 @@ Download from [Releases](https://github.com/shihuili1218/rssh/releases):
 | Windows             | `rssh-{ver}-windows-x86_64.msi`          | Silent install: `msiexec /i` |
 | Windows             | `rssh-{ver}-windows-x86_64-setup.exe`    | GUI installer                |
 | Windows             | `rssh-{ver}-windows-x86_64-portable.zip` | Portable GUI + CLI           |
-| Android             | `rssh-{ver}-android-universal.apk`       |                              |
+| Android (arm64)     | `rssh-{ver}-android-arm64.apk`           | 64-bit phones, 3x smaller    |
+| Android             | `rssh-{ver}-android-universal.apk`       | All ABIs (emulators too)     |
 | iOS                 |                                          | AppStore, by [@paradoxie](https://github.com/paradoxie) |
 
 ### IntelliJ / JetBrains plugin
