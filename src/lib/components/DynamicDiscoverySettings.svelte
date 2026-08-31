@@ -279,7 +279,7 @@
   .item-sub {
     font-size: 12px;
     color: var(--text-sub);
-    font-family: monospace;
+    font-family: var(--term-font);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

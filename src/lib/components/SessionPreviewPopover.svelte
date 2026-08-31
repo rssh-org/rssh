@@ -61,7 +61,7 @@
 
   .preview-popover pre {
     margin: 0;
-    font-family: monospace;
+    font-family: var(--term-font);
     font-size: 11px;
     line-height: 1.25;
     white-space: pre;

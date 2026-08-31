@@ -103,6 +103,12 @@
   --term-fg:     #E0E5EC;
   --term-cursor: #4A6CF7;
   --term-sel:    rgba(74,108,247,0.3);
+  /* Terminal font stack — overwritten by the theme store at init; the
+     literal only covers the pre-init frame (init is not awaited, see
+     main.ts). Concrete families first so the generic never resolves
+     locale-dependently (SimSun on zh-CN Windows); same safe-stack idiom
+     as the welcome scenes. */
+  --term-font:   Menlo, Consolas, 'Courier New', monospace;
 }
 
 /* ═══════════════════════════════════════════════════════

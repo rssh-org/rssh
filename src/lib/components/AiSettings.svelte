@@ -969,7 +969,7 @@
         box-sizing: border-box;
     }
     .row textarea {
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         resize: vertical;
         min-height: 240px;
@@ -1033,7 +1033,7 @@
     .provider-sub {
         font-size: 12px;
         color: var(--text-sub);
-        font-family: monospace;
+        font-family: var(--term-font);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -1232,7 +1232,7 @@
         color: var(--accent);
     }
     .skill-id {
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 11px;
         color: var(--text-dim);
         margin-left: auto;
@@ -1290,7 +1290,7 @@
     }
     .rule-pattern,
     .rule-replacement {
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         white-space: nowrap;
         overflow: hidden;
@@ -1310,7 +1310,7 @@
     }
     /* pattern / replacement 输入框用等宽，跟正则语义一致。 */
     .row input.mono {
-        font-family: monospace;
+        font-family: var(--term-font);
     }
 
     /* 命令黑名单：分类行（标签 + 命令列表），整类编辑。 */
@@ -1328,7 +1328,7 @@
     }
     .bl-cmds {
         flex: 1 1 auto;
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         color: var(--text-dim);
         white-space: nowrap;

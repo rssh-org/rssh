@@ -188,7 +188,7 @@
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .field { display: flex; flex-direction: column; gap: 4px; }
   .check { display: flex; align-items: center; gap: 8px; }
-  textarea { font-family: monospace; resize: vertical; }
+  textarea { font-family: var(--term-font); resize: vertical; }
   .form :global(.section-label) { margin-top: 10px; }
   .port-hint { margin: -4px 0 2px; font-size: 11px; color: var(--text-dim); line-height: 1.4; }
   .form-error {

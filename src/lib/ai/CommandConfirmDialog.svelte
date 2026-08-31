@@ -331,7 +331,7 @@
         border-radius: 5px;
     }
     .cmd {
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         flex: 1;
         min-width: 0;
@@ -414,7 +414,7 @@
     .result { margin-top: 8px; }
     .result-meta {
         display: flex; gap: 8px; font-size: 11px; color: var(--text-dim);
-        font-family: monospace; font-variant-numeric: tabular-nums;
+        font-family: var(--term-font); font-variant-numeric: tabular-nums;
     }
     .result-meta .warn { color: var(--warning); }
     .output {
@@ -422,7 +422,7 @@
         padding: 8px 10px;
         background: color-mix(in srgb, var(--black) 25%, var(--bg));
         border-radius: 6px;
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         line-height: 1.4;
         max-height: 240px;

@@ -143,7 +143,7 @@
     border: 1px solid var(--divider); border-radius: 4px;
     cursor: pointer; box-shadow: none;
   }
-  .color-hex { font-size: 12px; font-family: monospace; color: var(--text-dim); }
+  .color-hex { font-size: 12px; font-family: var(--term-font); color: var(--text-dim); }
 
   .form-actions {
     display: flex; gap: 10px; margin-left: auto; align-items: center;

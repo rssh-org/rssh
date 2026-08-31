@@ -167,7 +167,7 @@
     .ctx-shortcut {
         color: var(--text-dim);
         font-size: 11px;
-        font-family: monospace;
+        font-family: var(--term-font);
         letter-spacing: 0.5px;
     }
     .ctx-sep {

@@ -398,7 +398,7 @@
   .path {
     font-size: 11px;
     color: var(--text-dim);
-    font-family: monospace;
+    font-family: var(--term-font);
     word-break: break-all;
   }
 
@@ -411,7 +411,7 @@
     box-shadow: none;
     padding: 0;
     font-size: 11px;
-    font-family: monospace;
+    font-family: var(--term-font);
     color: var(--text-dim);
     border-radius: 0;
     min-width: 0;

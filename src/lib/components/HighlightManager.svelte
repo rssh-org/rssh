@@ -165,11 +165,11 @@
   .item-info.dimmed { opacity: 0.45; }
   .item-text { min-width: 0; }
   .item-name {
-    font-weight: 600; font-size: 14px; font-family: monospace;
+    font-weight: 600; font-size: 14px; font-family: var(--term-font);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .item-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .item-sub { font-size: 12px; color: var(--text-sub); font-family: monospace; }
+  .item-sub { font-size: 12px; color: var(--text-sub); font-family: var(--term-font); }
   .item-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
   .color-swatch {
     width: 20px; height: 20px; border-radius: 4px; flex-shrink: 0;
@@ -179,7 +179,7 @@
   .tag {
     font-size: 10px; font-weight: 600; color: var(--text-dim);
     border: 1px solid var(--divider); border-radius: 3px;
-    padding: 1px 4px; font-family: monospace;
+    padding: 1px 4px; font-family: var(--term-font);
   }
   .empty { text-align: center; color: var(--text-dim); padding: 32px; }
 </style>

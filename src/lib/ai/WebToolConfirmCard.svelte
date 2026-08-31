@@ -201,7 +201,7 @@
         border-radius: 5px;
     }
     .target {
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         flex: 1;
         min-width: 0;

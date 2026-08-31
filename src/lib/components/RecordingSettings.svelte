@@ -56,5 +56,5 @@
     display: flex; align-items: center; justify-content: space-between;
     padding: 10px 14px; margin-bottom: 6px;
   }
-  .rec-name { font-size: 12px; font-family: monospace; color: var(--text-sub); }
+  .rec-name { font-size: 12px; font-family: var(--term-font); color: var(--text-sub); }
 </style>

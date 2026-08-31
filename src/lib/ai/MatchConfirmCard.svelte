@@ -278,7 +278,7 @@
         border-radius: 5px;
     }
     .cmd {
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         flex: 1;
         min-width: 0;
@@ -299,7 +299,7 @@
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    .val.mono { font-family: monospace; font-size: 11.5px; }
+    .val.mono { font-family: var(--term-font); font-size: 11.5px; }
 
     .actions { margin-top: 10px; display: flex; gap: 8px; }
     .btn { padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
@@ -362,7 +362,7 @@
     .result { margin-top: 8px; }
     .result-meta {
         display: flex; gap: 8px; font-size: 11px; color: var(--text-dim);
-        font-family: monospace; font-variant-numeric: tabular-nums;
+        font-family: var(--term-font); font-variant-numeric: tabular-nums;
     }
     .result-meta .warn { color: var(--warning); }
     .output {
@@ -370,7 +370,7 @@
         padding: 8px 10px;
         background: color-mix(in srgb, var(--black) 25%, var(--bg));
         border-radius: 6px;
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         line-height: 1.4;
         max-height: 240px;

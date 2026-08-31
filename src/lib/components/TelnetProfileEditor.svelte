@@ -161,7 +161,7 @@
   .row-hostport { display: grid; grid-template-columns: 2fr 1fr; gap: 8px; }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .field { display: flex; flex-direction: column; gap: 4px; }
-  textarea { font-family: monospace; resize: vertical; }
+  textarea { font-family: var(--term-font); resize: vertical; }
   .check { display: flex; align-items: center; gap: 8px; }
   .form-error { color: var(--error); font-size: 12px; }
   .form :global(.section-label) { margin-top: 10px; }
