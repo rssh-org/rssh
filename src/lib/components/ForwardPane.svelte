@@ -400,7 +400,7 @@
   }
 
   .stat-value {
-    font-family: monospace;
+    font-family: var(--term-font);
     font-size: 13px;
     font-weight: 600;
     color: var(--text);
@@ -415,7 +415,7 @@
   .rule-head { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; }
   .rule-head code { color: var(--text); overflow-wrap: anywhere; }
   .rule-type {
-    font: 700 11px monospace;
+    font: 700 11px var(--term-font);
     color: var(--accent);
     background: var(--accent-soft);
     border-radius: 3px;
@@ -423,7 +423,7 @@
   }
   .rule-status { display: flex; align-items: center; gap: 6px; margin-top: 9px; font-size: 11px; color: var(--text-sub); }
   .rule-error-text { color: var(--error); margin-left: auto; }
-  .rule-stats { display: flex; gap: 18px; margin-top: 8px; font: 10px monospace; color: var(--text-dim); }
+  .rule-stats { display: flex; gap: 18px; margin-top: 8px; font: 10px var(--term-font); color: var(--text-dim); }
   .rule-stats b { color: var(--text); font-weight: 600; }
 
   .error-msg {

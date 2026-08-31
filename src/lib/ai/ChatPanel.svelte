@@ -624,7 +624,7 @@
         flex: 1;
         min-width: 0;
         font-size: 11px;
-        font-family: monospace;
+        font-family: var(--term-font);
         color: var(--text-dim);
         white-space: nowrap;
         overflow: hidden;
@@ -643,7 +643,7 @@
     }
     .tokens {
         font-size: 10.5px;
-        font-family: monospace;
+        font-family: var(--term-font);
         color: var(--text-dim);
         white-space: nowrap;
         flex-shrink: 0;
@@ -733,7 +733,7 @@
     }
     .history-time {
         font-size: 10.5px; color: var(--text-dim);
-        font-family: monospace; flex-shrink: 0;
+        font-family: var(--term-font); flex-shrink: 0;
     }
     .history-del { font-size: 14px; padding: 2px 5px; color: var(--text-dim); }
 
@@ -788,7 +788,7 @@
     }
     .ts {
         font-size: 10px; color: var(--text-dim);
-        font-family: monospace; letter-spacing: 0.03em;
+        font-family: var(--term-font); letter-spacing: 0.03em;
     }
     /* User timestamps sit over their right-aligned bubble; assistant ones
        over the left-aligned bubble — the column reads as two rails. */
@@ -857,7 +857,7 @@
     .bubble.md :global(code) {
         background: color-mix(in srgb, var(--text) 12%, transparent);
         padding: 1px 4px; border-radius: 3px;
-        font-family: monospace; font-size: 11.5px;
+        font-family: var(--term-font); font-size: 11.5px;
     }
     /* Code blocks read as dark insets (scenes.js tool-args language). */
     .bubble.md :global(pre) {

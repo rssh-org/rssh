@@ -203,7 +203,7 @@
         border-radius: 5px;
     }
     .target {
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         flex: 1;
         min-width: 0;
@@ -223,7 +223,7 @@
         color: var(--text-dim);
     }
     .dest {
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 11px;
         flex: 1;
         min-width: 0;

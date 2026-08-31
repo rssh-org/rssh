@@ -297,7 +297,7 @@
         grid-area: path;
         font-size: 11px;
         color: var(--text-dim);
-        font-family: monospace;
+        font-family: var(--term-font);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -360,7 +360,7 @@
         font-size: 11px;
         color: var(--error);
         word-break: break-all;
-        font-family: monospace;
+        font-family: var(--term-font);
         padding-top: 4px;
     }
 

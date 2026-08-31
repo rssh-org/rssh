@@ -103,6 +103,11 @@
   --term-fg:     #E0E5EC;
   --term-cursor: #4A6CF7;
   --term-sel:    rgba(74,108,247,0.3);
+  /* Terminal font stack — overwritten by the theme store at init; the
+     literal only covers the pre-init frame. Monospace UI text (paths,
+     code, key hints) consumes this instead of a bare generic, which the
+     OS resolves to SimSun on zh-CN Windows. */
+  --term-font:   monospace;
 }
 
 /* ═══════════════════════════════════════════════════════

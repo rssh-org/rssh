@@ -208,7 +208,7 @@
   .item-sub {
     overflow: hidden;
     color: var(--text-sub);
-    font-family: monospace;
+    font-family: var(--term-font);
     font-size: 12px;
     text-overflow: ellipsis;
     white-space: nowrap;

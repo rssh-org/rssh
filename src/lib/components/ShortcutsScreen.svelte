@@ -179,7 +179,7 @@
     background: var(--surface);
     box-shadow: var(--pressed);
     border-radius: 6px;
-    font-family: monospace;
+    font-family: var(--term-font);
     font-size: 12px;
     color: var(--text);
     text-align: center;

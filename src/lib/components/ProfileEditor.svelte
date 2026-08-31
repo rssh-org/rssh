@@ -240,7 +240,7 @@
     margin-top: 2px;
   }
   .algorithm-option span {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-family: var(--term-font);
     font-size: 12px;
     line-height: 1.35;
     overflow-wrap: anywhere;

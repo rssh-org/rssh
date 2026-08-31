@@ -178,13 +178,13 @@
     .badge.installed { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
     .badge.outdated { background: color-mix(in srgb, var(--error) 15%, transparent); color: var(--error); }
     .badge.not-installed { background: color-mix(in srgb, var(--error) 15%, transparent); color: var(--error); }
-    .path { font-family: monospace; font-size: 12px; color: var(--text-sub); }
-    .version { font-family: monospace; font-size: 12px; color: var(--text-dim); }
+    .path { font-family: var(--term-font); font-size: 12px; color: var(--text-sub); }
+    .version { font-family: var(--term-font); font-size: 12px; color: var(--text-dim); }
     .hint { font-size: 13px; color: var(--text-sub); }
     .msg { font-size: 12px; color: var(--accent); }
     .msg.error { color: var(--error); }
     .code-block {
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         background: var(--surface);
         padding: 12px;
@@ -212,7 +212,7 @@
         flex: 1;
         overflow-x: auto;
         color: var(--text-sub);
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         white-space: nowrap;
     }
@@ -228,7 +228,7 @@
         vertical-align: top;
     }
     .cmd-table .cmd {
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         color: var(--accent);
         white-space: nowrap;

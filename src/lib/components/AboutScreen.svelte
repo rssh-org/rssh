@@ -134,7 +134,7 @@
   .app-version {
     font-size: 13px;
     color: var(--text-dim);
-    font-family: monospace;
+    font-family: var(--term-font);
   }
   .links {
     display: flex;
@@ -162,7 +162,7 @@
   .link-row:active { box-shadow: var(--pressed); }
   .link-label { font-weight: 600; }
   .link-url {
-    font-family: monospace;
+    font-family: var(--term-font);
     font-size: 12px;
     color: var(--text-dim);
     overflow: hidden;

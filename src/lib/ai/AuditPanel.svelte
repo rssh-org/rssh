@@ -151,7 +151,7 @@
         font-size: 12px; padding: 6px 0;
         border-bottom: 1px solid color-mix(in srgb, var(--divider) 50%, transparent);
     }
-    .ts { color: var(--text-dim); margin-right: 8px; font-family: monospace; }
+    .ts { color: var(--text-dim); margin-right: 8px; font-family: var(--term-font); }
     .text { word-break: break-word; }
     .dropdown { margin-top: 4px; font-size: 11px; }
     .dropdown summary { cursor: pointer; color: var(--text-dim); }

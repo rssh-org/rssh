@@ -24,6 +24,43 @@ async function loadStore() {
   return import("./store.svelte.ts");
 }
 
+describe("term font CSS variable", () => {
+  /** Re-stub document with a recording setProperty; returns the writes. */
+  function recordRootWrites(): [string, string][] {
+    const writes: [string, string][] = [];
+    vi.stubGlobal("document", {
+      documentElement: {
+        dataset: {},
+        style: { setProperty: (k: string, v: string) => writes.push([k, v]) },
+      },
+    });
+    return writes;
+  }
+
+  it("init() exposes the chosen font + base stack as --term-font", async () => {
+    const writes = recordRootWrites();
+    invokeMock.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === "get_setting" && args?.key === "theme.term-font") return "Cascadia Mono";
+      return null;
+    });
+    const theme = await loadStore();
+    await theme.init();
+    const font = writes.find(([k]) => k === "--term-font");
+    // Chosen family quoted + prepended to the base stack — same string xterm gets.
+    expect(font?.[1]).toContain('"Cascadia Mono"');
+    expect(font?.[1]).toContain("JetBrainsMono Nerd Font");
+  });
+
+  it("setTermFont() refreshes --term-font", async () => {
+    const writes = recordRootWrites();
+    invokeMock.mockResolvedValue(null);
+    const theme = await loadStore();
+    await theme.setTermFont("Consolas");
+    const font = writes.filter(([k]) => k === "--term-font").pop();
+    expect(font?.[1]).toContain('"Consolas"');
+  });
+});
+
 describe("term gpu render setting", () => {
   it("defaults to on for desktop", async () => {
     const theme = await loadStore();

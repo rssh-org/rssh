@@ -663,7 +663,7 @@
   }
   .rule-pattern,
   .rule-replacement {
-    font-family: monospace;
+    font-family: var(--term-font);
     font-size: 12px;
     white-space: nowrap;
     overflow: hidden;
@@ -705,7 +705,7 @@
     width: 100%;
     box-sizing: border-box;
   }
-  .row input.mono { font-family: monospace; }
+  .row input.mono { font-family: var(--term-font); }
   .actions {
     display: flex;
     gap: 8px;

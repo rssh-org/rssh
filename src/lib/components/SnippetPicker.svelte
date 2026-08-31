@@ -90,6 +90,6 @@
   .picker-item:hover, .picker-item.focused { background: color-mix(in srgb, var(--text) 8%, transparent); }
   .picker-item.focused { outline: 1px solid var(--accent); outline-offset: -1px; }
   .picker-name { font-size: 13px; font-weight: 600; color: var(--text); }
-  .picker-cmd { font-size: 11px; font-family: monospace; color: var(--text-sub); }
+  .picker-cmd { font-size: 11px; font-family: var(--term-font); color: var(--text-sub); }
   .picker-empty { padding: 16px; text-align: center; color: var(--text-dim); font-size: 13px; }
 </style>

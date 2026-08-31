@@ -148,7 +148,7 @@
   .item-sub {
     font-size: 12px;
     color: var(--text-sub);
-    font-family: monospace;
+    font-family: var(--term-font);
     white-space: pre-wrap;
     word-break: break-all;
     margin-top: 2px;
@@ -165,7 +165,7 @@
     width: 100%; box-sizing: border-box; font: inherit; font-size: 13px;
   }
   .inline-form textarea {
-    font-family: monospace; resize: vertical; min-height: 36px;
+    font-family: var(--term-font); resize: vertical; min-height: 36px;
   }
   .form-actions { display: flex; gap: 10px; margin-top: 4px; }
   .empty { text-align: center; color: var(--text-dim); padding: 32px; }

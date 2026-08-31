@@ -786,7 +786,7 @@
         justify-content: center;
         gap: 4px;
         padding: 10px 12px;
-        font-family: var(--preview-font, 'JetBrainsMono Nerd Font', Menlo, Monaco, monospace);
+        font-family: var(--preview-font, var(--term-font));
         font-size: 11px;
         line-height: 1.3;
     }
@@ -805,7 +805,7 @@
     .term-inherit-label {
         font-size: 14px;
         font-weight: 600;
-        font-family: monospace;
+        font-family: var(--term-font);
         color: var(--text-sub);
     }
     /* Custom card — empty placeholder when no custom set */
@@ -850,7 +850,7 @@
     }
     .dialog-textarea {
         width: 100%;
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         line-height: 1.5;
         resize: vertical;
@@ -862,7 +862,7 @@
         padding: 8px 12px;
         background: color-mix(in srgb, var(--error) 12%, transparent);
         border-radius: var(--radius-sm);
-        font-family: monospace;
+        font-family: var(--term-font);
     }
 
     /* ── Terminal palette + font card (Selection & Mouse pattern) ── */

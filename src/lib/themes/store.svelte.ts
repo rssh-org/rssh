@@ -229,8 +229,17 @@ export function termFont(): string { return _termFont; }
 export function termFontSize(): number { return _termFontSize; }
 export function currentTermFontStack(): string { return composeTermFontStack(_termFont); }
 
+/** Expose the terminal font stack as a :root CSS variable. Monospace UI
+ *  spots (paths, code snippets, key hints) consume it so they always match
+ *  the terminal instead of the OS locale's generic monospace (SimSun on
+ *  zh-CN Windows). Written at init and on every font change. */
+function writeTermFontVar(): void {
+  document.documentElement.style.setProperty("--term-font", currentTermFontStack());
+}
+
 export async function setTermFont(name: string): Promise<void> {
   _termFont = name;
+  writeTermFontVar();
   notifyXtermFonts();
   try {
     await invoke("set_setting", { key: SETTING_KEY_TERM_FONT, value: name });
@@ -454,6 +463,7 @@ export async function init(): Promise<void> {
   apply(paletteById(_paletteId));
   applyShape(_shapeId);
   applyDensity(_densityId);
+  writeTermFontVar();
   // init() is not awaited before mount (see main.ts), so a terminal may
   // register its font listener before this resolves — with the default stack.
   // Notify now so any already-mounted terminal picks up the persisted font.

@@ -20,6 +20,7 @@
   let elapsed = $state(0);
   let timerId: ReturnType<typeof setTimeout> | null = null;
   let unsubscribeTheme: (() => void) | null = null;
+  let unsubscribeFont: (() => void) | null = null;
   let touchScrollCleanup: (() => void) | null = null;
 
   const fileName = $derived(app.editingId() ?? "");
@@ -28,8 +29,8 @@
   onMount(async () => {
     terminal = new Terminal({
       cursorBlink: false,
-      fontSize: 13,
-      fontFamily: "Menlo, Monaco, 'Courier New', monospace",
+      fontSize: theme.termFontSize(),
+      fontFamily: theme.currentTermFontStack(),
       theme: theme.currentTermTheme(),
       // Match the app's 6px scrollbars (xterm 6's own scrollbar defaults to 14px).
       overviewRuler: { width: 6 },
@@ -41,6 +42,14 @@
     terminal.loadAddon(fitAddon);
     terminal.open(containerEl);
     fitAddon.fit();
+    // Font changes alter cell metrics, so (unlike theme) the handler must
+    // refit — mirrors TerminalPane's registerXtermFontListener wiring.
+    unsubscribeFont = theme.registerXtermFontListener((font) => {
+      if (!terminal) return;
+      terminal.options.fontFamily = font.family;
+      terminal.options.fontSize = font.size;
+      fitAddon?.fit();
+    });
 
     // Mobile: one-finger drag scrolls the playback scrollback (xterm wires no
     // touch scroll itself). Desktop uses the wheel, so gate on isMobile.
@@ -55,6 +64,7 @@
   onDestroy(() => {
     stop();
     unsubscribeTheme?.();
+    unsubscribeFont?.();
     touchScrollCleanup?.();
     window.removeEventListener("resize", handleResize);
     terminal?.dispose();
@@ -171,7 +181,7 @@
     border-bottom: 1px solid var(--divider);
     flex-shrink: 0;
   }
-  .file-name { font-size: 12px; font-family: monospace; color: var(--text-sub); }
+  .file-name { font-size: 12px; font-family: var(--term-font); color: var(--text-sub); }
   .spacer { flex: 1; }
   .speed-group { display: flex; gap: 2px; }
   .speed-btn {

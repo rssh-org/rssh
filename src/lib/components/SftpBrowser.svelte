@@ -824,7 +824,7 @@
     }
 
     .breadcrumb-input {
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         color: var(--text);
         padding: calc(6px * var(--density)) calc(10px * var(--density));
@@ -1051,7 +1051,7 @@
     .modal-input {
         width: 100%;
         box-sizing: border-box;
-        font-family: monospace;
+        font-family: var(--term-font);
         font-size: 12px;
         padding: 6px 8px;
         border: 1px solid var(--divider);

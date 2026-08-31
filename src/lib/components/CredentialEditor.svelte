@@ -128,14 +128,14 @@
   .form { display: flex; flex-direction: column; gap: 10px; }
   .key-quick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   .chip {
-    font-family: monospace; font-size: 12px;
+    font-family: var(--term-font); font-size: 12px;
     padding: 3px 8px; border-radius: 6px;
     border: 1px solid var(--border); background: var(--surface);
     color: var(--text); cursor: pointer;
   }
   .chip:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
   .chip:disabled { opacity: 0.5; cursor: default; }
-  textarea { font-family: monospace; font-size: 12px; resize: vertical; }
+  textarea { font-family: var(--term-font); font-size: 12px; resize: vertical; }
   .hint { font-size: 13px; color: var(--text-dim); margin: 4px 0; line-height: 1.55; }
   .agent-hint { white-space: pre-line; }
 </style>

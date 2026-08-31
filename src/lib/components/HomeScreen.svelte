@@ -526,7 +526,7 @@
 
   .card-body { flex: 1; min-width: 0; }
   .card-name { font-weight: 600; font-size: 14px; color: var(--text); margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .card-sub { font-size: 12px; color: var(--text-sub); font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-sub { font-size: 12px; color: var(--text-sub); font-family: var(--term-font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .empty-state { text-align: center; padding: 60px 24px; color: var(--text-dim); }
   .empty-state p { margin-bottom: 12px; }

@@ -64,7 +64,7 @@
       backgroundColor: "var(--term-bg)",
       color: "var(--term-fg)",
     },
-    ".cm-scroller": { overflow: "auto", fontFamily: "monospace" },
+    ".cm-scroller": { overflow: "auto", fontFamily: "var(--term-font)" },
     ".cm-content": { caretColor: "var(--term-cursor)" },
     ".cm-gutters": {
       backgroundColor: "var(--term-bg)",
