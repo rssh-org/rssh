@@ -27,8 +27,8 @@
   {#each items as c (c.id)}
     <div class="card item-row">
       <div class="item-info">
-        <div class="item-name">{c.name}</div>
-        <div class="item-sub">{c.username} · {c.type}</div>
+        <div class="item-name" title={c.name}>{c.name}</div>
+        <div class="item-sub" title={`${c.username} · ${c.type}`}>{c.username} · {c.type}</div>
       </div>
       <div class="item-actions">
         <button
@@ -43,6 +43,7 @@
           class="btn btn-sm btn-icon btn-danger"
           title={t("common.delete")}
           aria-label={`${t("common.delete")} ${c.name}`}
+          aria-busy={deleting === c.id}
           onclick={() => remove(c.id)}
           disabled={deleting === c.id}
         >

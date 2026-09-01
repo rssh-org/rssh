@@ -125,7 +125,7 @@
         <div class="item-info">
           <span class="color-swatch" style="background: {g.color}"></span>
           <div class="item-text">
-            <div class="item-name">{g.name}</div>
+            <div class="item-name" title={g.name}>{g.name}</div>
             <div class="item-sub">{t("group.order", { n: g.sort_order })}</div>
           </div>
         </div>
@@ -142,6 +142,7 @@
             class="btn btn-sm btn-icon btn-danger"
             title={t("common.delete")}
             aria-label={`${t("common.delete")} ${g.name}`}
+            aria-busy={deleting === g.id}
             onclick={() => remove(g.id)}
             disabled={deleting === g.id}
           >
