@@ -36,6 +36,7 @@
     import {extractBlockTexts, extractBlocksText} from "../terminal/block-content.ts";
     import {redactCommandBlockTexts} from "../terminal/command-block-redaction.ts";
     import {setupTouchScroll} from "../terminal/touch-scroll.ts";
+    import {setupSoftKeyboardInset} from "../soft-keyboard-inset.ts";
     import {registerBracketedPasteProvider, unregisterBracketedPasteProvider} from "../terminal/bracketed-paste.ts";
     import {setupXtermIme229Workaround} from "../terminal/xterm-ime-229-workaround.ts";
     import {createReservedSessionAttempt} from "../terminal/reserved-session-attempt.ts";
@@ -97,6 +98,7 @@
     } = $props();
 
     let containerEl: HTMLDivElement;
+    let paneEl: HTMLDivElement; // the .term-outer root — soft-keyboard inset target
     let searchInputEl: HTMLInputElement;
 
     type AuthPromptData = { name: string; instructions: string; prompts: { prompt: string; echo: boolean }[] };
@@ -1485,10 +1487,19 @@
         window.visualViewport?.addEventListener("scroll", onViewportChange, { passive: true });
         window.visualViewport?.addEventListener("resize", onViewportChange, { passive: true });
         containerEl.addEventListener("pointerdown", onTerminalTouchDown, { capture: true, passive: true });
+        // iOS overlays the keyboard instead of resizing the webview: pad the
+        // pane up onto the visible viewport so the keybar rides on top of the
+        // keyboard — up with the open animation, down with the close (settle
+        // mode inside setupSoftKeyboardInset). Registered after our own
+        // listeners so the helper pin runs before the padding write. No-op on
+        // Android, where the webview already resized; the pane's
+        // ResizeObserver refits the terminal as the pane shrinks.
+        const insetCleanup = setupSoftKeyboardInset(paneEl, helper);
 
         return () => {
             if (scrollResetRaf) cancelAnimationFrame(scrollResetRaf);
             if (helperPinRaf) cancelAnimationFrame(helperPinRaf);
+            insetCleanup();
             if (originalHelperStyle === null) helper.removeAttribute("style");
             else helper.setAttribute("style", originalHelperStyle);
             helper.removeEventListener("focus", onFocus);
@@ -1939,7 +1950,7 @@
     });
 </script>
 
-<div class="term-outer">
+<div class="term-outer" bind:this={paneEl}>
     {#if showSearch}
         <div class="search-bar">
             <input
