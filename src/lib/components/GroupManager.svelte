@@ -124,7 +124,7 @@
       <div class="card item-row">
         <div class="item-info">
           <span class="color-swatch" style="background: {g.color}"></span>
-          <div>
+          <div class="item-text">
             <div class="item-name">{g.name}</div>
             <div class="item-sub">{t("group.order", { n: g.sort_order })}</div>
           </div>
@@ -162,6 +162,9 @@
   .toolbar { display: flex; justify-content: flex-end; margin-bottom: 16px; }
   .item-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
   .item-info { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  /* min-width:0 closes the ellipsis chain across the flex wrapper — without
+     it the wrapper's min-width:auto blocks truncation on .item-name. */
+  .item-text { min-width: 0; }
   .item-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .item-sub { font-size: 12px; color: var(--text-sub); }
   .item-actions { display: flex; gap: 10px; flex: 0 0 auto; }

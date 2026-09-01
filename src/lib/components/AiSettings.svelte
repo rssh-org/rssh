@@ -596,8 +596,10 @@
                         <label for={`ai-provider-r-${p.id}`} class="radio-label" title={t("ai.settings.provider.activate")}>
                             <span class="shell-radio-indicator" aria-hidden="true"></span>
                             <div class="provider-text">
-                                <div class="provider-name">{p.name}</div>
-                                <div class="provider-sub">{protocolLabel(p.protocol)} · {p.endpoint} · {p.model}</div>
+                                <div class="provider-name" title={p.name}>{p.name}</div>
+                                <div class="provider-sub" title={`${protocolLabel(p.protocol)} · ${p.endpoint} · ${p.model}`}>
+                                    {protocolLabel(p.protocol)} · {p.endpoint} · {p.model}
+                                </div>
                             </div>
                         </label>
                     </div>
@@ -1033,6 +1035,10 @@
         gap: 12px;
         cursor: pointer;
         min-height: 20px;
+        /* min-width:0 lets the label shrink below its text's min-content so
+           the ellipsis on .provider-text can engage (flex items default to
+           min-width:auto and refuse to shrink). */
+        min-width: 0;
         /* 压掉全局 label 样式（11px/大写/600）——provider 名称与 URL 保持原大小写。 */
         font-size: inherit;
         font-weight: 400;
@@ -1073,6 +1079,10 @@
     }
     @media (max-width: 640px) {
         .provider-row { align-items: flex-start; flex-direction: column; }
+        /* Column + flex-start shrink-wraps .provider-info (base width:
+           fit-content), unbounding the ellipsis chain — stretch it back to
+           the row width so long protocol · endpoint · model lines truncate. */
+        .provider-info { width: 100%; }
         .provider-actions { align-self: flex-end; }
     }
 
