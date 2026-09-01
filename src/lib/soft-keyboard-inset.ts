@@ -79,6 +79,13 @@ export function setupSoftKeyboardInset(panel: HTMLElement, input: HTMLElement): 
   }
   function onFocus() {
     settling = false;
+    // Apply immediately: on a focus handoff (e.g. terminal keybar keyboard →
+    // AI input) the keyboard is already open and stationary, so no viewport
+    // event will fire — without this the newly focused panel would stay
+    // unpadded behind the keyboard. When the keyboard is closed this
+    // computes 0 and is a no-op; the open animation's viewport events take
+    // over from there.
+    applySoftKeyboardInset(panel);
   }
   function onBlur() {
     settling = applySoftKeyboardInset(panel) > 0;
