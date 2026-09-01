@@ -667,18 +667,18 @@
   }
   /* Divider between ANY adjacent children, not just .rule-item pairs — an
      inline edit form can sit between two rows and break + adjacency. */
-  .rule-list > * + * { border-top: 1px solid var(--divider); }
-  /* The edit form is framed by the inter-row dividers (top from the rule
-     above, bottom from the next row's divider); it only adds its own left
-     and right edges. A form at the list's top or bottom edge has no such
-     neighbor, so it closes the missing side itself. */
+  .rule-list > * + *:not(.form) { border-top: 1px solid var(--divider); }
+  /* Rounded corners need one element owning all four edges, so the form
+     carries its own full border instead of borrowing the neighboring rows'
+     hairlines — and the hairlines directly above/below it are dropped to
+     avoid doubling. Reads as an inset editor box inside the list. */
   .rule-list .form {
     padding: 10px 12px;
-    border-left: 1px solid var(--divider);
-    border-right: 1px solid var(--divider);
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-sm);
+    margin: 6px 0;
   }
-  .rule-list .form:first-child { border-top: 1px solid var(--divider); }
-  .rule-list .form:last-child { border-bottom: 1px solid var(--divider); }
+  .rule-list > .form + * { border-top: none; }
   .rule-item:hover { background: var(--surface); }
   .rule-line {
     display: flex;
