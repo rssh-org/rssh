@@ -25,6 +25,7 @@ export const APP_ICON_NAMES = [
   "telnet",
   "terminal",
   "transfer",
+  "trash",
   "warning",
 ] as const;
 

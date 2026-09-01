@@ -121,29 +121,32 @@
           <div class="item-actions">
             <button
               type="button"
-              class="btn btn-sm"
+              class="btn btn-sm btn-icon"
+              title={t("common.copy")}
               aria-label={`${t("common.copy")} ${kindLabel(item.kind)} ${item.name}`}
               onclick={() => app.openConnectionCopy(item.kind, item.id)}
             >
-              {t("common.copy")}
+              <AppIcon name="copy" size={16} />
             </button>
             <button
               type="button"
-              class="btn btn-sm"
+              class="btn btn-sm btn-icon"
+              title={t("common.edit")}
               aria-label={`${t("common.edit")} ${kindLabel(item.kind)} ${item.name}`}
               onclick={() => app.openConnectionEdit(item.kind, item.id)}
             >
-              {t("common.edit")}
+              <AppIcon name="edit" size={16} />
             </button>
             <button
               type="button"
-              class="btn btn-sm btn-danger"
+              class="btn btn-sm btn-icon btn-danger"
+              title={t("common.delete")}
               aria-label={`${t("common.delete")} ${kindLabel(item.kind)} ${item.name}`}
               aria-busy={deletingKey === itemKey(item)}
               onclick={() => remove(item)}
               disabled={deletingKey === itemKey(item)}
             >
-              {deletingKey === itemKey(item) ? "…" : t("common.delete")}
+              {#if deletingKey === itemKey(item)}…{:else}<AppIcon name="trash" size={16} />{/if}
             </button>
           </div>
         </div>
@@ -218,6 +221,10 @@
 
   @media (max-width: 720px) {
     .item-row { align-items: flex-start; flex-direction: column; }
+    /* Column + flex-start shrink-wraps .item-main to content width, which
+       unbounds the ellipsis chain — a long forward detail then overflows the
+       viewport. Stretch back to the row width so .item-sub truncates. */
+    .item-main { width: 100%; }
     .item-actions { align-self: flex-end; flex-wrap: wrap; justify-content: flex-end; }
   }
 </style>

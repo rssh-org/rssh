@@ -101,6 +101,11 @@
     <path d="m7 9 3 3-3 3M13 15h4" />
   {:else if name === "transfer"}
     <path d="M8 4v16m0-16L4.5 7.5M8 4l3.5 3.5M16 20V4m0 16-3.5-3.5M16 20l3.5-3.5" />
+  {:else if name === "trash"}
+    <path d="M3 6h18" />
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    <path d="M10 11v6M14 11v6" />
   {:else if name === "warning"}
     <path d="M12 3 2.5 20h19Z" />
     <path d="M12 9v5m0 3h.01" />
