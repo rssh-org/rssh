@@ -5,6 +5,7 @@
   import * as app from "../stores/app.svelte.ts";
   import { toast } from "../stores/toast.svelte.ts";
   import { t, errMsg } from "../i18n/index.svelte.ts";
+  import AppIcon from "./AppIcon.svelte";
 
   let snippets = $state<Snippet[]>([]);
   let adding = $state(false);
@@ -121,8 +122,22 @@
           <div class="item-sub">{s.command}</div>
         </div>
         <div class="item-actions">
-          <button class="btn btn-sm" onclick={() => startEdit(i)}>{t("common.edit")}</button>
-          <button class="btn btn-sm btn-danger" onclick={() => remove(i)}>{t("common.delete")}</button>
+          <button
+            class="btn btn-sm btn-icon"
+            title={t("common.edit")}
+            aria-label={`${t("common.edit")} ${s.name}`}
+            onclick={() => startEdit(i)}
+          >
+            <AppIcon name="edit" size={16} />
+          </button>
+          <button
+            class="btn btn-sm btn-icon btn-danger"
+            title={t("common.delete")}
+            aria-label={`${t("common.delete")} ${s.name}`}
+            onclick={() => remove(i)}
+          >
+            <AppIcon name="trash" size={16} />
+          </button>
         </div>
       </div>
     {/if}

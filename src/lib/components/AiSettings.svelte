@@ -605,11 +605,30 @@
                         {#if activeId === p.id}
                             <span class="active-badge">{t("ai.settings.provider.active")}</span>
                         {/if}
-                        <button class="btn btn-sm" onclick={() => startEdit(p)}>{t("common.edit")}</button>
-                        <button class="btn btn-sm btn-danger" class:confirming={confirmingDeleteId === p.id}
-                                onclick={() => removeProvider(p)}>
-                            {confirmingDeleteId === p.id ? t("ai.settings.provider.delete_confirm") : t("common.delete")}
+                        <button
+                            class="btn btn-sm btn-icon"
+                            title={t("common.edit")}
+                            aria-label={`${t("common.edit")} ${p.name}`}
+                            onclick={() => startEdit(p)}
+                        >
+                            <AppIcon name="edit" size={16} />
                         </button>
+                        <!-- Two-tap delete: trash icon first, then the button morphs
+                             into an explicit text confirm (3s timeout reverts). -->
+                        {#if confirmingDeleteId === p.id}
+                            <button class="btn btn-sm btn-danger" onclick={() => removeProvider(p)}>
+                                {t("ai.settings.provider.delete_confirm")}
+                            </button>
+                        {:else}
+                            <button
+                                class="btn btn-sm btn-icon btn-danger"
+                                title={t("common.delete")}
+                                aria-label={`${t("common.delete")} ${p.name}`}
+                                onclick={() => removeProvider(p)}
+                            >
+                                <AppIcon name="trash" size={16} />
+                            </button>
+                        {/if}
                     </div>
                 </div>
             {/if}
