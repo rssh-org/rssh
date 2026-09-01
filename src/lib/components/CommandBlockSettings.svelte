@@ -404,7 +404,7 @@
           <div class="placeholder">{t("common.loading")}</div>
         {:else if redactionReady}
           {#each redactRules as rule (rule.id)}
-            <button class="rule-item surface-raised-sm" onclick={() => viewRule(rule)}>
+            <button class="rule-item" onclick={() => viewRule(rule)}>
               <div class="rule-line">
                 <code class="rule-pattern">{rule.pattern}</code>
                 <span class="rule-arrow">→</span>
@@ -642,19 +642,22 @@
   .rule-list {
     display: flex;
     flex-direction: column;
-    gap: 6px;
   }
+  /* Flat rows separated by hairlines, like the AI provider rows inside their
+     card: elevation belongs to the container — raised chips on a raised card
+     stack shadow on shadow. Hover feedback is a background tint, not lift. */
   .rule-item {
     text-align: left;
-    padding: 10px 14px;
+    padding: 10px 8px;
     border: none;
-    background: var(--bg);
+    background: transparent;
     cursor: pointer;
     font-family: inherit;
     color: var(--text);
-    transition: box-shadow 0.13s;
+    transition: background 0.13s;
   }
-  .rule-item:hover { box-shadow: var(--raised); }
+  .rule-item + .rule-item { border-top: 1px solid var(--divider); }
+  .rule-item:hover { background: var(--surface); }
   .rule-line {
     display: flex;
     align-items: baseline;
