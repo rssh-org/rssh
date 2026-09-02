@@ -10,6 +10,7 @@
 import en, { type MessageKey, type Messages } from "./locales/en";
 import zh from "./locales/zh";
 
+export type { MessageKey };
 export type Locale = "en" | "zh";
 
 const CATALOGS: Record<Locale, Messages> = { en, zh };
@@ -58,6 +59,23 @@ export function t(key: MessageKey, params?: Record<string, string | number>): st
   });
 }
 
+/** 把后端 AppError 载荷解析出来；老式 String 错误返回 null。 */
+export function errCoded(
+  e: unknown,
+): { code: string; params?: Record<string, string | number> } | null {
+  const s = e == null ? "" : (e instanceof Error ? e.message : String(e));
+  const PREFIX = "__rssh_err__|";
+  if (!s.startsWith(PREFIX)) return null;
+  try {
+    return JSON.parse(s.slice(PREFIX.length)) as {
+      code: string;
+      params?: Record<string, string | number>;
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 把后端抛出的错误（任意值）转成 i18n 字符串。
  *
@@ -66,18 +84,9 @@ export function t(key: MessageKey, params?: Record<string, string | number>): st
  * 老式 String 错误原样返回（向后兼容）。
  */
 export function errMsg(e: unknown): string {
-  const s = e == null ? "" : (e instanceof Error ? e.message : String(e));
-  const PREFIX = "__rssh_err__|";
-  if (!s.startsWith(PREFIX)) return s;
-  try {
-    const payload = JSON.parse(s.slice(PREFIX.length)) as {
-      code: string;
-      params?: Record<string, string | number>;
-    };
-    return t(`error.${payload.code}` as MessageKey, payload.params);
-  } catch {
-    return s;
-  }
+  const coded = errCoded(e);
+  if (coded) return t(`error.${coded.code}` as MessageKey, coded.params);
+  return e == null ? "" : (e instanceof Error ? e.message : String(e));
 }
 
 /** 用于 lang picker 的元数据。 */

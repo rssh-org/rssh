@@ -1,4 +1,4 @@
-export type PanelFitPriority = "ai" | "sftp";
+export type PanelFitPriority = "ai" | "sftp" | "plugin";
 
 export interface PanelWidthFitInput {
   containerWidth: number;
@@ -119,6 +119,46 @@ function fitSinglePanel(
   const minimum = Math.min(input.panelMinWidth, input.containerWidth);
   const maximum = Math.max(minimum, available);
   return clamp(preferred, minimum, maximum);
+}
+
+// ── Plugin side panel ───────────────────────────────────────────────────────
+
+export interface PluginSideFitInput {
+  containerWidth: number;
+  mainMinWidth: number;
+  panelMinWidth: number;
+  defaultWidth: number;
+  pluginVisible: boolean;
+  /** Preferred width (null = responsive default). */
+  pluginWidth: number | null;
+  aiVisible: boolean;
+  sftpVisible: boolean;
+}
+
+export interface PluginSideFit {
+  plugin: number;
+  /** Container width left for the ai/sftp negotiation to run over. */
+  remainingContainerWidth: number;
+}
+
+/**
+ * Fit the plugin side panel FIRST and lowest-priority: it yields toward its
+ * minimum before ai/sftp are asked to shrink, so the existing two-panel
+ * water-fill runs unchanged over the remaining width. Returns that remainder
+ * instead of mutating the shared input.
+ */
+export function fitPluginSideWidth(input: PluginSideFitInput): PluginSideFit {
+  const preferred = input.pluginWidth ?? input.defaultWidth;
+  if (!input.pluginVisible) {
+    return { plugin: preferred, remainingContainerWidth: input.containerWidth };
+  }
+  const total = Math.max(0, input.containerWidth - input.mainMinWidth);
+  const othersMin =
+    (input.aiVisible ? input.panelMinWidth : 0) +
+    (input.sftpVisible ? input.panelMinWidth : 0);
+  const pluginMax = Math.max(input.panelMinWidth, total - othersMin);
+  const plugin = clamp(preferred, Math.min(input.panelMinWidth, input.containerWidth), pluginMax);
+  return { plugin, remainingContainerWidth: input.containerWidth - plugin };
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

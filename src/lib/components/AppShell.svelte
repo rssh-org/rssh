@@ -23,6 +23,11 @@
     import ChatPanel from "../ai/ChatPanel.svelte";
     import * as ai from "../ai/store.svelte.ts";
     import type { AiTargetKind } from "../ai/types.ts";
+    import PluginSide from "../plugins/PluginSide.svelte";
+    import PluginStrip from "../plugins/PluginStrip.svelte";
+    import SidePanel from "./SidePanel.svelte";
+    import * as plugins from "../plugins/store.svelte.ts";
+    import { sideStacks, type PanelKind } from "../plugins/layout.ts";
     import {attachShortcuts, attachKeyup, digitTabIndex, type Shortcut} from "../keyboard/registry.ts";
     import {matchBinding, TAB_CYCLE} from "../keyboard/keymap.ts";
     import * as keymap from "../stores/keymap.svelte.ts";
@@ -33,6 +38,7 @@
     import {
         defaultPanelWidth,
         fitPanelWidths,
+        fitPluginSideWidth,
         resizePanelWidth,
         type PanelFitPriority,
     } from "./panel-widths.ts";
@@ -219,6 +225,11 @@
         }
         consumeCloneQuery();
         consumeAiHandoff();
+
+        // Plugin registry: manifest rows + on-disk root (for iframe entry URLs).
+        // A failed load (e.g. plain-browser dev without the shim server) only
+        // means no plugins — never block startup on it.
+        void plugins.load().catch((e) => console.warn("[plugins] registry load failed:", e));
 
         const detachKeydown = attachShortcuts(shortcutsTable());
         const detachKeyup = attachKeyup((e) => {
@@ -414,6 +425,41 @@
         // The Transfers popover does not hide SFTP — overlay.
     );
 
+    /* ── Plugin panels：per-tab open 状态镜像 SFTP；两个宿主区域（side aside +
+       terminal strip）各自渲染 manifest.area 匹配的启用插件。iframe 只给
+       已连接的 ssh tab 挂（exec 是唯一通道，没会话就是错误弹幕）。 */
+    let pluginHostOk = $derived(plugins.hostSupported());
+    let pluginSidePlugins = $derived(plugins.sidePlugins());
+    let pluginStripPlugins = $derived(plugins.stripPlugins());
+    let pluginTabs = $derived(
+        app.tabs()
+            .filter((tab) =>
+                plugins.isOpen(tab.id)
+                && (tab.type === "ssh" || tab.type === "local"))
+            // sessionId 可为空串：断线时 iframe 保活（图表不丢），exec 报
+            // plugin_no_exec 由插件显示断连态；重连后 sessionId 恢复。
+            .map((tab) => ({tabId: tab.id, sessionId: app.sessionIdForTab(tab.id) ?? ""})),
+    );
+    let pluginPaneActive = $derived.by(() => {
+        const tab = app.activeTab();
+        return (
+            !!tab
+            && (tab.type === "ssh" || tab.type === "local")
+            && plugins.isOpen(tab.id)
+            && !!app.sessionIdForTab(tab.id)
+        );
+    });
+    let pluginSideVisible = $derived(
+        pluginPaneActive && pluginHostOk && pluginSidePlugins.length > 0
+        && !app.settingsActive()
+    );
+    let pluginStripVisible = $derived(
+        pluginPaneActive && pluginHostOk && pluginStripPlugins.length > 0
+        && !app.settingsActive()
+    );
+    let pluginSidePos = $derived(plugins.sidePosition());
+    let pluginStripPos = $derived(plugins.stripPosition());
+
     /* ── 两侧面板宽度：preferred value 按 tab 保存，rendered value 按当前容器
        动态收敛；开第二块面板、切回宽 tab 或缩窗都不能把主区挤穿。 */
     const panelMinWidth = 280;
@@ -445,8 +491,19 @@
         }
     });
 
-    let fittedPanelWidths = $derived(fitPanelWidths({
+    /* 插件侧栏先适配（最低优先级，先被压缩），AI/SFTP 在剩余宽度上照旧协商。 */
+    let pluginSideFitted = $derived(fitPluginSideWidth({
         containerWidth: contentWidth,
+        mainMinWidth: mainPanelMinWidth,
+        panelMinWidth,
+        defaultWidth: defaultPanelWidth(viewportWidth),
+        pluginVisible: pluginSideVisible,
+        pluginWidth: plugins.sideWidth(app.activePaneId()),
+        aiVisible,
+        sftpVisible,
+    }));
+    let fittedPanelWidths = $derived(fitPanelWidths({
+        containerWidth: pluginSideFitted.remainingContainerWidth,
         mainMinWidth: mainPanelMinWidth,
         panelMinWidth,
         defaultWidth: defaultPanelWidth(viewportWidth),
@@ -457,19 +514,13 @@
         priority: panelFitPriorityByTab[aiTabId],
     }));
 
-    let aiSideStyle = $derived(
-        `flex: 0 0 ${fittedPanelWidths.ai}px; max-width: ${fittedPanelWidths.ai}px;`
-    );
-    let sftpSideStyle = $derived(
-        `flex: 0 0 ${fittedPanelWidths.sftp}px; max-width: ${fittedPanelWidths.sftp}px;`
-    );
-
     let activePanelResizeStop: (() => void) | null = null;
     $effect(() => {
         // 订阅所有会改变 drag owner/visibility 的坐标；一旦变化，旧手势立即失效。
         aiTabId;
         aiVisible;
         sftpVisible;
+        pluginSideVisible;
         app.settingsActive();
         activePanelResizeStop?.();
     });
@@ -488,6 +539,10 @@
     }) {
         e.preventDefault();
         activePanelResizeStop?.();
+        // Plugin iframes are separate documents: they swallow document-level
+        // mousemove/mouseup while the cursor is over them, freezing the drag
+        // (body.panel-resizing punches through, see global.css).
+        document.body.classList.add("panel-resizing");
         const startX = e.clientX;
         const sideEl = (e.currentTarget as HTMLElement).parentElement as HTMLElement | null;
         // 取实际渲染宽度作为起点，避免首次拖拽时的"跳变"。
@@ -499,6 +554,7 @@
         function stop() {
             if (stopped) return;
             stopped = true;
+            document.body.classList.remove("panel-resizing");
             document.removeEventListener("mousemove", onMove);
             document.removeEventListener("mouseup", stop);
             window.removeEventListener("blur", stop);
@@ -530,14 +586,19 @@
         activePanelResizeStop = stop;
     }
 
+    /** 统一的拖拽方向公式：面板在左 → 右移变宽(+1)；在右 → 左移变宽(-1)。
+        三个面板同一公式，只喂各自的停靠边。 */
+    function resizeSign(side: "left" | "right"): number {
+        return side === "left" ? 1 : -1;
+    }
+
     function startAiResize(e: MouseEvent) {
         const tabId = aiTabId;
         startPanelResize(e, {
             tabId,
             currentWidth: ai.panelWidth(tabId),
             priority: "ai",
-            // AI 在右：左移变宽；AI 在左：右移变宽。
-            sign: aiPos === "left" ? 1 : -1,
+            sign: resizeSign(aiPos),
             minWidth: panelMinWidth,
             minMain: mainPanelMinWidth,
             otherPanelVisible: sftpVisible,
@@ -557,15 +618,16 @@
 
     /* ── SFTP 面板宽度：跟 AI 镜像一份，同样按 tab 管理。
        SFTP 永远走 AI 的对侧（aiPos=right → SFTP 左；aiPos=left → SFTP 右），
-       靠 .content.ai-left 的 row-reverse 自动翻边，不引入新位置 config。 */
+       靠 sideStacks 的栈顺序翻边，不引入新位置 config。 */
+    let sftpSide = $derived<"left" | "right">(aiPos === "left" ? "right" : "left");
+
     function startSftpResize(e: MouseEvent) {
         const tabId = app.activePaneId();
         startPanelResize(e, {
             tabId,
             currentWidth: app.sftpPanelWidthForTab(tabId),
             priority: "sftp",
-            // SFTP 在左：右移变宽；SFTP 在右：左移变宽。
-            sign: aiPos === "left" ? -1 : 1,
+            sign: resizeSign(sftpSide),
             minWidth: panelMinWidth,
             minMain: mainPanelMinWidth,
             otherPanelVisible: aiVisible,
@@ -580,6 +642,29 @@
         panelFitPriorityByTab[tabId] = "sftp";
         app.setSftpPanelWidth(tabId, null);
         app.commitSftpPanelWidth(tabId);
+    }
+
+    /* ── Plugin side panel：跟 AI/SFTP 同一套拖拽骨架（per-tab 宽度存 plugin store）。 */
+    function startPluginSideResize(e: MouseEvent) {
+        const tabId = app.activePaneId();
+        startPanelResize(e, {
+            tabId,
+            currentWidth: plugins.sideWidth(tabId),
+            priority: "plugin",
+            sign: resizeSign(pluginSidePos),
+            minWidth: panelMinWidth,
+            minMain: mainPanelMinWidth,
+            otherPanelVisible: aiVisible || sftpVisible,
+            stillActive: () => pluginSideVisible && app.activePaneId() === tabId,
+            setWidth: plugins.setSideWidth,
+            commitWidth: () => {},
+        });
+    }
+
+    function resetPluginSideWidth() {
+        const tabId = app.activePaneId();
+        panelFitPriorityByTab[tabId] = "plugin";
+        plugins.setSideWidth(tabId, null);
     }
 
     /* Menu data — sections describe layout (header / scrollable list / footer),
@@ -878,6 +963,13 @@
                     disabled: !isSsh,
                     onClick: () => { app.setActivePane(tab.id); app.openSftp(); },
                 });
+                // Plugins run over exec: SSH channels remotely, a local child
+                // process on local-shell tabs. Telnet/serial have neither.
+                items.push({
+                    label: t("tab.context.plugins"),
+                    disabled: !(isSsh || tab.type === "local"),
+                    onClick: () => { app.setActivePane(tab.id); plugins.togglePanel(tab.id); },
+                });
             }
             sections.push(items);
         }
@@ -1069,6 +1161,7 @@
             // not also collapse SFTP/drawer underneath it.
             if (app.downloadsActive()) return;
             if (app.sftpOpen()) { app.closeSftp(); e.preventDefault(); }
+            else if (plugins.isOpen(app.activePaneId())) { plugins.closePanel(app.activePaneId()); e.preventDefault(); }
             else if (drawerOpen) { closeDrawer(); e.preventDefault(); }
         }
     }
@@ -1194,117 +1287,169 @@
         />
     {/if}
 
+    {#snippet sideAside(kind: PanelKind, side: "left" | "right")}
+        {#if kind === "sftp"}
+            <!-- 任何 tab 开了 SFTP 就把 aside 挂上（保留所有 tab 的 SftpBrowser 实例 → 切回时 cwd 不丢）。
+                 active tab 没开 / 进入 settings 时整块 aside 走 .hidden 收掉视觉宽度，但 DOM 留着。 -->
+            {#if resourcePanesAllowed && sftpTabs.length > 0}
+                <SidePanel
+                    {side}
+                    width={fittedPanelWidths.sftp}
+                    hidden={!sftpVisible}
+                    onResizeStart={startSftpResize}
+                    onResetWidth={resetSftpWidth}
+                    panes={sftpTabs.map((tab) => ({
+                        id: tab.id,
+                        visible: tab.id === app.activePaneId() && sftpVisible,
+                    }))}
+                >
+                    {#snippet pane(p)}
+                        {@const tab = sftpTabs.find((entry) => entry.id === p.id)}
+                        {#if tab}
+                            <SftpBrowser meta={{...tab.meta ?? {}, sessionId: app.sessionIdForTab(tab.id) ?? ''}}/>
+                        {/if}
+                    {/snippet}
+                </SidePanel>
+            {/if}
+        {:else if kind === "plugin"}
+            {#if resourcePanesAllowed && pluginHostOk && pluginSidePlugins.length > 0 && pluginTabs.length > 0}
+                <PluginSide
+                    {side}
+                    width={pluginSideFitted.plugin}
+                    hidden={!pluginSideVisible}
+                    plugins={pluginSidePlugins}
+                    tabs={pluginTabs}
+                    activeTabId={app.activePaneId()}
+                    onResizeStart={startPluginSideResize}
+                    onResetWidth={resetPluginSideWidth}
+                />
+            {/if}
+        {:else if kind === "ai"}
+            <!-- 任何 tab 开了 AI 就保留对应 ChatPanel；只有当前 tab 的 pane 可见。
+                 不能用 {#if aiVisible} 包住 aside，否则切到没开 AI 的 tab 会销毁旧实例。 -->
+            {#if resourcePanesAllowed && aiTabs.length > 0}
+                <SidePanel
+                    {side}
+                    width={fittedPanelWidths.ai}
+                    hidden={!aiVisible}
+                    bordered={false}
+                    mobileFullWidth
+                    onResizeStart={startAiResize}
+                    onResetWidth={resetAiWidth}
+                    panes={aiTabs.map((tab) => ({
+                        id: tab.id,
+                        visible: aiVisible && tab.id === aiTabId,
+                    }))}
+                >
+                    {#snippet pane(p)}
+                        {@const tab = aiTabs.find((entry) => entry.id === p.id)}
+                        {#if tab}
+                            <ChatPanel
+                                tabId={tab.id}
+                                targetKind={tab.type as AiTargetKind}
+                                targetId={app.sessionIdForTab(tab.id) ?? null}
+                                active={aiVisible && tab.id === aiTabId}
+                            />
+                        {/if}
+                    {/snippet}
+                </SidePanel>
+            {/if}
+        {/if}
+    {/snippet}
+
     <div
         class="content"
         bind:this={contentEl}
         class:ai-on={aiVisible}
-        class:ai-left={aiVisible && aiPos === "left"}
         class:sftp-on={sftpVisible}
     >
-        <!-- 任何 tab 开了 SFTP 就把 aside 挂上（保留所有 tab 的 SftpBrowser 实例 → 切回时 cwd 不丢）。
-             active tab 没开 / 进入 settings / downloads 时整块 aside 走 .hidden 收掉视觉宽度，但 DOM 留着。
-             SFTP 走 AI 对侧：aiPos=right(default) → SFTP 视觉左、handle 右边缘；
-             aiPos=left 下 .content.ai-left 翻 row → SFTP 视觉右、handle 左边缘。 -->
-        {#if resourcePanesAllowed && sftpTabs.length > 0}
-            <aside class="sftp-side" class:hidden={!sftpVisible} style={sftpSideStyle}>
-                <div class="sftp-resize-handle"
-                     class:on-left={aiPos === "left"}
-                     onmousedown={startSftpResize}
-                     ondblclick={resetSftpWidth}
-                     role="separator"
-                     aria-orientation="vertical"
-                     title={t("common.resize_hint")}></div>
-                {#each sftpTabs as tab (tab.id)}
-                    <div class="sftp-pane" class:visible={tab.id === app.activePaneId() && sftpVisible}>
-                        <SftpBrowser meta={{...tab.meta ?? {}, sessionId: app.sessionIdForTab(tab.id) ?? ''}}/>
+        <!-- 左右栈由 sideStacks(aiPos, pluginSidePos) 决定：SFTP 永远在 AI 对侧，
+             插件侧栏贴终端（所选侧最内层）。DOM 顺序 = 视觉顺序，不再用 row-reverse。 -->
+        {#each sideStacks(aiPos, pluginSidePos).left as kind (kind)}
+            {@render sideAside(kind, "left")}
+        {/each}
+        <div class="main-area">
+            <!-- 插件横条区：终端上/下边缘，per-tab keep-alive，无匹配插件不占位 -->
+            {#if resourcePanesAllowed && pluginHostOk && pluginStripPlugins.length > 0 && pluginTabs.length > 0 && pluginStripPos === "top"}
+                <PluginStrip
+                    position="top"
+                    hidden={!pluginStripVisible}
+                    plugins={pluginStripPlugins}
+                    tabs={pluginTabs}
+                    activeTabId={app.activePaneId()}
+                />
+            {/if}
+            <div class="terminal-region">
+                {#each terminalWorkspaceTabs as workspace (workspace.id)}
+                    {@const layout = app.layoutForWorkspace(workspace.id)}
+                    <div
+                        class="pane terminal-layout-pane"
+                        class:visible={!app.settingsActive() && workspace.id === app.activeWorkspaceId() && resourcePanesAllowed && !!layout}
+                        role="presentation"
+                    >
+                        {#if resourcePanesAllowed && layout}
+                            <TerminalSplitLayout
+                                {layout}
+                                activePaneId={workspace.id === app.activeWorkspaceId() ? app.activePaneId() : workspace.id}
+                                onActivate={(tabId) => {
+                                    if (workspace.id === app.activeWorkspaceId()) app.setActivePane(tabId);
+                                }}
+                                onResize={(path, ratio) => app.resizeLayoutPath(workspace.id, path, ratio)}
+                                onClose={closeTerminalPane}
+                                onContextMenu={openPaneContextMenu}
+                                onInitialConnectionFailure={handleInitialConnectionFailure}
+                            />
+                        {/if}
                     </div>
                 {/each}
-            </aside>
-        {/if}
-        <div class="main-area">
-            {#each terminalWorkspaceTabs as workspace (workspace.id)}
-                {@const layout = app.layoutForWorkspace(workspace.id)}
-                <div
-                    class="pane terminal-layout-pane"
-                    class:visible={!app.settingsActive() && workspace.id === app.activeWorkspaceId() && resourcePanesAllowed && !!layout}
-                    role="presentation"
-                >
-                    {#if resourcePanesAllowed && layout}
-                        <TerminalSplitLayout
-                            {layout}
-                            activePaneId={workspace.id === app.activeWorkspaceId() ? app.activePaneId() : workspace.id}
-                            onActivate={(tabId) => {
-                                if (workspace.id === app.activeWorkspaceId()) app.setActivePane(tabId);
-                            }}
-                            onResize={(path, ratio) => app.resizeLayoutPath(workspace.id, path, ratio)}
-                            onClose={closeTerminalPane}
-                            onContextMenu={openPaneContextMenu}
-                            onInitialConnectionFailure={handleInitialConnectionFailure}
-                        />
-                    {/if}
-                </div>
-            {/each}
 
-            {#each editTabs as tab (tab.id)}
-                <div
-                    class="pane"
-                    class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId()}
-                    role="presentation"
-                    oncontextmenu={(event) => openRouteContextMenu(event, tab)}
-                >
-                    <EditPane tabId={tab.id} active={tab.id === app.activeWorkspaceId() && !app.settingsActive()} />
-                </div>
-            {/each}
+                {#each editTabs as tab (tab.id)}
+                    <div
+                        class="pane"
+                        class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId()}
+                        role="presentation"
+                        oncontextmenu={(event) => openRouteContextMenu(event, tab)}
+                    >
+                        <EditPane tabId={tab.id} active={tab.id === app.activeWorkspaceId() && !app.settingsActive()} />
+                    </div>
+                {/each}
 
-            {#each forwardTabs as tab (tab.id)}
-                <div
-                    class="pane"
-                    class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId() && resourcePanesAllowed}
-                    role="presentation"
-                    oncontextmenu={(event) => openRouteContextMenu(event, tab)}
-                >
-                    {#if resourcePanesAllowed}
-                        <ForwardPane tabId={tab.id} meta={tab.meta ?? {}}/>
-                    {/if}
-                </div>
-            {/each}
+                {#each forwardTabs as tab (tab.id)}
+                    <div
+                        class="pane"
+                        class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId() && resourcePanesAllowed}
+                        role="presentation"
+                        oncontextmenu={(event) => openRouteContextMenu(event, tab)}
+                    >
+                        {#if resourcePanesAllowed}
+                            <ForwardPane tabId={tab.id} meta={tab.meta ?? {}}/>
+                        {/if}
+                    </div>
+                {/each}
 
-            {#if app.settingsActive()}
-                <div class="pane visible">
-                    <SettingsLayout/>
-                </div>
-            {:else if activeRouteTab?.type === "home"}
-                <div class="pane visible" role="presentation" oncontextmenu={(event) => openRouteContextMenu(event, activeRouteTab)}>
-                    <HomeScreen/>
-                </div>
+                {#if app.settingsActive()}
+                    <div class="pane visible">
+                        <SettingsLayout/>
+                    </div>
+                {:else if activeRouteTab?.type === "home"}
+                    <div class="pane visible" role="presentation" oncontextmenu={(event) => openRouteContextMenu(event, activeRouteTab)}>
+                        <HomeScreen/>
+                    </div>
+                {/if}
+            </div>
+            {#if resourcePanesAllowed && pluginHostOk && pluginStripPlugins.length > 0 && pluginTabs.length > 0 && pluginStripPos === "bottom"}
+                <PluginStrip
+                    position="bottom"
+                    hidden={!pluginStripVisible}
+                    plugins={pluginStripPlugins}
+                    tabs={pluginTabs}
+                    activeTabId={app.activePaneId()}
+                />
             {/if}
         </div>
-
-        <!-- 任何 tab 开了 AI 就保留对应 ChatPanel；只有当前 tab 的 pane 可见。
-             不能用 {#if aiVisible} 包住 aside，否则切到没开 AI 的 tab 会销毁旧实例。 -->
-        {#if resourcePanesAllowed && aiTabs.length > 0}
-            <aside class="ai-side" class:hidden={!aiVisible} style={aiSideStyle}>
-                <div class="ai-resize-handle"
-                     class:on-right={aiPos === "left"}
-                     onmousedown={startAiResize}
-                     ondblclick={resetAiWidth}
-                     role="separator"
-                     aria-orientation="vertical"
-                     title={t("common.resize_hint")}></div>
-                {#each aiTabs as tab (tab.id)}
-                    {@const targetId = app.sessionIdForTab(tab.id) ?? null}
-                    {@const active = aiVisible && tab.id === aiTabId}
-                    <div class="ai-pane" class:visible={active}>
-                        <ChatPanel
-                            tabId={tab.id}
-                            targetKind={tab.type as AiTargetKind}
-                            {targetId}
-                            {active}
-                        />
-                    </div>
-                {/each}
-            </aside>
-        {/if}
+        {#each sideStacks(aiPos, pluginSidePos).right as kind (kind)}
+            {@render sideAside(kind, "right")}
+        {/each}
     </div>
 
     <!-- Popover lives inside .shell so it inherits the --sb-* layout vars that
@@ -1460,74 +1605,29 @@
        row never paints over it; an expanded row floats above it, as intended. */
     .shell.sb-left  .content { border-left: 1px solid var(--divider); }
     .shell.sb-right .content { border-right: 1px solid var(--divider); }
-    /* AI 在左：flex row 翻转，模板顺序不变，无须状态机 */
-    .content.ai-left { flex-direction: row-reverse; }
 
-    /* 终端区——所有 .pane 挂在这里，绝对定位由父级 main-area 提供 position: relative。
-       min-width: 0 让 flex 能把它压到 0（窄屏 AI 接管时） */
+    /* 终端区——所有 .pane 挂在 .terminal-region（绝对定位由它提供 position:
+       relative），插件横条区作为兄弟节点贴其上/下边缘。min-width: 0 让 flex
+       能把它压到 0（窄屏 AI 接管时）。 */
     .main-area {
         display: flex;
+        flex-direction: column;
         flex: 1 1 auto;
         position: relative;
         min-width: 0;
         min-height: 0;
         overflow: hidden;
     }
-
-    /* 边框在 ChatPanel 自身 CSS 里（左右都有），aside 不重复加 */
-    .ai-side {
-        flex: 0 0 380px;
-        background: var(--bg);
+    .terminal-region {
         position: relative;
-    }
-    .ai-pane {
-        position: absolute;
-        inset: 0;
-        display: none;
-    }
-    .ai-pane.visible {
-        display: flex;
-        flex-direction: column;
-    }
-    .ai-side.hidden {
-        flex: 0 0 0 !important;
-        max-width: 0 !important;
-        overflow: hidden;
+        flex: 1 1 auto;
+        min-width: 0;
+        min-height: 0;
     }
 
-    @media (max-width: 800px) { .ai-side { flex-basis: 320px; } }
-
-    /* 拖拽宽度的把手：贴在 ai-side 的内边缘（默认右布局 → 左边；左布局 → 右边）。
-       6px 命中区域，悬停/拖拽时露一根细线。 */
-    .ai-resize-handle {
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        left: -3px;
-        width: 6px;
-        cursor: col-resize;
-        z-index: 10;
-        background: transparent;
-        transition: background 0.12s ease;
-    }
-    .ai-resize-handle.on-right {
-        left: auto;
-        right: -3px;
-    }
-    .ai-resize-handle:hover,
-    .ai-resize-handle:active {
-        background: var(--accent);
-        opacity: 0.45;
-    }
-
-    /* 竖屏手机：AI 接管整块内容区，main-area 挤到 0（终端实例保留，关 AI 后恢复） */
+    /* 竖屏手机：AI 接管整块内容区，main-area 挤到 0（终端实例保留，关 AI 后恢复）。
+       aside 自身的接管样式在 SidePanel（mobileFullWidth prop）。 */
     @media (max-width: 480px) {
-        /* inline preferred width 不能压过 mobile takeover。 */
-        .ai-side:not(.hidden) {
-            flex: 1 1 auto !important;
-            max-width: none !important;
-        }
-        .ai-resize-handle { display: none; }
         .content.ai-on .main-area { flex: 0; }
     }
 
@@ -1543,60 +1643,6 @@
     .pane.visible {
         display: flex;
         flex-direction: column;
-    }
-
-    /* ── SFTP side panel —— 跟 .ai-side 镜像；位置由 .content 的 row / row-reverse 决定 ── */
-    .sftp-side {
-        flex: 0 0 380px;
-        background: var(--bg);
-        position: relative;
-        border-right: 1px solid var(--divider);
-    }
-    /* aside 里挂多个 SftpBrowser 实例（每 tab 一个），靠 .visible 决定显示哪个。
-       绝对定位让所有非活跃实例不占布局空间，但 DOM 留着 → cwd / 网络连接保活。 */
-    .sftp-pane {
-        position: absolute;
-        inset: 0;
-        display: none;
-    }
-    .sftp-pane.visible {
-        display: flex;
-        flex-direction: column;
-    }
-    /* active tab 没开 SFTP / settings / downloads 状态下整块 aside 折叠为 0，
-       内部 SftpBrowser 实例保持 mount —— 切回有 SFTP 的 tab 时立刻恢复。 */
-    .sftp-side.hidden {
-        flex-basis: 0 !important;
-        max-width: 0 !important;
-        overflow: hidden;
-        border: none;
-    }
-    /* aiPos=left 时 .content 翻 row-reverse → SFTP 视觉在右，分隔线得贴左边缘 */
-    .content.ai-left .sftp-side {
-        border-right: none;
-        border-left: 1px solid var(--divider);
-    }
-    @media (max-width: 800px) { .sftp-side { flex-basis: 320px; } }
-
-    .sftp-resize-handle {
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        right: -3px;        /* SFTP 视觉在左 → handle 在右边缘 */
-        width: 6px;
-        cursor: col-resize;
-        z-index: 10;
-        background: transparent;
-        transition: background 0.12s ease;
-    }
-    .sftp-resize-handle.on-left {  /* SFTP 视觉在右（aiPos=left）→ handle 翻到左边缘 */
-        right: auto;
-        left: -3px;
-    }
-    .sftp-resize-handle:hover,
-    .sftp-resize-handle:active {
-        background: var(--accent);
-        opacity: 0.45;
     }
 
     /* 关闭 tab 二次确认弹窗 —— 外壳（scrim + 卡片）由 Modal.svelte 统一提供，

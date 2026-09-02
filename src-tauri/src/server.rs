@@ -326,6 +326,48 @@ fn dispatch(
             &arg::<String>(&args, "id")?,
         )),
 
+        // ---- plugins (JCEF hosts the UI but has no asset protocol, so iframe
+        //      loading is unavailable there; registry + exec still work) ----
+        "plugins_root" => ok(Ok::<_, AppError>(
+            crate::commands::plugin::plugins_dir(state)
+                .to_string_lossy()
+                .into_owned(),
+        )),
+        "install_plugin" => {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            let b64: String = arg(&args, "base64Zip")?;
+            let bytes = STANDARD.decode(b64.trim()).map_err(|e| {
+                err_value(AppError::config(
+                    "crypto_base64_decode_failed",
+                    json!({ "err": e.to_string() }),
+                ))
+            })?;
+            ok(crate::commands::plugin::install_impl(state, &bytes, None))
+        }
+        "list_plugins" => ok(crate::db::plugin::list(&state.db)),
+        "set_plugin_enabled" => {
+            let id: String = arg(&args, "id")?;
+            let enabled: bool = arg(&args, "enabled")?;
+            ok(crate::db::plugin::set_enabled(&state.db, &id, enabled))
+        }
+        "set_plugin_order" => {
+            let ids: Vec<String> = arg(&args, "ids")?;
+            ok(crate::db::plugin::set_order(&state.db, &ids))
+        }
+        "uninstall_plugin" => {
+            let id: String = arg(&args, "id")?;
+            let dir = state.data_dir.join("plugins").join(&id);
+            if crate::commands::plugin::valid_plugin_id(&id) && dir.exists() {
+                std::fs::remove_dir_all(&dir).map_err(|e| {
+                    err_value(AppError::other(
+                        "plugin_uninstall_failed",
+                        json!({ "err": e.to_string() }),
+                    ))
+                })?;
+            }
+            ok(crate::db::plugin::delete(&state.db, &id))
+        }
+
         // ---- settings / snippets / highlights ----
         "get_setting" => {
             let key: String = arg(&args, "key")?;
@@ -905,6 +947,15 @@ async fn dispatch_async(
         //      the native pick dialogs that supply that path are host-provided) ----
         "sftp_connect" => sftp_connect(state, owner, args).await,
         "sftp_connect_session" => sftp_connect_session(state, owner, args).await,
+        "plugin_exec" => {
+            let session_id: String = arg(&args, "sessionId")?;
+            let command: String = arg(&args, "command")?;
+            let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64);
+            ok(crate::commands::plugin::plugin_exec_impl(
+                state, owner, session_id, command, timeout_ms,
+            )
+            .await)
+        }
         "sftp_home" => ok(sftp_handle(state, &arg::<String>(&args, "sftpId")?)?
             .home_dir()
             .await),

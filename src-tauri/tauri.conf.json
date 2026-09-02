@@ -22,7 +22,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/plugins/**", "$HOME/.rssh/plugins/**"]
+      }
     }
   },
   "bundle": {

@@ -9,6 +9,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type Event as TauriEvent, type UnlistenFn } from "@tauri-apps/api/event";
 import { saveTextFile, fileStamp } from "../save-file.ts";
+import { createSidePanelState } from "../stores/panel-state.svelte.ts";
 import { t, errMsg, locale as currentLocale } from "../i18n/index.svelte.ts";
 import { extractOutput, findSentinel } from "./pty-output.ts";
 import { truncateCommand } from "./format.ts";
@@ -71,19 +72,15 @@ function loadPos(): AiPosition {
   return v === "left" || v === "right" ? v : "right";
 }
 
-function loadLegacyPanelWidth(): number | null {
-  const raw = localStorage.getItem(LEGACY_PANEL_WIDTH_KEY);
-  if (!raw) return null;
-  const width = Number.parseInt(raw, 10);
-  return Number.isFinite(width) && width >= MIN_PANEL_WIDTH ? width : null;
-}
-
 // ─── Per-tab visibility ───────────────────────────────────────────
 
-let _openByTab = $state<Record<string, true>>({});
-let _panelWidthByTab = $state<Record<string, number | null>>({});
+/* Per-tab panel state — the shared side-panel skeleton (open flags + widths
+   + the persisted committed default that seeds new tabs). */
+const panel = createSidePanelState({
+  minWidth: MIN_PANEL_WIDTH,
+  storageKey: LEGACY_PANEL_WIDTH_KEY,
+});
 let _position = $state<AiPosition>(loadPos());
-let _initialPanelWidth = loadLegacyPanelWidth();
 let _sessionByTab = $state<Record<string, AiSessionInfo>>({});
 let _chatByTab = $state<Record<string, ChatItem[]>>({});
 let _pendingByTab = $state<Record<string, CommandProposed | null>>({});
@@ -223,11 +220,10 @@ export function setPosition(p: AiPosition) {
 
 // ─── Open/close ───────────────────────────────────────────────────
 
-export function isOpen(tab_id: string) { return _openByTab[tab_id] === true; }
-export function openPanel(tab_id: string) { _openByTab[tab_id] = true; }
-function hidePanel(tab_id: string) { delete _openByTab[tab_id]; }
+export function isOpen(tab_id: string) { return panel.isOpen(tab_id); }
+export function openPanel(tab_id: string) { panel.openPanel(tab_id); }
 export function closePanel(tab_id: string): Promise<void> {
-  hidePanel(tab_id);
+  panel.closePanel(tab_id);
   return endConversation(tab_id);
 }
 
@@ -249,48 +245,29 @@ export function endConversation(tab_id: string): Promise<void> {
   return Promise.resolve();
 }
 export async function togglePanel(tab_id: string): Promise<void> {
-  if (isOpen(tab_id)) await closePanel(tab_id);
-  else openPanel(tab_id);
-}
-function hasPanelWidthState(tab_id: string): boolean {
-  return Object.prototype.hasOwnProperty.call(_panelWidthByTab, tab_id);
+  if (panel.isOpen(tab_id)) await closePanel(tab_id);
+  else panel.openPanel(tab_id);
 }
 export function panelWidth(tab_id: string): number | null {
-  return hasPanelWidthState(tab_id) ? _panelWidthByTab[tab_id] : null;
+  return panel.width(tab_id);
 }
 export function setPanelWidth(tab_id: string, width: number | null) {
-  if (!_disposedTabs.has(tab_id)) _panelWidthByTab[tab_id] = width;
+  // Writes from a disposed tab's late drag continuation must not resurrect
+  // state — the dispose flow owns cleanup from that point on.
+  if (!_disposedTabs.has(tab_id)) panel.setWidth(tab_id, width);
 }
 /** Commit only at the end of a drag. The active tab keeps its own value; the
  * committed value seeds tabs created later and preserves the pre-per-tab
  * localStorage behavior across app restarts. */
 export function commitPanelWidth(tab_id: string): boolean {
-  if (_disposedTabs.has(tab_id) || !hasPanelWidthState(tab_id)) {
-    if (_disposedTabs.has(tab_id)) delete _panelWidthByTab[tab_id];
+  if (_disposedTabs.has(tab_id)) {
+    panel.clearTab(tab_id);
     return false;
   }
-  const width = _panelWidthByTab[tab_id];
-  if (width === null) {
-    _initialPanelWidth = null;
-    try {
-      localStorage.removeItem(LEGACY_PANEL_WIDTH_KEY);
-    } catch (error) {
-      console.warn("[ai] clear panel width:", error);
-    }
-    return true;
-  }
-  if (!Number.isFinite(width) || width < MIN_PANEL_WIDTH) return false;
-  _initialPanelWidth = width;
-  try {
-    localStorage.setItem(LEGACY_PANEL_WIDTH_KEY, String(width));
-  } catch (error) {
-    console.warn("[ai] persist panel width:", error);
-  }
-  return true;
+  return panel.commitWidth(tab_id);
 }
 export function discardPanelState(tab_id: string) {
-  hidePanel(tab_id);
-  delete _panelWidthByTab[tab_id];
+  panel.clearTab(tab_id);
   clearPrefill(tab_id);
 }
 
@@ -299,9 +276,7 @@ export function discardPanelState(tab_id: string) {
 export function activateTab(tab_id: string) {
   _tabGeneration[tab_id] = tabGeneration(tab_id) + 1;
   _disposedTabs.delete(tab_id);
-  if (!hasPanelWidthState(tab_id)) {
-    _panelWidthByTab[tab_id] = _initialPanelWidth;
-  }
+  panel.seedWidth(tab_id);
 }
 
 /** closeTab 的唯一 AI teardown：先同步封死后续异步 continuation，再清 UI/actor。 */

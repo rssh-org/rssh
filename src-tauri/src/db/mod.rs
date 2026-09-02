@@ -8,6 +8,7 @@ pub mod credential;
 pub mod forward;
 pub mod group;
 pub mod highlight;
+pub mod plugin;
 pub mod profile;
 pub mod schema;
 pub mod secret;

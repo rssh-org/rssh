@@ -427,3 +427,8 @@ input[type="radio"]:checked::after {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--shadow-light); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+/* Panel-resize gestures (class set by startPanelResize): iframes are separate
+   documents that swallow document-level mousemove/mouseup — without this the
+   drag freezes whenever the cursor crosses a plugin iframe. */
+body.panel-resizing iframe { pointer-events: none; }
