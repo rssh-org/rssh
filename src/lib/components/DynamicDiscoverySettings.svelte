@@ -216,8 +216,22 @@
             <input type="checkbox" checked={source.enabled} onchange={() => toggleEnabled(source)} />
             <span class="slider"></span>
           </label>
-          <button class="btn btn-sm" onclick={() => startEdit(source)}>{t("common.edit")}</button>
-          <button class="btn btn-sm btn-danger" onclick={() => remove(source.id)}>{t("common.delete")}</button>
+          <button
+            class="btn btn-sm btn-icon"
+            title={t("common.edit")}
+            aria-label={`${t("common.edit")} ${source.name}`}
+            onclick={() => startEdit(source)}
+          >
+            <AppIcon name="edit" size={16} />
+          </button>
+          <button
+            class="btn btn-sm btn-icon btn-danger"
+            title={t("common.delete")}
+            aria-label={`${t("common.delete")} ${source.name}`}
+            onclick={() => remove(source.id)}
+          >
+            <AppIcon name="trash" size={16} />
+          </button>
         </div>
       </div>
     {/if}
@@ -289,6 +303,10 @@
   @media (max-width: 640px) {
     .toolbar { justify-content: stretch; flex-wrap: wrap; }
     .item-row { align-items: flex-start; flex-direction: column; }
+    /* Column + flex-start shrink-wraps .item-info (base width: fit-content),
+       unbounding the ellipsis chain — a long context/namespace line then
+       overflows the viewport. Stretch back to the row width so it truncates. */
+    .item-info { width: 100%; }
     .item-actions { align-self: flex-end; }
   }
 </style>

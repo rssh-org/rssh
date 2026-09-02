@@ -5,6 +5,7 @@
   import * as app from "../stores/app.svelte.ts";
   import { toast } from "../stores/toast.svelte.ts";
   import { t, errMsg } from "../i18n/index.svelte.ts";
+  import AppIcon from "./AppIcon.svelte";
 
   let groups = $state<Group[]>([]);
   let adding = $state(false);
@@ -123,15 +124,29 @@
       <div class="card item-row">
         <div class="item-info">
           <span class="color-swatch" style="background: {g.color}"></span>
-          <div>
-            <div class="item-name">{g.name}</div>
+          <div class="item-text">
+            <div class="item-name" title={g.name}>{g.name}</div>
             <div class="item-sub">{t("group.order", { n: g.sort_order })}</div>
           </div>
         </div>
         <div class="item-actions">
-          <button class="btn btn-sm" onclick={() => startEdit(g)}>{t("common.edit")}</button>
-          <button class="btn btn-sm btn-danger" onclick={() => remove(g.id)} disabled={deleting === g.id}>
-            {deleting === g.id ? "..." : t("common.delete")}
+          <button
+            class="btn btn-sm btn-icon"
+            title={t("common.edit")}
+            aria-label={`${t("common.edit")} ${g.name}`}
+            onclick={() => startEdit(g)}
+          >
+            <AppIcon name="edit" size={16} />
+          </button>
+          <button
+            class="btn btn-sm btn-icon btn-danger"
+            title={t("common.delete")}
+            aria-label={`${t("common.delete")} ${g.name}`}
+            aria-busy={deleting === g.id}
+            onclick={() => remove(g.id)}
+            disabled={deleting === g.id}
+          >
+            {#if deleting === g.id}…{:else}<AppIcon name="trash" size={16} />{/if}
           </button>
         </div>
       </div>
@@ -146,11 +161,14 @@
 <style>
   .page { padding: 24px; }
   .toolbar { display: flex; justify-content: flex-end; margin-bottom: 16px; }
-  .item-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-  .item-info { display: flex; align-items: center; gap: 10px; }
-  .item-name { font-weight: 600; font-size: 14px; }
+  .item-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .item-info { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  /* min-width:0 closes the ellipsis chain across the flex wrapper — without
+     it the wrapper's min-width:auto blocks truncation on .item-name. */
+  .item-text { min-width: 0; }
+  .item-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .item-sub { font-size: 12px; color: var(--text-sub); }
-  .item-actions { display: flex; gap: 10px; }
+  .item-actions { display: flex; gap: 10px; flex: 0 0 auto; }
   .color-swatch {
     width: 20px; height: 20px; border-radius: 4px; flex-shrink: 0;
     border: 1px solid var(--divider);

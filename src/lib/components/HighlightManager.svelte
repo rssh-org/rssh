@@ -6,6 +6,7 @@
   import { toast } from "../stores/toast.svelte.ts";
   import { t, errMsg } from "../i18n/index.svelte.ts";
   import HighlightRuleForm from "./HighlightRuleForm.svelte";
+  import AppIcon from "./AppIcon.svelte";
 
   const EMPTY_RULE: HighlightRule = {
     keyword: "",
@@ -139,8 +140,22 @@
             <input type="checkbox" checked={h.enabled} onchange={() => toggleEnabled(h)} />
             <span class="slider"></span>
           </label>
-          <button class="btn btn-sm" onclick={() => startEdit(h)}>{t("common.edit")}</button>
-          <button class="btn btn-sm btn-danger" onclick={() => remove(h.keyword)}>{t("common.delete")}</button>
+          <button
+            class="btn btn-sm btn-icon"
+            title={t("common.edit")}
+            aria-label={`${t("common.edit")} ${displayTitle(h)}`}
+            onclick={() => startEdit(h)}
+          >
+            <AppIcon name="edit" size={16} />
+          </button>
+          <button
+            class="btn btn-sm btn-icon btn-danger"
+            title={t("common.delete")}
+            aria-label={`${t("common.delete")} ${displayTitle(h)}`}
+            onclick={() => remove(h.keyword)}
+          >
+            <AppIcon name="trash" size={16} />
+          </button>
         </div>
       </div>
     {/if}

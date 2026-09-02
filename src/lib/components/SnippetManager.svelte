@@ -5,6 +5,7 @@
   import * as app from "../stores/app.svelte.ts";
   import { toast } from "../stores/toast.svelte.ts";
   import { t, errMsg } from "../i18n/index.svelte.ts";
+  import AppIcon from "./AppIcon.svelte";
 
   let snippets = $state<Snippet[]>([]);
   let adding = $state(false);
@@ -117,12 +118,26 @@
     {:else}
       <div class="card item-row">
         <div class="item-info">
-          <div class="item-name">{s.name}</div>
-          <div class="item-sub">{s.command}</div>
+          <div class="item-name" title={s.name}>{s.name}</div>
+          <div class="item-sub" title={s.command}>{s.command}</div>
         </div>
         <div class="item-actions">
-          <button class="btn btn-sm" onclick={() => startEdit(i)}>{t("common.edit")}</button>
-          <button class="btn btn-sm btn-danger" onclick={() => remove(i)}>{t("common.delete")}</button>
+          <button
+            class="btn btn-sm btn-icon"
+            title={t("common.edit")}
+            aria-label={`${t("common.edit")} ${s.name}`}
+            onclick={() => startEdit(i)}
+          >
+            <AppIcon name="edit" size={16} />
+          </button>
+          <button
+            class="btn btn-sm btn-icon btn-danger"
+            title={t("common.delete")}
+            aria-label={`${t("common.delete")} ${s.name}`}
+            onclick={() => remove(i)}
+          >
+            <AppIcon name="trash" size={16} />
+          </button>
         </div>
       </div>
     {/if}
@@ -144,13 +159,22 @@
     gap: 12px;
   }
   .item-info { min-width: 0; flex: 1; }
-  .item-name { font-weight: 600; font-size: 14px; }
+  /* Single line + ellipsis like every other list row; the full command
+     stays available on hover via the title attribute. */
+  .item-name {
+    font-weight: 600;
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .item-sub {
     font-size: 12px;
     color: var(--text-sub);
     font-family: var(--term-font);
-    white-space: pre-wrap;
-    word-break: break-all;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     margin-top: 2px;
   }
   .item-actions { display: flex; gap: 10px; flex-shrink: 0; }

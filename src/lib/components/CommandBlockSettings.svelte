@@ -398,26 +398,7 @@
       </div>
     {/if}
 
-    {#if !editingRule}
-      <div class="rule-list">
-        {#if redactionLoading}
-          <div class="placeholder">{t("common.loading")}</div>
-        {:else if redactionReady}
-          {#each redactRules as rule (rule.id)}
-            <button class="rule-item surface-raised-sm" onclick={() => viewRule(rule)}>
-              <div class="rule-line">
-                <code class="rule-pattern">{rule.pattern}</code>
-                <span class="rule-arrow">→</span>
-                <code class="rule-replacement">{rule.replacement}</code>
-              </div>
-            </button>
-          {/each}
-        {/if}
-        {#if redactionReady && redactRules.length === 0}
-          <div class="placeholder">{t("settings.shell.command_block_redact_empty")}</div>
-        {/if}
-      </div>
-    {:else}
+    {#snippet ruleForm(rule: CommandBlockRedactRule)}
       <div class="form">
         <div class="row">
           <label for="cbrr-pattern">{t("settings.shell.command_block_redact_pattern")}</label>
@@ -425,7 +406,7 @@
             id="cbrr-pattern"
             type="text"
             class="mono"
-            bind:value={editingRule.pattern}
+            bind:value={rule.pattern}
             placeholder={t("settings.shell.command_block_redact_pattern_placeholder")}
           />
         </div>
@@ -435,7 +416,7 @@
             id="cbrr-replacement"
             type="text"
             class="mono"
-            bind:value={editingRule.replacement}
+            bind:value={rule.replacement}
             placeholder={t("settings.shell.command_block_redact_replacement_placeholder")}
           />
         </div>
@@ -447,7 +428,7 @@
             <button
               class="btn btn-sm btn-danger"
               class:confirming={confirmingRuleDelete}
-              onclick={() => editingRule && removeRule(editingRule)}
+              onclick={() => removeRule(rule)}
             >
               {confirmingRuleDelete
                 ? t("settings.shell.command_block_redact_delete_confirm")
@@ -459,7 +440,35 @@
           </button>
         </div>
       </div>
-    {/if}
+    {/snippet}
+
+    <!-- Same shape as the highlight list: the add form sits above the list,
+         editing replaces only the clicked row — the other rules stay visible. -->
+    <div class="rule-list">
+      {#if redactionLoading}
+        <div class="placeholder">{t("common.loading")}</div>
+      {:else if redactionReady}
+        {#if editingRule && isNewRule}
+          {@render ruleForm(editingRule)}
+        {/if}
+        {#each redactRules as rule (rule.id)}
+          {#if editingRule && !isNewRule && editingRule.id === rule.id}
+            {@render ruleForm(editingRule)}
+          {:else}
+            <button class="rule-item" onclick={() => viewRule(rule)}>
+              <div class="rule-line">
+                <code class="rule-pattern">{rule.pattern}</code>
+                <span class="rule-arrow">→</span>
+                <code class="rule-replacement">{rule.replacement}</code>
+              </div>
+            </button>
+          {/if}
+        {/each}
+        {#if redactRules.length === 0 && !(editingRule && isNewRule)}
+          <div class="placeholder">{t("settings.shell.command_block_redact_empty")}</div>
+        {/if}
+      {/if}
+    </div>
   </div>
 </div>
 
@@ -642,19 +651,35 @@
   .rule-list {
     display: flex;
     flex-direction: column;
-    gap: 6px;
   }
+  /* Flat rows separated by hairlines, like the AI provider rows inside their
+     card: elevation belongs to the container — raised chips on a raised card
+     stack shadow on shadow. Hover feedback is a background tint, not lift. */
   .rule-item {
     text-align: left;
-    padding: 10px 14px;
+    padding: 10px 8px;
     border: none;
-    background: var(--bg);
+    background: transparent;
     cursor: pointer;
     font-family: inherit;
     color: var(--text);
-    transition: box-shadow 0.13s;
+    transition: background 0.13s;
   }
-  .rule-item:hover { box-shadow: var(--raised); }
+  /* Divider between ANY adjacent children, not just .rule-item pairs — an
+     inline edit form can sit between two rows and break + adjacency. */
+  .rule-list > * + *:not(.form) { border-top: 1px solid var(--divider); }
+  /* Rounded corners need one element owning all four edges, so the form
+     carries its own full border instead of borrowing the neighboring rows'
+     hairlines — and the hairlines directly above/below it are dropped to
+     avoid doubling. Reads as an inset editor box inside the list. */
+  .rule-list .form {
+    padding: 10px 12px;
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-sm);
+    margin: 6px 0;
+  }
+  .rule-list > .form + * { border-top: none; }
+  .rule-item:hover { background: var(--surface); }
   .rule-line {
     display: flex;
     align-items: baseline;

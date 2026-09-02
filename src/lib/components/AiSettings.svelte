@@ -596,8 +596,10 @@
                         <label for={`ai-provider-r-${p.id}`} class="radio-label" title={t("ai.settings.provider.activate")}>
                             <span class="shell-radio-indicator" aria-hidden="true"></span>
                             <div class="provider-text">
-                                <div class="provider-name">{p.name}</div>
-                                <div class="provider-sub">{protocolLabel(p.protocol)} · {p.endpoint} · {p.model}</div>
+                                <div class="provider-name" title={p.name}>{p.name}</div>
+                                <div class="provider-sub" title={`${protocolLabel(p.protocol)} · ${p.endpoint} · ${p.model}`}>
+                                    {protocolLabel(p.protocol)} · {p.endpoint} · {p.model}
+                                </div>
                             </div>
                         </label>
                     </div>
@@ -605,11 +607,30 @@
                         {#if activeId === p.id}
                             <span class="active-badge">{t("ai.settings.provider.active")}</span>
                         {/if}
-                        <button class="btn btn-sm" onclick={() => startEdit(p)}>{t("common.edit")}</button>
-                        <button class="btn btn-sm btn-danger" class:confirming={confirmingDeleteId === p.id}
-                                onclick={() => removeProvider(p)}>
-                            {confirmingDeleteId === p.id ? t("ai.settings.provider.delete_confirm") : t("common.delete")}
+                        <button
+                            class="btn btn-sm btn-icon"
+                            title={t("common.edit")}
+                            aria-label={`${t("common.edit")} ${p.name}`}
+                            onclick={() => startEdit(p)}
+                        >
+                            <AppIcon name="edit" size={16} />
                         </button>
+                        <!-- Two-tap delete: trash icon first, then the button morphs
+                             into an explicit text confirm (3s timeout reverts). -->
+                        {#if confirmingDeleteId === p.id}
+                            <button class="btn btn-sm btn-danger" onclick={() => removeProvider(p)}>
+                                {t("ai.settings.provider.delete_confirm")}
+                            </button>
+                        {:else}
+                            <button
+                                class="btn btn-sm btn-icon btn-danger"
+                                title={t("common.delete")}
+                                aria-label={`${t("common.delete")} ${p.name}`}
+                                onclick={() => removeProvider(p)}
+                            >
+                                <AppIcon name="trash" size={16} />
+                            </button>
+                        {/if}
                     </div>
                 </div>
             {/if}
@@ -760,31 +781,16 @@
             <div class="banner">{ruleNote} <button class="banner-close" onclick={() => (ruleNote = null)} aria-label={t("common.close")}>×</button></div>
         {/if}
 
-        {#if !editingRule}
-            <div class="skill-list">
-                {#each redactRules as r (r.id)}
-                    <button class="skill-item surface-raised-sm" onclick={() => viewRule(r)}>
-                        <div class="rule-line">
-                            <code class="rule-pattern">{r.pattern}</code>
-                            <span class="rule-arrow">→</span>
-                            <code class="rule-replacement">{r.replacement}</code>
-                        </div>
-                    </button>
-                {/each}
-                {#if redactRules.length === 0}
-                    <div class="placeholder">{t("ai.settings.redact.empty")}</div>
-                {/if}
-            </div>
-        {:else}
+        {#snippet redactForm(rule: RedactRuleRecord)}
             <div class="form">
                 <div class="row">
                     <label for="rr-pattern">{t("ai.settings.redact.label.pattern")}</label>
-                    <input id="rr-pattern" type="text" class="mono" bind:value={editingRule.pattern}
+                    <input id="rr-pattern" type="text" class="mono" bind:value={rule.pattern}
                            placeholder={t("ai.settings.redact.placeholder.pattern")}/>
                 </div>
                 <div class="row">
                     <label for="rr-replacement">{t("ai.settings.redact.label.replacement")}</label>
-                    <input id="rr-replacement" type="text" class="mono" bind:value={editingRule.replacement}
+                    <input id="rr-replacement" type="text" class="mono" bind:value={rule.replacement}
                            placeholder={t("ai.settings.redact.placeholder.replacement")}/>
                 </div>
                 <div class="actions">
@@ -793,14 +799,39 @@
                     </button>
                     {#if !isNewRule}
                         <button class="btn btn-sm btn-danger" class:confirming={confirmingRuleDelete}
-                                onclick={() => editingRule && removeRule(editingRule)}>
+                                onclick={() => removeRule(rule)}>
                             {confirmingRuleDelete ? t("ai.settings.redact.btn.delete_confirm") : t("ai.settings.redact.btn.delete")}
                         </button>
                     {/if}
                     <button class="btn btn-sm" onclick={cancelRuleEdit}>{t("ai.settings.redact.btn.cancel")}</button>
                 </div>
             </div>
-        {/if}
+        {/snippet}
+
+        <!-- Same shape as the command-block redaction list: the add form sits
+             above the list, editing replaces only the clicked row — the other
+             rules stay visible. -->
+        <div class="skill-list">
+            {#if editingRule && isNewRule}
+                {@render redactForm(editingRule)}
+            {/if}
+            {#each redactRules as r (r.id)}
+                {#if editingRule && !isNewRule && editingRule.id === r.id}
+                    {@render redactForm(editingRule)}
+                {:else}
+                    <button class="skill-item" onclick={() => viewRule(r)}>
+                        <div class="rule-line">
+                            <code class="rule-pattern">{r.pattern}</code>
+                            <span class="rule-arrow">→</span>
+                            <code class="rule-replacement">{r.replacement}</code>
+                        </div>
+                    </button>
+                {/if}
+            {/each}
+            {#if redactRules.length === 0 && !(editingRule && isNewRule)}
+                <div class="placeholder">{t("ai.settings.redact.empty")}</div>
+            {/if}
+        </div>
     </div>
 
     <!-- 命令黑名单 + 可用性过滤 合进一个 .card.surface-raised。
@@ -830,7 +861,7 @@
                         </div>
                     </div>
                 {:else}
-                    <button class="skill-item surface-raised-sm" onclick={() => editCat(g)}>
+                    <button class="skill-item" onclick={() => editCat(g)}>
                         <div class="bl-row">
                             <span class="bl-cat">{catLabel(g.category)}</span>
                             <code class="bl-cmds" class:bl-empty={g.commands.length === 0}>
@@ -1014,6 +1045,10 @@
         gap: 12px;
         cursor: pointer;
         min-height: 20px;
+        /* min-width:0 lets the label shrink below its text's min-content so
+           the ellipsis on .provider-text can engage (flex items default to
+           min-width:auto and refuse to shrink). */
+        min-width: 0;
         /* 压掉全局 label 样式（11px/大写/600）——provider 名称与 URL 保持原大小写。 */
         font-size: inherit;
         font-weight: 400;
@@ -1054,6 +1089,10 @@
     }
     @media (max-width: 640px) {
         .provider-row { align-items: flex-start; flex-direction: column; }
+        /* Column + flex-start shrink-wraps .provider-info (base width:
+           fit-content), unbounding the ellipsis chain — stretch it back to
+           the row width so long protocol · endpoint · model lines truncate. */
+        .provider-info { width: 100%; }
         .provider-actions { align-self: flex-end; }
     }
 
@@ -1208,6 +1247,30 @@
         transition: box-shadow 0.13s;
     }
     .skill-item:hover { box-shadow: var(--raised); }
+    /* In-card list rows (redact rules, command blacklist): flat + hairline
+       dividers — elevation belongs to the card, not its rows. The standalone
+       skills list below (outside any card) keeps its raised chips. */
+    .list-card .skill-list { gap: 0; }
+    .list-card .skill-list > * + *:not(.form) { border-top: 1px solid var(--divider); }
+    .list-card .skill-item {
+        padding: 10px 8px;
+        background: transparent;
+        transition: background 0.13s;
+    }
+    .list-card .skill-item:hover {
+        background: var(--surface);
+        box-shadow: none;
+    }
+    /* Rounded inline editor box: one element owns all four edges, so it
+       carries its own border; the hairlines directly above/below it are
+       dropped to avoid doubling. */
+    .list-card .skill-list .form {
+        padding: 10px 12px;
+        border: 1px solid var(--divider);
+        border-radius: var(--radius-sm);
+        margin: 6px 0;
+    }
+    .list-card .skill-list > .form + * { border-top: none; }
     .skill-row {
         display: flex;
         align-items: baseline;
