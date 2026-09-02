@@ -15,7 +15,8 @@
     import { t, errMsg } from "../i18n/index.svelte.ts";
     import { toast } from "../stores/toast.svelte.ts";
     import { writeText as writeClipboard } from "../clipboard.ts";
-    import { onMount } from "svelte";
+    import { setupSoftKeyboardInset } from "../soft-keyboard-inset.ts";
+    import { onMount, onDestroy, untrack } from "svelte";
 
     // tabId 是 AI 会话身份（切 tab / 重连不丢；显式关闭面板时结束）。
     // targetId 是当前 SSH/PTY session_id —— 给 executeCommand 路由 ssh_write/pty_write 用。
@@ -44,6 +45,7 @@
     let banner = $state<string | null>(null);
     let inputEl = $state<HTMLTextAreaElement | null>(null);
     let chatBoxEl = $state<HTMLDivElement | null>(null);
+    let panelEl = $state<HTMLDivElement | null>(null);
     let rollingBack = $state(false);
     let rollbackDialog = $state<{
         owner: PanelOwner;
@@ -98,6 +100,19 @@
         if (active) return;
         rollbackDialog = null;
     });
+
+    // iOS overlays the soft keyboard instead of resizing the webview: keep the
+    // input row above it by padding the panel to the visible viewport (rides
+    // the keyboard both up and down; no-op under Android's adjustResize). The
+    // textarea is not rendered in the picker view, so wiring follows inputEl.
+    let kbInsetCleanup: (() => void) | null = null;
+    $effect(() => {
+        const panel = panelEl;
+        const input = inputEl;
+        untrack(() => kbInsetCleanup?.());
+        kbInsetCleanup = panel && input ? setupSoftKeyboardInset(panel, input) : null;
+    });
+    onDestroy(() => kbInsetCleanup?.());
 
     // 历史对话随当前 target（同一 tab 重连时 session id 会变）重新加载。
     // seq 守卫丢弃旧连接的迟到响应，避免它覆盖新连接的列表。
@@ -356,7 +371,7 @@
     }
 </script>
 
-<div class="ai-panel">
+<div class="ai-panel" bind:this={panelEl}>
     <div class="toolbar">
         <!-- Current model: left-aligned, single line, ellipsis on overflow (full
              text on hover). Also the flex spring (flex:1) that pushes the controls
