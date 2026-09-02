@@ -46,7 +46,9 @@
     let heights = $state<Record<string, number>>({});
 
     function onPluginSize(id: string, size: SizeReport): void {
-        const height = Math.round(size.height ?? 0);
+        // Ceil: a rounded-down size leaves the content a fraction taller than
+        // the card → scrollbar → scrollbar eats width → second scrollbar.
+        const height = Math.ceil(size.height ?? 0);
         if (height > 0 && heights[id] !== height) heights = { ...heights, [id]: height };
     }
 </script>

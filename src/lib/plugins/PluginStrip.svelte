@@ -35,7 +35,9 @@
     let widths = $state<Record<string, number>>({});
 
     function onPluginSize(id: string, size: SizeReport): void {
-        const width = Math.round(size.width ?? 0);
+        // Ceil: a rounded-down size leaves the content a fraction wider than
+        // the segment → scrollbar.
+        const width = Math.ceil(size.width ?? 0);
         if (width > 0 && widths[id] !== width) widths = { ...widths, [id]: width };
     }
 </script>
