@@ -68,12 +68,13 @@ function isExecPayload(p: unknown): boolean {
   const req = p as Record<string, unknown>;
   if (typeof req.command !== "string" || req.command.length === 0) return false;
   if (req.command.length > MAX_COMMAND_LENGTH) return false;
-  // Finite and positive: NaN/Infinity serialize to null at the invoke boundary,
-  // and a non-positive timeout is meaningless (the backend clamps the rest).
-  // typeof narrows the unknown so the comparison type-checks; Number.isFinite
-  // never throws or coerces, so symbols/bigints fail the typeof check instead.
+  // A safe positive integer: the backend reads u64 on both transports, so a
+  // fractional value would error on Tauri but silently become the default
+  // timeout on headless — one contract at the bridge. typeof narrows the
+  // unknown so the comparison type-checks; isSafeInteger never throws or
+  // coerces, so symbols/bigints fail the typeof check instead.
   const timeoutMs = req.timeoutMs;
-  if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0))
+  if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0))
     return false;
   return true;
 }
