@@ -251,6 +251,12 @@
     </div>
   </div>
 
+  <div class="links-row">
+    <a href={DEV_GUIDE_URL} onclick={(e) => openExternal(e, DEV_GUIDE_URL)}>{t("plugins.links.guide")} ↗</a>
+    <span class="dot">·</span>
+    <a href={EXAMPLE_PLUGIN_URL} onclick={(e) => openExternal(e, EXAMPLE_PLUGIN_URL)}>{t("plugins.links.example")} ↗</a>
+  </div>
+
   <!-- ═══ The stage: one window mock with EVERY plugin area combined —
        side column at its chosen edge (full height), strip bar docked to the
        terminal region's top/bottom edge (same nesting as the real app). ═══ -->
@@ -294,11 +300,6 @@
     </div>
   </div>
 
-  <div class="links-row">
-    <a href={DEV_GUIDE_URL} onclick={(e) => openExternal(e, DEV_GUIDE_URL)}>{t("plugins.links.guide")} ↗</a>
-    <span class="dot">·</span>
-    <a href={EXAMPLE_PLUGIN_URL} onclick={(e) => openExternal(e, EXAMPLE_PLUGIN_URL)}>{t("plugins.links.example")} ↗</a>
-  </div>
 </div>
 
 {#snippet cell(p: PluginInfo, kind: "side" | "strip")}
