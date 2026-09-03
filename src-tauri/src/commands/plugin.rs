@@ -41,6 +41,17 @@ pub fn plugins_dir(state: &AppState) -> PathBuf {
     state.data_dir.join("plugins")
 }
 
+/// Serializes plugin installs/uninstalls across entrypoints (Tauri commands
+/// and the ws server): the directory swap and the registry upsert must not
+/// interleave for the same id. Plain mutex — no path holds it across an await.
+static PLUGIN_OPS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_plugin_ops() -> std::sync::MutexGuard<'static, ()> {
+    // A poisoned lock only means an earlier operation panicked mid-way; the
+    // next one should still run rather than brick plugin management.
+    PLUGIN_OPS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // ── Manifest ────────────────────────────────────────────────────────────────
 
 /// `manifest.json` inside a plugin zip, before it becomes a DB `Plugin` row.
@@ -248,6 +259,7 @@ pub fn install_impl(
     zip_bytes: &[u8],
     expected_area: Option<&str>,
 ) -> AppResult<Plugin> {
+    let _ops = lock_plugin_ops();
     if zip_bytes.len() > MAX_ZIP_BYTES {
         return Err(AppError::config(
             "plugin_zip_invalid",
@@ -484,12 +496,20 @@ pub fn plugins_root(state: State<'_, AppState>) -> AppResult<String> {
 /// Reject encoded input that could decode beyond MAX_ZIP_BYTES — decoding
 /// first would allocate the whole payload in memory. Call before decode.
 pub fn ensure_zip_b64_within_cap(encoded: &str) -> AppResult<()> {
-    // base64 encodes 3 bytes as 4 chars, plus up to 4 padding chars.
-    const MAX_B64_LEN: usize = MAX_ZIP_BYTES / 3 * 4 + 4;
-    if encoded.trim().len() > MAX_B64_LEN {
+    // Decoded upper bound: 3 bytes per full 4-char group plus the 1-2 bytes
+    // of a trailing partial group (padding decodes to nothing). Exact, so it
+    // agrees with install_impl's check on the decoded bytes.
+    let len = encoded.trim().len();
+    let decoded = len / 4 * 3
+        + match len % 4 {
+            2 => 1,
+            3 => 2,
+            _ => 0,
+        };
+    if decoded > MAX_ZIP_BYTES {
         return Err(AppError::config(
             "plugin_zip_invalid",
-            json!({ "op": "zip_too_large", "size": encoded.trim().len() }),
+            json!({ "op": "zip_too_large", "size": len }),
         ));
     }
     Ok(())
@@ -536,23 +556,32 @@ pub fn set_plugin_order(state: State<'_, AppState>, ids: Vec<String>) -> AppResu
     crate::db::plugin::set_order(&state.db, &ids)
 }
 
-#[tauri::command]
-pub fn uninstall_plugin(state: State<'_, AppState>, id: String) -> AppResult<()> {
-    if !valid_plugin_id(&id) {
+/// Uninstall shared by the Tauri command and the ws server.
+pub fn uninstall_impl(state: &AppState, id: &str) -> AppResult<()> {
+    if !valid_plugin_id(id) {
         return Err(AppError::config(
             "plugin_manifest_invalid",
             json!({ "field": "id", "reason": "not a plugin id" }),
         ));
     }
+    let _ops = lock_plugin_ops();
     // Registry row first, files second: a failure after the DB delete leaves
     // an orphan directory (harmless — reinstall overwrites it), while the
     // reverse order can leave a row pointing at removed files.
-    crate::db::plugin::delete(&state.db, &id)?;
-    let dir = plugins_dir(&state).join(&id);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir)?;
+    crate::db::plugin::delete(&state.db, id)?;
+    // Remove unconditionally — an exists() probe would swallow real errors
+    // and races another uninstall's removal; a missing dir is plain success.
+    if let Err(e) = std::fs::remove_dir_all(plugins_dir(state).join(id)) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(e.into());
+        }
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn uninstall_plugin(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    uninstall_impl(&state, &id)
 }
 
 #[tauri::command]
@@ -616,12 +645,15 @@ mod tests {
     #[cfg(desktop)]
     #[tokio::test]
     async fn local_exec_runs_command_and_captures_output() {
-        let result = local_exec(
-            "echo hi; echo oops 1>&2; exit 7",
-            std::time::Duration::from_secs(5),
-        )
-        .await
-        .unwrap();
+        // Both shells must chain stdout, stderr and a nonzero exit code.
+        let command = if cfg!(windows) {
+            "echo hi& echo oops 1>&2 & exit 7"
+        } else {
+            "echo hi; echo oops 1>&2; exit 7"
+        };
+        let result = local_exec(command, std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
         assert_eq!(result.stdout.trim(), "hi");
         assert_eq!(result.stderr.trim(), "oops");
         assert_eq!(result.exit_code, Some(7));
@@ -630,8 +662,15 @@ mod tests {
     #[cfg(desktop)]
     #[tokio::test]
     async fn local_exec_times_out_and_kills() {
+        // `sleep` doesn't exist on Windows; ping-to-localhost is the standard
+        // blocking stand-in (~1s per -n unit).
+        let command = if cfg!(windows) {
+            "ping -n 31 127.0.0.1 >nul"
+        } else {
+            "sleep 30"
+        };
         let start = std::time::Instant::now();
-        let err = local_exec("sleep 30", std::time::Duration::from_secs(1))
+        let err = local_exec(command, std::time::Duration::from_secs(1))
             .await
             .unwrap_err();
         assert_eq!(err.code(), "plugin_exec_timeout");

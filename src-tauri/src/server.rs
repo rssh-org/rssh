@@ -357,26 +357,7 @@ fn dispatch(
         }
         "uninstall_plugin" => {
             let id: String = arg(&args, "id")?;
-            if !crate::commands::plugin::valid_plugin_id(&id) {
-                return Err(err_value(AppError::config(
-                    "plugin_manifest_invalid",
-                    json!({ "field": "id", "reason": "not a plugin id" }),
-                )));
-            }
-            // Registry row first, files second — a failure after the DB delete
-            // leaves an orphan directory (reinstall overwrites it), while the
-            // reverse can leave a row pointing at removed files.
-            crate::db::plugin::delete(&state.db, &id).map_err(err_value)?;
-            let dir = state.data_dir.join("plugins").join(&id);
-            if dir.exists() {
-                std::fs::remove_dir_all(&dir).map_err(|e| {
-                    err_value(AppError::other(
-                        "plugin_uninstall_failed",
-                        json!({ "err": e.to_string() }),
-                    ))
-                })?;
-            }
-            ok(Ok(()))
+            ok(crate::commands::plugin::uninstall_impl(state, &id))
         }
 
         // ---- settings / snippets / highlights ----
