@@ -275,6 +275,8 @@ const zh: Messages = {
   "plugins.position.right": "右侧",
   "plugins.position.top": "顶部",
   "plugins.position.bottom": "底部",
+  "plugins.links.guide": "插件开发指南",
+  "plugins.links.example": "示例插件：monitor",
   "settings.section.ai_skills": "AI Skill",
   "tab.context.ai": "打开 AI 排障",
   "settings.section.shortcuts": "快捷键",

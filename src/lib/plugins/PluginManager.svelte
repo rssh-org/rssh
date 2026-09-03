@@ -10,6 +10,7 @@
    * declares the other area is rejected by the backend.
    */
   import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import { t, errMsg, errCoded, type MessageKey } from "../i18n/index.svelte.ts";
   import { toast } from "../stores/toast.svelte.ts";
   import AppIcon from "../components/AppIcon.svelte";
@@ -20,6 +21,17 @@
   // Previews run no bridge — host theme tokens ride in as a URL fragment the
   // preview document applies itself, so plugin colors preview in-app too.
   const themeTokens = readThemeTokens(getComputedStyle(document.documentElement));
+
+  // Author-facing docs live on the site; the reference plugin lives on GitHub.
+  const DEV_GUIDE_URL = "https://rssh.ofcoder.com/plugins.html";
+  const EXAMPLE_PLUGIN_URL = "https://github.com/rssh-org/monitor-plugin";
+
+  function openExternal(e: MouseEvent, url: string) {
+    e.preventDefault();
+    invoke("open_external_url", { url }).catch(err =>
+      console.error("open_external_url failed:", err)
+    );
+  }
 
   let installing = $state(false);
   let fileInput = $state<HTMLInputElement | null>(null);
@@ -280,6 +292,12 @@
         <div class="tline w70"></div>
       </div>
     </div>
+  </div>
+
+  <div class="links-row">
+    <a href={DEV_GUIDE_URL} onclick={(e) => openExternal(e, DEV_GUIDE_URL)}>{t("plugins.links.guide")} ↗</a>
+    <span class="dot">·</span>
+    <a href={EXAMPLE_PLUGIN_URL} onclick={(e) => openExternal(e, EXAMPLE_PLUGIN_URL)}>{t("plugins.links.example")} ↗</a>
   </div>
 </div>
 
@@ -642,5 +660,23 @@
   .btn.armed {
     box-shadow: var(--pressed);
     outline: 1px solid var(--error);
+  }
+
+  /* ── Author-facing links (guide + reference plugin) ── */
+  .links-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+  }
+  .links-row a {
+    color: var(--text-sub);
+    text-decoration: none;
+  }
+  .links-row a:hover {
+    color: var(--accent);
+  }
+  .links-row .dot {
+    color: var(--text-dim);
   }
 </style>

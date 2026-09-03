@@ -273,6 +273,8 @@ const en = {
   "plugins.position.right": "Right",
   "plugins.position.top": "Top",
   "plugins.position.bottom": "Bottom",
+  "plugins.links.guide": "Plugin development guide",
+  "plugins.links.example": "Example: monitor plugin",
   "settings.section.ai_skills": "AI Skills",
   "tab.context.ai": "Open AI diagnose",
   "settings.section.shortcuts": "Shortcuts",
