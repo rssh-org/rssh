@@ -428,9 +428,23 @@ async fn local_exec(command: &str, timeout: std::time::Duration) -> AppResult<Pl
     async fn read_capped<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) -> Vec<u8> {
         use tokio::io::AsyncReadExt as _;
         let mut buf = Vec::new();
-        if let Some(r) = pipe {
-            let mut capped = r.take(CAP);
-            let _ = capped.read_to_end(&mut buf).await;
+        if let Some(mut r) = pipe {
+            // Retain the first CAP bytes, then keep DRAINING to EOF: closing
+            // the read end early would break the pipe and the child would die
+            // to SIGPIPE mid-write, corrupting its exit code — the SSH path
+            // consumes the channel to EOF for the same reason.
+            let mut chunk = [0u8; 8192];
+            loop {
+                match r.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let room = (CAP as usize).saturating_sub(buf.len());
+                        if room > 0 {
+                            buf.extend_from_slice(&chunk[..n.min(room)]);
+                        }
+                    }
+                }
+            }
         }
         buf
     }
@@ -676,6 +690,24 @@ mod tests {
         assert_eq!(err.code(), "plugin_exec_timeout");
         // kill_on_drop fired — we must not have waited for the sleeper.
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(desktop)]
+    #[tokio::test]
+    async fn local_exec_caps_output_without_breaking_the_pipe() {
+        // >256 KB of stdout: the retained buffer is capped, but the pipe keeps
+        // draining so the writer finishes normally — a broken read end would
+        // kill it with SIGPIPE (exit 141) instead of a clean truncation.
+        let command = if cfg!(windows) {
+            "for /L %i in (1,1,30000) do @echo 0123456789012345678901234567890"
+        } else {
+            "head -c 300000 /dev/zero"
+        };
+        let result = local_exec(command, std::time::Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(result.stdout.len(), 256 * 1024);
+        assert_eq!(result.exit_code, Some(0));
     }
 
     #[test]
