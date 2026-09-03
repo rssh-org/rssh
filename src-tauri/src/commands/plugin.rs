@@ -395,9 +395,9 @@ fn exec_transport(
 }
 
 /// One-shot local command, mirroring `ssh::client::exec_once` semantics
-/// (timeout, 256 KB per stream). `kill_on_drop` makes the timeout path kill
-/// the child: dropping the collection future drops the Child, which kills
-/// the process — no orphaned `cat /dev/zero` burners.
+/// (timeout, 256 KB per stream). The timeout path kills the WHOLE process
+/// group: `kill_on_drop` takes out the shell and a group sweep takes out its
+/// children — no orphaned `sh -c "cat /dev/zero & wait"` burners.
 #[cfg(desktop)]
 async fn local_exec(command: &str, timeout: std::time::Duration) -> AppResult<PluginExecResult> {
     const CAP: u64 = 256 * 1024;
@@ -414,6 +414,12 @@ async fn local_exec(command: &str, timeout: std::time::Duration) -> AppResult<Pl
         c.arg("/C");
         c
     };
+    // Own process group: the timeout kill must reach the shell's children,
+    // not just the shell. Windows TerminateProcess reaches only the direct
+    // child — grandchildren are left to the OS (job objects are overkill
+    // for v1).
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -422,6 +428,9 @@ async fn local_exec(command: &str, timeout: std::time::Duration) -> AppResult<Pl
     let mut child = cmd.spawn().map_err(|e| {
         AppError::other("plugin_exec_spawn_failed", json!({ "err": e.to_string() }))
     })?;
+    // The child leads its own group, so the group id equals the child pid.
+    #[cfg(unix)]
+    let group_id = child.id();
     let out_pipe = child.stdout.take();
     let err_pipe = child.stderr.take();
 
@@ -460,10 +469,21 @@ async fn local_exec(command: &str, timeout: std::time::Duration) -> AppResult<Pl
             stderr: String::from_utf8_lossy(&err).into_owned(),
             exit_code: status.ok().and_then(|s| s.code()),
         }),
-        Err(_) => Err(AppError::other(
-            "plugin_exec_timeout",
-            json!({ "millis": timeout.as_millis() as u64 }),
-        )),
+        Err(_) => {
+            // Dropping `collect` already killed the shell (kill_on_drop);
+            // the group sweep finishes off its children. ESRCH here just
+            // means the group is already gone.
+            #[cfg(unix)]
+            if let Some(pid) = group_id {
+                unsafe {
+                    let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                }
+            }
+            Err(AppError::other(
+                "plugin_exec_timeout",
+                json!({ "millis": timeout.as_millis() as u64 }),
+            ))
+        }
     }
 }
 
@@ -690,6 +710,27 @@ mod tests {
         assert_eq!(err.code(), "plugin_exec_timeout");
         // kill_on_drop fired — we must not have waited for the sleeper.
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(all(desktop, unix))]
+    #[tokio::test]
+    async fn local_exec_timeout_kills_the_process_group() {
+        // `sh -c "sleep N & wait"` parks the shell behind a background child;
+        // the timeout kill must reap the whole group, not just the shell.
+        // 9876s is a unique duration so the ps scan can't false-positive.
+        let command = "sleep 9876 & wait";
+        let err = local_exec(command, std::time::Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "plugin_exec_timeout");
+        // SIGKILL delivery is asynchronous — give the sweep a beat to land.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let out = std::process::Command::new("ps")
+            .args(["-eo", "args"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(!text.contains("sleep 9876"), "orphan survived:\n{text}");
     }
 
     #[cfg(desktop)]
