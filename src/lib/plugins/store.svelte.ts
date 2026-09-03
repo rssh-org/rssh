@@ -1,11 +1,13 @@
 /**
  * Plugin registry + per-tab panel state. Mirrors the ai store's idioms:
- * open-state is per tab (kept alive across tab switches), area positions and
- * the strip height persist to localStorage like `ai_panel_position`.
+ * open-state is per tab and per area (kept alive across tab switches), area
+ * positions and auto-open preferences persist to localStorage like
+ * `ai_panel_position`.
  *
  * Lazy contract: nothing here mounts an iframe. A plugin's UI loads only for
- * tabs where the user opened the plugin panel (see PluginSide/PluginStrip),
- * and exec channels are one-shot on the Rust side.
+ * tabs where its area is open — new tabs get that from the manager's auto-open
+ * preference (see openForNewTab) — and exec channels are one-shot on the Rust
+ * side.
  */
 
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
@@ -28,10 +30,12 @@ export interface PluginInfo {
   sort_order: number;
 }
 
-// ── Positions (localStorage, same pattern as ai_panel_position) ──
+// ── Positions & auto-open (localStorage, same pattern as ai_panel_position) ──
 
 const SIDE_POS_KEY = "plugin_side_position";
 const STRIP_POS_KEY = "plugin_strip_position";
+const SIDE_AUTO_KEY = "plugin_side_auto_open";
+const STRIP_AUTO_KEY = "plugin_strip_auto_open";
 
 function loadSidePos(): SidePosition {
   const v = localStorage.getItem(SIDE_POS_KEY);
@@ -43,6 +47,10 @@ function loadStripPos(): StripPosition {
   return v === "top" || v === "bottom" ? v : "bottom";
 }
 
+function loadAutoOpen(key: string): boolean {
+  return localStorage.getItem(key) === "true";
+}
+
 // ── State ────────────────────────────────────────────────────────────────
 
 let _plugins = $state<PluginInfo[]>([]);
@@ -50,8 +58,12 @@ let _loaded = $state(false);
 let _pluginsRoot = $state<string | null>(null);
 let _sidePos = $state<SidePosition>(loadSidePos());
 let _stripPos = $state<StripPosition>(loadStripPos());
-/** Per-tab panel state — the shared side-panel skeleton, in-memory only. */
+let _sideAuto = $state(loadAutoOpen(SIDE_AUTO_KEY));
+let _stripAuto = $state(loadAutoOpen(STRIP_AUTO_KEY));
+/** Per-tab side-panel state — the shared skeleton, in-memory only. */
 const panel = createSidePanelState({ minWidth: 280 });
+/** Per-tab strip open flags — open-state only; the strip height is global. */
+let _stripOpenByTab = $state<Record<string, true>>({});
 
 // ── Registry ─────────────────────────────────────────────────────────────
 
@@ -142,16 +154,34 @@ export function hostSupported(): boolean {
 }
 
 // ── Per-tab panel state (kept alive across tab switches) ─────────────────
-// Thin named wrappers over the shared skeleton — call sites stay unchanged.
+// The two areas open independently: the side column rides the shared skeleton
+// (it also owns per-tab widths); the strip is open-flags only.
 
-export function isOpen(tabId: string): boolean { return panel.isOpen(tabId); }
-export function openPanel(tabId: string): void { panel.openPanel(tabId); }
-export function closePanel(tabId: string): void { panel.closePanel(tabId); }
-export function togglePanel(tabId: string): void { panel.togglePanel(tabId); }
+export function isSideOpen(tabId: string): boolean { return panel.isOpen(tabId); }
+export function openSide(tabId: string): void { panel.openPanel(tabId); }
+export function closeSide(tabId: string): void { panel.closePanel(tabId); }
+
+export function isStripOpen(tabId: string): boolean { return _stripOpenByTab[tabId] === true; }
+export function openStrip(tabId: string): void { _stripOpenByTab[tabId] = true; }
+export function closeStrip(tabId: string): void { delete _stripOpenByTab[tabId]; }
+
+/** A new tab starts with the areas the manager's auto-open toggles asked for. */
+export function openForNewTab(tabId: string): void {
+  if (_sideAuto) panel.openPanel(tabId);
+  if (_stripAuto) _stripOpenByTab[tabId] = true;
+}
+
+/** Split view takes over the terminal region: every plugin panel closes.
+ *  Width preferences survive (their tabs are still alive). */
+export function closeAllPanels(): void {
+  panel.closeAll();
+  _stripOpenByTab = {};
+}
 
 /** Called from the app store's tab-close cleanup (same spot as SFTP state). */
 export function disposeTab(tabId: string): void {
   panel.clearTab(tabId);
+  delete _stripOpenByTab[tabId];
 }
 
 export function sideWidth(tabId: string): number | null { return panel.width(tabId); }
@@ -171,4 +201,16 @@ export function stripPosition(): StripPosition { return _stripPos; }
 export function setStripPosition(pos: StripPosition): void {
   _stripPos = pos;
   localStorage.setItem(STRIP_POS_KEY, pos);
+}
+
+export function sideAutoOpen(): boolean { return _sideAuto; }
+export function setSideAutoOpen(v: boolean): void {
+  _sideAuto = v;
+  localStorage.setItem(SIDE_AUTO_KEY, String(v));
+}
+
+export function stripAutoOpen(): boolean { return _stripAuto; }
+export function setStripAutoOpen(v: boolean): void {
+  _stripAuto = v;
+  localStorage.setItem(STRIP_AUTO_KEY, String(v));
 }

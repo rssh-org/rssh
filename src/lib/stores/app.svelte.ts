@@ -441,6 +441,8 @@ export function addPane(workspaceId: string, side: PaneSide, tab: Tab): string |
   ai.activateTab(pane.id);
   if (pane.type === "ssh") sftpPanel.seedWidth(pane.id);
   _tabs.push(pane);
+  // Split view takes over the terminal region — plugin panels close everywhere.
+  pluginStore.closeAllPanels();
   setActiveWorkspace(workspaceId);
   setActivePane(pane.id);
   return pane.id;
@@ -500,6 +502,13 @@ export function addTab(tab: Tab) {
   ai.activateTab(rootTab.id);
   if (rootTab.type === "ssh") {
     sftpPanel.seedWidth(rootTab.id);
+  }
+  // Plugin panels follow the manager's per-area auto-open toggles. Local
+  // shell tabs run exec as a child process, same capability class as ssh.
+  // Mobile stays out of v1: the panels have no touch close affordance yet
+  // (desktop closes via Esc) — same scope the old desktop-only menu had.
+  if (!isMobile && (rootTab.type === "ssh" || rootTab.type === "local")) {
+    pluginStore.openForNewTab(rootTab.id);
   }
   // MRU on: new tab is the most-recently-focused → front of the session region.
   _tabs.splice(_tabMru ? 1 : _tabs.length, 0, rootTab);

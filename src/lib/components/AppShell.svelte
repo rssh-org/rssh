@@ -425,36 +425,41 @@
         // The Transfers popover does not hide SFTP — overlay.
     );
 
-    /* ── Plugin panels：per-tab open 状态镜像 SFTP；两个宿主区域（side aside +
-       terminal strip）各自渲染 manifest.area 匹配的启用插件。iframe 只给
-       已连接的 ssh tab 挂（exec 是唯一通道，没会话就是错误弹幕）。 */
+    /* ── Plugin panels: per-tab AND per-area open state. New tabs inherit the
+       manager's auto-open toggles (app store addTab → openForNewTab); a split
+       closes every panel (addPane → closeAllPanels). Each host region (side
+       aside + terminal strip) renders the enabled plugins of manifest.area;
+       iframes mount only for connected ssh/local tabs (exec is the only
+       channel — no session just means error cards). */
     let pluginHostOk = $derived(plugins.hostSupported());
     let pluginSidePlugins = $derived(plugins.sidePlugins());
     let pluginStripPlugins = $derived(plugins.stripPlugins());
-    let pluginTabs = $derived(
-        app.tabs()
+    function pluginTabsFor(open: (tabId: string) => boolean) {
+        return app.tabs()
             .filter((tab) =>
-                plugins.isOpen(tab.id)
+                open(tab.id)
                 && (tab.type === "ssh" || tab.type === "local"))
             // sessionId 可为空串：断线时 iframe 保活（图表不丢），exec 报
             // plugin_no_exec 由插件显示断连态；重连后 sessionId 恢复。
-            .map((tab) => ({tabId: tab.id, sessionId: app.sessionIdForTab(tab.id) ?? ""})),
-    );
-    let pluginPaneActive = $derived.by(() => {
+            .map((tab) => ({tabId: tab.id, sessionId: app.sessionIdForTab(tab.id) ?? ""}));
+    }
+    let pluginSideTabs = $derived(pluginTabsFor(plugins.isSideOpen));
+    let pluginStripTabs = $derived(pluginTabsFor(plugins.isStripOpen));
+    function pluginAreaActive(open: (tabId: string) => boolean): boolean {
         const tab = app.activeTab();
         return (
             !!tab
             && (tab.type === "ssh" || tab.type === "local")
-            && plugins.isOpen(tab.id)
+            && open(tab.id)
             && !!app.sessionIdForTab(tab.id)
         );
-    });
+    }
     let pluginSideVisible = $derived(
-        pluginPaneActive && pluginHostOk && pluginSidePlugins.length > 0
+        pluginAreaActive(plugins.isSideOpen) && pluginHostOk && pluginSidePlugins.length > 0
         && !app.settingsActive()
     );
     let pluginStripVisible = $derived(
-        pluginPaneActive && pluginHostOk && pluginStripPlugins.length > 0
+        pluginAreaActive(plugins.isStripOpen) && pluginHostOk && pluginStripPlugins.length > 0
         && !app.settingsActive()
     );
     let pluginSidePos = $derived(plugins.sidePosition());
@@ -963,13 +968,6 @@
                     disabled: !isSsh,
                     onClick: () => { app.setActivePane(tab.id); app.openSftp(); },
                 });
-                // Plugins run over exec: SSH channels remotely, a local child
-                // process on local-shell tabs. Telnet/serial have neither.
-                items.push({
-                    label: t("tab.context.plugins"),
-                    disabled: !(isSsh || tab.type === "local"),
-                    onClick: () => { app.setActivePane(tab.id); plugins.togglePanel(tab.id); },
-                });
             }
             sections.push(items);
         }
@@ -1162,10 +1160,11 @@
             if (app.downloadsActive()) return;
             if (app.sftpOpen()) { app.closeSftp(); e.preventDefault(); }
             // Only swallow Esc when a plugin region is actually showing —
-            // isOpen alone would eat the key on tabs where the panel is
-            // invisible (no session / settings) and starve the drawer close.
+            // the open flags alone would eat the key on tabs where the panel
+            // is invisible (no session / settings) and starve the drawer close.
             else if (pluginSideVisible || pluginStripVisible) {
-                plugins.closePanel(app.activePaneId());
+                plugins.closeSide(app.activePaneId());
+                plugins.closeStrip(app.activePaneId());
                 e.preventDefault();
             }
             else if (drawerOpen) { closeDrawer(); e.preventDefault(); }
@@ -1318,13 +1317,13 @@
                 </SidePanel>
             {/if}
         {:else if kind === "plugin"}
-            {#if resourcePanesAllowed && pluginHostOk && pluginSidePlugins.length > 0 && pluginTabs.length > 0}
+            {#if resourcePanesAllowed && pluginHostOk && pluginSidePlugins.length > 0 && pluginSideTabs.length > 0}
                 <PluginSide
                     {side}
                     width={pluginSideFitted.plugin}
                     hidden={!pluginSideVisible}
                     plugins={pluginSidePlugins}
-                    tabs={pluginTabs}
+                    tabs={pluginSideTabs}
                     activeTabId={app.activePaneId()}
                     onResizeStart={startPluginSideResize}
                     onResetWidth={resetPluginSideWidth}
@@ -1376,12 +1375,12 @@
         {/each}
         <div class="main-area">
             <!-- 插件横条区：终端上/下边缘，per-tab keep-alive，无匹配插件不占位 -->
-            {#if resourcePanesAllowed && pluginHostOk && pluginStripPlugins.length > 0 && pluginTabs.length > 0 && pluginStripPos === "top"}
+            {#if resourcePanesAllowed && pluginHostOk && pluginStripPlugins.length > 0 && pluginStripTabs.length > 0 && pluginStripPos === "top"}
                 <PluginStrip
                     position="top"
                     hidden={!pluginStripVisible}
                     plugins={pluginStripPlugins}
-                    tabs={pluginTabs}
+                    tabs={pluginStripTabs}
                     activeTabId={app.activePaneId()}
                 />
             {/if}
@@ -1443,12 +1442,12 @@
                     </div>
                 {/if}
             </div>
-            {#if resourcePanesAllowed && pluginHostOk && pluginStripPlugins.length > 0 && pluginTabs.length > 0 && pluginStripPos === "bottom"}
+            {#if resourcePanesAllowed && pluginHostOk && pluginStripPlugins.length > 0 && pluginStripTabs.length > 0 && pluginStripPos === "bottom"}
                 <PluginStrip
                     position="bottom"
                     hidden={!pluginStripVisible}
                     plugins={pluginStripPlugins}
-                    tabs={pluginTabs}
+                    tabs={pluginStripTabs}
                     activeTabId={app.activePaneId()}
                 />
             {/if}

@@ -101,23 +101,53 @@ describe("registry", () => {
 });
 
 describe("per-tab open state", () => {
-  it("opens, toggles and disposes per tab", () => {
-    store.openPanel("ssh:1");
-    expect(store.isOpen("ssh:1")).toBe(true);
-    expect(store.isOpen("ssh:2")).toBe(false);
+  it("side and strip open independently and dispose per tab", () => {
+    store.openSide("ssh:1");
+    expect(store.isSideOpen("ssh:1")).toBe(true);
+    expect(store.isStripOpen("ssh:1")).toBe(false);
 
-    store.togglePanel("ssh:1");
-    expect(store.isOpen("ssh:1")).toBe(false);
+    store.openStrip("ssh:1");
+    expect(store.isStripOpen("ssh:1")).toBe(true);
 
-    store.openPanel("ssh:1");
+    store.closeSide("ssh:1");
+    expect(store.isSideOpen("ssh:1")).toBe(false);
+    expect(store.isStripOpen("ssh:1")).toBe(true);
+
     store.disposeTab("ssh:1");
-    expect(store.isOpen("ssh:1")).toBe(false);
+    expect(store.isStripOpen("ssh:1")).toBe(false);
   });
 
   it("disposeTab also drops the side width preference", () => {
     store.setSideWidth("ssh:1", 400);
     store.disposeTab("ssh:1");
     expect(store.sideWidth("ssh:1")).toBe(null);
+  });
+});
+
+describe("auto-open preferences", () => {
+  it("openForNewTab follows the per-area toggles and persists them", () => {
+    store.setSideAutoOpen(true);
+    store.setStripAutoOpen(false);
+    expect(storage.get("plugin_side_auto_open")).toBe("true");
+    expect(storage.get("plugin_strip_auto_open")).toBe("false");
+
+    store.openForNewTab("ssh:1");
+    expect(store.isSideOpen("ssh:1")).toBe(true);
+    expect(store.isStripOpen("ssh:1")).toBe(false);
+  });
+
+  it("closeAllPanels wipes both areas but keeps width preferences", () => {
+    store.setSideAutoOpen(true);
+    store.setStripAutoOpen(true);
+    store.openForNewTab("ssh:1");
+    store.openForNewTab("ssh:2");
+    store.setSideWidth("ssh:1", 400);
+
+    store.closeAllPanels();
+    expect(store.isSideOpen("ssh:1")).toBe(false);
+    expect(store.isSideOpen("ssh:2")).toBe(false);
+    expect(store.isStripOpen("ssh:1")).toBe(false);
+    expect(store.sideWidth("ssh:1")).toBe(400);
   });
 });
 

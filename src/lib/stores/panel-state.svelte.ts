@@ -22,6 +22,8 @@ export interface SidePanelState {
   openPanel(tabId: string): void;
   closePanel(tabId: string): void;
   togglePanel(tabId: string): void;
+  /** Drop every tab's open flag at once (width preferences stay). */
+  closeAll(): void;
   /** Tracked read: must be a plain property get so $derived consumers
    *  subscribe even when the key is missing (see the width-drag freeze bug). */
   width(tabId: string): number | null;
@@ -77,6 +79,9 @@ export function createSidePanelState(config: SidePanelConfig): SidePanelState {
     togglePanel(tabId) {
       if (openByTab[tabId] === true) delete openByTab[tabId];
       else openByTab[tabId] = true;
+    },
+    closeAll() {
+      openByTab = {};
     },
     width(tabId) {
       return widthByTab[tabId] ?? null;

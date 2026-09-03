@@ -153,6 +153,8 @@
 
   // ── Section data ────────────────────────────────────────────────────────
 
+  let sideOn = $derived(plugins.sideAutoOpen());
+  let stripOn = $derived(plugins.stripAutoOpen());
   let sideInstalled = $derived(plugins.plugins().filter(p => p.area === "side"));
   let stripInstalled = $derived(plugins.plugins().filter(p => p.area === "strip"));
   /** Previews need the asset protocol AND a loaded registry root. */
@@ -173,32 +175,67 @@
     <div class="host-warning">{t("plugins.host_unavailable")}</div>
   {/if}
 
-  <!-- ═══ Position pickers (both areas live in the single stage below) ═══ -->
-  <div class="picker-row">
-    <span class="section-label">{t("plugins.section.side")}</span>
-    <div class="pos-picker">
-      <button
-        class:active={plugins.sidePosition() === "left"}
-        onclick={() => plugins.setSidePosition("left")}
-      >{t("plugins.position.left")}</button>
-      <button
-        class:active={plugins.sidePosition() === "right"}
-        onclick={() => plugins.setSidePosition("right")}
-      >{t("plugins.position.right")}</button>
+  <!-- ═══ Area cards (skeleton copied from AiSettings' danger-card): toggle
+       head on top, dock-edge row below the divider — one group per area. ═══ -->
+  <div class="card surface-raised area-card">
+    <div class="area-head">
+      <div class="area-head-body">
+        <div class="area-title" class:on={sideOn} class:off={!sideOn}>{t("plugins.section.side")}</div>
+        <div class="area-desc">{t("plugins.auto_open")}</div>
+      </div>
+      <label class="switch">
+        <input
+          type="checkbox"
+          checked={sideOn}
+          onchange={(e) => plugins.setSideAutoOpen((e.currentTarget as HTMLInputElement).checked)}
+        />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="card-divider"></div>
+    <div class="pos-row">
+      <span class="pos-label">{t("plugins.position.label")}</span>
+      <div class="pos-picker">
+        <button
+          class:active={plugins.sidePosition() === "left"}
+          onclick={() => plugins.setSidePosition("left")}
+        >{t("plugins.position.left")}</button>
+        <button
+          class:active={plugins.sidePosition() === "right"}
+          onclick={() => plugins.setSidePosition("right")}
+        >{t("plugins.position.right")}</button>
+      </div>
     </div>
   </div>
 
-  <div class="picker-row">
-    <span class="section-label">{t("plugins.section.strip")}</span>
-    <div class="pos-picker">
-      <button
-        class:active={plugins.stripPosition() === "top"}
-        onclick={() => plugins.setStripPosition("top")}
-      >{t("plugins.position.top")}</button>
-      <button
-        class:active={plugins.stripPosition() === "bottom"}
-        onclick={() => plugins.setStripPosition("bottom")}
-      >{t("plugins.position.bottom")}</button>
+  <div class="card surface-raised area-card">
+    <div class="area-head">
+      <div class="area-head-body">
+        <div class="area-title" class:on={stripOn} class:off={!stripOn}>{t("plugins.section.strip")}</div>
+        <div class="area-desc">{t("plugins.auto_open")}</div>
+      </div>
+      <label class="switch">
+        <input
+          type="checkbox"
+          checked={stripOn}
+          onchange={(e) => plugins.setStripAutoOpen((e.currentTarget as HTMLInputElement).checked)}
+        />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="card-divider"></div>
+    <div class="pos-row">
+      <span class="pos-label">{t("plugins.position.label")}</span>
+      <div class="pos-picker">
+        <button
+          class:active={plugins.stripPosition() === "top"}
+          onclick={() => plugins.setStripPosition("top")}
+        >{t("plugins.position.top")}</button>
+        <button
+          class:active={plugins.stripPosition() === "bottom"}
+          onclick={() => plugins.setStripPosition("bottom")}
+        >{t("plugins.position.bottom")}</button>
+      </div>
     </div>
   </div>
 
@@ -309,14 +346,52 @@
     color: var(--warning);
   }
 
-  /* ── Picker rows: area label + dock-edge segmented control ── */
-  .picker-row {
+  /* ── Area cards: same skeleton as AiSettings' danger-card — toggle head
+     (title/desc left, switch right), full-bleed divider, dock-edge row. ── */
+  .area-card {
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .area-head {
     display: flex;
     align-items: center;
     gap: 12px;
   }
-  .picker-row .section-label {
-    padding: 0;
+  .area-head-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .area-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .area-title.on { color: var(--accent); }
+  .area-desc {
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.5;
+  }
+  .card-divider {
+    height: 1px;
+    background: var(--divider);
+    margin: 2px -18px;
+  }
+  .pos-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .pos-label {
+    font-size: 12px;
+    color: var(--text-sub);
   }
   .pos-picker {
     display: inline-flex;

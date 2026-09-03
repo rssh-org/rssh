@@ -53,6 +53,17 @@ describe("width preference", () => {
     expect(panel.width("a")).toBeNull();
     expect(panel.hasWidth("a")).toBe(false);
   });
+
+  it("closeAll drops every open flag but keeps width preferences", () => {
+    const panel = createSidePanelState({ minWidth: 280 });
+    panel.openPanel("a");
+    panel.openPanel("b");
+    panel.setWidth("a", 480);
+    panel.closeAll();
+    expect(panel.isOpen("a")).toBe(false);
+    expect(panel.isOpen("b")).toBe(false);
+    expect(panel.width("a")).toBe(480);
+  });
 });
 
 describe("persistence (storageKey present)", () => {
