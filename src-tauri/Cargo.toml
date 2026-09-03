@@ -12,7 +12,7 @@ crate-type = ["staticlib", "cdylib", "lib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
@@ -45,6 +45,10 @@ include_dir = { version = "0.7", optional = true }
 
 # SFTP
 russh-sftp = "2"
+
+# Plugin packages are user-supplied zips (manifest.json + index.html + assets).
+# Default features on: accept any standard compression a packager might emit.
+zip = "2"
 
 # HTTP + crypto
 base64 = "0.22"

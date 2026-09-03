@@ -23,6 +23,7 @@
   import CliSettings from "./CliSettings.svelte";
   import AppearanceSettings from "./AppearanceSettings.svelte";
   import AiSettings from "./AiSettings.svelte";
+  import PluginManager from "../plugins/PluginManager.svelte";
   import Select from "./Select.svelte";
   import ConnectionList from "./ConnectionList.svelte";
   import ConnectionEditor from "./ConnectionEditor.svelte";
@@ -51,6 +52,7 @@
     "cli":                { component: CliSettings },
     "appearance":         { component: AppearanceSettings },
     "ai":                 { component: AiSettings },
+    "plugins":            { component: PluginManager },
     "shortcuts":          { component: ShortcutsScreen },
     "about":              { component: AboutScreen },
   };
@@ -81,6 +83,7 @@
     { id: "command-blocks", label: t("settings.section.command_block"), section: "settings.group.advanced" },
     { id: "sync", label: t("settings.section.sync"), section: "settings.group.advanced" },
     { id: "ai", label: t("settings.section.ai"), section: "settings.group.advanced" },
+    { id: "plugins", label: t("settings.section.plugins"), section: "settings.group.advanced" },
     { id: "cli", label: t("settings.section.cli"), section: "settings.group.advanced" },
     { id: "shortcuts", label: t("settings.section.shortcuts"), section: "settings.group.help" },
     { id: "about", label: t("settings.section.about"), section: "settings.group.help" },

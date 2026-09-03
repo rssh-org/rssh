@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import * as ai from "../ai/store.svelte.ts";
+import * as pluginStore from "../plugins/store.svelte.ts";
 import { errMsg, t } from "../i18n/index.svelte.ts";
 import { isIOS, isMobile } from "../platform.ts";
 import type {
@@ -17,6 +18,7 @@ import { toast } from "./toast.svelte.ts";
 export type { CommandBlockSplitMode } from "../terminal/command-blocks.ts";
 import { addSplit, collectLeafIds, leaf, normalizeRatio, removeLeaf } from "../terminal/layout.ts";
 import type { SplitDirection, TerminalLayout } from "../terminal/layout.ts";
+import { createSidePanelState } from "./panel-state.svelte.ts";
 
 /* ═══════════════════════════════════════════════════════
    Platform
@@ -69,6 +71,7 @@ export type SettingsPage =
   | "shortcuts"
   | "appearance"
   | "ai"
+  | "plugins"
   | "about";
 
 export interface Group {
@@ -197,23 +200,14 @@ let _connectionEditorIntent = $state<ConnectionEditorIntent>({ mode: "create", k
    SFTP 共用对应 tab 的 SSH 连接；切 tab 不影响其他 tab 已打开的 SFTP；
    新开 tab 不自动开 SFTP——每个 tab 手动开。
    (老的全局 _sftpOpen 已废，那是 fullscreen overlay 时代的产物。) */
-let _sftpOpenByTab = $state<Record<string, boolean>>({});
 const sftpPanelWidthKey = "sftp-panel-width";
 const sftpPanelMinWidth = 280;
-
-function loadSftpPanelWidth(): number | null {
-  try {
-    const raw = localStorage.getItem(sftpPanelWidthKey);
-    if (raw === null) return null;
-    const width = Number.parseInt(raw, 10);
-    return Number.isFinite(width) && width >= sftpPanelMinWidth ? width : null;
-  } catch {
-    return null;
-  }
-}
-
-let _sftpPanelDefaultWidth = loadSftpPanelWidth();
-let _sftpPanelWidthByTab = $state<Record<string, number | null>>({});
+/* SFTP per-tab panel state — the shared side-panel skeleton (open flags +
+   widths + persisted committed default). Opening stays ssh-gated (openSftp). */
+const sftpPanel = createSidePanelState({
+  minWidth: sftpPanelMinWidth,
+  storageKey: sftpPanelWidthKey,
+});
 /* Transfers popover: an overlay, no longer a sibling route of Settings.
    State is independent — switching tabs / opening Settings does not close it;
    the user must dismiss explicitly (X / click outside / Esc / re-click entry).
@@ -313,26 +307,17 @@ export function connectionUpdateId(): string | null {
   return _connectionEditorIntent.mode === "edit" ? _connectionEditorIntent.sourceId : null;
 }
 /** 当前活跃 tab 的 SFTP 是否打开（toolbar / Esc / × 按钮等用这个）。 */
-export function sftpOpen() { return !!_sftpOpenByTab[_activeTabId]; }
+export function sftpOpen() { return sftpPanel.isOpen(_activeTabId); }
 /** 任意 tab 是否查询；用 tab id 显式问。 */
-export function sftpOpenForTab(tabId: string) { return !!_sftpOpenByTab[tabId]; }
+export function sftpOpenForTab(tabId: string) { return sftpPanel.isOpen(tabId); }
 /** 模板 {#each} 遍历所有"开了 SFTP"的 tab 用——保持 SftpBrowser 实例存活以便切回时 cwd 不丢。 */
-export function tabsWithSftp(): Tab[] { return _tabs.filter(t => _sftpOpenByTab[t.id]); }
-export function sftpPanelWidthForTab(tabId: string): number | null {
-  return _sftpPanelWidthByTab[tabId] ?? null;
-}
+export function tabsWithSftp(): Tab[] { return _tabs.filter(t => sftpPanel.isOpen(t.id)); }
+export function sftpPanelWidthForTab(tabId: string): number | null { return sftpPanel.width(tabId); }
 export function setSftpPanelWidth(tabId: string, width: number | null) {
-  _sftpPanelWidthByTab[tabId] = width;
+  sftpPanel.setWidth(tabId, width);
 }
 export function commitSftpPanelWidth(tabId: string) {
-  if (!Object.prototype.hasOwnProperty.call(_sftpPanelWidthByTab, tabId)) return;
-  const width = _sftpPanelWidthByTab[tabId] ?? null;
-  _sftpPanelDefaultWidth = width;
-  if (width === null) {
-    safeRemoveItem(sftpPanelWidthKey);
-  } else {
-    safeSetItem(sftpPanelWidthKey, String(width));
-  }
+  sftpPanel.commitWidth(tabId);
 }
 export function downloadsActive() { return _downloadsActive; }
 export function pinnedProfileIds() { return _pinnedProfileIds; }
@@ -454,8 +439,10 @@ export function addPane(workspaceId: string, side: PaneSide, tab: Tab): string |
   const pane: Tab = { ...tabWithoutPaneMetadata, workspaceId, paneOf: workspaceId };
   _layoutByWorkspace[workspaceId] = nextLayout;
   ai.activateTab(pane.id);
-  if (pane.type === "ssh") _sftpPanelWidthByTab[pane.id] = _sftpPanelDefaultWidth;
+  if (pane.type === "ssh") sftpPanel.seedWidth(pane.id);
   _tabs.push(pane);
+  // Split view takes over the terminal region — plugin panels close everywhere.
+  pluginStore.closeAllPanels();
   setActiveWorkspace(workspaceId);
   setActivePane(pane.id);
   return pane.id;
@@ -464,12 +451,8 @@ export function addPane(workspaceId: string, side: PaneSide, tab: Tab): string |
 function disposeTabResources(id: string) {
   delete _terminalTitles[id];
   delete _terminalConnectionStatusByTab[id];
-  if (_sftpOpenByTab[id]) {
-    const next = { ..._sftpOpenByTab };
-    delete next[id];
-    _sftpOpenByTab = next;
-  }
-  delete _sftpPanelWidthByTab[id];
+  sftpPanel.clearTab(id);
+  pluginStore.disposeTab(id);
   ai.disposeTab(id).catch((error) => {
     console.warn("[ai] dispose on tab close:", error);
     toast.error(errMsg(error));
@@ -518,7 +501,14 @@ export function addTab(tab: Tab) {
   const { workspaceId: _workspaceId, paneOf: _paneOf, ...rootTab } = tab;
   ai.activateTab(rootTab.id);
   if (rootTab.type === "ssh") {
-    _sftpPanelWidthByTab[rootTab.id] = _sftpPanelDefaultWidth;
+    sftpPanel.seedWidth(rootTab.id);
+  }
+  // Plugin panels follow the manager's per-area auto-open toggles. Local
+  // shell tabs run exec as a child process, same capability class as ssh.
+  // Mobile stays out of v1: the panels have no touch close affordance yet
+  // (desktop closes via Esc) — same scope the old desktop-only menu had.
+  if (!isMobile && (rootTab.type === "ssh" || rootTab.type === "local")) {
+    pluginStore.openForNewTab(rootTab.id);
   }
   // MRU on: new tab is the most-recently-focused → front of the session region.
   _tabs.splice(_tabMru ? 1 : _tabs.length, 0, rootTab);
@@ -1269,13 +1259,11 @@ export function openSftp() {
   if (!_activeTabId) return;
   const tab = _tabs.find(t => t.id === _activeTabId);
   if (!tab || tab.type !== "ssh") return;
-  _sftpOpenByTab = { ..._sftpOpenByTab, [_activeTabId]: true };
+  sftpPanel.openPanel(_activeTabId);
 }
 export function closeSftp() {
-  if (!_activeTabId || !_sftpOpenByTab[_activeTabId]) return;
-  const next = { ..._sftpOpenByTab };
-  delete next[_activeTabId];
-  _sftpOpenByTab = next;
+  if (!_activeTabId || !sftpPanel.isOpen(_activeTabId)) return;
+  sftpPanel.closePanel(_activeTabId);
 }
 
 /* ─── Pinned profiles ─── */

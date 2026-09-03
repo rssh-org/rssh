@@ -15,7 +15,7 @@
 - 移动端增加自定义键盘
 - profile/forward 自定义icon
 - iOS快捷键盘，随着软键盘升起
-- 手机端增加gpu加速开关
+
 
 ![Stars](https://img.shields.io/github/stars/shihuili1218/rssh)
 ![Forks](https://img.shields.io/github/forks/shihuili1218/rssh)

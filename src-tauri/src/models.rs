@@ -516,6 +516,39 @@ pub struct Snippet {
     pub command: String,
 }
 
+// --- Plugin ---
+
+/// A third-party plugin package installed on this machine. `id` doubles as the
+/// directory name under `<data_dir>/plugins/`, so it must stay a slug.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Plugin {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub author: String,
+    /// Which host region the plugin UI mounts in: "side" | "strip".
+    pub area: String,
+    /// Package-relative preview document ("" = none).
+    #[serde(default)]
+    pub preview: String,
+    pub enabled: bool,
+    pub installed_at: i64,
+    /// Position within its area; the manager page rewrites this on reorder.
+    #[serde(default)]
+    pub sort_order: i64,
+}
+
+/// One-shot remote command result handed to a plugin iframe via the bridge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginExecResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
 // --- Session Recording ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

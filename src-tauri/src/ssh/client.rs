@@ -827,6 +827,77 @@ impl SessionHandle {
     }
 }
 
+/// Run one command on an existing SSH connection and collect its output.
+///
+/// Opens a fresh session channel per call — one-shot, no state kept between
+/// calls, so there is nothing to clean up when a plugin stops polling (the
+/// "lazy" in the plugin exec capability). The channel is opened under a short
+/// handle lock and then driven without it, mirroring `SftpHandle::from_handle`.
+pub async fn exec_once(
+    ssh_handle: &SshHandle,
+    command: &str,
+    timeout: std::time::Duration,
+) -> AppResult<crate::models::PluginExecResult> {
+    const OUTPUT_CAP: usize = 256 * 1024;
+
+    let mut channel = {
+        let h = ssh_handle.lock().await;
+        h.channel_open_session().await.map_err(|e| {
+            AppError::ssh(
+                "plugin_exec_channel_failed",
+                json!({ "err": e.to_string() }),
+            )
+        })?
+    };
+    channel
+        .exec(true, command)
+        .await
+        .map_err(|e| AppError::ssh("plugin_exec_failed", json!({ "err": e.to_string() })))?;
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let mut exit_code: Option<i32> = None;
+
+    let collect = async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { data }) => {
+                    if stdout.len() < OUTPUT_CAP {
+                        stdout
+                            .extend_from_slice(&data[..data.len().min(OUTPUT_CAP - stdout.len())]);
+                    }
+                }
+                Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    if stderr.len() < OUTPUT_CAP {
+                        stderr
+                            .extend_from_slice(&data[..data.len().min(OUTPUT_CAP - stderr.len())]);
+                    }
+                }
+                Some(ChannelMsg::ExitStatus { exit_status }) => {
+                    exit_code = Some(exit_status as i32);
+                }
+                // Eof arrives BEFORE ExitStatus — breaking on it would lose
+                // the exit code. Only Close (or a dropped channel) ends it.
+                Some(ChannelMsg::Eof) => {}
+                Some(ChannelMsg::Close) | None => break,
+                _ => {}
+            }
+        }
+    };
+    tokio::time::timeout(timeout, collect).await.map_err(|_| {
+        AppError::ssh(
+            "plugin_exec_timeout",
+            json!({ "millis": timeout.as_millis() as u64 }),
+        )
+    })?;
+
+    Ok(crate::models::PluginExecResult {
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        exit_code,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // connect — 支持可选堡垒机（ProxyJump）
 // ---------------------------------------------------------------------------

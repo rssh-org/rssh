@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   defaultPanelWidth,
   fitPanelWidths,
+  fitPluginSideWidth,
   resizePanelWidth,
 } from "./panel-widths.ts";
 
@@ -178,5 +179,76 @@ describe("fitPanelWidths", () => {
       sftpWidth: 500,
       priority: "ai",
     })).toEqual({ ai: 600, sftp: 280 });
+  });
+});
+
+describe("fitPluginSideWidth", () => {
+  const pbase = {
+    containerWidth: 1200,
+    mainMinWidth: 320,
+    panelMinWidth: 280,
+    defaultWidth: 380,
+    aiVisible: true,
+    sftpVisible: true,
+  };
+
+  it("hidden plugin keeps the full container for ai/sftp", () => {
+    const fit = fitPluginSideWidth({...pbase, pluginVisible: false, pluginWidth: null});
+    expect(fit.plugin).toBe(380);
+    expect(fit.remainingContainerWidth).toBe(1200);
+  });
+
+  it("visible plugin takes its preference when space is plentiful", () => {
+    // 1400 - 320(main) - 2×280(other minima) = 520 ≥ 340 → preference wins.
+    const fit = fitPluginSideWidth({...pbase, containerWidth: 1400, pluginVisible: true, pluginWidth: 340});
+    expect(fit.plugin).toBe(340);
+    expect(fit.remainingContainerWidth).toBe(1060);
+  });
+
+  it("shrinks below its own minimum when the row cannot satisfy the higher-priority minima", () => {
+    // 1000 - 320(main) = 680 budget; ai+sftp reserve 2×280 → only 120 left.
+    // Main minimum and the other panels' minima outrank the plugin's own
+    // minimum — the plugin yields to 120 instead of overflowing the row.
+    const fit = fitPluginSideWidth({
+      ...pbase, containerWidth: 1000, pluginVisible: true, pluginWidth: 600,
+    });
+    expect(fit.plugin).toBe(120);
+    expect(fit.remainingContainerWidth).toBe(880);
+  });
+
+  it("collapses to zero rather than pushing the main area below its minimum", () => {
+    // Extreme narrow (500): budget 180 < ai+sftp minima — the plugin gives
+    // up entirely and the whole row stays with main + the other panels.
+    const fit = fitPluginSideWidth({
+      ...pbase, containerWidth: 500, pluginVisible: true, pluginWidth: null,
+    });
+    expect(fit.plugin).toBe(0);
+    expect(fit.remainingContainerWidth).toBe(500);
+  });
+
+  it("a null preference uses the responsive default", () => {
+    const fit = fitPluginSideWidth({
+      ...pbase, containerWidth: 1400, pluginVisible: true, pluginWidth: null,
+    });
+    expect(fit.plugin).toBe(380);
+  });
+
+  it("chaining into fitPanelWidths keeps ai/sftp inside the remainder", () => {
+    const {plugin, remainingContainerWidth} = fitPluginSideWidth({
+      ...pbase, containerWidth: 1100, pluginVisible: true, pluginWidth: 400,
+    });
+    const two = fitPanelWidths({
+      containerWidth: remainingContainerWidth,
+      mainMinWidth: 320,
+      panelMinWidth: 280,
+      defaultWidth: 380,
+      aiVisible: true,
+      sftpVisible: true,
+      aiWidth: 500,
+      sftpWidth: 500,
+    });
+    // The three panels must share the panel budget (container minus the main
+    // minimum) — never more.
+    expect(plugin + two.ai + two.sftp).toBeLessThanOrEqual(1100 - 320);
   });
 });

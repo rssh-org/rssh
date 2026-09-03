@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppResult;
 
-const SCHEMA_VERSION: u32 = 29;
+const SCHEMA_VERSION: u32 = 30;
 
 fn column_exists(conn: &Connection, table: &str, col: &str) -> AppResult<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
@@ -645,6 +645,26 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
                 }
             }
         }
+    }
+
+    if version < 30 {
+        // Installed third-party plugins. The package itself lives on disk at
+        // `<data_dir>/plugins/<id>/`; this table only tracks registration and
+        // the manifest fields the manager page displays.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS plugins (
+                 id           TEXT PRIMARY KEY,
+                 name         TEXT NOT NULL,
+                 version      TEXT NOT NULL,
+                 description  TEXT NOT NULL DEFAULT '',
+                 author       TEXT NOT NULL DEFAULT '',
+                 area         TEXT NOT NULL,
+                 preview      TEXT NOT NULL DEFAULT '',
+                 enabled      INTEGER NOT NULL DEFAULT 1,
+                 installed_at INTEGER NOT NULL DEFAULT 0,
+                 sort_order   INTEGER NOT NULL DEFAULT 0
+             );",
+        )?;
     }
 
     if version < SCHEMA_VERSION {
