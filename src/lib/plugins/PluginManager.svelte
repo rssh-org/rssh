@@ -24,7 +24,7 @@
 
   // Author-facing docs live on the site; the reference plugin lives on GitHub.
   const DEV_GUIDE_URL = "https://rssh.ofcoder.com/plugins.html";
-  const EXAMPLE_PLUGIN_URL = "https://github.com/rssh-org/monitor-plugin";
+  const EXAMPLE_PLUGIN_URL = "https://github.com/rssh-org/rssh-plugin-monitor";
 
   function openExternal(e: MouseEvent, url: string) {
     e.preventDefault();
