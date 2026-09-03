@@ -253,6 +253,7 @@ const en = {
   "plugins.installing": "Installing…",
   "plugins.install_done": "Plugin installed",
   "plugins.install_failed": "Install failed",
+  "plugins.zip_too_large": "Zip exceeds the 10 MB limit",
   "plugins.empty": "No plugins installed",
   "plugins.uninstall": "Uninstall",
   "plugins.uninstall_confirm": "Click again to uninstall",

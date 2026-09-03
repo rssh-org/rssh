@@ -94,11 +94,13 @@ describe("persistence (storageKey present)", () => {
 });
 
 describe("no storageKey (in-memory panel)", () => {
-  it("commit reports success but persists nothing; seed stays null", () => {
+  it("commit is rejected and persists nothing; seed stays null", () => {
     const panel = createSidePanelState({ minWidth: 280 });
     panel.setWidth("a", 480);
     expect(panel.hasWidth("a")).toBe(true);
-    panel.commitWidth("a"); // no crash, no storage
+    // Without persistence there is no committed default to create — per-tab
+    // widths must never leak across tabs.
+    expect(panel.commitWidth("a")).toBe(false);
     expect(storage.size).toBe(0);
     panel.seedWidth("b");
     expect(panel.width("b")).toBeNull();

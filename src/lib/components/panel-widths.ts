@@ -156,8 +156,12 @@ export function fitPluginSideWidth(input: PluginSideFitInput): PluginSideFit {
   const othersMin =
     (input.aiVisible ? input.panelMinWidth : 0) +
     (input.sftpVisible ? input.panelMinWidth : 0);
-  const pluginMax = Math.max(input.panelMinWidth, total - othersMin);
-  const plugin = clamp(preferred, Math.min(input.panelMinWidth, input.containerWidth), pluginMax);
+  // The plugin panel is lowest priority: when the container cannot satisfy
+  // the main minimum plus the other panels' minimums, the plugin shrinks
+  // BELOW its own minimum rather than overflowing the content row.
+  const pluginMax = Math.max(0, total - othersMin);
+  const pluginMin = Math.min(input.panelMinWidth, pluginMax);
+  const plugin = clamp(preferred, pluginMin, pluginMax);
   return { plugin, remainingContainerWidth: input.containerWidth - plugin };
 }
 

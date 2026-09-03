@@ -1161,7 +1161,13 @@
             // not also collapse SFTP/drawer underneath it.
             if (app.downloadsActive()) return;
             if (app.sftpOpen()) { app.closeSftp(); e.preventDefault(); }
-            else if (plugins.isOpen(app.activePaneId())) { plugins.closePanel(app.activePaneId()); e.preventDefault(); }
+            // Only swallow Esc when a plugin region is actually showing —
+            // isOpen alone would eat the key on tabs where the panel is
+            // invisible (no session / settings) and starve the drawer close.
+            else if (pluginSideVisible || pluginStripVisible) {
+                plugins.closePanel(app.activePaneId());
+                e.preventDefault();
+            }
             else if (drawerOpen) { closeDrawer(); e.preventDefault(); }
         }
     }

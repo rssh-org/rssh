@@ -56,6 +56,12 @@
     const file = inputEl.files?.[0];
     inputEl.value = ""; // allow picking the same file again after a failure
     if (!file) return;
+    // Mirror of the backend MAX_ZIP_BYTES — reject before reading the file
+    // into memory (the backend check remains the authority).
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error(t("plugins.zip_too_large"));
+      return;
+    }
     installing = true;
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());

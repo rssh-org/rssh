@@ -876,7 +876,10 @@ pub async fn exec_once(
                 Some(ChannelMsg::ExitStatus { exit_status }) => {
                     exit_code = Some(exit_status as i32);
                 }
-                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => break,
+                // Eof arrives BEFORE ExitStatus — breaking on it would lose
+                // the exit code. Only Close (or a dropped channel) ends it.
+                Some(ChannelMsg::Eof) => {}
+                Some(ChannelMsg::Close) | None => break,
                 _ => {}
             }
         }

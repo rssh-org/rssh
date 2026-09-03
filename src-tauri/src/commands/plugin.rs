@@ -481,6 +481,20 @@ pub fn plugins_root(state: State<'_, AppState>) -> AppResult<String> {
     Ok(plugins_dir(&state).to_string_lossy().into_owned())
 }
 
+/// Reject encoded input that could decode beyond MAX_ZIP_BYTES — decoding
+/// first would allocate the whole payload in memory. Call before decode.
+pub fn ensure_zip_b64_within_cap(encoded: &str) -> AppResult<()> {
+    // base64 encodes 3 bytes as 4 chars, plus up to 4 padding chars.
+    const MAX_B64_LEN: usize = MAX_ZIP_BYTES / 3 * 4 + 4;
+    if encoded.trim().len() > MAX_B64_LEN {
+        return Err(AppError::config(
+            "plugin_zip_invalid",
+            json!({ "op": "zip_too_large", "size": encoded.trim().len() }),
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn install_plugin(
     state: State<'_, AppState>,
@@ -488,6 +502,7 @@ pub fn install_plugin(
     area: Option<String>,
 ) -> AppResult<Plugin> {
     use base64::{engine::general_purpose::STANDARD, Engine};
+    ensure_zip_b64_within_cap(&base64_zip)?;
     let bytes = STANDARD.decode(base64_zip.trim()).map_err(|e| {
         AppError::config(
             "crypto_base64_decode_failed",
@@ -529,11 +544,15 @@ pub fn uninstall_plugin(state: State<'_, AppState>, id: String) -> AppResult<()>
             json!({ "field": "id", "reason": "not a plugin id" }),
         ));
     }
+    // Registry row first, files second: a failure after the DB delete leaves
+    // an orphan directory (harmless — reinstall overwrites it), while the
+    // reverse order can leave a row pointing at removed files.
+    crate::db::plugin::delete(&state.db, &id)?;
     let dir = plugins_dir(&state).join(&id);
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
     }
-    crate::db::plugin::delete(&state.db, &id)
+    Ok(())
 }
 
 #[tauri::command]

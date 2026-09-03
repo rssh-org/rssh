@@ -205,24 +205,25 @@ describe("fitPluginSideWidth", () => {
     expect(fit.remainingContainerWidth).toBe(1060);
   });
 
-  it("yields toward the minimum before the other panels' minima", () => {
-    // 1000 - 320(main) = 680 budget; ai+sftp reserve 2×280 → plugin max 120
-    // < min 280 → plugin clamps to its min and ai/sftp negotiate the rest.
+  it("shrinks below its own minimum when the row cannot satisfy the higher-priority minima", () => {
+    // 1000 - 320(main) = 680 budget; ai+sftp reserve 2×280 → only 120 left.
+    // Main minimum and the other panels' minima outrank the plugin's own
+    // minimum — the plugin yields to 120 instead of overflowing the row.
     const fit = fitPluginSideWidth({
       ...pbase, containerWidth: 1000, pluginVisible: true, pluginWidth: 600,
     });
-    expect(fit.plugin).toBe(280);
-    expect(fit.remainingContainerWidth).toBe(720);
+    expect(fit.plugin).toBe(120);
+    expect(fit.remainingContainerWidth).toBe(880);
   });
 
-  it("plugin min never pushes the remainder below the main minimum entirely", () => {
-    // Extreme narrow: plugin still renders at min; remainder may be tight and
-    // fitPanelWidths degrades gracefully from there.
+  it("collapses to zero rather than pushing the main area below its minimum", () => {
+    // Extreme narrow (500): budget 180 < ai+sftp minima — the plugin gives
+    // up entirely and the whole row stays with main + the other panels.
     const fit = fitPluginSideWidth({
       ...pbase, containerWidth: 500, pluginVisible: true, pluginWidth: null,
     });
-    expect(fit.plugin).toBeGreaterThanOrEqual(280);
-    expect(fit.remainingContainerWidth).toBe(500 - fit.plugin);
+    expect(fit.plugin).toBe(0);
+    expect(fit.remainingContainerWidth).toBe(500);
   });
 
   it("a null preference uses the responsive default", () => {
@@ -246,6 +247,8 @@ describe("fitPluginSideWidth", () => {
       aiWidth: 500,
       sftpWidth: 500,
     });
-    expect(plugin + two.ai + two.sftp).toBeLessThanOrEqual(1100 - 320 + 280 * 2 - 320 + 320);
+    // The three panels must share the panel budget (container minus the main
+    // minimum) — never more.
+    expect(plugin + two.ai + two.sftp).toBeLessThanOrEqual(1100 - 320);
   });
 });

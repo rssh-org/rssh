@@ -255,6 +255,7 @@ const zh: Messages = {
   "plugins.installing": "安装中…",
   "plugins.install_done": "插件已安装",
   "plugins.install_failed": "安装失败",
+  "plugins.zip_too_large": "压缩包超过 10 MB 上限",
   "plugins.empty": "尚未安装插件",
   "plugins.uninstall": "卸载",
   "plugins.uninstall_confirm": "再次点击确认卸载",
