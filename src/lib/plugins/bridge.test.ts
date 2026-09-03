@@ -54,6 +54,12 @@ describe("isPluginRequest", () => {
     expect(isPluginRequest(req({payload: {command: "ls", timeoutMs: "3000"}}))).toBe(false);
   });
 
+  it("rejects non-finite, fractional and non-positive timeoutMs", () => {
+    for (const timeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 0, -3000, null, 3000.5])
+      expect(isPluginRequest(req({payload: {command: "ls", timeoutMs}}))).toBe(false);
+    expect(isPluginRequest(req({payload: {command: "ls", timeoutMs: 3000}}))).toBe(true);
+  });
+
   it("rejects non-object payloads", () => {
     expect(isPluginRequest(req({payload: null}))).toBe(false);
     expect(isPluginRequest("exec")).toBe(false);
