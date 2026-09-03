@@ -70,7 +70,10 @@ function isExecPayload(p: unknown): boolean {
   if (req.command.length > MAX_COMMAND_LENGTH) return false;
   // Finite and positive: NaN/Infinity serialize to null at the invoke boundary,
   // and a non-positive timeout is meaningless (the backend clamps the rest).
-  if (req.timeoutMs !== undefined && !(Number.isFinite(req.timeoutMs) && req.timeoutMs > 0))
+  // typeof narrows the unknown so the comparison type-checks; Number.isFinite
+  // never throws or coerces, so symbols/bigints fail the typeof check instead.
+  const timeoutMs = req.timeoutMs;
+  if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0))
     return false;
   return true;
 }

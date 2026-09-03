@@ -338,10 +338,7 @@ fn dispatch(
             let b64: String = arg(&args, "base64Zip")?;
             // Same region-button contract as the Tauri command — passing None
             // here would silently skip the area mismatch validation.
-            let area: Option<String> = match args.get("area") {
-                Some(serde_json::Value::String(s)) => Some(s.clone()),
-                _ => None,
-            };
+            let area = optional_string_arg(&args, "area")?;
             crate::commands::plugin::ensure_zip_b64_within_cap(&b64).map_err(err_value)?;
             let bytes = STANDARD.decode(b64.trim()).map_err(|e| {
                 err_value(AppError::config(

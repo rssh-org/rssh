@@ -55,7 +55,7 @@ describe("isPluginRequest", () => {
   });
 
   it("rejects non-finite and non-positive timeoutMs", () => {
-    for (const timeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 0, -3000])
+    for (const timeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, 0, -3000, null])
       expect(isPluginRequest(req({payload: {command: "ls", timeoutMs}}))).toBe(false);
     expect(isPluginRequest(req({payload: {command: "ls", timeoutMs: 3000}}))).toBe(true);
   });
