@@ -439,8 +439,10 @@
             .filter((tab) =>
                 open(tab.id)
                 && (tab.type === "ssh" || tab.type === "local"))
-            // sessionId 可为空串：断线时 iframe 保活（图表不丢），exec 报
-            // plugin_no_exec 由插件显示断连态；重连后 sessionId 恢复。
+            // sessionId may be "" on a disconnected tab: the tab stays listed
+            // so its iframes stay mounted (charts survive the drop; exec would
+            // answer plugin_no_exec), but pluginAreaActive hides the region
+            // itself until the session comes back.
             .map((tab) => ({tabId: tab.id, sessionId: app.sessionIdForTab(tab.id) ?? ""}));
     }
     let pluginSideTabs = $derived(pluginTabsFor(plugins.isSideOpen));

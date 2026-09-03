@@ -530,16 +530,29 @@ pub fn plugins_root(state: State<'_, AppState>) -> AppResult<String> {
 /// Reject encoded input that could decode beyond MAX_ZIP_BYTES — decoding
 /// first would allocate the whole payload in memory. Call before decode.
 pub fn ensure_zip_b64_within_cap(encoded: &str) -> AppResult<()> {
-    // Decoded upper bound: 3 bytes per full 4-char group plus the 1-2 bytes
-    // of a trailing partial group (padding decodes to nothing). Exact, so it
-    // agrees with install_impl's check on the decoded bytes.
-    let len = encoded.trim().len();
-    let decoded = len / 4 * 3
-        + match len % 4 {
-            2 => 1,
-            3 => 2,
-            _ => 0,
-        };
+    // Exact decoded length: 3 bytes per full 4-char group, 1-2 bytes for an
+    // unpadded tail group, minus trailing '=' (they decode to nothing), so
+    // the estimate agrees with install_impl's check on the decoded bytes.
+    // Padding matters: 10 MiB % 3 == 1, so a cap-sized payload ends in "=="
+    // and ignoring that overcounts by 2 bytes and rejects a legal zip.
+    let s = encoded.trim();
+    let len = s.len();
+    let mut decoded = len / 4 * 3;
+    match len % 4 {
+        2 => decoded += 1,
+        3 => decoded += 2,
+        _ => {}
+    }
+    // At most the final group pads; saturate so garbage like "====" cannot
+    // underflow (the caller's decode rejects it anyway).
+    let pad = s
+        .as_bytes()
+        .iter()
+        .rev()
+        .take(2)
+        .take_while(|&b| *b == b'=')
+        .count();
+    decoded = decoded.saturating_sub(pad);
     if decoded > MAX_ZIP_BYTES {
         return Err(AppError::config(
             "plugin_zip_invalid",
@@ -674,6 +687,22 @@ mod tests {
 
     fn open(bytes: &[u8]) -> zip::ZipArchive<std::io::Cursor<&[u8]>> {
         zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap()
+    }
+
+    #[test]
+    fn zip_b64_cap_accepts_padded_input_at_exactly_the_cap() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        // 10 MiB % 3 == 1, so a cap-sized payload encodes with "==" padding;
+        // ignoring the padding overcounted by 2 and rejected a legal zip.
+        let encoded = STANDARD.encode(vec![b'x'; MAX_ZIP_BYTES]);
+        assert!(ensure_zip_b64_within_cap(&encoded).is_ok());
+    }
+
+    #[test]
+    fn zip_b64_cap_rejects_one_byte_over() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let encoded = STANDARD.encode(vec![b'x'; MAX_ZIP_BYTES + 1]);
+        assert!(ensure_zip_b64_within_cap(&encoded).is_err());
     }
 
     #[cfg(desktop)]

@@ -336,6 +336,12 @@ fn dispatch(
         "install_plugin" => {
             use base64::{engine::general_purpose::STANDARD, Engine};
             let b64: String = arg(&args, "base64Zip")?;
+            // Same region-button contract as the Tauri command — passing None
+            // here would silently skip the area mismatch validation.
+            let area: Option<String> = match args.get("area") {
+                Some(serde_json::Value::String(s)) => Some(s.clone()),
+                _ => None,
+            };
             crate::commands::plugin::ensure_zip_b64_within_cap(&b64).map_err(err_value)?;
             let bytes = STANDARD.decode(b64.trim()).map_err(|e| {
                 err_value(AppError::config(
@@ -343,7 +349,11 @@ fn dispatch(
                     json!({ "err": e.to_string() }),
                 ))
             })?;
-            ok(crate::commands::plugin::install_impl(state, &bytes, None))
+            ok(crate::commands::plugin::install_impl(
+                state,
+                &bytes,
+                area.as_deref(),
+            ))
         }
         "list_plugins" => ok(crate::db::plugin::list(&state.db)),
         "set_plugin_enabled" => {

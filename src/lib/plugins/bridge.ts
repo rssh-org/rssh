@@ -68,7 +68,10 @@ function isExecPayload(p: unknown): boolean {
   const req = p as Record<string, unknown>;
   if (typeof req.command !== "string" || req.command.length === 0) return false;
   if (req.command.length > MAX_COMMAND_LENGTH) return false;
-  if (req.timeoutMs !== undefined && typeof req.timeoutMs !== "number") return false;
+  // Finite and positive: NaN/Infinity serialize to null at the invoke boundary,
+  // and a non-positive timeout is meaningless (the backend clamps the rest).
+  if (req.timeoutMs !== undefined && !(Number.isFinite(req.timeoutMs) && req.timeoutMs > 0))
+    return false;
   return true;
 }
 

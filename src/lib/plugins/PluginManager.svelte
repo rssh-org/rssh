@@ -644,8 +644,12 @@
     opacity: 0;
     transition: opacity 0.12s;
   }
+  /* focus-within: the hover-revealed enable/uninstall controls must also be
+     visible when a keyboard user tabs into them. */
   .block:hover .cell-hover,
-  .seg:hover .cell-hover {
+  .block:focus-within .cell-hover,
+  .seg:hover .cell-hover,
+  .seg:focus-within .cell-hover {
     opacity: 1;
   }
   .cell-label {
