@@ -277,6 +277,7 @@ const zh: Messages = {
   "plugins.position.bottom": "底部",
   "plugins.links.guide": "插件开发指南",
   "plugins.links.example": "示例插件：monitor",
+  "plugins.links.mascot": "示例插件：像素猫",
   "settings.section.ai_skills": "AI Skill",
   "tab.context.ai": "打开 AI 排障",
   "settings.section.shortcuts": "快捷键",

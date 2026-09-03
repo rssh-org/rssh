@@ -22,9 +22,10 @@
   // preview document applies itself, so plugin colors preview in-app too.
   const themeTokens = readThemeTokens(getComputedStyle(document.documentElement));
 
-  // Author-facing docs live on the site; the reference plugin lives on GitHub.
+  // Author-facing docs live on the site; the reference plugins live on GitHub.
   const DEV_GUIDE_URL = "https://rssh.ofcoder.com/plugins.html";
   const EXAMPLE_PLUGIN_URL = "https://github.com/rssh-org/rssh-plugin-monitor";
+  const MASCOT_PLUGIN_URL = "https://github.com/rssh-org/rssh-plugin-mascot";
 
   function openExternal(e: MouseEvent, url: string) {
     e.preventDefault();
@@ -255,6 +256,8 @@
     <a href={DEV_GUIDE_URL} onclick={(e) => openExternal(e, DEV_GUIDE_URL)}>{t("plugins.links.guide")} ↗</a>
     <span class="dot">·</span>
     <a href={EXAMPLE_PLUGIN_URL} onclick={(e) => openExternal(e, EXAMPLE_PLUGIN_URL)}>{t("plugins.links.example")} ↗</a>
+    <span class="dot">·</span>
+    <a href={MASCOT_PLUGIN_URL} onclick={(e) => openExternal(e, MASCOT_PLUGIN_URL)}>{t("plugins.links.mascot")} ↗</a>
   </div>
 
   <!-- ═══ The stage: one window mock with EVERY plugin area combined —

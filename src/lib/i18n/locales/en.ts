@@ -275,6 +275,7 @@ const en = {
   "plugins.position.bottom": "Bottom",
   "plugins.links.guide": "Plugin development guide",
   "plugins.links.example": "Example: monitor plugin",
+  "plugins.links.mascot": "Example: pixel cat",
   "settings.section.ai_skills": "AI Skills",
   "tab.context.ai": "Open AI diagnose",
   "settings.section.shortcuts": "Shortcuts",
