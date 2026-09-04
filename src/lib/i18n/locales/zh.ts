@@ -1107,6 +1107,7 @@ const zh: Messages = {
   // 回放
   "playback.back": "← 录像",
   "playback.load_failed": "加载录像失败：{error}",
+  "pane.load_failed": "面板加载失败：{error}",
   // 快捷键
   "shortcuts.section.global": "全局",
   "shortcuts.section.home": "首页",
