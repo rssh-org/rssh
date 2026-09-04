@@ -2,9 +2,11 @@
 
 [English](README.md) | [中文](README_zh.md)
 
-**The SSH client built to be an AI ops copilot.**
+**A genuinely different SSH client — built to fix the pain points everyone else ignored.**
 
-> Connect to a host and just ask "why is the disk full?" — the AI proposes commands, flags their side effects, and runs them in your terminal only after you approve. Sensitive data is redacted locally before anything leaves your machine.
+> Traditional clients hand you a shell and stop there: endless scrollback, static IPs to memorize, copy-pasting logs into a chat bot.
+> 
+> RSSH goes further: commands become navigable blocks, containers are discovered live, and the AI reads the terminal like an operator.
 > 
 > Desktop · Mobile · JetBrains · CLI — one shared data store.
 
