@@ -9,7 +9,6 @@
     import HomeScreen from "./HomeScreen.svelte";
     import TerminalSplitLayout from "./TerminalSplitLayout.svelte";
     import ForwardPane from "./ForwardPane.svelte";
-    import EditPane from "./EditPane.svelte";
     import SettingsLayout from "./SettingsLayout.svelte";
     import SftpBrowser from "./SftpBrowser.svelte";
     import DownloadsScreen from "./DownloadsScreen.svelte";
@@ -20,7 +19,6 @@
     import MenuButton, {type NavItem, navItemKey} from "./MenuButton.svelte";
     import StripBar from "./StripBar.svelte";
     import { rippleWidth } from "./sidebar-ripple.ts";
-    import ChatPanel from "../ai/ChatPanel.svelte";
     import * as ai from "../ai/store.svelte.ts";
     import type { AiTargetKind } from "../ai/types.ts";
     import PluginSide from "../plugins/PluginSide.svelte";
@@ -42,6 +40,21 @@
         resizePanelWidth,
         type PanelFitPriority,
     } from "./panel-widths.ts";
+
+    // Lazy pane components. EditPane (CodeMirror) and ChatPanel (marked/DOMPurify)
+    // are heavy and not needed until the user opens an edit tab or an AI panel —
+    // keeping them out of the startup chunk splits the single 1.7MB bundle.
+    let editPaneLoader: Promise<typeof import("./EditPane.svelte")> | undefined;
+    function loadEditPane() {
+        editPaneLoader ??= import("./EditPane.svelte");
+        return editPaneLoader;
+    }
+
+    let chatPanelLoader: Promise<typeof import("../ai/ChatPanel.svelte")> | undefined;
+    function loadChatPanel() {
+        chatPanelLoader ??= import("../ai/ChatPanel.svelte");
+        return chatPanelLoader;
+    }
 
     let drawerOpen = $state(false);
     let focusIdx = $state(-1);
@@ -1351,12 +1364,14 @@
                     {#snippet pane(p)}
                         {@const tab = aiTabs.find((entry) => entry.id === p.id)}
                         {#if tab}
-                            <ChatPanel
-                                tabId={tab.id}
-                                targetKind={tab.type as AiTargetKind}
-                                targetId={app.sessionIdForTab(tab.id) ?? null}
-                                active={aiVisible && tab.id === aiTabId}
-                            />
+                            {#await loadChatPanel() then { default: ChatPanel }}
+                                <ChatPanel
+                                    tabId={tab.id}
+                                    targetKind={tab.type as AiTargetKind}
+                                    targetId={app.sessionIdForTab(tab.id) ?? null}
+                                    active={aiVisible && tab.id === aiTabId}
+                                />
+                            {/await}
                         {/if}
                     {/snippet}
                 </SidePanel>
@@ -1417,7 +1432,9 @@
                         role="presentation"
                         oncontextmenu={(event) => openRouteContextMenu(event, tab)}
                     >
-                        <EditPane tabId={tab.id} active={tab.id === app.activeWorkspaceId() && !app.settingsActive()} />
+                        {#await loadEditPane() then { default: EditPane }}
+                            <EditPane tabId={tab.id} active={tab.id === app.activeWorkspaceId() && !app.settingsActive()} />
+                        {/await}
                     </div>
                 {/each}
 
