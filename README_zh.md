@@ -8,11 +8,11 @@
 > 
 > 桌面 · 手机 · JetBrains · 命令行，一套数据通用。
 
-[![Release](https://img.shields.io/github/v/release/shihuili1218/rssh)](https://github.com/shihuili1218/rssh/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/shihuili1218/rssh/total)](https://github.com/shihuili1218/rssh/releases)
+[![Release](https://img.shields.io/github/v/release/rssh-org/rssh)](https://github.com/rssh-org/rssh/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/rssh-org/rssh/total)](https://github.com/rssh-org/rssh/releases)
 ![Platforms](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux%20·%20Android·%20iOS-555)
-[![License](https://img.shields.io/github/license/shihuili1218/rssh)](LICENSE)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/shihuili1218/rssh)
+[![License](https://img.shields.io/github/license/rssh-org/rssh)](LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/rssh-org/rssh)
 
 <p align="center">
   <img src="https://rssh.ofcoder.com/img_local.png" alt="RSSH —— 问一句，AI 提议命令，你点同意才执行" height="180">
@@ -20,7 +20,7 @@
   <img src="https://rssh.ofcoder.com/img_ai_panel.png" alt="RSSH —— AI 面板读终端上下文，提议命令待批准" height="180"> 
 </p>
 
-<p align="center"><b><a href="https://github.com/shihuili1218/rssh/releases">⬇️ 下载最新版</a></b> &nbsp;·&nbsp; <a href="https://github.com/rssh-org/docs/blob/main/article_zh.md">为什么是 RSSH？</a></p>
+<p align="center"><b><a href="https://github.com/rssh-org/rssh/releases">⬇️ 下载最新版</a></b> &nbsp;·&nbsp; <a href="https://github.com/rssh-org/docs/blob/main/article_zh.md">为什么是 RSSH？</a></p>
 
 ---
 
@@ -87,7 +87,7 @@
 
 ## 安装
 
-从 [Releases](https://github.com/shihuili1218/rssh/releases) 下载：
+从 [Releases](https://github.com/rssh-org/rssh/releases) 下载：
 
 | 平台                  | 文件                                       | 备注                     |
 |---------------------|------------------------------------------|------------------------|

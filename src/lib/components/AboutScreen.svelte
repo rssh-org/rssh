@@ -9,7 +9,7 @@
   import { isIOS } from "../stores/app.svelte.ts";
   import WelcomeScreen from "./WelcomeScreen.svelte";
 
-  const REPO = "shihuili1218/rssh";
+  const REPO = "rssh-org/rssh";
   const REPO_URL = `https://github.com/${REPO}`;
   const ISSUES_URL = `${REPO_URL}/issues`;
   const LICENSE_URL = `${REPO_URL}/blob/main/LICENSE`;

@@ -8,11 +8,11 @@
 > 
 > Desktop · Mobile · JetBrains · CLI — one shared data store.
 
-[![Release](https://img.shields.io/github/v/release/shihuili1218/rssh)](https://github.com/shihuili1218/rssh/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/shihuili1218/rssh/total)](https://github.com/shihuili1218/rssh/releases)
+[![Release](https://img.shields.io/github/v/release/rssh-org/rssh)](https://github.com/rssh-org/rssh/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/rssh-org/rssh/total)](https://github.com/rssh-org/rssh/releases)
 ![Platforms](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux%20·%20Android·%20iOS-555)
-[![License](https://img.shields.io/github/license/shihuili1218/rssh)](LICENSE)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/shihuili1218/rssh)
+[![License](https://img.shields.io/github/license/rssh-org/rssh)](LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/rssh-org/rssh)
 
 <p align="center">
   <img src="https://rssh.ofcoder.com/img_local.png" alt="RSSH — ask a question, the AI proposes commands, you approve before they run" height="180">
@@ -20,7 +20,7 @@
   <img src="https://rssh.ofcoder.com/img_ai_panel.png" alt="RSSH — the AI panel reads the terminal and proposes commands for approval" height="180">  
 </p>
 
-<p align="center"><b><a href="https://github.com/shihuili1218/rssh/releases/latest">⬇️ Download latest</a></b> &nbsp;·&nbsp; <a href="https://github.com/rssh-org/docs/blob/main/article_en.md">Why RSSH?</a></p>
+<p align="center"><b><a href="https://github.com/rssh-org/rssh/releases/latest">⬇️ Download latest</a></b> &nbsp;·&nbsp; <a href="https://github.com/rssh-org/docs/blob/main/article_en.md">Why RSSH?</a></p>
 
 ---
 
@@ -87,7 +87,7 @@ Keys stay in your local OS keyserver; connection configs are encrypted into your
 
 ## Install
 
-Download from [Releases](https://github.com/shihuili1218/rssh/releases):
+Download from [Releases](https://github.com/rssh-org/rssh/releases):
 
 | Platform            | File                                     | Notes                        |
 |---------------------|------------------------------------------|------------------------------|
