@@ -270,6 +270,7 @@ const zh: Messages = {
   "plugins.area_mismatch": "这是{actual}插件，请从{expected}插件入口安装",
   "plugins.preview_of": "{name} 预览",
   "plugins.host_unavailable": "当前宿主不支持插件面板（无 asset 协议）",
+  "plugins.warn.trust": "安全提示：插件可在后台执行命令（本机 Shell 与 SSH 会话），请仅安装可信来源的第三方插件",
   "plugins.drag_hint": "拖拽调整顺序",
   "plugins.position.left": "左侧",
   "plugins.position.right": "右侧",
@@ -699,6 +700,8 @@ const zh: Messages = {
 
   // ── AI 排障：AiSettings ──
   "ai.settings.warn.byok": "BYOK：你的命令输出经本地脱敏后会发送到所选 LLM 提供方。提供方可能按其条款使用这些数据",
+  "ai.settings.warn.orca": "OrcaRouter 提供了免费的 DeepSeek-V4 模型，前往",
+  "ai.settings.warn.orca_link": "注册获取",
   "ai.settings.label.model": "MODEL",
   "ai.settings.label.endpoint": "ENDPOINT",
   "ai.settings.label.api_key": "API KEY",

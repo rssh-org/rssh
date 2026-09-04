@@ -268,6 +268,7 @@ const en = {
   "plugins.area_mismatch": "This is a {actual} plugin — use the {expected} region's install entry",
   "plugins.preview_of": "Preview of {name}",
   "plugins.host_unavailable": "Plugin panels are unavailable in this host (no asset protocol)",
+  "plugins.warn.trust": "Security note: plugins can run commands in the background (local shell and SSH sessions) — only install third-party plugins from sources you trust",
   "plugins.drag_hint": "Drag to reorder",
   "plugins.position.left": "Left",
   "plugins.position.right": "Right",
@@ -696,6 +697,8 @@ const en = {
 
   // ── AI Diagnose: AiSettings ──
   "ai.settings.warn.byok": "BYOK: command output is sanitized locally before being sent to the LLM provider. The provider may use this data per their terms",
+  "ai.settings.warn.orca": "OrcaRouter offers a free DeepSeek-V4 model: ",
+  "ai.settings.warn.orca_link": "sign up to claim it",
   "ai.settings.label.model": "MODEL",
   "ai.settings.label.endpoint": "ENDPOINT",
   "ai.settings.label.api_key": "API KEY",

@@ -177,6 +177,22 @@
 <div class="page">
   <div class="section-label">{t("settings.section.plugins")}</div>
 
+  <!-- Same trust warning idiom as AiSettings' BYOK note: icon + body in a
+       warning-tinted bar; body stacks the message over the author links. -->
+  <div class="warn">
+    <AppIcon name="warning" size={16} />
+    <div class="warn-body">
+      <div>{t("plugins.warn.trust")}</div>
+      <div class="links-row">
+        <a href={DEV_GUIDE_URL} onclick={(e) => openExternal(e, DEV_GUIDE_URL)}>{t("plugins.links.guide")} ↗</a>
+        <span class="dot">·</span>
+        <a href={EXAMPLE_PLUGIN_URL} onclick={(e) => openExternal(e, EXAMPLE_PLUGIN_URL)}>{t("plugins.links.example")} ↗</a>
+        <span class="dot">·</span>
+        <a href={MASCOT_PLUGIN_URL} onclick={(e) => openExternal(e, MASCOT_PLUGIN_URL)}>{t("plugins.links.mascot")} ↗</a>
+      </div>
+    </div>
+  </div>
+  
   <input
     bind:this={fileInput}
     type="file"
@@ -252,13 +268,7 @@
     </div>
   </div>
 
-  <div class="links-row">
-    <a href={DEV_GUIDE_URL} onclick={(e) => openExternal(e, DEV_GUIDE_URL)}>{t("plugins.links.guide")} ↗</a>
-    <span class="dot">·</span>
-    <a href={EXAMPLE_PLUGIN_URL} onclick={(e) => openExternal(e, EXAMPLE_PLUGIN_URL)}>{t("plugins.links.example")} ↗</a>
-    <span class="dot">·</span>
-    <a href={MASCOT_PLUGIN_URL} onclick={(e) => openExternal(e, MASCOT_PLUGIN_URL)}>{t("plugins.links.mascot")} ↗</a>
-  </div>
+
 
   <!-- ═══ The stage: one window mock with EVERY plugin area combined —
        side column at its chosen edge (full height), strip bar docked to the
@@ -367,6 +377,26 @@
     font-size: 12px;
     color: var(--warning);
   }
+  /* Trust warning — same style as AiSettings' BYOK note. */
+  .warn {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    background: color-mix(in srgb, var(--warning) 12%, var(--bg));
+    border-left: 3px solid var(--warning);
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-sub);
+    line-height: 1.5;
+  }
+  .warn-body {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .warn a { color: var(--accent); }
 
   /* ── Area cards: same skeleton as AiSettings' danger-card — toggle head
      (title/desc left, switch right), full-bleed divider, dock-edge row. ── */
@@ -670,19 +700,12 @@
     outline: 1px solid var(--error);
   }
 
-  /* ── Author-facing links (guide + reference plugin) ── */
+  /* ── Author-facing links (guide + reference plugin) — accent via .warn a ── */
   .links-row {
     display: flex;
     align-items: center;
     gap: 10px;
     font-size: 12px;
-  }
-  .links-row a {
-    color: var(--text-sub);
-    text-decoration: none;
-  }
-  .links-row a:hover {
-    color: var(--accent);
   }
   .links-row .dot {
     color: var(--text-dim);

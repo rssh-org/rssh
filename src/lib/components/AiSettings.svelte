@@ -15,6 +15,9 @@
         );
     }
 
+    // Free-model referral shown on its own line under the BYOK notice.
+    const ORCA_URL = "https://www.orcarouter.ai/ref/ref_183b245f43cae453d9da";
+
     // ─── Provider 管理（动态发现式：列表 + 内联表单）────────────
     // 数据模型：ai_providers 表一行一个 provider（name/protocol/endpoint/model
     // + key 在 secret store）。协议三选一；endpoint 必填，chips 一键填官方值。
@@ -546,9 +549,9 @@
     <!-- Provider 管理 + BYOK 警告合在一个 .card.surface-raised。
          交互照动态发现：顶部"新建"，列表行（active 单选 / 编辑 / 删除二次确认），
          新建或编辑时渲染内联表单 AiProviderForm（三协议卡 + endpoint chips）。 -->
-    <div class="card surface-raised provider-card">
-        <div class="warn">
-            <AppIcon name="warning" size={16} />
+    <div class="warn">
+        <AppIcon name="warning" size={16} />
+        <div class="warn-body">
             <span>
                 {t("ai.settings.warn.byok")}
                 （<a href="https://www.anthropic.com/legal/privacy" onclick={(e) => openExternal(e, "https://www.anthropic.com/legal/privacy")}>Anthropic</a>
@@ -556,7 +559,13 @@
                  / <a href="https://platform.deepseek.com/downloads" onclick={(e) => openExternal(e, "https://platform.deepseek.com/downloads")}>DeepSeek</a>
                  / <a href="https://docs.bigmodel.cn/cn/terms/privacy-policy" onclick={(e) => openExternal(e, "https://docs.bigmodel.cn/cn/terms/privacy-policy")}>GLM</a>）。
             </span>
+            <span>
+                {t("ai.settings.warn.orca")}<a href={ORCA_URL} onclick={(e) => openExternal(e, ORCA_URL)}>{t("ai.settings.warn.orca_link")}</a>
+            </span>
         </div>
+    </div>
+
+    <div class="card surface-raised provider-card">
 
         <div class="card-head">
             <span class="hint">{t("ai.settings.provider.hint")}</span>
@@ -977,6 +986,12 @@
         line-height: 1.5;
     }
     .warn a { color: var(--accent); }
+    .warn-body {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
 
     .form {
         display: flex;
