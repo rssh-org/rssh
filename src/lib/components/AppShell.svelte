@@ -44,15 +44,22 @@
     // Lazy pane components. EditPane (CodeMirror) and ChatPanel (marked/DOMPurify)
     // are heavy and not needed until the user opens an edit tab or an AI panel —
     // keeping them out of the startup chunk splits the single 1.7MB bundle.
+    // Rejections are never cached, so reopening the tab retries the load.
     let editPaneLoader: Promise<typeof import("./EditPane.svelte")> | undefined;
     function loadEditPane() {
-        editPaneLoader ??= import("./EditPane.svelte");
+        editPaneLoader ??= import("./EditPane.svelte").catch((err) => {
+            editPaneLoader = undefined;
+            throw err;
+        });
         return editPaneLoader;
     }
 
     let chatPanelLoader: Promise<typeof import("../ai/ChatPanel.svelte")> | undefined;
     function loadChatPanel() {
-        chatPanelLoader ??= import("../ai/ChatPanel.svelte");
+        chatPanelLoader ??= import("../ai/ChatPanel.svelte").catch((err) => {
+            chatPanelLoader = undefined;
+            throw err;
+        });
         return chatPanelLoader;
     }
 
@@ -1371,6 +1378,8 @@
                                     targetId={app.sessionIdForTab(tab.id) ?? null}
                                     active={aiVisible && tab.id === aiTabId}
                                 />
+                            {:catch error}
+                                <div>{t("pane.load_failed", { error: String(error) })}</div>
                             {/await}
                         {/if}
                     {/snippet}
@@ -1434,6 +1443,8 @@
                     >
                         {#await loadEditPane() then { default: EditPane }}
                             <EditPane tabId={tab.id} active={tab.id === app.activeWorkspaceId() && !app.settingsActive()} />
+                        {:catch error}
+                            <div>{t("pane.load_failed", { error: String(error) })}</div>
                         {/await}
                     </div>
                 {/each}

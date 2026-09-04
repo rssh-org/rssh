@@ -1104,6 +1104,7 @@ const en = {
   // Playback
   "playback.back": "← Recordings",
   "playback.load_failed": "Failed to load recording: {error}",
+  "pane.load_failed": "Failed to load panel: {error}",
   // Shortcuts
   "shortcuts.section.global": "Global",
   "shortcuts.section.home": "Home",
