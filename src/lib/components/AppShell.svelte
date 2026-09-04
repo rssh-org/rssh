@@ -1379,7 +1379,7 @@
                                     active={aiVisible && tab.id === aiTabId}
                                 />
                             {:catch error}
-                                <div>{t("pane.load_failed", { error: String(error) })}</div>
+                                <div>{t("pane.load_failed", { error: errMsg(error) })}</div>
                             {/await}
                         {/if}
                     {/snippet}
@@ -1444,7 +1444,7 @@
                         {#await loadEditPane() then { default: EditPane }}
                             <EditPane tabId={tab.id} active={tab.id === app.activeWorkspaceId() && !app.settingsActive()} />
                         {:catch error}
-                            <div>{t("pane.load_failed", { error: String(error) })}</div>
+                            <div>{t("pane.load_failed", { error: errMsg(error) })}</div>
                         {/await}
                     </div>
                 {/each}
