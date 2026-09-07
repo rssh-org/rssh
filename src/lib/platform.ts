@@ -16,9 +16,12 @@ export function detectPlatform(navigatorInfo?: NavigatorPlatformInfo): PlatformI
   const isIPadDesktopUA = /Macintosh/i.test(userAgent)
     && (navigatorInfo.maxTouchPoints ?? 0) > 1;
   const isIOS = /iPhone|iPad|iPod/i.test(userAgent) || isIPadDesktopUA;
+  // OpenHarmony covers HarmonyOS NEXT: ArkWeb UAs say "OpenHarmony" and
+  // older builds say "HarmonyOS"; either way it rides the mobile UI.
+  const isHarmony = /OpenHarmony|HarmonyOS/i.test(userAgent);
   return {
     isIOS,
-    isMobile: isIOS || /Android/i.test(userAgent),
+    isMobile: isIOS || isHarmony || /Android/i.test(userAgent),
   };
 }
 

@@ -24,6 +24,16 @@ describe("detectPlatform", () => {
       .toEqual({ isIOS: false, isMobile: true });
   });
 
+  it("recognizes HarmonyOS ArkWeb as mobile but not iOS", () => {
+    expect(
+      detectPlatform({
+        userAgent:
+          "Mozilla/5.0 (Phone; OpenHarmony 5.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36 ArkWeb/4.1.6.1 Mobile",
+        maxTouchPoints: 5,
+      }),
+    ).toEqual({ isIOS: false, isMobile: true });
+  });
+
   it("does not misclassify a touch-capable Mac or ordinary desktop", () => {
     expect(detectPlatform({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15)", maxTouchPoints: 1 }))
       .toEqual({ isIOS: false, isMobile: false });

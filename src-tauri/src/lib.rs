@@ -67,10 +67,21 @@ pub fn run() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Official plugins ship no OHOS backend (see the Cargo.toml target table
+    // that gates them); every other target registers them exactly as before.
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos")),
+        target_os = "android",
+        target_os = "ios"
+    ))]
+    let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_fs::init());
+    builder
         .on_window_event(|window, event| {
             match event {
                 // Mobile (Android/iOS): Activity lifecycle changes can fire
@@ -87,7 +98,14 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            #[cfg(mobile)]
+            // OHOS: app_data_dir() aborts at startup — no HOME, the linux
+            // path resolver returns UnknownPath and the panic hook kills the
+            // process before any UI. The sandbox files dir is stable; it is
+            // the same storage as /data/app/el2/100/base/<bundle>/files.
+            #[cfg(target_env = "ohos")]
+            let data_dir = std::path::PathBuf::from("/data/storage/el2/base/files");
+            // fork defines mobile = ios|android|ohos, desktop = !mobile
+            #[cfg(all(mobile, not(target_env = "ohos")))]
             let data_dir = app.path().app_data_dir()?;
             #[cfg(desktop)]
             let data_dir = db::data_dir()?;

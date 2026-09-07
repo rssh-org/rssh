@@ -49,11 +49,13 @@ use crate::error::{AppError, AppResult};
 pub mod crypto;
 mod db_store;
 mod hybrid_store;
+// keyring crate is not compiled for ohos (Cargo.toml target table), so its
+// linux branch must not claim it either — target_os = "linux" is true there.
 #[cfg(any(
     target_os = "macos",
     target_os = "ios",
     target_os = "windows",
-    target_os = "linux"
+    all(target_os = "linux", not(target_env = "ohos"))
 ))]
 mod keyring_store;
 mod master_key;
@@ -178,7 +180,7 @@ fn probe_keyring() -> Option<Arc<dyn SecretStore>> {
         target_os = "macos",
         target_os = "ios",
         target_os = "windows",
-        target_os = "linux"
+        all(target_os = "linux", not(target_env = "ohos"))
     ))]
     {
         keyring_store::try_open().map(|kr| {
@@ -190,7 +192,7 @@ fn probe_keyring() -> Option<Arc<dyn SecretStore>> {
         target_os = "macos",
         target_os = "ios",
         target_os = "windows",
-        target_os = "linux"
+        all(target_os = "linux", not(target_env = "ohos"))
     )))]
     {
         None
