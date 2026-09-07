@@ -22,7 +22,10 @@ cd rssh && git checkout feat/ohos-port
 # 2. 装 fork 的 tauri CLI（crates.io 官方版没有 ohos 子命令，必须装这个）
 cargo install --git https://github.com/yangyongzhen/tauri --branch feat/open-harmony tauri-cli
 
-# 3. Rust 目标（build-ohos.sh 也会自动装）
+# 3. 构建助手（cargo tauri ohos build 内部调用）
+cargo install ohrs
+
+# 4. Rust 目标（build-ohos.sh 也会自动装）
 rustup target add aarch64-unknown-linux-ohos
 ```
 
@@ -51,19 +54,18 @@ rustup target add aarch64-unknown-linux-ohos
 脚本做这些事：探测 SDK → 配 NDK 交叉编译环境变量 →
 `cargo tauri ohos build -t aarch64 --features custom-protocol`。
 
-### Windows 已知坑（来自已验证的真机移植实录，别慌）
+### Windows 已知坑
 
-- **HAP 装配最后一步报错**（`Failed to assemble HAP: 系统找不到指定的文件`）：
-  Windows 上拉不起 `.bat`，属预期行为。`.so` 已经编译好了，手工装配：
-  ```bash
-  cd src-tauri/gen/ohos && ohpm install && cd entry && ohpm install && cd ..
-  node "<DevEco>/tools/hvigor/bin/hvigorw.js" assembleHap --mode module -p product=default --no-daemon
-  ```
-- **hvigor 报 ENOENT / 找不到 cmd.exe、java**：PATH 必须是纯 Windows 风格
-  （含 `C:\Windows\System32` + DevEco 的 node、`jbr\bin`），MSYS/Git Bash 的
-  PATH 转换会坏事。
-- 生成的工程 `entry/hvigorfile.ts` 若带 cargo 钩子在 Windows 上会炸，替换成
-  `plugins: []` 的无钩子版（.so 已手动编译时）。
+脚本会自动做三件善后：前端同步进 `rawfile`、剥掉 `entry/hvigorfile.ts` 的
+cargo 钩子、用 node 直调 hvigorw.js 重打 HAP。但 `cargo tauri ohos build`
+最后一步在 Windows 上仍会报 `.bat` 启动失败——脚本把它当非致命继续跑。若
+脚本尾部的 hvigor 重打也失败（PATH 里缺 cmd.exe/java），在**纯 Windows 风格
+PATH**（含 `System32` + DevEco 的 node、`jbr\bin`）下手动执行：
+
+```bash
+cd src-tauri/gen/ohos
+node "<DevEco>/tools/hvigor/bin/hvigorw.js" assembleHap --mode module -p product=default --no-daemon
+```
 
 macOS / Linux 上这些坑不存在，脚本应一路走通。
 

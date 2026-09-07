@@ -25,11 +25,13 @@ if ! cargo tauri ohos --help >/dev/null 2>&1; then
     echo "Install the fork CLI (see header of this script), then retry."
     exit 1
 fi
+command -v ohrs >/dev/null || { echo "Missing: ohrs (cargo install ohrs)"; exit 1; }
 
 # OHOS_HOME must point at the FULL SDK (the dir containing native/ + ets/),
 # not the bare NDK — DevEco's hvigor needs the complete component set.
 if [ -z "${OHOS_HOME:-}" ]; then
     for candidate in \
+        "/Applications/DevEco-Studio.app/Contents/sdk/"*/openharmony \
         "/Applications/DevEco Studio.app/Contents/sdk/"*/openharmony \
         "$HOME/ohos/sdk/openharmony" \
         "/opt/openharmony/sdk"; do
@@ -76,7 +78,61 @@ rustup target add aarch64-unknown-linux-ohos
 echo "=== Build Tauri OHOS (aarch64) ==="
 # custom-protocol is passed explicitly: without it the artifact embeds the
 # devUrl and ships a white screen (see the fork porting notes).
-cargo tauri ohos build -t aarch64 --features custom-protocol
+# The trailing `|| true`: on Windows the final HAP-assembly step of this
+# command fails on a .bat spawn even though the .so is built — we re-assemble
+# below ourselves anyway, so the initial failure is not fatal.
+cargo tauri ohos build -t aarch64 --features custom-protocol || \
+    echo "(initial HAP assembly failed — .so should still be staged; continuing)"
+
+# ── Post-build fixes (the fork's ohos pipeline has two gaps) ──
+OHOS_PROJECT="src-tauri/gen/ohos"
+
+# 1. The frontend never lands in the DevEco project on its own — sync it.
+RAWFILE="$OHOS_PROJECT/entry/src/main/resources/rawfile"
+rm -rf "$RAWFILE"
+mkdir -p "$RAWFILE"
+cp -r dist/. "$RAWFILE"/
+
+# 2. The generated entry/hvigorfile.ts shells out to a cargo-mobile2 daemon
+# (`dev-eco-studio-script`) that only exists inside a `cargo tauri ohos build`
+# invocation. Strip it so plain hvigor runs work; the .so it used to build is
+# already staged in entry/libs/arm64-v8a/ by the step above.
+HVIGORFILE="$OHOS_PROJECT/entry/hvigorfile.ts"
+if grep -q "tauriPlugin" "$HVIGORFILE"; then
+    cat > "$HVIGORFILE" <<'EOF'
+import { hapTasks } from '@ohos/hvigor-ohos-plugin';
+
+export default {
+  system: hapTasks,
+  /* cargo hook removed: librssh_lib.so is cross-compiled by build-ohos.sh
+     (cargo tauri ohos build) and already staged in entry/libs/arm64-v8a/.
+     The hook's dev-eco-studio-script needs the cargo-mobile2 daemon and is
+     the documented Windows blocker anyway. */
+  plugins: []
+}
+EOF
+fi
+
+# 3. Re-assemble so the HAP actually contains the frontend from step 1.
+if [ -z "${DEVECO_SDK_HOME:-}" ]; then
+    case "$OHOS_HOME" in
+        */openharmony) export DEVECO_SDK_HOME="${OHOS_HOME%/openharmony}" ;;
+        *) export DEVECO_SDK_HOME="$OHOS_HOME" ;;
+    esac
+fi
+HVIGOR_BIN=""
+for candidate in \
+    "/Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw.js" \
+    "${DEVECO_SDK_HOME%/sdk*}/tools/hvigor/bin/hvigorw.js"; do
+    if [ -f "$candidate" ]; then HVIGOR_BIN="$candidate"; break; fi
+done
+if [ -n "$HVIGOR_BIN" ]; then
+    echo "=== Re-assemble HAP with frontend ==="
+    (cd "$OHOS_PROJECT" && node "$HVIGOR_BIN" assembleHap --mode module -p product=default --no-daemon)
+else
+    echo "WARNING: hvigorw.js not found — HAP lacks the frontend until you re-run"
+    echo "hvigor assembleHap from DevEco Studio (or install command-line tools)."
+fi
 
 echo "=== Done ==="
 SO="src-tauri/target/aarch64-unknown-linux-ohos/release/librssh_lib.so"

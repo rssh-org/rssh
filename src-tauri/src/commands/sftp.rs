@@ -13,6 +13,9 @@ use crate::state::AppState;
 use crate::state::{SessionKind, SessionOwner};
 
 #[cfg(desktop)]
+// The plugin crates exist everywhere except ohos (Cargo.toml target table);
+// bare FilePath is only used by the desktop-only dialogs below.
+#[cfg(desktop)]
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 /// Maximum recursion depth for the local walker. Mirrors the remote-side cap.
@@ -429,6 +432,9 @@ fn open_err(e: std::io::Error) -> AppError {
 
 /// Keeps an iOS security-scoped file URL active for exactly as long as the
 /// transfer owns its file handle. Other platforms need no matching release.
+// plugin-fs types in the signatures — compiled wherever the plugin table
+// covers (everywhere but ohos).
+#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
 struct FileAccessGuard {
     #[cfg(target_os = "ios")]
     app: tauri::AppHandle,
@@ -436,6 +442,7 @@ struct FileAccessGuard {
     path: Option<tauri_plugin_fs::FilePath>,
 }
 
+#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
 impl FileAccessGuard {
     fn new(app: &tauri::AppHandle, path: &tauri_plugin_fs::FilePath) -> Self {
         #[cfg(target_os = "ios")]
@@ -457,6 +464,7 @@ impl FileAccessGuard {
     }
 }
 
+#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
 impl Drop for FileAccessGuard {
     fn drop(&mut self) {
         #[cfg(target_os = "ios")]
@@ -471,6 +479,7 @@ impl Drop for FileAccessGuard {
 
 /// Resolve a desktop path, Android content URI, or iOS security-scoped file URL
 /// to a real file. The guard must live until the file handle is dropped.
+#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
 fn fs_open_read(
     app: &tauri::AppHandle,
     fp: tauri_plugin_fs::FilePath,
@@ -485,6 +494,7 @@ fn fs_open_read(
 
 /// Same as [`fs_open_read`] but opens (create + truncate) for writing — the
 /// mobile download target.
+#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
 fn fs_open_write(
     app: &tauri::AppHandle,
     fp: tauri_plugin_fs::FilePath,
@@ -500,6 +510,7 @@ fn fs_open_write(
 /// Stream-download to a caller-supplied local target. transfer_id is used as the
 /// `sftp:progress:{transfer_id}` event suffix (R1) so the frontend listens
 /// per-transfer instead of multiplexing one global stream.
+#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
 #[tauri::command]
 pub async fn sftp_download_to(
     app: tauri::AppHandle,
@@ -535,6 +546,7 @@ pub async fn sftp_download_to(
 }
 
 /// Stream-upload from a caller-supplied local source. transfer_id mirrors above.
+#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
 #[tauri::command]
 pub async fn sftp_upload_from(
     app: tauri::AppHandle,
@@ -566,6 +578,42 @@ pub async fn sftp_upload_from(
     )
     .await
     .map(|_| ())
+}
+
+// ── OHOS stubs ──
+// No plugin-fs backend on ohos (PoC): local-file transfers stay disabled until
+// the ArkTS filePicker bridge lands. Same signatures so the invoke_handler
+// list is shared across targets; the frontend surfaces this error.
+#[cfg(target_env = "ohos")]
+#[tauri::command]
+pub async fn sftp_download_to(
+    _app: tauri::AppHandle,
+    _state: State<'_, AppState>,
+    _sftp_id: String,
+    _remote_path: String,
+    _local_path: String,
+    _transfer_id: String,
+) -> AppResult<()> {
+    Err(AppError::other(
+        "ohos_file_bridge_pending",
+        json!({ "hint": "SFTP local-file transfers arrive with the ohos file picker bridge" }),
+    ))
+}
+
+#[cfg(target_env = "ohos")]
+#[tauri::command]
+pub async fn sftp_upload_from(
+    _app: tauri::AppHandle,
+    _state: State<'_, AppState>,
+    _sftp_id: String,
+    _local_path: String,
+    _remote_path: String,
+    _transfer_id: String,
+) -> AppResult<()> {
+    Err(AppError::other(
+        "ohos_file_bridge_pending",
+        json!({ "hint": "SFTP local-file transfers arrive with the ohos file picker bridge" }),
+    ))
 }
 
 #[tauri::command]

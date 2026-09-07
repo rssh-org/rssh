@@ -1,5 +1,4 @@
 use tauri::AppHandle;
-use tauri_plugin_opener::OpenerExt;
 
 use crate::error::{AppError, AppResult};
 
@@ -10,8 +9,11 @@ use crate::error::{AppError, AppResult};
 /// route had no implementation and the invoke silently failed for users.
 ///
 /// Refuses non-http(s) schemes to prevent abuse (file://, javascript:, …).
+#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
 #[tauri::command]
 pub fn open_external_url(app: AppHandle, url: String) -> AppResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(AppError::config(
             "window_non_https_url",
@@ -24,4 +26,21 @@ pub fn open_external_url(app: AppHandle, url: String) -> AppResult<()> {
             serde_json::json!({ "err": e.to_string() }),
         )
     })
+}
+
+/// OHOS stub: tauri-plugin-opener has no ohos backend yet. The scheme guard
+/// stays so the failure mode is identical for bad input on every target.
+#[cfg(target_env = "ohos")]
+#[tauri::command]
+pub fn open_external_url(_app: AppHandle, url: String) -> AppResult<()> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(AppError::config(
+            "window_non_https_url",
+            serde_json::json!({ "url": url }),
+        ));
+    }
+    Err(AppError::other(
+        "ohos_opener_pending",
+        serde_json::json!({ "hint": "URL opening arrives with the ohos opener bridge" }),
+    ))
 }

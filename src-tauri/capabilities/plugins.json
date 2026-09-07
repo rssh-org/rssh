@@ -1,0 +1,12 @@
+{
+  "identifier": "plugins",
+  "description": "Official plugin capabilities — platforms that compile opener/dialog/fs. OHOS has no plugin backends (PoC), so it is excluded here and the permission set stays valid.",
+  "windows": ["main", "rssh-*"],
+  "platforms": ["macOS", "windows", "linux", "android", "iOS"],
+  "permissions": [
+    "opener:default",
+    "dialog:default",
+    "fs:default",
+    "fs:allow-write-text-file"
+  ]
+}
