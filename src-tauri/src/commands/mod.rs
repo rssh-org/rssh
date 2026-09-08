@@ -17,6 +17,7 @@ pub mod settings;
 pub mod sftp;
 pub mod sync;
 pub mod telnet;
+pub mod ui_state;
 pub mod update;
 #[cfg(desktop)]
 pub mod window;

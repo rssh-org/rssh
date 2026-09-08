@@ -82,7 +82,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init());
     builder
-        .on_window_event(|window, event| {
+        // `_window`: only the desktop Destroyed branch below uses it; on ohos
+        // (mobile alias) the whole match arm is cfg'd out.
+        .on_window_event(|_window, event| {
             match event {
                 // Mobile (Android/iOS): Activity lifecycle changes can fire
                 // WindowEvent::Destroyed when the app merely goes to background
@@ -90,9 +92,9 @@ pub fn run() {
                 // would silently disconnect every SSH tab. Desktop only.
                 #[cfg(desktop)]
                 tauri::WindowEvent::Destroyed => {
-                    let state = window.state::<AppState>();
+                    let state = _window.state::<AppState>();
                     // Close only sessions belonging to this window.
-                    commands::lifecycle::close_window_sessions(&state, window.label());
+                    commands::lifecycle::close_window_sessions(&state, _window.label());
                 }
                 _ => {}
             }
@@ -206,6 +208,10 @@ pub fn run() {
             commands::settings::read_recording,
             commands::settings::secret_backend,
             commands::settings::list_fonts,
+            // localStorage persistence for the OHOS ArkWeb polyfill (no-op
+            // target elsewhere: real localStorage exists there).
+            commands::ui_state::ui_state_load,
+            commands::ui_state::ui_state_save,
             // plugins
             commands::plugin::plugins_root,
             commands::plugin::install_plugin,

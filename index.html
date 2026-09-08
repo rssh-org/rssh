@@ -10,26 +10,71 @@
     <div id="app"></div>
     <script>
       // HarmonyOS ArkWeb: window.localStorage is null under the custom
-      // tauri://localhost scheme. The AI store reads localStorage at module
-      // load, so this must run as an inline classic script BEFORE any ES
-      // module (module imports are hoisted and would win the race). In-memory
-      // fallback only — persisted data lives in SQLite, not here.
+      // tauri://localhost scheme. This must run as an inline classic script
+      // BEFORE the app modules load (store modules read localStorage at
+      // module-eval time). The Map is refilled from Rust (ui_state_load) and
+      // flushed back (ui_state_save, debounced), so UI state survives
+      // restarts. Everywhere else localStorage exists and none of this runs.
       if (typeof window !== "undefined" && !window.localStorage) {
         var __rsshLs = new Map();
+        var __rsshSave = null;
+        var __rsshInvoke = function () {
+          return window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke;
+        };
+        function __rsshScheduleSave() {
+          if (__rsshSave) return;
+          __rsshSave = setTimeout(function () {
+            __rsshSave = null;
+            var invoke = __rsshInvoke();
+            if (!invoke) return;
+            var obj = {};
+            __rsshLs.forEach(function (v, k) { obj[k] = v; });
+            invoke("ui_state_save", { uiState: JSON.stringify(obj) }).catch(function () {});
+          }, 500);
+        }
         Object.defineProperty(window, "localStorage", {
           value: {
             getItem: function (k) { return __rsshLs.has(String(k)) ? __rsshLs.get(String(k)) : null; },
-            setItem: function (k, v) { __rsshLs.set(String(k), String(v)); },
-            removeItem: function (k) { __rsshLs.delete(String(k)); },
-            clear: function () { __rsshLs.clear(); },
+            setItem: function (k, v) { __rsshLs.set(String(k), String(v)); __rsshScheduleSave(); },
+            removeItem: function (k) { __rsshLs.delete(String(k)); __rsshScheduleSave(); },
+            clear: function () { __rsshLs.clear(); __rsshScheduleSave(); },
             key: function (i) { return Array.from(__rsshLs.keys())[i] ?? null; },
             get length() { return __rsshLs.size; },
           },
           configurable: true,
           writable: true,
         });
+        // Restore before the app modules evaluate. Store modules read
+        // localStorage at import time, so the app entry is imported only
+        // after this promise resolves (see the loader below).
+        var __rsshResolve;
+        window.__rsshLsReady = new Promise(function (r) { __rsshResolve = r; });
+        var __rsshTries = 0;
+        (function restore() {
+          var invoke = __rsshInvoke();
+          if (!invoke && ++__rsshTries < 50) return setTimeout(restore, 100);
+          if (!invoke) return __rsshResolve(); // no bridge: stay in-memory
+          invoke("ui_state_load")
+            .then(function (blob) {
+              if (blob) {
+                try {
+                  var obj = JSON.parse(blob);
+                  Object.keys(obj).forEach(function (k) { __rsshLs.set(k, String(obj[k])); });
+                } catch (e) { /* corrupt blob: keep defaults */ }
+              }
+              __rsshResolve();
+            })
+            .catch(function () { __rsshResolve(); });
+        })();
       }
     </script>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module">
+      // The app entry is a dynamic import behind the restore promise: store
+      // modules evaluate only after the polyfill Map has been refilled.
+      // Platforms with a real localStorage have no __rsshLsReady at all.
+      ((window.__rsshLsReady || Promise.resolve())).then(function () {
+        import("/src/main.ts");
+      });
+    </script>
   </body>
 </html>
