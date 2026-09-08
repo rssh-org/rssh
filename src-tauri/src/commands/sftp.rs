@@ -12,7 +12,6 @@ use crate::ssh::sftp::{FileStat, RemoteEntry, SftpHandle, WalkEntry};
 use crate::state::AppState;
 use crate::state::{SessionKind, SessionOwner};
 
-#[cfg(desktop)]
 // The plugin crates exist everywhere except ohos (Cargo.toml target table);
 // bare FilePath is only used by the desktop-only dialogs below.
 #[cfg(desktop)]
