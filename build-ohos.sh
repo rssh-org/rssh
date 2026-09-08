@@ -114,8 +114,11 @@ EOF
 fi
 
 # 3. Re-assemble so the HAP actually contains the frontend from step 1.
+# hvigor wants the SDK root that CONTAINS the version dir (…/sdk with
+# sdk/default/openharmony below it), so peel both /openharmony and /default.
 if [ -z "${DEVECO_SDK_HOME:-}" ]; then
     case "$OHOS_HOME" in
+        */sdk/default/openharmony) export DEVECO_SDK_HOME="${OHOS_HOME%/sdk/default/openharmony}/sdk" ;;
         */openharmony) export DEVECO_SDK_HOME="${OHOS_HOME%/openharmony}" ;;
         *) export DEVECO_SDK_HOME="$OHOS_HOME" ;;
     esac
