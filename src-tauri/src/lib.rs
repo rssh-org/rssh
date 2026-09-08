@@ -315,6 +315,8 @@ pub fn run() {
             #[cfg(desktop)]
             commands::sftp::sftp_pick_open_files,
             commands::sftp::sftp_cancel_transfer,
+            // Plain file write for text exports where plugin-fs is absent (ohos).
+            commands::sftp::write_text_file,
             commands::sftp::sftp_remove,
             commands::sftp::sftp_rename,
             commands::sftp::sftp_stat,

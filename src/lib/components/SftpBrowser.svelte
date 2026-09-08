@@ -369,9 +369,12 @@
                 const { queued, walkErrors } = await queueDownloads([entry], dir);
                 if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
                 if (queued > 0) notice = t("sftp.queued_n", { n: queued });
-            } else if (app.isMobile) {
-                // Mobile: pick a SAF save target via the dialog plugin and stream
-                // to its content:// URI through the shared transfer queue.
+            } else if (app.isMobile && !app.isHarmony) {
+                // Mobile (Android/iOS): pick a SAF save target via the dialog
+                // plugin and stream to its content:// URI through the shared
+                // transfer queue. HarmonyOS has no plugin backends and falls
+                // through to the invoke-based desktop branch below, whose
+                // ohos pick command stages under Downloads/rssh.
                 const { save } = await import("@tauri-apps/plugin-dialog");
                 const target = await save({ defaultPath: entry.name });
                 if (!target) return;
@@ -526,6 +529,23 @@
         notice = "";
         if (!meta.sessionId) { error = "Missing SSH session"; return; }
         try {
+            if (app.isHarmony) {
+                // No dialog plugin on ohos: the pick command lists everything
+                // staged under Downloads/rssh (files land there from other
+                // apps, or from rssh downloads) and queues each one.
+                const files = await invoke<string[] | null>("sftp_pick_open_files");
+                if (!files) { error = t("sftp.ohos_stage_empty"); return; }
+                for (const f of files) {
+                    const name = f.split("/").pop() || `upload-${fileStamp()}`;
+                    await transfers.startUpload({
+                        sessionId: meta.sessionId,
+                        localPath:  f,
+                        remotePath: joinRemote(cwd, name),
+                    });
+                }
+                notice = t("sftp.queued_n", { n: files.length });
+                return;
+            }
             const { open } = await import("@tauri-apps/plugin-dialog");
             const src = await open({ multiple: false, directory: false });
             if (!src || Array.isArray(src)) return;

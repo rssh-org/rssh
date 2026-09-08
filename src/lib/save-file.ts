@@ -2,15 +2,19 @@
  * Save text to a user-chosen file. One path for desktop, mobile and browser —
  * the write side mirror of pickTextFile.
  *
- * - real Tauri (desktop + mobile): native save dialog (`@tauri-apps/plugin-dialog`)
+ * - real Tauri (desktop + Android/iOS): native save dialog (`@tauri-apps/plugin-dialog`)
  *   + write (`@tauri-apps/plugin-fs`). fs accepts both desktop paths and the
  *   `content://` URIs Android's SAF returns, so one call covers every target.
+ * - HarmonyOS: no plugin backends — invoke the ohos pick command (stages under
+ *   Downloads/rssh) and a plain write command.
  * - plain browser: a Blob download to the downloads folder.
  * - JCEF (IDE plugin): downloads are silently dropped, so reject with a clear,
  *   localizable error instead of doing nothing.
  *
  * Resolves the chosen path/name, or null if the user cancelled.
  */
+import { isHarmony } from "./platform.ts";
+
 export interface SaveOpts {
   defaultName: string;
   filters?: { name: string; extensions: string[] }[];
@@ -26,6 +30,18 @@ export async function saveTextFile(content: string, opts: SaveOpts): Promise<str
       );
     downloadTextBlob(content, opts.defaultName);
     return opts.defaultName;
+  }
+
+  // HarmonyOS: no dialog/fs plugin backends — the pick command stages a path
+  // under Downloads/rssh and a plain invoke writes it.
+  if (isHarmony) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const path = await invoke<string | null>("sftp_pick_save_path", {
+      defaultName: opts.defaultName,
+    });
+    if (path == null) return null;
+    await invoke("write_text_file", { path, contents: content });
+    return path;
   }
 
   // Loaded lazily so a browser build never pulls the plugin modules.

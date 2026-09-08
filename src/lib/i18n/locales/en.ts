@@ -92,6 +92,7 @@ const en = {
   "sftp.column.size": "Size",
   "sftp.column.modified": "Modified",
   "sftp.queued_n": "Queued {n} transfer(s)",
+  "sftp.ohos_stage_empty": "Nothing to upload — stage files in Downloads/rssh first",
   "sftp.folder_empty": "Folder has no files",
   "sftp.walk_failed": "Walk failed:",
   "sftp.ctx.download": "Download",

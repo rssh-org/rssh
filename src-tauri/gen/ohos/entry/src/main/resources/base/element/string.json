@@ -11,6 +11,10 @@
     {
       "name": "EntryAbility_label",
       "value": "label"
+    },
+    {
+      "name": "download_perm_reason",
+      "value": "SFTP transfers stage files in the public Downloads folder"
     }
   ]
 }

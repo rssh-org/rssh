@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import * as ai from "../ai/store.svelte.ts";
 import * as pluginStore from "../plugins/store.svelte.ts";
 import { errMsg, t } from "../i18n/index.svelte.ts";
-import { isIOS, isMobile } from "../platform.ts";
+import { isHarmony, isIOS, isMobile } from "../platform.ts";
 import type {
   CommandBlockRedactionRule as RedactionRule,
   CommandBlockRedactionSettings as RedactionSettings,
@@ -23,7 +23,7 @@ import { createSidePanelState } from "./panel-state.svelte.ts";
 /* ═══════════════════════════════════════════════════════
    Platform
    ═══════════════════════════════════════════════════════ */
-export { isIOS, isMobile };
+export { isHarmony, isIOS, isMobile };
 
 /* ═══════════════════════════════════════════════════════
    Types

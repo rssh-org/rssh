@@ -34,6 +34,11 @@ describe("detectPlatform", () => {
     ).toEqual({ isIOS: false, isMobile: true });
   });
 
+  it("isMobile is true for a plain Linux desktop UA", () => {
+    expect(detectPlatform({ userAgent: "Mozilla/5.0 (X11; Linux x86_64)" }))
+      .toEqual({ isIOS: false, isMobile: false });
+  });
+
   it("does not misclassify a touch-capable Mac or ordinary desktop", () => {
     expect(detectPlatform({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15)", maxTouchPoints: 1 }))
       .toEqual({ isIOS: false, isMobile: false });

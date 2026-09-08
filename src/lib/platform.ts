@@ -31,5 +31,11 @@ const current = detectPlatform(
     : { userAgent: navigator.userAgent, maxTouchPoints: navigator.maxTouchPoints },
 );
 
+// Separate from PlatformInfo: only flows that must diverge INSIDE mobile
+// (e.g. SFTP pickers: SAF on Android, Downloads-dir staging on HarmonyOS)
+// read this.
+export const isHarmony =
+  typeof navigator !== "undefined" && /OpenHarmony|HarmonyOS/i.test(navigator.userAgent);
+
 export const isIOS = current.isIOS;
 export const isMobile = current.isMobile;

@@ -580,40 +580,139 @@ pub async fn sftp_upload_from(
     .map(|_| ())
 }
 
-// ── OHOS stubs ──
-// No plugin-fs backend on ohos (PoC): local-file transfers stay disabled until
-// the ArkTS filePicker bridge lands. Same signatures so the invoke_handler
-// list is shared across targets; the frontend surfaces this error.
+// ── OHOS local-file bridge ──
+// PoC design: no system picker yet (the plugin-dialog/fs backends are the
+// bigger ArkTS piece). Transfers go through the PUBLIC Downloads directory —
+// the app holds READ_WRITE_DOWNLOAD_DIRECTORY (requested by EntryAbility at
+// startup) and stages everything under Downloads/rssh. Huawei shifted the
+// public layout across API versions, so resolve by probing known candidates.
+#[cfg(target_env = "ohos")]
+fn ohos_downloads_dir() -> AppResult<PathBuf> {
+    const CANDIDATES: [&str; 2] = [
+        "/storage/Users/currentUser/Download",
+        "/storage/media/100/local/files/Download",
+    ];
+    for c in CANDIDATES {
+        let p = PathBuf::from(c);
+        if p.is_dir() {
+            return Ok(p);
+        }
+    }
+    Err(AppError::other(
+        "ohos_no_downloads_dir",
+        json!({
+            "hint": "public Download dir not visible — grant storage permission or the device layout changed"
+        }),
+    ))
+}
+
+#[cfg(target_env = "ohos")]
+fn ohos_rssh_dir() -> AppResult<PathBuf> {
+    let dir = ohos_downloads_dir()?.join("rssh");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| AppError::other("ohos_mkdir_failed", json!({ "err": e.to_string() })))?;
+    Ok(dir)
+}
+
 #[cfg(target_env = "ohos")]
 #[tauri::command]
 pub async fn sftp_download_to(
-    _app: tauri::AppHandle,
-    _state: State<'_, AppState>,
-    _sftp_id: String,
-    _remote_path: String,
-    _local_path: String,
-    _transfer_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    sftp_id: String,
+    remote_path: String,
+    local_path: String,
+    transfer_id: String,
 ) -> AppResult<()> {
-    Err(AppError::other(
-        "ohos_file_bridge_pending",
-        json!({ "hint": "SFTP local-file transfers arrive with the ohos file picker bridge" }),
-    ))
+    let sftp = get_sftp(&state, &sftp_id)?;
+    let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
+    let host = crate::emitter::Host::Tauri(app);
+    // Plain sandbox/public paths only — no content:// URIs on ohos.
+    let target = PathBuf::from(local_path);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AppError::other("ohos_mkdir_failed", json!({ "err": e.to_string() })))?;
+    }
+    sftp.download_streaming(&remote_path, &target, &host, &transfer_id, cancel)
+        .await
+        .map(|_| ())
 }
 
 #[cfg(target_env = "ohos")]
 #[tauri::command]
 pub async fn sftp_upload_from(
-    _app: tauri::AppHandle,
-    _state: State<'_, AppState>,
-    _sftp_id: String,
-    _local_path: String,
-    _remote_path: String,
-    _transfer_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    sftp_id: String,
+    local_path: String,
+    remote_path: String,
+    transfer_id: String,
 ) -> AppResult<()> {
-    Err(AppError::other(
-        "ohos_file_bridge_pending",
-        json!({ "hint": "SFTP local-file transfers arrive with the ohos file picker bridge" }),
-    ))
+    let sftp = get_sftp(&state, &sftp_id)?;
+    let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
+    let host = crate::emitter::Host::Tauri(app);
+    let mut reader = tokio::fs::File::open(&local_path).await?;
+    let total = reader.metadata().await.map(|m| m.len()).unwrap_or(0);
+    sftp.upload_streaming(
+        &mut reader,
+        total,
+        &remote_path,
+        &host,
+        &transfer_id,
+        cancel,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Returns a save target under Downloads/rssh. Named like the desktop pickers
+/// so the frontend flows are shared; there is just no dialog on ohos (yet).
+#[cfg(target_env = "ohos")]
+#[tauri::command]
+pub async fn sftp_pick_save_path(default_name: String) -> AppResult<Option<String>> {
+    let dir = ohos_rssh_dir()?;
+    Ok(Some(dir.join(default_name).display().to_string()))
+}
+
+/// "Picks" every file staged under Downloads/rssh — the upload source on
+/// ohos. Empty dir → None (frontend shows "nothing to upload").
+#[cfg(target_env = "ohos")]
+#[tauri::command]
+pub async fn sftp_pick_open_files() -> AppResult<Option<Vec<String>>> {
+    let dir = ohos_downloads_dir()?.join("rssh");
+    let mut files = Vec::new();
+    if dir.is_dir() {
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| AppError::other("ohos_readdir_failed", json!({ "err": e.to_string() })))?
+        {
+            let Ok(entry) = entry else { continue };
+            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                files.push(entry.path().display().to_string());
+            }
+        }
+    }
+    if files.is_empty() {
+        return Ok(None);
+    }
+    files.sort();
+    Ok(Some(files))
+}
+
+/// Plain text-file write used by save-file.ts where plugin-fs does not exist
+/// (ohos). Registered on every target — desktop already exposes equivalent
+/// writes through plugin-fs, so this adds no new surface.
+#[tauri::command]
+pub fn write_text_file(path: String, contents: String) -> AppResult<()> {
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            AppError::other(
+                "write_text_file_mkdir_failed",
+                json!({ "err": e.to_string() }),
+            )
+        })?;
+    }
+    std::fs::write(&path, contents)
+        .map_err(|e| AppError::other("write_text_file_failed", json!({ "err": e.to_string() })))
 }
 
 #[tauri::command]
