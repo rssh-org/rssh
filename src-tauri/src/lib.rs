@@ -306,13 +306,16 @@ pub fn run() {
             commands::sftp::sftp_save_file,
             #[cfg(desktop)]
             commands::sftp::sftp_pick_and_upload,
-            #[cfg(desktop)]
+            // pick_save_path/open_files/folder also have ohos impls staging
+            // under Downloads/rssh — the cfg here must cover BOTH, otherwise
+            // the function compiles in but never registers (Command not found).
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::sftp::sftp_pick_save_path,
             #[cfg(desktop)]
             commands::sftp::sftp_pick_open_path,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::sftp::sftp_pick_folder,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::sftp::sftp_pick_open_files,
             commands::sftp::sftp_cancel_transfer,
             // Plain file write for text exports where plugin-fs is absent (ohos).

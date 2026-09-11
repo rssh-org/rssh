@@ -673,6 +673,17 @@ pub async fn sftp_pick_save_path(default_name: String) -> AppResult<Option<Strin
     Ok(Some(dir.join(default_name).display().to_string()))
 }
 
+/// Directory-download target on ohos: a fresh subdir under Downloads/rssh
+/// (frontend queues each walked file into it).
+#[cfg(target_env = "ohos")]
+#[tauri::command]
+pub async fn sftp_pick_folder() -> AppResult<Option<String>> {
+    let dir = ohos_rssh_dir()?.join(format!("folder-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| AppError::other("ohos_mkdir_failed", json!({ "err": e.to_string() })))?;
+    Ok(Some(dir.display().to_string()))
+}
+
 /// "Picks" every file staged under Downloads/rssh — the upload source on
 /// ohos. Empty dir → None (frontend shows "nothing to upload").
 #[cfg(target_env = "ohos")]
