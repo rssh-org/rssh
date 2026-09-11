@@ -95,6 +95,7 @@ const zh: Messages = {
   "sftp.column.modified": "修改时间",
   "sftp.queued_n": "已加入队列：{n} 项",
   "sftp.ohos_stage_empty": "没有可上传的文件——请先把文件放到 下载/rssh 目录",
+  "sftp.ohos_pick_file": "选择要上传的文件（来自 下载/rssh）",
   "sftp.folder_empty": "文件夹内没有文件",
   "sftp.walk_failed": "目录展开失败：",
   "sftp.ctx.download": "下载",

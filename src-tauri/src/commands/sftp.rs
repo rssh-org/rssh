@@ -610,6 +610,21 @@ fn ohos_rssh_dir() -> AppResult<PathBuf> {
     let dir = ohos_downloads_dir()?.join("rssh");
     std::fs::create_dir_all(&dir)
         .map_err(|e| AppError::other("ohos_mkdir_failed", json!({ "err": e.to_string() })))?;
+    // create_dir_all is a no-op when the dir exists, so it can succeed on a
+    // mere stat. The public Downloads dir is permission-gated at WRITE time
+    // (grants reset on app updates/reinstalls) — probe once so the failure
+    // surfaces here as an actionable message instead of a bare EACCES deep
+    // inside a transfer.
+    let probe = dir.join(".write-probe");
+    std::fs::write(&probe, b"").map_err(|_| {
+        AppError::other(
+            "ohos_downloads_denied",
+            json!({
+                "hint": "No write access to the public Downloads folder — grant storage permission in system settings, then retry"
+            }),
+        )
+    })?;
+    let _ = std::fs::remove_file(&probe);
     Ok(dir)
 }
 
