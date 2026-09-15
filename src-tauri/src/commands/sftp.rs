@@ -122,10 +122,26 @@ fn get_sftp(state: &State<'_, AppState>, sftp_id: &str) -> AppResult<Arc<SftpHan
         .ok_or_else(|| AppError::not_found("sftp_session_not_found", json!({})))
 }
 
+/// SFTP 操作硬超时（秒）。挂在 NFS/网络存储上的 read/write 必须有个上限，
+/// 否则前端会永远停在"加载中…/保存中…"且退不出去。
+const SFTP_OP_TIMEOUT_SECS: u64 = 60;
+
+/// 给单个 SFTP 操作套超时：无论服务器怎么卡，命令在超时后必定返回错误，
+/// 前端 UI 永远不会无限等待。
+async fn with_sftp_timeout<T>(fut: impl std::future::Future<Output = AppResult<T>>) -> AppResult<T> {
+    match tokio::time::timeout(std::time::Duration::from_secs(SFTP_OP_TIMEOUT_SECS), fut).await {
+        Ok(r) => r,
+        Err(_) => Err(AppError::sftp(
+            "sftp_operation_timeout",
+            json!({ "timeout_secs": SFTP_OP_TIMEOUT_SECS }),
+        )),
+    }
+}
+
 #[tauri::command]
 pub async fn sftp_home(state: State<'_, AppState>, sftp_id: String) -> AppResult<String> {
     let h = get_sftp(&state, &sftp_id)?;
-    h.home_dir().await
+    with_sftp_timeout(h.home_dir()).await
 }
 
 #[tauri::command]
@@ -135,7 +151,7 @@ pub async fn sftp_list(
     path: String,
 ) -> AppResult<Vec<RemoteEntry>> {
     let h = get_sftp(&state, &sftp_id)?;
-    h.list_dir(&path).await
+    with_sftp_timeout(h.list_dir(&path)).await
 }
 
 /// Recursively list every file under a remote directory (symlink-to-file is
@@ -224,7 +240,7 @@ pub async fn sftp_download(
     path: String,
 ) -> AppResult<Vec<u8>> {
     let h = get_sftp(&state, &sftp_id)?;
-    h.download(&path).await
+    with_sftp_timeout(h.download(&path)).await
 }
 
 #[tauri::command]
@@ -235,7 +251,7 @@ pub async fn sftp_upload(
     data: Vec<u8>,
 ) -> AppResult<()> {
     let h = get_sftp(&state, &sftp_id)?;
-    h.upload(&path, &data).await
+    with_sftp_timeout(h.upload(&path, &data)).await
 }
 
 #[tauri::command]
@@ -245,7 +261,7 @@ pub async fn sftp_mkdir(
     path: String,
 ) -> AppResult<()> {
     let h = get_sftp(&state, &sftp_id)?;
-    h.mkdir(&path).await
+    with_sftp_timeout(h.mkdir(&path)).await
 }
 
 #[tauri::command]
@@ -575,7 +591,7 @@ pub async fn sftp_remove(
     path: String,
 ) -> AppResult<()> {
     let h = get_sftp(&state, &sftp_id)?;
-    h.remove(&path).await
+    with_sftp_timeout(h.remove(&path)).await
 }
 
 #[tauri::command]
@@ -586,7 +602,7 @@ pub async fn sftp_rename(
     new_path: String,
 ) -> AppResult<()> {
     let h = get_sftp(&state, &sftp_id)?;
-    h.rename(&old_path, &new_path).await
+    with_sftp_timeout(h.rename(&old_path, &new_path)).await
 }
 
 #[tauri::command]
@@ -596,7 +612,7 @@ pub async fn sftp_stat(
     path: String,
 ) -> AppResult<FileStat> {
     let h = get_sftp(&state, &sftp_id)?;
-    h.stat(&path).await
+    with_sftp_timeout(h.stat(&path)).await
 }
 
 /// 用户在传输页点"取消"调用：把 transfer_id 对应的 cancel flag 置 1，

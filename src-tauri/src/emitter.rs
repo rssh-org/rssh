@@ -12,6 +12,7 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
 
 use crate::state::AppState;
@@ -19,6 +20,15 @@ use crate::state::AppState;
 /// Returns `true` if the event was handed off (ws send queued), `false` once the
 /// connection is gone — lets `Host::emit` surface failure to prompt paths.
 type Sink = Arc<dyn Fn(&str, serde_json::Value) -> bool + Send + Sync>;
+
+/// Wire encoding for terminal byte streams (`ssh:data` / `pty:data` /
+/// `telnet:data` / `serial:data`): base64 text, never a JSON number array —
+/// the array form inflates every byte ~4x in the IPC payload and forces
+/// per-element JSON parsing on the webview. One definition here keeps the
+/// desktop Tauri sinks and the headless ws sinks byte-identical.
+pub fn b64_payload(bytes: &[u8]) -> String {
+    STANDARD.encode(bytes)
+}
 
 #[derive(Clone)]
 pub enum Host {
@@ -69,6 +79,14 @@ impl Host {
                 }
             }
         }
+    }
+
+    /// Terminal byte streams (`ssh:data` / `pty:data` / `telnet:data` /
+    /// `serial:data`) travel as base64 text, never a JSON number array (see
+    /// [`b64_payload`]). Both hosts share one wire shape (a JSON string), so
+    /// desktop and headless stay identical.
+    pub fn emit_bytes(&self, event: &str, bytes: &[u8]) -> tauri::Result<()> {
+        self.emit(event, b64_payload(bytes))
     }
 
     /// Replaces `app.state::<AppState>()`.

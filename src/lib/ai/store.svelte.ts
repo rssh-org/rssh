@@ -12,6 +12,7 @@ import { saveTextFile, fileStamp } from "../save-file.ts";
 import { createSidePanelState } from "../stores/panel-state.svelte.ts";
 import { t, errMsg, locale as currentLocale } from "../i18n/index.svelte.ts";
 import { extractOutput, findSentinel } from "./pty-output.ts";
+import { decodeStreamChunk } from "../terminal/stream-decode.ts";
 import { truncateCommand } from "./format.ts";
 import { PROBE_COMMAND, classifyProbeBuffer } from "./shell-probe.ts";
 import {
@@ -1176,8 +1177,8 @@ export async function probeRemoteShell(target_id: string): Promise<boolean> {
   // can never open a line mid-token and let `^P=` false-match a sliced echo line.
   const TAIL_CAP = 16 * 1024;
   let buffer = "";
-  const unlisten = await listen<number[]>(dataEvent, (e) => {
-    buffer += new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(e.payload));
+  const unlisten = await listen<string>(dataEvent, (e) => {
+    buffer += new TextDecoder("utf-8", { fatal: false }).decode(decodeStreamChunk(e.payload));
     if (buffer.length > TAIL_CAP) {
       const tail = buffer.slice(-TAIL_CAP);
       const nl = tail.indexOf("\n");
@@ -1536,9 +1537,9 @@ export async function executeCommand(
   };
 
   try {
-    const unlisten = await listen<number[]>(dataEvent, (e) => {
+    const unlisten = await listen<string>(dataEvent, (e) => {
       if (exec.status !== "running") return;
-      const chunk = new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(e.payload));
+      const chunk = new TextDecoder("utf-8", { fatal: false }).decode(decodeStreamChunk(e.payload));
       exec.buffer.append(chunk);
       // Raw devices (serial/telnet) have no sentinel — just accumulate.
       // Completion comes from the user (submit) or the safety timeout below.

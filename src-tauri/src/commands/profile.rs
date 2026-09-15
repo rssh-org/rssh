@@ -1,8 +1,10 @@
+use serde::Serialize;
 use serde_json::json;
 use tauri::State;
+use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
-use crate::models::{Credential, Profile, SshAlgorithmCatalog};
+use crate::models::{Credential, CredentialType, Profile, SshAlgorithmCatalog, SshAlgorithms};
 use crate::secret::cred_secret_key;
 use crate::state::AppState;
 
@@ -129,6 +131,279 @@ fn read_key_file_capped(path: &std::path::Path, display: &str) -> AppResult<Stri
         )),
         Err(e) => Err(e.into()),
     }
+}
+
+/// A parsed `Host` block from `~/.ssh/config`.
+#[derive(Clone, Serialize)]
+pub struct SshConfigHost {
+    pub alias: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub identity_file: String,
+    pub proxy_jump: Option<String>,
+    /// 该别名在 rssh 里已存在同名连接。
+    pub already_exists: bool,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SshImportResult {
+    pub alias: String,
+    /// imported | skipped_exists | skipped_no_host | skipped_no_key | error
+    pub status: String,
+    pub message: String,
+}
+
+fn ssh_config_path() -> AppResult<std::path::PathBuf> {
+    let home =
+        dirs::home_dir().ok_or_else(|| AppError::other("home_dir_unavailable", json!({})))?;
+    Ok(home.join(".ssh").join("config"))
+}
+
+/// Minimal OpenSSH `config` parser: top-level `Host <aliases>` blocks with
+/// indented keys. Wildcard aliases (`Host *` / `Host ?`) are skipped; a blank
+/// line ends the current block so dangling key-only segments (no `Host` head)
+/// don't leak into the previous block.
+fn parse_ssh_config(content: &str) -> Vec<SshConfigHost> {
+    let mut blocks: Vec<SshConfigHost> = Vec::new();
+    let mut cur: Option<SshConfigHost> = None;
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            if let Some(b) = cur.take() {
+                blocks.push(b);
+            }
+            continue;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        let (key, val) = match line.split_once(char::is_whitespace) {
+            Some((k, v)) => (k.trim().to_ascii_lowercase(), v.trim().to_string()),
+            None => (line.to_ascii_lowercase(), String::new()),
+        };
+        if key == "host" {
+            if let Some(b) = cur.take() {
+                blocks.push(b);
+            }
+            let aliases: Vec<String> = val
+                .split_whitespace()
+                .filter(|a| !a.is_empty() && !a.contains('*') && !a.contains('?'))
+                .map(String::from)
+                .collect();
+            if aliases.is_empty() {
+                continue;
+            }
+            cur = Some(SshConfigHost {
+                alias: aliases[0].clone(),
+                host: String::new(),
+                port: 22,
+                user: String::new(),
+                identity_file: String::new(),
+                proxy_jump: None,
+                already_exists: false,
+            });
+        } else if let Some(b) = cur.as_mut() {
+            match key.as_str() {
+                "hostname" => b.host = val,
+                "port" => {
+                    if let Ok(p) = val.parse::<u16>() {
+                        b.port = p;
+                    }
+                }
+                "user" => b.user = val,
+                "identityfile" => b.identity_file = val,
+                "proxyjump" | "proxycommand" => b.proxy_jump = Some(val),
+                _ => {}
+            }
+        }
+    }
+    if let Some(b) = cur.take() {
+        blocks.push(b);
+    }
+    blocks
+}
+
+/// Expand `~` / relative paths against `$HOME/.ssh` and require the resolved
+/// key to stay under `$HOME/.ssh` (webview-adjacent surface: never read
+/// arbitrary files). Returns Ok(None) when the key file doesn't exist.
+fn resolve_identity_key(home: &std::path::Path, spec: &str) -> AppResult<Option<String>> {
+    let ssh_dir = home.join(".ssh");
+    let path = if let Some(rest) = spec.strip_prefix("~/") {
+        home.join(rest)
+    } else if std::path::Path::new(spec).is_absolute() {
+        // 支持 Windows 盘符绝对路径（C:/Users/.../.ssh/id_rsa 等）
+        std::path::PathBuf::from(spec)
+    } else {
+        // relative to ~/.ssh, per OpenSSH config semantics
+        ssh_dir.join(spec)
+    };
+    if !path.starts_with(&ssh_dir) {
+        return Err(AppError::other(
+            "key_outside_ssh_dir",
+            json!({ "path": path.display().to_string() }),
+        ));
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(c) => Ok(Some(c)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Scan `~/.ssh/config` and return the importable host list (host blocks that
+/// have a HostName), marking aliases that already exist as rssh connections.
+#[tauri::command]
+pub fn ssh_config_scan(state: State<AppState>) -> AppResult<Vec<SshConfigHost>> {
+    let path = ssh_config_path()?;
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::not_found("ssh_config_not_found", json!({ "path": path.display().to_string() }))
+        } else {
+            AppError::from(e)
+        }
+    })?;
+    let existing: std::collections::HashSet<String> = crate::db::profile::list(&state.db)?
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    Ok(parse_ssh_config(&content)
+        .into_iter()
+        .filter(|h| !h.host.is_empty())
+        .map(|mut h| {
+            h.already_exists = existing.contains(&h.alias);
+            h
+        })
+        .collect())
+}
+
+/// Import the named aliases from `~/.ssh/config` as rssh connections: one
+/// key credential (private key read from `IdentityFile`) + one profile per
+/// alias. Aliases that already exist or lack a host/key are skipped.
+#[tauri::command]
+pub fn ssh_config_import(
+    state: State<AppState>,
+    aliases: Vec<String>,
+) -> AppResult<Vec<SshImportResult>> {
+    let path = ssh_config_path()?;
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            AppError::not_found("ssh_config_not_found", json!({ "path": path.display().to_string() }))
+        } else {
+            AppError::from(e)
+        }
+    })?;
+    let hosts = parse_ssh_config(&content);
+    let existing: std::collections::HashSet<String> = crate::db::profile::list(&state.db)?
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    let home =
+        dirs::home_dir().ok_or_else(|| AppError::other("home_dir_unavailable", json!({})))?;
+
+    let mut results = Vec::new();
+    for alias in aliases {
+        let alias = alias.trim().to_string();
+        let Some(h) = hosts.iter().find(|h| h.alias == alias) else {
+            results.push(SshImportResult {
+                alias,
+                status: "error".into(),
+                message: "未在 ~/.ssh/config 找到该别名".into(),
+            });
+            continue;
+        };
+        if existing.contains(&alias) {
+            results.push(SshImportResult {
+                alias,
+                status: "skipped_exists".into(),
+                message: "rssh 里已有同名连接".into(),
+            });
+            continue;
+        }
+        if h.host.is_empty() {
+            results.push(SshImportResult {
+                alias,
+                status: "skipped_no_host".into(),
+                message: "缺少 HostName，跳过".into(),
+            });
+            continue;
+        }
+        // 私钥读不到就跳过，避免导入一个连不上的空 key 凭据
+        let secret = match resolve_identity_key(&home, &h.identity_file) {
+            Ok(Some(s)) => Some(s),
+            Ok(None) => {
+                results.push(SshImportResult {
+                    alias,
+                    status: "skipped_no_key".into(),
+                    message: format!("找不到密钥文件（{}），可先复制到 ~/.ssh 再试", h.identity_file),
+                });
+                continue;
+            }
+            Err(e) => {
+                results.push(SshImportResult {
+                    alias,
+                    status: "error".into(),
+                    message: e.to_string(),
+                });
+                continue;
+            }
+        };
+
+        let cred_id = format!("cred-{}", Uuid::new_v4().simple());
+        let cred = Credential {
+            id: cred_id.clone(),
+            name: format!("{} (from ssh config)", alias),
+            username: h.user.clone(),
+            credential_type: CredentialType::Key,
+            secret,
+            save_to_remote: false,
+        };
+        if let Err(e) = crate::db::credential::insert(&state.db, &cred) {
+            results.push(SshImportResult {
+                alias,
+                status: "error".into(),
+                message: e.to_string(),
+            });
+            continue;
+        }
+        if let Some(s) = &cred.secret {
+            let _ = state.secret_store.set(&cred_secret_key(&cred_id), s);
+        }
+
+        // ProxyJump 别名若已是 rssh 连接则挂为跳板，否则忽略（不阻断导入）
+        let bastion_profile_id = h
+            .proxy_jump
+            .as_ref()
+            .and_then(|pj| {
+                let first = pj.split_whitespace().next()?;
+                if existing.contains(first) { Some(first.to_string()) } else { None }
+            });
+        let prof = Profile {
+            id: format!("prof-{}", Uuid::new_v4().simple()),
+            name: alias.clone(),
+            host: h.host.clone(),
+            port: h.port,
+            credential_id: cred_id,
+            bastion_profile_id,
+            init_command: None,
+            group_id: None,
+            algorithms: SshAlgorithms::default(),
+        };
+        if let Err(e) = crate::db::profile::insert(&state.db, &prof) {
+            results.push(SshImportResult {
+                alias,
+                status: "error".into(),
+                message: e.to_string(),
+            });
+            continue;
+        }
+        results.push(SshImportResult {
+            alias,
+            status: "imported".into(),
+            message: format!("已导入 {}:{} ({}@)", h.host, h.port, h.user),
+        });
+    }
+    Ok(results)
 }
 
 #[cfg(test)]

@@ -28,9 +28,9 @@ export { isIOS, isMobile };
 /* ═══════════════════════════════════════════════════════
    Types
    ═══════════════════════════════════════════════════════ */
-export type TabType = "home" | "ssh" | "local" | "serial" | "telnet" | "docker_exec" | "kubectl_exec" | "forward" | "edit";
+export type TabType = "home" | "ssh" | "local" | "serial" | "telnet" | "docker_exec" | "kubectl_exec" | "forward" | "edit" | "sftp_edit" | "sftp_preview" | "pi_session" | "opencode_session";
 /** Tab types that render a TerminalPane (byte-stream terminals). */
-export type TerminalTabType = Exclude<TabType, "home" | "forward" | "edit">;
+export type TerminalTabType = Exclude<TabType, "home" | "forward" | "edit" | "pi_session" | "opencode_session">;
 export type TerminalConnectionStatus = "connecting" | "connected" | "disconnected";
 export function isTerminalTabType(type: TabType): type is TerminalTabType {
   return type === "ssh" || type === "local" || type === "serial" || type === "telnet"
@@ -519,6 +519,158 @@ export function addTab(tab: Tab) {
   _focusedPaneByWorkspace[rootTab.id] = rootTab.id;
   _settingsActive = false;
   recordRecentHomeItem(rootTab);
+}
+
+/** Open a remote file in the main-window editor tab (VS Code style): the SFTP
+ *  sidebar stays mounted as the file tree, the editor opens in the center.
+ *  Reuses an existing tab for the same path when one is already open. */
+export function openRemoteEdit(meta: { sftpId: string; path: string; name: string; size?: number }) {
+  const existing = _tabs.find(
+    (tab) => tab.type === "sftp_edit" && tab.meta?.path === meta.path && tab.meta?.sftpId === meta.sftpId,
+  );
+  if (existing) {
+    setActiveWorkspace(existing.id);
+    _settingsActive = false;
+    return;
+  }
+  const id = `sftp_edit:${crypto.randomUUID()}`;
+  addTab({
+    id,
+    type: "sftp_edit",
+    label: meta.name,
+    meta: {
+      sftpId: meta.sftpId,
+      path: meta.path,
+      name: meta.name,
+      size: meta.size !== undefined ? String(meta.size) : "",
+    },
+  });
+}
+
+/** Open a remote image/PDF (preview-only file) in a main-window tab, so the
+ *  open file shows in the tab bar like a VS Code editor tab. Reuses the tab
+ *  for the same path when one is already open. */
+export function openRemotePreview(meta: { sftpId: string; path: string; name: string; size?: number }) {
+  const existing = _tabs.find(
+    (tab) => tab.type === "sftp_preview" && tab.meta?.path === meta.path && tab.meta?.sftpId === meta.sftpId,
+  );
+  if (existing) {
+    setActiveWorkspace(existing.id);
+    _settingsActive = false;
+    return;
+  }
+  const id = `sftp_preview:${crypto.randomUUID()}`;
+  addTab({
+    id,
+    type: "sftp_preview",
+    label: meta.name,
+    meta: {
+      sftpId: meta.sftpId,
+      path: meta.path,
+      name: meta.name,
+      size: meta.size !== undefined ? String(meta.size) : "",
+    },
+  });
+}
+
+/** Open a Pi coding-agent chat tab attached to an active SSH session. The tab
+ *  spawns `pi --mode rpc` on that connection; conversations live server-side
+ *  (~/.pi/agent/sessions/), so any machine reconnecting to the same host can
+ *  continue the same session (TRAE/opencode-style, no handoff docs needed). */
+export function openPiSession(sshTabId: string) {
+  const sid = sessionIdForTab(sshTabId);
+  if (!sid) return;
+  const existing = _tabs.find(
+    (tab) => tab.type === "pi_session" && tab.meta?.sessionId === sid,
+  );
+  if (existing) {
+    setActiveWorkspace(existing.id);
+    _settingsActive = false;
+    return;
+  }
+  const sshTab = _tabs.find((t) => t.id === sshTabId);
+  const profileId = sshTab?.meta?.profileId ?? "";
+  const sshName = sshTab?.label || "SSH";
+  const id = `pi_session:${crypto.randomUUID()}`;
+  addTab({
+    id,
+    type: "pi_session",
+    label: `${sshName} · Pi`,
+    meta: { sessionId: sid, profileId },
+  });
+}
+
+/** Open an OpenCode coding-agent chat tab attached to an active SSH session.
+ *  The backend starts/reuses `opencode serve` on the host and streams its
+ *  event bus; sessions persist in opencode.db server-side. */
+export function openOpencodeSession(sshTabId: string) {
+  const sid = sessionIdForTab(sshTabId);
+  if (!sid) return;
+  const existing = _tabs.find(
+    (tab) => tab.type === "opencode_session" && tab.meta?.sessionId === sid,
+  );
+  if (existing) {
+    setActiveWorkspace(existing.id);
+    _settingsActive = false;
+    return;
+  }
+  const sshTab = _tabs.find((t) => t.id === sshTabId);
+  const profileId = sshTab?.meta?.profileId ?? "";
+  const sshName = sshTab?.label || "SSH";
+  const id = `opencode_session:${crypto.randomUUID()}`;
+  addTab({
+    id,
+    type: "opencode_session",
+    label: `${sshName} · OpenCode`,
+    meta: { sessionId: sid, profileId },
+  });
+}
+
+// ---- "terminal alongside editor/preview" split state ----------------------
+// When an sftp_edit / sftp_preview tab is active, the user can pin a live
+// terminal next to it (VS Code style) to run commands while looking at a
+// figure. Stored here so both AppShell (layout) and the split panel can share.
+let _sideTerminalTab = $state<string | null>(null);
+export function sideTerminalTab(): string | null { return _sideTerminalTab; }
+export function setSideTerminal(tabId: string | null) { _sideTerminalTab = tabId; }
+
+// ---- sftp_edit tab dirty state: lets AppShell intercept tab close (×) and
+// ask save / discard / cancel instead of silently dropping the document. ----
+let _tabDirty = $state<Set<string>>(new Set());
+export function setTabDirty(id: string, dirty: boolean) {
+  const next = new Set(_tabDirty);
+  if (dirty) next.add(id);
+  else next.delete(id);
+  _tabDirty = next;
+}
+export function isTabDirty(id: string) {
+  return _tabDirty.has(id);
+}
+
+// ---- "save this sftp_edit tab" request: emitted by AppShell's close confirm,
+// consumed by the owning RemoteEditTab, which saves and then closes. ----
+let _saveRequest = $state<{ id: string; nonce: number } | null>(null);
+export function requestSaveTab(id: string) {
+  _saveRequest = { id, nonce: Date.now() + Math.random() };
+}
+export function saveRequest() {
+  return _saveRequest;
+}
+export function clearSaveRequest(nonce: number) {
+  if (_saveRequest && _saveRequest.nonce === nonce) _saveRequest = null;
+}
+
+// ---- reveal file in the SFTP tree: emitted by the editor tab (Ctrl+click on
+// the filename), consumed by the SftpBrowser instance owning that SFTP session.
+let _revealRequest = $state<{ sftpId: string; path: string; nonce: number } | null>(null);
+export function requestRevealFile(sftpId: string, path: string) {
+  _revealRequest = { sftpId, path, nonce: Date.now() + Math.random() };
+}
+export function revealRequest() {
+  return _revealRequest;
+}
+export function clearRevealRequest(nonce: number) {
+  if (_revealRequest && _revealRequest.nonce === nonce) _revealRequest = null;
 }
 
 

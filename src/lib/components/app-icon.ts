@@ -59,5 +59,7 @@ export function tabIconName(type: TabType): AppIconName {
     case "kubectl_exec": return "kubernetes";
     case "forward": return "forward";
     case "edit": return "edit";
+    case "sftp_edit": return "edit";
+    case "sftp_preview": return "file";
   }
 }
