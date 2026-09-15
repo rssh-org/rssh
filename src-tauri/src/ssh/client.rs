@@ -1056,13 +1056,13 @@ async fn session_task(
                 if let Some(ref mut rec) = recorder {
                     let _ = rec.record(&data);
                 }
-                let _ = app.emit(&data_event, data.to_vec());
+                let _ = app.emit_bytes(&data_event, &data);
             }
             Event::Ssh(Some(ChannelMsg::ExtendedData { data, .. })) => {
                 if let Some(ref mut rec) = recorder {
                     let _ = rec.record(&data);
                 }
-                let _ = app.emit(&data_event, data.to_vec());
+                let _ = app.emit_bytes(&data_event, &data);
             }
             Event::Ssh(Some(ChannelMsg::Eof | ChannelMsg::Close)) | Event::Ssh(None) => {
                 break;
