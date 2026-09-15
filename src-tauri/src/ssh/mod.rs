@@ -4,5 +4,6 @@ pub mod bastion;
 pub mod client;
 pub mod forward;
 pub mod known_hosts;
+pub mod pi;
 pub mod prompt;
 pub mod sftp;

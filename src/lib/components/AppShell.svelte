@@ -11,6 +11,11 @@
     import ForwardPane from "./ForwardPane.svelte";
     import SettingsLayout from "./SettingsLayout.svelte";
     import SftpBrowser from "./SftpBrowser.svelte";
+    import RemoteEditTab from "./RemoteEditTab.svelte";
+    import RemotePreviewTab from "./RemotePreviewTab.svelte";
+    import PiSessionTab from "./PiSessionTab.svelte";
+    import OpencodeSessionTab from "./OpencodeSessionTab.svelte";
+    import SideTerminal from "./SideTerminal.svelte";
     import DownloadsScreen from "./DownloadsScreen.svelte";
     import SnippetPicker from "./SnippetPicker.svelte";
     import Modal from "./Modal.svelte";
@@ -112,11 +117,17 @@
     let dropTabId = $state<string | null>(null);
 
     /* 关闭 tab 的唯一入口：所有关闭路径（快捷键 / 右键菜单 / tab 上的 × 按钮）都走这里。
-       开了二次确认就先弹窗存住待关的 tab，否则直接关。home tab 不可关，跟 closeTab 一致。 */
+       开了二次确认就先弹窗存住待关的 tab，否则直接关。home tab 不可关，跟 closeTab 一致。
+       sftp_edit tab 有未保存修改时先弹「保存/不保存/取消」，绝不静默丢编辑。 */
     let closingTab = $state<Tab | null>(null);
+    let closingEditTab = $state<Tab | null>(null);
     function requestCloseTab(id: string) {
         const tab = app.tabs().find(t => t.id === id);
         if (!tab || tab.type === "home") return;
+        if (tab.type === "sftp_edit" && app.isTabDirty(id)) {
+            closingEditTab = tab;
+            return;
+        }
         if (app.confirmCloseTab()) { closingTab = tab; return; }
         delete pendingPaneSources[id];
         app.closeTab(id);
@@ -127,6 +138,19 @@
             app.closeTab(closingTab.id);
         }
         closingTab = null;
+    }
+    function confirmCloseEditTab() {
+        if (closingEditTab) {
+            app.requestSaveTab(closingEditTab.id);
+        }
+        closingEditTab = null;
+    }
+    function discardCloseEditTab() {
+        if (closingEditTab) {
+            delete pendingPaneSources[closingEditTab.id];
+            app.closeTab(closingEditTab.id);
+        }
+        closingEditTab = null;
     }
 
     /* ── 全局快捷键声明表 ── */
@@ -394,6 +418,30 @@
     // unmount on tab switch would wipe it. Visibility toggles per active tab.
     let editTabs = $derived(
         app.workspaceTabs().filter((tab) => tab.type === "edit"),
+    );
+    // Remote file editor tabs (SFTP): the CodeMirror doc / grid lives in the
+    // component, so keep them mounted across tab switches like editTabs.
+    let sftpEditTabs = $derived(
+        app.workspaceTabs().filter((tab) => tab.type === "sftp_edit"),
+    );
+    // Read-only preview tabs (image / PDF / markdown / table / code) stay
+    // mounted like sftp_edit: the preview content lives in the component.
+    let sftpPreviewTabs = $derived(
+        app.workspaceTabs().filter((tab) => tab.type === "sftp_preview"),
+    );
+    // Pi coding-agent chat tabs: the live rpc subprocess + message stream live
+    // in the component, so keep them mounted across tab switches.
+    let piTabs = $derived(
+        app.workspaceTabs().filter((tab) => tab.type === "pi_session"),
+    );
+    // OpenCode chat tabs: the local port-forward + event bus live in the
+    // backend while the tab is mounted, so keep them mounted across switches.
+    let ocTabs = $derived(
+        app.workspaceTabs().filter((tab) => tab.type === "opencode_session"),
+    );
+    // Live terminal tabs that can be pinned next to an editor/preview tab.
+    let terminalTabs = $derived(
+        app.workspaceTabs().filter((tab) => app.isTerminalTabType(tab.type)),
     );
     // Forward panes too: ForwardPane's onDestroy stops the tunnel, so unmounting
     // on a tab switch would tear down live port-forwards and reconnect on return.
@@ -1040,6 +1088,25 @@
             ]);
         }
 
+        // Pi coding-agent 会话入口（ssh tab 已连上时）：在已激活 SSH 会话上起
+        // `pi --mode rpc`，聊天 + 工具调用像 TRAE/opencode 一样内嵌在 rssh 里，
+        // 会话文件存在服务器 ~/.pi/agent/sessions/，换机连同一台机器可续接。
+        if (tab.type === "ssh") {
+            const sid = app.sessionIdForTab(tab.id);
+            sections.push([
+                {
+                    label: t("tab.context.pi"),
+                    disabled: !sid,
+                    onClick: () => { app.setActivePane(tab.id); app.openPiSession(tab.id); },
+                },
+                {
+                    label: t("tab.context.opencode"),
+                    disabled: !sid,
+                    onClick: () => { app.setActivePane(tab.id); app.openOpencodeSession(tab.id); },
+                },
+            ]);
+        }
+
         // Split panes + multi-window: one desktop-only terminal section.
         // canOpenTabInNewWindow already excludes serial (panes would fight the
         // exclusive port), so a single guard covers both items. Split follows
@@ -1449,6 +1516,82 @@
                     </div>
                 {/each}
 
+                {#each sftpEditTabs as tab (tab.id)}
+                    <div
+                        class="pane"
+                        class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId()}
+                        role="presentation"
+                        oncontextmenu={(event) => openRouteContextMenu(event, tab)}
+                    >
+                        <div class="split-with-terminal">
+                            <div class="split-main">
+                                <RemoteEditTab tabId={tab.id} meta={tab.meta ?? {}} active={tab.id === app.activeWorkspaceId() && !app.settingsActive()} />
+                            </div>
+                            {#if app.sideTerminalTab() && tab.id === app.activeWorkspaceId()}
+                                <div class="split-side">
+                                    <SideTerminal />
+                                </div>
+                            {:else if terminalTabs.length > 0 && tab.id === app.activeWorkspaceId()}
+                                <button
+                                    type="button"
+                                    class="split-term-open"
+                                    onclick={() => app.setSideTerminal(terminalTabs[0].id)}
+                                    title={t("sftp.split.open")}
+                                >▭ {t("sftp.split.terminal")}</button>
+                            {/if}
+                        </div>
+                    </div>
+                {/each}
+
+                {#each sftpPreviewTabs as tab (tab.id)}
+                    <div
+                        class="pane"
+                        class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId()}
+                        role="presentation"
+                        oncontextmenu={(event) => openRouteContextMenu(event, tab)}
+                    >
+                        <div class="split-with-terminal">
+                            <div class="split-main">
+                                <RemotePreviewTab tabId={tab.id} meta={tab.meta ?? {}} />
+                            </div>
+                            {#if app.sideTerminalTab() && tab.id === app.activeWorkspaceId()}
+                                <div class="split-side">
+                                    <SideTerminal />
+                                </div>
+                            {:else if terminalTabs.length > 0 && tab.id === app.activeWorkspaceId()}
+                                <button
+                                    type="button"
+                                    class="split-term-open"
+                                    onclick={() => app.setSideTerminal(terminalTabs[0].id)}
+                                    title={t("sftp.split.open")}
+                                >▭ {t("sftp.split.terminal")}</button>
+                            {/if}
+                        </div>
+                    </div>
+                {/each}
+
+                {#each piTabs as tab (tab.id)}
+                    <div
+                        class="pane"
+                        class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId()}
+                        role="presentation"
+                        oncontextmenu={(event) => openRouteContextMenu(event, tab)}
+                    >
+                        <PiSessionTab tabId={tab.id} meta={tab.meta ?? {}} />
+                    </div>
+                {/each}
+
+                {#each ocTabs as tab (tab.id)}
+                    <div
+                        class="pane"
+                        class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId()}
+                        role="presentation"
+                        oncontextmenu={(event) => openRouteContextMenu(event, tab)}
+                    >
+                        <OpencodeSessionTab tabId={tab.id} meta={tab.meta ?? {}} />
+                    </div>
+                {/each}
+
                 {#each forwardTabs as tab (tab.id)}
                     <div
                         class="pane"
@@ -1504,6 +1647,20 @@
             <div class="modal-actions">
                 <button class="btn btn-sm" onclick={() => (closingTab = null)}>{t("common.cancel")}</button>
                 <button class="btn btn-sm btn-primary" onclick={confirmCloseTab}>{t("tab.context.close")}</button>
+            </div>
+        </Modal>
+    {/if}
+
+    <!-- 远程文件编辑 tab 关闭时若未保存：保存并离开 / 不保存 / 取消。 -->
+    {#if closingEditTab}
+        <Modal onClose={() => (closingEditTab = null)} class="stack"
+               aria-labelledby="close-edit-title" aria-describedby="close-edit-body">
+            <h3 id="close-edit-title" class="dialog-title">{t("sftp.editor.unsaved_title")}</h3>
+            <div id="close-edit-body" class="dialog-body">{t("sftp.editor.unsaved_body", { name: closingEditTab.label })}</div>
+            <div class="modal-actions">
+                <button class="btn btn-sm" onclick={discardCloseEditTab}>{t("sftp.editor.discard")}</button>
+                <button class="btn btn-sm btn-primary" onclick={confirmCloseEditTab}>{t("sftp.editor.save_and_leave")}</button>
+                <button class="btn btn-sm" onclick={() => (closingEditTab = null)}>{t("common.cancel")}</button>
             </div>
         </Modal>
     {/if}
@@ -1678,6 +1835,43 @@
     .pane.visible {
         display: flex;
         flex-direction: column;
+    }
+
+    /* Editor/preview tab with a terminal pinned beside it (VS Code split). */
+    .split-with-terminal {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        position: relative;
+        box-sizing: border-box;
+    }
+    .split-main {
+        flex: 1;
+        min-width: 0;
+        min-height: 0;
+    }
+    .split-side {
+        flex: 0 0 46%;
+        min-width: 0;
+        min-height: 0;
+        max-width: 62%;
+    }
+    .split-term-open {
+        position: absolute;
+        top: 8px;
+        right: 10px;
+        z-index: 40;
+        font-size: 11px;
+        padding: 4px 10px;
+        border-radius: var(--radius-sm, 6px);
+        border: 1px solid var(--border, #444);
+        background: color-mix(in srgb, var(--bg, #141414) 88%, var(--text-sub, #888));
+        color: var(--text, #eee);
+        cursor: pointer;
+    }
+    .split-term-open:hover {
+        border-color: var(--accent, #8bc8ea);
+        color: var(--accent, #8bc8ea);
     }
 
     /* 关闭 tab 二次确认弹窗 —— 外壳（scrim + 卡片）由 Modal.svelte 统一提供，

@@ -31,6 +31,7 @@
     } from "../terminal/limits.ts";
     import {createPaintScheduler, type PaintScheduler} from "../terminal/paint-scheduler.ts";
     import {createOutputFeeder, formatBacklogBytes, type OutputFeeder} from "../terminal/output-feeder.ts";
+    import {decodeStreamChunk} from "../terminal/stream-decode.ts";
     import {terminalRowHeight} from "../terminal/row-height.ts";
 
     import {extractBlockTexts, extractBlocksText} from "../terminal/block-content.ts";
@@ -984,9 +985,9 @@
     async function createSessionEventSubscription(sid: string): Promise<UnlistenFn> {
         const listeners: UnlistenFn[] = [];
         try {
-            listeners.push(await listen<number[]>(`${dataEvent}:${sid}`, (ev) => {
+            listeners.push(await listen<string>(`${dataEvent}:${sid}`, (ev) => {
                 if (!acceptsSessionEvent(sid)) return;
-                const raw = new Uint8Array(ev.payload);
+                const raw = decodeStreamChunk(ev.payload);
                 if (streamOpts) {
                     stageLoginScript(raw);
                     if (streamOpts.outputMode === "hex") {

@@ -1037,6 +1037,13 @@ enum Event {
     Cmd(Option<SessionCmd>),
 }
 
+/// Batched-output flush window (see `session_task`): a fraction of one frame
+/// budget, so interactive echo stays visually instant while flood output
+/// collapses to at most ~125 IPC events per second instead of one per packet.
+const STREAM_FLUSH_WINDOW: Duration = Duration::from_millis(8);
+/// Buffer cap: flush immediately once output exceeds this, window or not.
+const STREAM_FLUSH_MAX: usize = 64 * 1024;
+
 async fn session_task(
     data_event: String,
     close_event: String,
@@ -1045,10 +1052,32 @@ async fn session_task(
     app: crate::emitter::Host,
     mut recorder: Option<Recorder>,
 ) {
+    let mut out: Vec<u8> = Vec::with_capacity(8 * 1024);
+    let mut flush_at: Option<tokio::time::Instant> = None;
+    let flush = |out: &mut Vec<u8>, at: &mut Option<tokio::time::Instant>| {
+        if !out.is_empty() {
+            let _ = app.emit_bytes(&data_event, out);
+            out.clear();
+        }
+        *at = None;
+    };
     loop {
+        // Copy, don't borrow: Instant is Copy, and the timer future must not
+        // hold `flush_at` across the match arms that mutate it.
+        let timer_deadline = flush_at;
+        let flush_timer = async {
+            match timer_deadline {
+                Some(d) => tokio::time::sleep_until(d).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         let event = tokio::select! {
             msg = channel.wait() => Event::Ssh(msg),
             cmd = rx.recv() => Event::Cmd(cmd),
+            _ = flush_timer => {
+                flush(&mut out, &mut flush_at);
+                continue;
+            }
         };
 
         match event {
@@ -1056,18 +1085,31 @@ async fn session_task(
                 if let Some(ref mut rec) = recorder {
                     let _ = rec.record(&data);
                 }
-                let _ = app.emit(&data_event, data.to_vec());
+                out.extend_from_slice(&data);
+                if out.len() >= STREAM_FLUSH_MAX {
+                    flush(&mut out, &mut flush_at);
+                } else if flush_at.is_none() {
+                    flush_at = Some(tokio::time::Instant::now() + STREAM_FLUSH_WINDOW);
+                }
             }
             Event::Ssh(Some(ChannelMsg::ExtendedData { data, .. })) => {
                 if let Some(ref mut rec) = recorder {
                     let _ = rec.record(&data);
                 }
-                let _ = app.emit(&data_event, data.to_vec());
+                out.extend_from_slice(&data);
+                if out.len() >= STREAM_FLUSH_MAX {
+                    flush(&mut out, &mut flush_at);
+                } else if flush_at.is_none() {
+                    flush_at = Some(tokio::time::Instant::now() + STREAM_FLUSH_WINDOW);
+                }
             }
             Event::Ssh(Some(ChannelMsg::Eof | ChannelMsg::Close)) | Event::Ssh(None) => {
                 break;
             }
             Event::Cmd(Some(SessionCmd::Write(data))) => {
+                // Queued output must reach the terminal before the write whose
+                // echo it precedes.
+                flush(&mut out, &mut flush_at);
                 let _ = channel.data(std::io::Cursor::new(data)).await;
             }
             Event::Cmd(Some(SessionCmd::Resize { cols, rows })) => {
@@ -1080,6 +1122,9 @@ async fn session_task(
             _ => {}
         }
     }
+    // Trailing output must precede the close event, or the last lines of a
+    // dying command never render.
+    flush(&mut out, &mut flush_at);
     if let Some(rec) = recorder {
         let _ = rec.finish();
     }

@@ -217,20 +217,30 @@ impl SftpHandle {
             )
         })?;
 
-        let mut result: Vec<RemoteEntry> = entries
-            .map(|e| {
-                let name = e.file_name();
-                let ft = e.file_type();
-                let meta = e.metadata();
-                RemoteEntry {
-                    name,
-                    is_dir: ft.is_dir(),
-                    is_symlink: ft.is_symlink(),
-                    size: meta.size.unwrap_or(0),
-                    mtime: meta.mtime.map(u64::from).unwrap_or(0),
+        let mut result: Vec<RemoteEntry> = Vec::new();
+        for e in entries {
+            let name = e.file_name();
+            let ft = e.file_type();
+            let meta = e.metadata();
+            let is_symlink = ft.is_symlink();
+            let mut is_dir = ft.is_dir();
+            if is_symlink {
+                // Follow the link once (STAT) to learn the target type. A
+                // symlink-to-dir sorts with directories and is navigable,
+                // mirroring VS Code's explorer; symlink-to-file stays a file.
+                let full = join_remote(path, &name);
+                if let Ok(target_meta) = self.sftp.metadata(&full).await {
+                    is_dir = target_meta.is_dir();
                 }
-            })
-            .collect();
+            }
+            result.push(RemoteEntry {
+                name,
+                is_dir,
+                is_symlink,
+                size: meta.size.unwrap_or(0),
+                mtime: meta.mtime.map(u64::from).unwrap_or(0),
+            });
+        }
 
         result.sort_by(|a, b| {
             b.is_dir

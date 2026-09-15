@@ -551,7 +551,8 @@ pub fn open(
     let writer = handle.writer.clone();
     std::thread::spawn(move || {
         let mut reader = reader;
-        let mut buf = [0u8; 4096];
+        // 与 PTY 读取线程同策略：大缓冲摊薄 flood 输出下的 emit 次数。
+        let mut buf = [0u8; 64 * 1024];
         loop {
             if reader_closed.load(Ordering::Relaxed) {
                 break;

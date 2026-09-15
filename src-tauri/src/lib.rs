@@ -124,6 +124,8 @@ pub fn run() {
                 serial_sessions: Mutex::new(HashMap::new()),
                 telnet_sessions: Mutex::new(HashMap::new()),
                 sftp_sessions: Mutex::new(HashMap::new()),
+                pi_sessions: Mutex::new(HashMap::new()),
+                opencode_sessions: Mutex::new(HashMap::new()),
                 transfer_cancels: Mutex::new(HashMap::new()),
                 active_forwards: Mutex::new(HashMap::new()),
                 auth_waiters: Mutex::new(HashMap::new()),
@@ -135,6 +137,11 @@ pub fn run() {
                 ai_remote_shell_cache: Mutex::new(HashMap::new()),
                 data_dir,
             });
+            // If the frontend renderer hangs (heartbeat stops), reload the
+            // window automatically instead of leaving the user with a frozen
+            // UI that only Task Manager can close.
+            #[cfg(desktop)]
+            commands::window::spawn_ui_watchdog(app.handle(), std::time::Duration::from_secs(12));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -151,6 +158,8 @@ pub fn run() {
             commands::profile::update_credential,
             commands::profile::delete_credential,
             commands::profile::read_default_key_file,
+            commands::profile::ssh_config_scan,
+            commands::profile::ssh_config_import,
             // groups
             commands::group::list_groups,
             commands::group::create_group,
@@ -202,6 +211,21 @@ pub fn run() {
             // SSH session
             commands::session::ssh_connect,
             commands::session::ssh_write,
+            // pi coding-agent
+            commands::pi::pi_session_start,
+            commands::pi::pi_session_send,
+            commands::pi::pi_session_stop,
+            commands::pi::pi_session_list,
+            commands::pi::pi_session_delete,
+            // opencode coding-agent
+            commands::opencode::opencode_session_start,
+            commands::opencode::opencode_session_stop,
+            commands::opencode::opencode_session_list,
+            commands::opencode::opencode_session_new,
+            commands::opencode::opencode_session_delete,
+            commands::opencode::opencode_session_send,
+            commands::opencode::opencode_session_messages,
+            commands::opencode::opencode_session_abort,
             commands::session::ssh_resize,
             commands::session::ssh_disconnect,
             commands::session::ssh_auth_respond,
@@ -306,6 +330,10 @@ pub fn run() {
             commands::window::clipboard_read,
             #[cfg(desktop)]
             commands::window::clipboard_write,
+            #[cfg(desktop)]
+            commands::window::log_frontend_error,
+            #[cfg(desktop)]
+            commands::window::frontend_heartbeat,
             // external URL opener — cross-platform via tauri-plugin-opener
             commands::external::open_external_url,
             // update check (cross-platform — separate mod from window)

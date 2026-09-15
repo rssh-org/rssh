@@ -1,5 +1,7 @@
-use tauri::{AppHandle, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use uuid::Uuid;
+
+use serde_json::json;
 
 use crate::error::{AppError, AppResult};
 
@@ -35,6 +37,7 @@ pub async fn open_tab_in_new_window(app: AppHandle, clone: String) -> AppResult<
     WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
         .title("RSSH")
         .inner_size(1200.0, 800.0)
+        .additional_browser_args("--disable-gpu")
         .initialization_script(&init_script)
         .build()
         .map_err(|e| {
@@ -127,11 +130,93 @@ pub fn clipboard_read() -> AppResult<String> {
     with_clipboard("read", |cb| cb.get_text())
 }
 
-/// Write text to the system clipboard.
+/// Write a text to the system clipboard.
 /// Mirrors `clipboard_read`: goes through Rust (arboard) because in the
 /// WKWebView `navigator.clipboard.writeText` is unreliable from a right-click
 /// (contextmenu) / unfocused context — it silently rejects.
 #[tauri::command]
 pub fn clipboard_write(text: String) -> AppResult<()> {
     with_clipboard("write", |cb| cb.set_text(text))
+}
+
+/// Append a frontend-side error (window.onerror / unhandledrejection / view
+/// init failure) to `<app-data>/fe-errors.log`. When the UI freezes or a file
+/// editor won't open, this log is how we learn what actually happened in the
+/// WebView — the browser console is not reachable from a release build.
+#[tauri::command]
+pub fn log_frontend_error(app: AppHandle, msg: String) -> AppResult<()> {
+    use std::io::Write;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::other("app_data_dir_failed", json!({ "err": e.to_string() })))?;
+    std::fs::create_dir_all(&dir).ok();
+    let path = dir.join("fe-errors.log");
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("[{secs}] {msg}\n");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+    Ok(())
+}
+
+// ---- UI heartbeat watchdog -------------------------------------------------
+// The frontend calls `frontend_heartbeat` every 2s. If the renderer thread
+// hangs (e.g. a Svelte effect runaway like `effect_update_depth_exceeded`, or
+// a WebView2 GPU stall), the heartbeat stops; after UI_WATCHDOG_TIMEOUT we
+// reload the main window instead of leaving the user with a frozen window
+// that can only be killed from Task Manager. The frontend keeps its own
+// reload-safe watchdog too; this Rust-side one works even if the JS main
+// thread is completely stuck.
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+static LAST_HEARTBEAT_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[tauri::command]
+pub fn frontend_heartbeat() {
+    LAST_HEARTBEAT_MS.store(now_ms(), Ordering::Relaxed);
+}
+
+/// Spawn a background task that reloads the main window when the frontend
+/// heartbeat stops for longer than `timeout`. Also guards new editor windows
+/// (`rssh-*` labels). Call once from setup.
+pub fn spawn_ui_watchdog(app: &AppHandle, timeout: Duration) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let last = LAST_HEARTBEAT_MS.load(Ordering::Relaxed);
+            if last == 0 {
+                continue; // frontend not booted yet
+            }
+            let elapsed = now_ms().saturating_sub(last);
+            if elapsed > timeout.as_millis() as u64 {
+                // Reset first so a crashed reload loop does not fire forever.
+                LAST_HEARTBEAT_MS.store(now_ms(), Ordering::Relaxed);
+                log::warn!("UI heartbeat stopped for {elapsed} ms — reloading windows");
+                for label in handle
+                    .webview_windows()
+                    .keys()
+                    .filter(|l| l.as_str() == "main" || l.starts_with("rssh-"))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
+                    if let Some(win) = handle.get_webview_window(&label) {
+                        let _ = win.eval("location.reload()");
+                    }
+                }
+            }
+        }
+    });
 }

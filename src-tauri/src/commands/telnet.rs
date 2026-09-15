@@ -37,7 +37,10 @@ pub async fn telnet_open(
     let sink: telnet::TelnetSink =
         std::sync::Arc::new(move |id: &str, out: telnet::TelnetOut| match out {
             telnet::TelnetOut::Data(b) => {
-                let _ = app.emit(&format!("telnet:data:{id}"), b);
+                let _ = app.emit(
+                    &format!("telnet:data:{id}"),
+                    crate::emitter::b64_payload(&b),
+                );
             }
             telnet::TelnetOut::RemoteEcho(enabled) => {
                 let _ = app.emit(&format!("telnet:echo:{id}"), enabled);

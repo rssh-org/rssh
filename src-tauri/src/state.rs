@@ -8,6 +8,7 @@ use crate::db::Db;
 use crate::secret::SecretStore;
 use crate::ssh::client::SessionHandle;
 use crate::ssh::forward::ForwardHandle;
+use crate::ssh::pi::PiHandle;
 use crate::ssh::sftp::SftpHandle;
 #[cfg(desktop)]
 use crate::terminal::pty::PtyHandle;
@@ -80,6 +81,12 @@ pub struct AppState {
     /// Telnet is plain TCP — available on every platform, no mobile gate.
     pub telnet_sessions: Mutex<HashMap<String, TelnetHandle>>,
     pub sftp_sessions: Mutex<HashMap<String, Arc<SftpHandle>>>,
+    /// 常驻 `pi --mode rpc` 子进程表：pi_id → PiHandle。
+    /// 进程挂载在某个已激活 SSH 会话的 exec channel 上，跟随该 SSH 会话生命周期。
+    pub pi_sessions: Mutex<HashMap<String, Arc<PiHandle>>>,
+    /// opencode 会话表：opencode_id → OpencodeRuntime（本地转发 + serve 凭据）。
+    pub opencode_sessions:
+        Mutex<HashMap<String, crate::commands::opencode::OpencodeRuntime>>,
     /// 进行中的 SFTP 传输 cancel flag：transfer_id → AtomicBool。
     /// 用户在传输页点"取消"会把对应位置 1，streaming 循环每个 chunk 查一次，
     /// 命中即提前 Err 退出。传输结束（成功 / 失败 / 取消）都从 map 里移除。

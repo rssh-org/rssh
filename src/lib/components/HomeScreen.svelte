@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import * as app from "../stores/app.svelte.ts";
   import * as syncStatus from "../stores/sync.svelte.ts";
   import type {
@@ -16,6 +17,7 @@
   import { createHomeRefresh } from "./home-refresh.ts";
   import { forwardDetail } from "./connection-list.ts";
   import AppIcon from "./AppIcon.svelte";
+  import Modal from "./Modal.svelte";
   import {
     connectionIconName,
     dynamicPlatformIconName,
@@ -43,6 +45,69 @@
   let dynamicTargets = $state<DynamicDiscoveredTarget[]>([]);
   let query = $state("");
   let viewPreferences = $state<HomeViewPreferences>(loadHomeViewPreferences());
+
+  // ── Import connections from ~/.ssh/config ──────────────────────────────────
+  interface SshConfigHost {
+    alias: string;
+    host: string;
+    port: number;
+    user: string;
+    identity_file: string;
+    proxy_jump: string | null;
+    already_exists: boolean;
+  }
+  interface SshImportResult {
+    alias: string;
+    status: string;
+    message: string;
+  }
+  let importHosts = $state<SshConfigHost[]>([]);
+  let showImport = $state(false);
+  let importBusy = $state(false);
+  let importMsg = $state("");
+  let importSelected = $state<Set<string>>(new Set());
+
+  async function openImport() {
+    importMsg = "";
+    importSelected = new Set();
+    try {
+      importHosts = await invoke<SshConfigHost[]>("ssh_config_scan");
+      importSelected = new Set(importHosts.filter((h) => !h.already_exists).map((h) => h.alias));
+      showImport = true;
+    } catch (e) {
+      toast.error(errMsg(e));
+    }
+  }
+  function toggleImport(alias: string) {
+    const next = new Set(importSelected);
+    if (next.has(alias)) next.delete(alias);
+    else next.add(alias);
+    importSelected = next;
+  }
+  async function doImport() {
+    const aliases = [...importSelected];
+    if (!aliases.length) {
+      toast.error(t("home.import.none"));
+      return;
+    }
+    importBusy = true;
+    importMsg = "";
+    try {
+      const results = await invoke<SshImportResult[]>("ssh_config_import", { aliases });
+      const imported = results.filter((r) => r.status === "imported").length;
+      importMsg = results.map((r) => `${r.alias}: ${r.message}`).join("\n");
+      if (imported > 0) {
+        toast.success(t("home.import.done", { n: String(imported) }));
+        void homeRefresh.refresh();
+      } else {
+        toast.error(t("home.import.none_done"));
+      }
+    } catch (e) {
+      importMsg = errMsg(e);
+    } finally {
+      importBusy = false;
+    }
+  }
 
   onMount(() => {
     const syncPreferences = (event: StorageEvent) => {
@@ -388,6 +453,7 @@
           onclick={() => setSorting("recent")}
         >{t("home.sort.recent")}</button>
       </div>
+      <button type="button" class="btn import-ssh-btn" onclick={openImport}>{t("home.import.button")}</button>
     </div>
   </div>
 
@@ -438,12 +504,63 @@
   {/if}
 </div>
 
+{#if showImport}
+  <Modal onClose={() => (showImport = false)}>
+    <div class="import-modal">
+      <h3>{t("home.import.title")}</h3>
+      <p class="import-hint">{t("home.import.hint")}</p>
+      <div class="import-list">
+        {#if importHosts.length === 0}
+          <p class="import-empty">{t("home.import.empty")}</p>
+        {:else}
+          {#each importHosts as h}
+            <label class="import-item">
+              <input
+                type="checkbox"
+                checked={importSelected.has(h.alias)}
+                disabled={h.already_exists}
+                onchange={() => toggleImport(h.alias)}
+              />
+              <span class="import-alias">{h.alias}</span>
+              <span class="import-detail">{h.user || "?"}@{h.host}:{h.port} · {h.identity_file || t("home.import.no_key")}</span>
+              {#if h.already_exists}<span class="import-tag">{t("home.import.exists")}</span>{/if}
+            </label>
+          {/each}
+        {/if}
+      </div>
+      {#if importMsg}
+        <pre class="import-msg">{importMsg}</pre>
+      {/if}
+      <div class="import-actions">
+        <button class="btn" onclick={() => (showImport = false)}>{t("common.cancel")}</button>
+        <button class="btn btn-accent" disabled={importBusy} onclick={doImport}>
+          {importBusy ? "…" : t("home.import.do")}
+        </button>
+      </div>
+    </div>
+  </Modal>
+{/if}
+
 <style>
   .home { padding: 24px; flex: 1; overflow-y: auto; min-height: 0; }
   .home-header { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 16px; margin-bottom: 20px; }
   .logo { display: inline-flex; align-items: center; gap: 6px; font-size: 22px; color: var(--accent); font-weight: 700; white-space: nowrap; }
   .search-input { flex: 1 1 200px; min-width: 160px; }
   .home-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .import-ssh-btn { font-size: 12px; padding: 5px 12px; }
+  .import-modal { min-width: 460px; max-width: 620px; padding: 4px 0; }
+  .import-modal h3 { margin: 0 0 6px; font-size: 15px; }
+  .import-hint { margin: 0 0 12px; font-size: 12px; color: var(--text-sub); }
+  .import-list { max-height: 300px; overflow-y: auto; border: 1px solid var(--divider); border-radius: var(--radius-sm); }
+  .import-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; font-size: 12px; cursor: pointer; }
+  .import-item:hover { background: var(--surface-hover, rgba(0,0,0,0.04)); }
+  .import-item input { flex: 0 0 auto; }
+  .import-alias { font-family: ui-monospace, monospace; font-weight: 600; color: var(--text); flex: 0 0 auto; }
+  .import-detail { color: var(--text-sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+  .import-tag { flex: 0 0 auto; font-size: 10px; padding: 1px 6px; border-radius: 8px; background: var(--surface); color: var(--text-sub); }
+  .import-empty { padding: 14px; font-size: 12px; color: var(--text-sub); }
+  .import-msg { margin: 10px 0 0; padding: 8px 10px; font-size: 11px; line-height: 1.5; max-height: 160px; overflow-y: auto; background: var(--surface); border-radius: var(--radius-sm); white-space: pre-wrap; color: var(--text-sub); }
+  .import-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
   .segmented {
     display: inline-flex;
     padding: 2px;

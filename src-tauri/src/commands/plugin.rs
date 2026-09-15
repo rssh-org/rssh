@@ -963,6 +963,8 @@ mod tests {
             #[cfg(desktop)]
             serial_sessions: Default::default(),
             telnet_sessions: Default::default(),
+            pi_sessions: Default::default(),
+            opencode_sessions: Default::default(),
             sftp_sessions: Default::default(),
             transfer_cancels: Default::default(),
             active_forwards: Default::default(),

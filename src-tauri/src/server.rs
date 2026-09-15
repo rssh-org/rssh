@@ -63,6 +63,8 @@ fn build_state() -> AppResult<AppState> {
         pty_sessions: Mutex::new(HashMap::new()),
         serial_sessions: Mutex::new(HashMap::new()),
         telnet_sessions: Mutex::new(HashMap::new()),
+        pi_sessions: Mutex::new(HashMap::new()),
+        opencode_sessions: Mutex::new(HashMap::new()),
         sftp_sessions: Mutex::new(HashMap::new()),
         transfer_cancels: Mutex::new(HashMap::new()),
         active_forwards: Mutex::new(HashMap::new()),
@@ -463,7 +465,7 @@ fn dispatch(
             let sink: PtySink = Arc::new(move |id: &str, out: PtyOut| {
                 let msg = match out {
                     PtyOut::Data(b) => {
-                        json!({ "type": "event", "event": format!("pty:data:{id}"), "payload": b })
+                        json!({ "type": "event", "event": format!("pty:data:{id}"), "payload": crate::emitter::b64_payload(&b) })
                     }
                     PtyOut::Close => {
                         json!({ "type": "event", "event": format!("pty:close:{id}"), "payload": Value::Null })
@@ -529,7 +531,7 @@ fn dispatch(
             let sink: SerialSink = Arc::new(move |id: &str, out: SerialOut| {
                 let msg = match out {
                     SerialOut::Data(b) => {
-                        json!({ "type": "event", "event": format!("serial:data:{id}"), "payload": b })
+                        json!({ "type": "event", "event": format!("serial:data:{id}"), "payload": crate::emitter::b64_payload(&b) })
                     }
                     SerialOut::Close => {
                         json!({ "type": "event", "event": format!("serial:close:{id}"), "payload": Value::Null })
@@ -838,7 +840,7 @@ async fn dispatch_async(
             let sink: TelnetSink = Arc::new(move |id: &str, out: TelnetOut| {
                 let msg = match out {
                     TelnetOut::Data(b) => {
-                        json!({ "type": "event", "event": format!("telnet:data:{id}"), "payload": b })
+                        json!({ "type": "event", "event": format!("telnet:data:{id}"), "payload": crate::emitter::b64_payload(&b) })
                     }
                     TelnetOut::RemoteEcho(enabled) => {
                         json!({ "type": "event", "event": format!("telnet:echo:{id}"), "payload": enabled })
