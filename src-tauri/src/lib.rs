@@ -85,15 +85,15 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init());
     builder
-        // `_window`: only the desktop Destroyed branch below uses it; on ohos
-        // (mobile alias) the whole match arm is cfg'd out.
+        // Android/iOS Activity recreation is not a logical window close.
+        // The OHOS adapter emits Destroyed only for a real native window close.
         .on_window_event(|_window, event| {
             match event {
                 // Mobile (Android/iOS): Activity lifecycle changes can fire
                 // WindowEvent::Destroyed when the app merely goes to background
                 // (e.g. a fullscreen file picker opens). Closing sessions there
-                // would silently disconnect every SSH tab. Desktop only.
-                #[cfg(desktop)]
+                // would silently disconnect every SSH tab.
+                #[cfg(any(desktop, target_env = "ohos"))]
                 tauri::WindowEvent::Destroyed => {
                     let state = _window.state::<AppState>();
                     // Close only sessions belonging to this window.
@@ -114,10 +114,14 @@ pub fn run() {
 
             // 启动时扫一次本机可用 shell，结果缓存到进程退出。
             // 用户在 Shell 设置页打开时直接读缓存，没冷启动开销。
-            // PTY 模块本身就是桌面端独占（移动端没有 portable_pty）。
-            #[cfg(desktop)]
+            // HarmonyOS also compiles PTY, but probes sandbox support before use.
+            #[cfg(any(desktop, target_env = "ohos"))]
             terminal::pty::init_available_shells();
             let db = Arc::new(db::Db::open(&data_dir)?);
+            // The plugin store follows the actual host data directory (including
+            // application sandboxes), rather than a desktop-only path template.
+            app.asset_protocol_scope()
+                .allow_directory(data_dir.join("plugins"), true)?;
             // secret::open 可能失败：sticky backend 标记 keyring 但 keychain 现在
             // 拿不到（系统 keychain 损坏 / D-Bus 挂等）→ 硬 fail 启动。silently
             // fallback file 会用新主密钥让旧密文全部解不开，比启动失败更危险。
@@ -138,9 +142,9 @@ pub fn run() {
                 secret_store: secret_system.store,
                 lifecycle_sessions: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
-                #[cfg(desktop)]
+                #[cfg(any(desktop, target_env = "ohos"))]
                 pty_sessions: Mutex::new(HashMap::new()),
-                #[cfg(desktop)]
+                #[cfg(any(desktop, target_env = "ohos"))]
                 serial_sessions: Mutex::new(HashMap::new()),
                 telnet_sessions: Mutex::new(HashMap::new()),
                 sftp_sessions: Mutex::new(HashMap::new()),
@@ -158,6 +162,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::runtime::get_runtime_capabilities,
+            commands::files::resolve_local_paths,
             // profile & credential
             commands::profile::list_profiles,
             commands::profile::get_profile,
@@ -232,45 +238,45 @@ pub fn run() {
             commands::session::ssh_host_key_cancel,
             // session lifecycle
             commands::lifecycle::reconcile_sessions,
-            // PTY (desktop only)
-            #[cfg(desktop)]
+            // PTY (desktop hosts and capability-probed HarmonyOS PC)
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::pty::list_shells,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::pty::refresh_shells,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::pty::pty_spawn,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::pty::pty_spawn_connector,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::pty::pty_write,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::pty::pty_resize,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::pty::pty_close,
             // Serial (desktop only)
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::serial::serial_list_ports,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::serial::serial_open,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::serial::serial_write,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::serial::serial_close,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::serial::serial_set_dtr,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::serial::serial_set_rts,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::serial::serial_send_break,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::serial::list_serial_profiles,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::serial::get_serial_profile,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::serial::create_serial_profile,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::serial::update_serial_profile,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::serial::delete_serial_profile,
             // Telnet (all platforms — plain TCP)
             commands::telnet::telnet_open,
@@ -299,9 +305,9 @@ pub fn run() {
             commands::sftp::sftp_upload_from,
             commands::sftp::sftp_pick_save_path,
             commands::sftp::sftp_pick_open_path,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::sftp::sftp_pick_folder,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::sftp::sftp_pick_open_files,
             commands::sftp::sftp_cancel_transfer,
             commands::files::save_text_file,
@@ -313,8 +319,8 @@ pub fn run() {
             commands::cli::cli_status,
             #[cfg(desktop)]
             commands::cli::cli_install,
-            // multi-window (desktop only)
-            #[cfg(desktop)]
+            // Native multi-window hosts
+            #[cfg(any(desktop, target_env = "ohos"))]
             commands::window::open_tab_in_new_window,
             commands::clipboard::clipboard_read,
             commands::clipboard::clipboard_write,

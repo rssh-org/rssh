@@ -21,6 +21,43 @@ index 9d52dcd..3bcbc3b 100644
      }
  
      pub fn config(&self) -> Configuration {
+diff --git a/crates/ability/src/bridge/mod.rs b/crates/ability/src/bridge/mod.rs
+index f3a5b35..92d794f 100644
+--- a/crates/ability/src/bridge/mod.rs
++++ b/crates/ability/src/bridge/mod.rs
+@@ -704,6 +704,13 @@ pub struct BridgeCallOptions {
+ }
+ 
+ impl BridgeCallOptions {
++    /// Wait for a human interaction without a wall-clock deadline. The call
++    /// remains bound to its Ability session and is cancelled during teardown.
++    pub fn without_timeout(mut self) -> Self {
++        self.timeout_ms = 0;
++        self
++    }
++
+     pub fn with_timeout_ms(mut self, timeout_ms: u32) -> Self {
+         self.timeout_ms = timeout_ms.clamp(1, MAX_TIMEOUT_MS);
+         self
+@@ -1487,6 +1494,18 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn human_interaction_explicitly_disables_only_the_deadline() {
++        assert_eq!(BridgeCallOptions::default().without_timeout().timeout_ms(), 0);
++        assert_eq!(
++            BridgeCallOptions::default()
++                .without_timeout()
++                .with_timeout_ms(100)
++                .timeout_ms(),
++            100
++        );
++    }
++
+     #[test]
+     fn registry_rejects_duplicate_contracts() {
+         let registry = BridgePluginRegistry::default();
 diff --git a/crates/ability/src/waker.rs b/crates/ability/src/waker.rs
 index 6183607..64609d1 100644
 --- a/crates/ability/src/waker.rs
@@ -65,7 +102,7 @@ index 6183607..64609d1 100644
 -    }
 -}
 diff --git a/crates/plugin-files/src/lib.rs b/crates/plugin-files/src/lib.rs
-index 2cd0fd7..d918b7c 100644
+index 2cd0fd7..d1fb509 100644
 --- a/crates/plugin-files/src/lib.rs
 +++ b/crates/plugin-files/src/lib.rs
 @@ -74,6 +74,8 @@ pub struct FileDialogOptions {
@@ -108,6 +145,15 @@ index 2cd0fd7..d918b7c 100644
          match self.dialog_type.as_str() {
              dialog_type::OPEN_FILE | dialog_type::SAVE_FILE | dialog_type::OPEN_FOLDER => {}
              _ => {
+@@ -166,7 +184,7 @@ impl FilesExt for OpenHarmonyApp {
+                 .call_async::<FilesBridgePlugin, FileDialogOptions, FileDialogResponse>(
+                     "file-dialog",
+                     options,
+-                    BridgeCallOptions::default().with_timeout_ms(60_000),
++                    BridgeCallOptions::default().without_timeout(),
+                 )
+                 .await
+         })
 @@ -219,4 +237,25 @@ mod tests {
          assert_eq!(response.files.len(), 1);
          assert_eq!(response.filter, -1);
@@ -393,7 +439,7 @@ index 8e27af1..9d5f862 100644
  ///
  /// The registered object is available as `window.<object_name>` and each declared method receives
 diff --git a/crates/plugin-webview/src/lib.rs b/crates/plugin-webview/src/lib.rs
-index 53806e9..e314d4d 100644
+index 53806e9..8ad71d6 100644
 --- a/crates/plugin-webview/src/lib.rs
 +++ b/crates/plugin-webview/src/lib.rs
 @@ -27,6 +27,15 @@ pub use protocol::{
@@ -453,7 +499,24 @@ index 53806e9..e314d4d 100644
  }
  
  /// A document-start script and the URL rules for pages where ArkWeb may inject it.
-@@ -469,8 +487,20 @@ pub struct WebviewTitleChangeEvent {
+@@ -285,6 +303,8 @@ pub struct WebviewCreateRequest {
+     /// the ArkTS host appends the WebView FrameNode under that container instead of this native
+     /// module's DefaultXComponent root.
+     pub parent_handle: Option<u32>,
++    /// Logical OS window owner; zero is the existing Ability main window.
++    pub window_id: Option<i64>,
+     pub url: Option<String>,
+     pub html: Option<String>,
+     pub style: WebviewStyle,
+@@ -311,6 +331,7 @@ impl WebviewCreateRequest {
+         Self {
+             id: id.into(),
+             parent_handle: None,
++            window_id: None,
+             url: None,
+             html: None,
+             style: WebviewStyle::default(),
+@@ -469,8 +490,20 @@ pub struct WebviewTitleChangeEvent {
      pub title: String,
  }
  
@@ -474,7 +537,7 @@ index 53806e9..e314d4d 100644
  
  /// Response used by one-way named N-API notifications sent directly from ArkTS.
  #[napi(object)]
-@@ -1033,6 +1063,10 @@ mod tests {
+@@ -1033,6 +1066,10 @@ mod tests {
              <WebviewTitleChangeEvent as BridgeNapiType>::TYPE_NAME,
              "ohos.webview.TitleChangeEvent"
          );
@@ -486,7 +549,7 @@ index 53806e9..e314d4d 100644
              <WebviewEventAcknowledgement as BridgeNapiType>::TYPE_NAME,
              "ohos.webview.EventAcknowledgement"
 diff --git a/crates/plugin-webview/src/protocol.rs b/crates/plugin-webview/src/protocol.rs
-index c2acbe2..4afea47 100644
+index c2acbe2..c33a27a 100644
 --- a/crates/plugin-webview/src/protocol.rs
 +++ b/crates/plugin-webview/src/protocol.rs
 @@ -49,6 +49,19 @@ struct ProtocolState {
@@ -509,6 +572,316 @@ index c2acbe2..4afea47 100644
  /// ArkWeb scheme flags re-exported under the WebView plugin API.
  pub use ohos_web_binding::CustomProtocolOption as WebviewProtocolOptions;
  
+@@ -447,25 +460,18 @@ fn install_declaration(native_tag: &str, declaration: ProtocolDeclaration) -> Re
+         let headers = request.headers();
+         let is_main_frame = request.is_main_frame();
+ 
+-        if let Some(body) = request.http_body_stream() {
+-            let callback = Arc::clone(&callback);
+-            let mut request_handle = Some(request_handle);
+-            body.read(body.size() as usize, move |body| {
+-                let Some(request_handle) = request_handle.take() else {
+-                    return;
+-                };
+-                let responder = responder_for(request_handle);
+-                match build_request(&method, &url, headers.iter(), body) {
+-                    Ok(native_request) => callback(&url, native_request, is_main_frame, responder),
+-                    Err(_) => responder.respond(invalid_request_response()),
+-                }
+-            });
+-        } else {
+-            let responder = responder_for(request_handle);
+-            match build_request(&method, &url, headers.iter(), Vec::new()) {
+-                Ok(native_request) => callback(&url, native_request, is_main_frame, responder),
+-                Err(_) => responder.respond(invalid_request_response()),
+-            }
++        let responder = responder_for(request_handle);
++        // ohos-web-binding 0.2.3 drops the read buffer before ArkWeb's worker
++        // finishes filling it. Until the binding owns that buffer through completion,
++        // custom schemes serve resources only; IPC uses the native JavaScript proxy.
++        // Do not inspect a GET/HEAD body: some controllers expose an empty stream.
++        if !matches!(method.as_str(), "GET" | "HEAD") {
++            responder.respond(unsupported_request_response());
++            return true;
++        }
++        match build_request(&method, &url, headers.iter(), Vec::new()) {
++            Ok(native_request) => callback(&url, native_request, is_main_frame, responder),
++            Err(_) => responder.respond(invalid_request_response()),
+         }
+         true
+     });
+@@ -508,6 +514,14 @@ fn invalid_request_response() -> WebviewProtocolResponse {
+     response
+ }
+ 
++fn unsupported_request_response() -> WebviewProtocolResponse {
++    let mut response = Response::new(Cow::Borrowed(
++        &b"Custom schemes support GET and HEAD only"[..],
++    ));
++    *response.status_mut() = http::StatusCode::NOT_IMPLEMENTED;
++    response
++}
++
+ fn responder_for(request_handle: ohos_web_binding::ResourceHandle) -> WebviewProtocolResponder {
+     WebviewProtocolResponder {
+         responder: Box::new(move |response| {
+diff --git a/crates/plugin-window/src/events.rs b/crates/plugin-window/src/events.rs
+new file mode 100644
+index 0000000..4614bd0
+--- /dev/null
++++ b/crates/plugin-window/src/events.rs
+@@ -0,0 +1,115 @@
++use std::{cell::RefCell, collections::HashMap, rc::Rc};
++
++/// OS events carry the logical owner ID, never the platform ID (which may be reused).
++#[derive(Clone, Debug, Default)]
++pub struct WindowEvent {
++    pub window_id: i64,
++    pub kind: String,
++    pub x: i32,
++    pub y: i32,
++    pub width: i32,
++    pub height: i32,
++    pub scale: f64,
++    pub focused: bool,
++    pub visible: bool,
++    pub maximized: bool,
++    pub minimized: bool,
++}
++
++type Callback = Rc<dyn Fn(WindowEvent)>;
++thread_local! {
++    static HANDLERS: RefCell<HashMap<i64, Callback>> = RefCell::new(HashMap::new());
++}
++
++pub fn observe_window(id: i64, callback: impl Fn(WindowEvent) + 'static) {
++    HANDLERS.with(|handlers| handlers.borrow_mut().insert(id, Rc::new(callback)));
++}
++
++pub fn forget_window(id: i64) {
++    HANDLERS.with(|handlers| handlers.borrow_mut().remove(&id));
++}
++
++pub fn dispatch_window_event(event: WindowEvent) {
++    let callback = HANDLERS.with(|handlers| {
++        if event.kind == "destroyed" {
++            handlers.borrow_mut().remove(&event.window_id)
++        } else {
++            handlers.borrow().get(&event.window_id).cloned()
++        }
++    });
++    if let Some(callback) = callback {
++        callback(event);
++    }
++}
++
++pub fn window_context_ready() {
++    // Take a snapshot: callbacks may destroy a window or register a new one.
++    let handlers = HANDLERS.with(|handlers| handlers.borrow().clone());
++    for (id, callback) in handlers {
++        callback(WindowEvent {
++            window_id: id,
++            kind: "ready".into(),
++            ..Default::default()
++        });
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn close_is_scoped_and_context_recreation_keeps_survivors() {
++        let events = Rc::new(RefCell::new(Vec::new()));
++        for id in [7, 8] {
++            let events = events.clone();
++            observe_window(id, move |event| {
++                events.borrow_mut().push((event.window_id, event.kind))
++            });
++        }
++        dispatch_window_event(WindowEvent {
++            window_id: 7,
++            kind: "close-requested".into(),
++            ..Default::default()
++        });
++        dispatch_window_event(WindowEvent {
++            window_id: 7,
++            kind: "destroyed".into(),
++            ..Default::default()
++        });
++        dispatch_window_event(WindowEvent {
++            window_id: 7,
++            kind: "resized".into(),
++            ..Default::default()
++        });
++        window_context_ready();
++        assert_eq!(
++            &*events.borrow(),
++            &[
++                (7, "close-requested".into()),
++                (7, "destroyed".into()),
++                (8, "ready".into())
++            ]
++        );
++        dispatch_window_event(WindowEvent {
++            window_id: 8,
++            kind: "destroyed".into(),
++            ..Default::default()
++        });
++    }
++    #[test]
++    fn callbacks_can_register_another_window_without_reentrant_borrow() {
++        observe_window(1, |_| observe_window(2, |_| {}));
++        dispatch_window_event(WindowEvent {
++            window_id: 1,
++            kind: "close-requested".into(),
++            ..Default::default()
++        });
++        for id in [1, 2] {
++            dispatch_window_event(WindowEvent {
++                window_id: id,
++                kind: "destroyed".into(),
++                ..Default::default()
++            });
++        }
++    }
++}
+diff --git a/crates/plugin-window/src/lib.rs b/crates/plugin-window/src/lib.rs
+index f8ffebd..00886dd 100644
+--- a/crates/plugin-window/src/lib.rs
++++ b/crates/plugin-window/src/lib.rs
+@@ -4,10 +4,14 @@
+ //! decorations, focus, move/resize/minimize/maximize, background color, blur and destruction).
+ 
+ use napi_derive_ohos::napi;
++use napi_ohos::bindgen_prelude::Unknown;
++mod events;
++pub use events::{forget_window, observe_window, WindowEvent};
+ use napi_ohos::{Error, Result};
+ use openharmony_ability::{
+     impl_bridge_napi_type, AsyncBridge, AvoidArea, AvoidAreaType, BridgeCallOptions,
+-    BridgeContextRequirement, BridgeNapiType, BridgePlugin, BridgeRuntime, OpenHarmonyApp, Rect,
++    BridgeContextRequirement, BridgeMainThreadEvent, BridgeNapiType, BridgePlugin, BridgeRuntime,
++    OpenHarmonyApp, PluginLifecycleEvent, Rect,
+ };
+ 
+ pub struct WindowBridgePlugin;
+@@ -18,6 +22,37 @@ impl BridgePlugin for WindowBridgePlugin {
+     const ID: &'static str = "ohos.window";
+     const REQUIRED_CONTEXTS: &'static [BridgeContextRequirement] =
+         &[BridgeContextRequirement::UiContext];
++
++    fn on_main_thread_event<'env>(
++        &self,
++        event: BridgeMainThreadEvent<'env>,
++    ) -> Result<Unknown<'env>> {
++        if event.name() != "window-event" {
++            return Err(Error::from_reason("Unknown window event"));
++        }
++        let value = event.decode::<NativeWindowEvent>()?;
++        events::dispatch_window_event(WindowEvent {
++            window_id: value.window_id,
++            kind: value.kind,
++            x: value.x,
++            y: value.y,
++            width: value.width,
++            height: value.height,
++            scale: value.scale,
++            focused: value.focused,
++            visible: value.visible,
++            maximized: value.maximized,
++            minimized: value.minimized,
++        });
++        event.respond(WindowAcknowledgement { accepted: true })
++    }
++
++    fn on_lifecycle(&self, event: &PluginLifecycleEvent) -> Result<()> {
++        if matches!(event, PluginLifecycleEvent::UiContextReady) {
++            events::window_context_ready();
++        }
++        Ok(())
++    }
+ }
+ 
+ #[napi(object)]
+@@ -78,6 +113,56 @@ impl From<RawAvoidArea> for AvoidArea {
+     }
+ }
+ 
++/// Logical window creation contract used by windowing runtimes. ID 0 owns the Ability's
++/// existing main window; all other IDs own independently mounted OS sub-windows.
++#[napi(object)]
++#[derive(Clone, Debug)]
++pub struct ManagedWindowRequest {
++    pub window_id: i64,
++    pub title: String,
++    pub width: i32,
++    pub height: i32,
++    pub x: i32,
++    pub y: i32,
++    pub visible: bool,
++    pub decorations: bool,
++    pub resizable: bool,
++    pub minimizable: bool,
++    pub maximizable: bool,
++    pub closable: bool,
++    pub maximized: bool,
++}
++impl_bridge_napi_type!(ManagedWindowRequest, "ohos.window.ManagedRequest");
++
++#[napi(object)]
++#[derive(Clone, Debug)]
++pub struct ManagedWindowCommand {
++    pub window_id: i64,
++    pub operation: String,
++    pub value: Option<bool>,
++    pub text: Option<String>,
++    pub x: Option<i32>,
++    pub y: Option<i32>,
++}
++impl_bridge_napi_type!(ManagedWindowCommand, "ohos.window.ManagedCommand");
++
++#[napi(object)]
++#[derive(Clone, Debug)]
++pub struct NativeWindowEvent {
++    pub window_id: i64,
++    pub kind: String,
++    pub x: i32,
++    pub y: i32,
++    pub width: i32,
++    pub height: i32,
++    pub scale: f64,
++    pub focused: bool,
++    pub visible: bool,
++    pub maximized: bool,
++    pub minimized: bool,
++}
++impl_bridge_napi_type!(NativeWindowEvent, "ohos.window.WindowEvent");
++
+ // ── Multi-window operations ────────────────────────────────────────────────────
+ 
+ #[napi(object)]
+@@ -259,6 +344,20 @@ impl WindowClient {
+             .await
+     }
+ 
++    pub async fn attach_managed_window(&self, request: ManagedWindowRequest) -> Result<()> {
++        validate_window_id(request.window_id)?;
++        self.call::<ManagedWindowRequest, WindowAcknowledgement>("attach-managed-window", request)
++            .await?
++            .ensure()
++    }
++
++    pub async fn update_managed_window(&self, request: ManagedWindowCommand) -> Result<()> {
++        validate_window_id(request.window_id)?;
++        self.call::<ManagedWindowCommand, WindowAcknowledgement>("update-managed-window", request)
++            .await?
++            .ensure()
++    }
++
+     /// Queries the avoid area of the Window that owns the attached DefaultXComponent.
+     pub async fn query_avoid_area(&self, area_type: AvoidAreaType) -> Result<AvoidArea> {
+         let response = self
 diff --git a/docs/plugin-development-standard.md b/docs/plugin-development-standard.md
 index 6436d31..40ef0dc 100644
 --- a/docs/plugin-development-standard.md
@@ -521,6 +894,16 @@ index 6436d31..40ef0dc 100644
  
  `transparent` 是 create 时的行为：当 `.transparent(true)` 且未显式指定 background color 时，ArkTS
  必须在创建根节点时使用透明色 `#00000000`；显式 background color 优先。不能把这一语义退化为
+diff --git a/native_ability/index.ets b/native_ability/index.ets
+index 6f98445..3bc8c6a 100644
+--- a/native_ability/index.ets
++++ b/native_ability/index.ets
+@@ -27,3 +27,5 @@ export type {
+ } from "./src/main/ets/ability/type";
+ export { DefaultXComponent } from "./src/main/ets/components/DefaultXComponent";
+ export { invokeNativeBackPressInterceptor } from "./src/main/ets/runtime/BackPress";
++
++export { WindowSurface, WindowSurfaceRegistry } from "./src/main/ets/components/WindowSurface";
 diff --git a/native_ability/src/main/ets/ability/NativeAbility.ets b/native_ability/src/main/ets/ability/NativeAbility.ets
 index a542f8a..6b51153 100644
 --- a/native_ability/src/main/ets/ability/NativeAbility.ets
@@ -543,10 +926,29 @@ index a542f8a..6b51153 100644
        // a module name point at the wrong lifecycle object after one dynamic import failed.
        for (const moduleName of requestedModules) {
 diff --git a/native_ability/src/main/ets/bridge/BridgeHost.ets b/native_ability/src/main/ets/bridge/BridgeHost.ets
-index b4e7b2c..f86717f 100644
+index b4e7b2c..e74acef 100644
 --- a/native_ability/src/main/ets/bridge/BridgeHost.ets
 +++ b/native_ability/src/main/ets/bridge/BridgeHost.ets
-@@ -1710,6 +1710,20 @@ class BridgeHost {
+@@ -205,6 +205,8 @@ function isBridgeIdentifier(value: string): boolean {
+ }
+ 
+ function clampTimeout(timeoutMs: number): number {
++  // Explicit Rust without_timeout() policy. Lifecycle cancellation is kept.
++  if (timeoutMs === 0) return 0;
+   if (!Number.isFinite(timeoutMs)) {
+     return MAX_TIMEOUT_MS;
+   }
+@@ -1692,6 +1694,9 @@ class BridgeHost {
+     action: string,
+     onTimeout: (reason: Error) => void,
+   ): Promise<BridgeTypedValue> {
++    // operation already races the lifecycle cancellation Promise. A human
++    // picker may stay open indefinitely without outliving its Ability session.
++    if (timeoutMs === 0) return operation;
+     let timer = 0;
+     const timeout = new Promise<BridgeTypedValue>((_resolve, reject) => {
+       timer = setTimeout(() => {
+@@ -1710,6 +1715,20 @@ class BridgeHost {
    }
  }
  
@@ -567,7 +969,7 @@ index b4e7b2c..f86717f 100644
  /**
   * Session registry is transport plumbing only. It is keyed by a NativeAbility-created session
   * instead of a process-global Helper, so stale calls cannot reach a recreated ability instance.
-@@ -1718,19 +1732,21 @@ export class BridgeHostRegistry {
+@@ -1718,19 +1737,21 @@ export class BridgeHostRegistry {
    private static readonly sessions: Map<string, Map<string, BridgeHost>> = new Map();
    /** One loaded native module may belong to only one active Ability session. */
    private static readonly moduleOwners: Map<string, string> = new Map();
@@ -591,7 +993,7 @@ index b4e7b2c..f86717f 100644
      for (const moduleName of moduleNames) {
        if (!isBridgeIdentifier(moduleName)) {
          throw new Error(`Invalid native module name '${moduleName}'`);
-@@ -1739,6 +1755,22 @@ export class BridgeHostRegistry {
+@@ -1739,6 +1760,22 @@ export class BridgeHostRegistry {
          throw new Error(`Native module '${moduleName}' is declared more than once for one Ability`);
        }
        requestedModules.set(moduleName, true);
@@ -614,7 +1016,7 @@ index b4e7b2c..f86717f 100644
        const owner = BridgeHostRegistry.moduleOwners.get(moduleName);
        if (owner !== undefined) {
          throw new Error(
-@@ -1923,6 +1955,9 @@ export class BridgeHostRegistry {
+@@ -1923,6 +1960,9 @@ export class BridgeHostRegistry {
      if (hosts === undefined) {
        return;
      }
@@ -624,7 +1026,7 @@ index b4e7b2c..f86717f 100644
      for (const host of hosts.values()) {
        host.beginClosing();
      }
-@@ -1931,8 +1966,11 @@ export class BridgeHostRegistry {
+@@ -1931,8 +1971,11 @@ export class BridgeHostRegistry {
    static async dispose(sessionId: string): Promise<void> {
      const hosts = BridgeHostRegistry.sessions.get(sessionId);
      if (!hosts) {
@@ -636,7 +1038,7 @@ index b4e7b2c..f86717f 100644
      BridgeHostRegistry.sessions.delete(sessionId);
      try {
        await BridgeHostRegistry.disposeHosts(hosts);
-@@ -1943,6 +1981,8 @@ export class BridgeHostRegistry {
+@@ -1943,6 +1986,8 @@ export class BridgeHostRegistry {
          }
        }
        hosts.clear();
@@ -645,6 +1047,171 @@ index b4e7b2c..f86717f 100644
      }
    }
  
+diff --git a/native_ability/src/main/ets/components/WindowSurface.ets b/native_ability/src/main/ets/components/WindowSurface.ets
+new file mode 100644
+index 0000000..a575502
+--- /dev/null
++++ b/native_ability/src/main/ets/components/WindowSurface.ets
+@@ -0,0 +1,159 @@
++import { FrameNode, NodeController } from "@ohos.arkui.node";
++import { UIContext } from "@ohos.arkui.UIContext";
++
++interface SurfaceWaiter {
++  resolve: (surface: WindowSurface) => void;
++  reject: (error: Error) => void;
++}
++
++/** A window's UIContext and mount root always travel together. A sub-window never borrows
++ * the main window's context or claims its DefaultXComponent render owner. */
++export class WindowSurface {
++  private context?: UIContext;
++  private root?: FrameNode;
++  private disposed: boolean = false;
++  private readonly waiters: SurfaceWaiter[] = [];
++  private readonly nodes: Map<string, FrameNode> = new Map();
++
++  attach(context: UIContext, root: FrameNode): void {
++    if (this.disposed) { throw new Error("Window surface has already been disposed"); }
++    this.context = context;
++    this.root = root;
++    for (const waiter of this.waiters.splice(0)) { waiter.resolve(this); }
++  }
++
++  wait(onCancel: (listener: () => void) => () => void): Promise<WindowSurface> {
++    if (this.disposed) { return Promise.reject(new Error("Window surface is closed")); }
++    if (this.root !== undefined) { return Promise.resolve(this); }
++    return new Promise<WindowSurface>((resolve, reject): void => {
++      let unsubscribe: () => void = (): void => {};
++      const waiter: SurfaceWaiter = {
++        resolve: (surface: WindowSurface): void => { unsubscribe(); resolve(surface); },
++        reject: (error: Error): void => { unsubscribe(); reject(error); },
++      };
++      this.waiters.push(waiter);
++      unsubscribe = onCancel((): void => {
++        const index = this.waiters.indexOf(waiter);
++        if (index >= 0) { this.waiters.splice(index, 1); }
++        waiter.reject(new Error("Window surface wait was cancelled"));
++      });
++    });
++  }
++
++  getUIContext(): UIContext {
++    if (this.context === undefined) { throw new Error("Window UIContext is unavailable"); }
++    return this.context;
++  }
++
++  append(key: string, node: FrameNode): void {
++    if (this.root === undefined || this.disposed) { throw new Error("Window surface is unavailable"); }
++    this.remove(key);
++    this.root.appendChild(node);
++    this.nodes.set(key, node);
++  }
++
++  remove(key: string): void {
++    const node = this.nodes.get(key);
++    if (node === undefined) { return; }
++    this.nodes.delete(key);
++    try { this.root?.removeChild(node); } catch {}
++    try { node.dispose(); } catch {}
++  }
++
++  dispose(): void {
++    if (this.disposed) { return; }
++    this.disposed = true;
++    for (const waiter of this.waiters.splice(0)) { waiter.reject(new Error("Window surface closed before attachment")); }
++    for (const key of Array.from(this.nodes.keys())) { this.remove(key); }
++    this.context = undefined;
++    this.root = undefined;
++  }
++}
++
++/** Bridge-session scoped: a late controller from an old Ability cannot mount in its replacement. */
++export class WindowSurfaceRegistry {
++  private static readonly surfaces: Map<string, WindowSurface> = new Map();
++  private static readonly owners: WeakMap<FrameNode, string> = new WeakMap();
++  private static nextOwner: number = 1;
++
++  static owner(sessionId: string, root: FrameNode): string {
++    let owner = WindowSurfaceRegistry.owners.get(root);
++    if (owner === undefined) {
++      owner = `${sessionId}:surface:${WindowSurfaceRegistry.nextOwner++}`;
++      WindowSurfaceRegistry.owners.set(root, owner);
++    }
++    return owner;
++  }
++
++  static clear(owner: string): void {
++    for (const key of Array.from(WindowSurfaceRegistry.surfaces.keys())) {
++      if (!key.startsWith(`${owner}:window:`)) { continue; }
++      const surface = WindowSurfaceRegistry.surfaces.get(key);
++      WindowSurfaceRegistry.surfaces.delete(key);
++      surface?.dispose();
++    }
++  }
++
++  static key(sessionId: string, windowId: number): string { return `${sessionId}:window:${windowId}`; }
++
++  static get(sessionId: string, windowId: number): WindowSurface {
++    const key = WindowSurfaceRegistry.key(sessionId, windowId);
++    let surface = WindowSurfaceRegistry.surfaces.get(key);
++    if (surface === undefined) {
++      surface = new WindowSurface();
++      WindowSurfaceRegistry.surfaces.set(key, surface);
++    }
++    return surface;
++  }
++
++  static has(key: string): boolean { return WindowSurfaceRegistry.surfaces.has(key); }
++
++  static find(key: string): WindowSurface {
++    const surface = WindowSurfaceRegistry.surfaces.get(key);
++    if (surface === undefined) { throw new Error("Unknown native window surface"); }
++    return surface;
++  }
++
++  static remove(sessionId: string, windowId: number): void {
++    const key = WindowSurfaceRegistry.key(sessionId, windowId);
++    const surface = WindowSurfaceRegistry.surfaces.get(key);
++    WindowSurfaceRegistry.surfaces.delete(key);
++    surface?.dispose();
++  }
++}
++
++class WindowRootController extends NodeController {
++  private root?: FrameNode;
++  makeNode(context: UIContext): FrameNode {
++    if (this.root === undefined) { this.root = new FrameNode(context); }
++    return this.root;
++  }
++  release(): void {
++    try { this.root?.dispose(); } catch {}
++    this.root = undefined;
++  }
++}
++
++@Entry({ routeName: "NativeAbilityWindow", useSharedStorage: true })
++@Component
++struct NativeAbilityWindow {
++  @LocalStorageProp("nativeWindowSurface") surfaceKey: string = "";
++  private controller: WindowRootController = new WindowRootController();
++
++  aboutToAppear(): void {
++    // A queued route can appear after its Ability session has already been disposed.
++    if (!WindowSurfaceRegistry.has(this.surfaceKey)) { return; }
++    const context = this.getUIContext();
++    WindowSurfaceRegistry.find(this.surfaceKey).attach(context, this.controller.makeNode(context));
++  }
++
++  aboutToDisappear(): void { this.controller.release(); }
++
++  build() {
++    Row() {
++      Column() {
++        NodeContainer(this.controller).width("100%").height("100%")
++      }.width("100%")
++    }.height("100%")
++  }
++}
 diff --git a/native_ability/src/test/LocalUnit.test.ets b/native_ability/src/test/LocalUnit.test.ets
 index 7fd5709..9fbc781 100644
 --- a/native_ability/src/test/LocalUnit.test.ets
@@ -838,10 +1405,19 @@ index 7abd128..c560d27 100644
      const files = await documentPicker.save(saveOptions);
      let filter = -1;
 diff --git a/plugins/webview/src/main/ets/WebviewPlugin.ets b/plugins/webview/src/main/ets/WebviewPlugin.ets
-index ef07248..5e78bde 100644
+index ef07248..a5c97f2 100644
 --- a/plugins/webview/src/main/ets/WebviewPlugin.ets
 +++ b/plugins/webview/src/main/ets/WebviewPlugin.ets
-@@ -24,6 +24,7 @@ const DOWNLOAD_START_REQUEST_TYPE = "ohos.webview.DownloadStartRequest";
+@@ -2,6 +2,8 @@ import { WebHeader } from "@kit.ArkUI";
+ import { BuilderNode } from "@ohos.arkui.node";
+ import webview from "@ohos.web.webview";
+ import {
++  WindowSurface,
++  WindowSurfaceRegistry,
+   BridgeCallContext,
+   BridgeTypedValue,
+   BridgePluginContext,
+@@ -24,6 +26,7 @@ const DOWNLOAD_START_REQUEST_TYPE = "ohos.webview.DownloadStartRequest";
  const DOWNLOAD_START_RESPONSE_TYPE = "ohos.webview.DownloadStartResponse";
  const DOWNLOAD_END_EVENT_TYPE = "ohos.webview.DownloadEndEvent";
  const TITLE_CHANGE_EVENT_TYPE = "ohos.webview.TitleChangeEvent";
@@ -849,7 +1425,7 @@ index ef07248..5e78bde 100644
  const ENGINE_LIFECYCLE_EVENT_TYPE = "ohos.webview.EngineLifecycleEvent";
  const ENGINE_LIFECYCLE_RESPONSE_TYPE = "ohos.webview.EngineLifecycleResponse";
  const CONTROLLER_EVENT_TYPE = "ohos.webview.ControllerEvent";
-@@ -64,6 +65,7 @@ interface WebviewEventOptions {
+@@ -64,6 +67,7 @@ interface WebviewEventOptions {
    downloadStart?: boolean | null;
    downloadEnd?: boolean | null;
    titleChange?: boolean | null;
@@ -857,7 +1433,15 @@ index ef07248..5e78bde 100644
  }
  
  interface WebviewCreatePayload {
-@@ -116,6 +118,7 @@ interface ManagedWebview extends WebviewCreatePayload {
+@@ -74,6 +78,7 @@ interface WebviewCreatePayload {
+    * so an RS-layer node tree can adopt WebViews as children.
+    */
+   parentHandle?: number | null;
++  windowId?: number | null;
+   url?: string | null;
+   html?: string | null;
+   style?: WebviewStyle | null;
+@@ -116,10 +121,12 @@ interface ManagedWebview extends WebviewCreatePayload {
    failControllerAttach: (reason: string) => void;
    onNavigationRequest: (url: string) => boolean;
    onTitleChange: (title: string) => void;
@@ -865,7 +1449,12 @@ index ef07248..5e78bde 100644
    onDownloadStart: (url: string, tempPath: string | null) => WebviewDownloadStartResponse;
    onDownloadEnd: (url: string, tempPath: string | null, success: boolean) => void;
    /** How this WebView was mounted: a parent-handle container or the component root. */
-@@ -320,6 +323,20 @@ class WebviewTitleChangeEvent {
+   mountParentHandle: number | null;
++  mountWindowSurface?: WindowSurface;
+   /** Host-internal cleanup key; WebView IDs remain opaque business identifiers. */
+   mountKey: string;
+ }
+@@ -320,6 +327,20 @@ class WebviewTitleChangeEvent {
    }
  }
  
@@ -886,7 +1475,7 @@ index ef07248..5e78bde 100644
  class WebviewEngineLifecycleEvent {
    readonly phase: string;
    readonly schemes: WebviewSchemeDeclaration[];
-@@ -496,6 +513,7 @@ function normalizeEventOptions(
+@@ -496,6 +517,7 @@ function normalizeEventOptions(
      downloadStart: optionalEventFlag(options?.downloadStart, "WebView eventOptions.downloadStart"),
      downloadEnd: optionalEventFlag(options?.downloadEnd, "WebView eventOptions.downloadEnd"),
      titleChange: optionalEventFlag(options?.titleChange, "WebView eventOptions.titleChange"),
@@ -894,7 +1483,7 @@ index ef07248..5e78bde 100644
    };
  }
  
-@@ -772,6 +790,8 @@ function BuildWebview(data: ManagedWebview) {
+@@ -772,6 +794,8 @@ function BuildWebview(data: ManagedWebview) {
        }
      })
      .onLoadIntercept((event) => data.onNavigationRequest(event.data.getRequestUrl()))
@@ -903,7 +1492,25 @@ index ef07248..5e78bde 100644
      .onTitleReceive((event) => data.onTitleChange(event.title));
  }
  
-@@ -846,6 +866,21 @@ class WebviewSurface {
+@@ -799,12 +823,17 @@ class WebviewSurface {
+     const style = normalizeStyle(payload.style, payload.transparent);
+     const eventOptions = normalizeEventOptions(payload.eventOptions);
+     const parentHandle = payload.parentHandle ?? null;
++    const windowId = payload.windowId ?? 0;
++    if (parentHandle !== null && windowId !== 0) { throw new Error("Cross-window node handles are not supported"); }
++    const windowSurface: WindowSurface | undefined = windowId === 0 ? undefined : await WindowSurfaceRegistry.get(WindowSurfaceRegistry.owner(this.pluginContext.sessionId, this.pluginContext.getRootFrameNode()), windowId).wait(callContext.onCancel);
++    this.assertCallActive(callContext);
+     const instanceId = this.nextMountKey++;
+     const nativeTagId = nextWebviewNativeTagId++;
+     const nativeTag = `ohos.webview.${this.pluginContext.sessionId}.${nativeTagId}`;
+     const data: ManagedWebview = {
+       id: payload.id,
+       mountParentHandle: parentHandle,
++      mountWindowSurface: windowSurface,
+       mountKey: `ohos.webview.${instanceId}`,
+       nativeTag,
+       url: payload.url,
+@@ -846,6 +875,21 @@ class WebviewSurface {
            console.error("WebView title notification failed: " + String(error));
          }
        },
@@ -925,3 +1532,421 @@ index ef07248..5e78bde 100644
        onDownloadStart: (url: string, tempPath: string | null): WebviewDownloadStartResponse => {
          return downloadStartDecision(this.pluginContext, payload.id, nativeTag, url, tempPath);
        },
+@@ -869,7 +913,7 @@ class WebviewSurface {
+     if (payload.devtools) {
+       enableWebDebuggingIfAvailable();
+     }
+-    const node = new BuilderNode<[ManagedWebview]>(this.pluginContext.getUIContext());
++    const node = new BuilderNode<[ManagedWebview]>(windowSurface?.getUIContext() ?? this.pluginContext.getUIContext());
+     const entry = new WebviewEntry(data, node);
+     data.beginControllerAttach = (): boolean => entry.beginControllerAttach();
+     data.notifyNativeControllerAttached = (): void => {
+@@ -891,7 +935,9 @@ class WebviewSurface {
+       if (frameNode === null) {
+         throw new Error(`Unable to build WebView '${payload.id}': no FrameNode`);
+       }
+-      if (parentHandle !== null) {
++      if (windowSurface !== undefined) {
++        windowSurface.append(data.mountKey, frameNode);
++      } else if (parentHandle !== null) {
+         this.pluginContext.getFrameNode(parentHandle).appendChild(frameNode);
+       } else {
+         this.pluginContext.appendChild(data.mountKey, frameNode, (): void => {
+@@ -1024,7 +1070,9 @@ class WebviewSurface {
+     entry.failController(`WebView '${id}' was removed before its controller attached`);
+     if (detachNode) {
+       const parentHandle = entry.data.mountParentHandle;
+-      if (parentHandle !== null) {
++      if (entry.data.mountWindowSurface !== undefined) {
++        entry.data.mountWindowSurface.remove(entry.data.mountKey);
++      } else if (parentHandle !== null) {
+         const frameNode = entry.node.getFrameNode();
+         if (frameNode !== null) {
+           try {
+diff --git a/plugins/window/src/main/ets/ManagedWindows.ets b/plugins/window/src/main/ets/ManagedWindows.ets
+new file mode 100644
+index 0000000..0c951d3
+--- /dev/null
++++ b/plugins/window/src/main/ets/ManagedWindows.ets
+@@ -0,0 +1,288 @@
++import window from "@ohos.window";
++import deviceInfo from "@ohos.deviceInfo";
++import { BridgeCallContext, BridgePluginContext, BridgeTypedValue, WindowSurfaceRegistry } from "@ohos-rs/ability";
++
++export const MANAGED_REQUEST = "ohos.window.ManagedRequest";
++export const MANAGED_COMMAND = "ohos.window.ManagedCommand";
++
++interface ManagedRequest {
++  windowId: number;
++  title: string;
++  width: number;
++  height: number;
++  x: number;
++  y: number;
++  visible: boolean;
++  decorations: boolean;
++  resizable: boolean;
++  minimizable: boolean;
++  maximizable: boolean;
++  closable: boolean;
++  maximized: boolean;
++}
++
++interface ManagedCommand {
++  windowId: number;
++  operation: string;
++  value?: boolean;
++  text?: string;
++  x?: number;
++  y?: number;
++}
++
++class WindowNotification {
++  windowId: number;
++  kind: string;
++  x: number;
++  y: number;
++  width: number;
++  height: number;
++  scale: number;
++  focused: boolean;
++  visible: boolean;
++  maximized: boolean;
++  minimized: boolean;
++  constructor(windowId: number, kind: string, record?: ManagedRecord) {
++    this.windowId = windowId;
++    this.kind = kind;
++    this.x = record?.rect.left ?? 0;
++    this.y = record?.rect.top ?? 0;
++    this.width = record?.rect.width ?? 0;
++    this.height = record?.rect.height ?? 0;
++    this.scale = record?.scale ?? 1;
++    this.focused = record?.focused ?? false;
++    this.visible = record?.visible ?? false;
++    this.maximized = record?.status === window.WindowStatusType.MAXIMIZE;
++    this.minimized = record?.status === window.WindowStatusType.MINIMIZE;
++  }
++}
++
++class ManagedRecord {
++  readonly win: window.Window;
++  readonly request: ManagedRequest;
++  rect: window.Rect;
++  scale: number;
++  focused: boolean = false;
++  closeAuthorized: boolean = false;
++  visible: boolean;
++  status: window.WindowStatusType;
++  onRect?: (options: window.RectChangeOptions) => void;
++  onEvent?: (event: window.WindowEventType) => void;
++  onStatus?: (status: window.WindowStatusType) => void;
++  onClose?: () => Promise<boolean>;
++  constructor(win: window.Window, request: ManagedRequest) {
++    this.win = win;
++    this.request = request;
++    this.rect = win.getWindowProperties().windowRect;
++    this.scale = win.getUIContext().vp2px(1);
++    this.visible = request.visible;
++    this.status = win.getWindowStatus();
++    this.focused = win.isFocused();
++  }
++}
++
++/** Native windows are owned by a bridge session; logical IDs survive UIContext recreation. */
++export class ManagedWindows {
++  private readonly windows: Map<number, ManagedRecord> = new Map();
++  private readonly creating: Map<number, Promise<void>> = new Map();
++  private generation: number = 0;
++  private disposed: boolean = false;
++  private closing: boolean = false;
++  private readonly context: BridgePluginContext;
++  private readonly owner: string;
++
++  constructor(context: BridgePluginContext) {
++    this.context = context;
++    this.owner = WindowSurfaceRegistry.owner(context.sessionId, context.getRootFrameNode());
++  }
++
++  async attach(payload: BridgeTypedValue, call: BridgeCallContext): Promise<void> {
++    if (payload.typeName !== MANAGED_REQUEST) { throw new Error("Invalid managed window request type"); }
++    const request = payload.value as ManagedRequest;
++    if (!Number.isSafeInteger(request.windowId) || request.windowId < 0 || request.width <= 0 || request.height <= 0) {
++      throw new Error("Invalid managed window ID or dimensions");
++    }
++    if (this.disposed) { throw new Error("Window host is disposed"); }
++    if (this.closing) { throw new Error("Window host is closing"); }
++    if (this.windows.has(request.windowId)) { return; }
++    const pending = this.creating.get(request.windowId);
++    if (pending !== undefined) { return await pending; }
++    const generation = this.generation;
++    const promise = this.create(request, call, generation);
++    this.creating.set(request.windowId, promise);
++    try { await promise; } finally { this.creating.delete(request.windowId); }
++  }
++
++  private assertCreationActive(call: BridgeCallContext, generation: number): void {
++    if (this.disposed || this.closing || generation !== this.generation || !call.isActive()) {
++      throw new Error("Window creation was cancelled");
++    }
++  }
++
++  private async create(request: ManagedRequest, call: BridgeCallContext, generation: number): Promise<void> {
++    const main = request.windowId === 0;
++    const win: window.Window = main ? this.context.getWindow() : await this.context.getWindowStage().createSubWindowWithOptions(`${this.owner}:native-${request.windowId}`, {
++      title: request.title, decorEnabled: true, maximizeSupported: request.maximizable,
++    });
++    let record: ManagedRecord | undefined;
++    try {
++      this.assertCreationActive(call, generation);
++      if (!main) {
++        WindowSurfaceRegistry.get(this.owner, request.windowId);
++        const storage = new LocalStorage();
++        storage.setOrCreate("nativeWindowSurface", WindowSurfaceRegistry.key(this.owner, request.windowId));
++        await win.loadContentByName("NativeAbilityWindow", storage);
++        await win.resize(request.width, request.height);
++        await win.moveWindowTo(request.x, request.y);
++      }
++      this.assertCreationActive(call, generation);
++      const desktop = deviceInfo.deviceType === "2in1" || deviceInfo.deviceType === "pc";
++      if (desktop) {
++        win.setWindowDecorVisible(request.decorations);
++        await win.setResizeByDragEnabled(request.resizable);
++        await win.setWindowTitle(request.title);
++        if (main) { win.setWindowTitleButtonVisible(request.maximizable, request.minimizable, request.closable); }
++        if (request.maximized) { await win.maximize(window.MaximizePresentation.EXIT_IMMERSIVE); }
++      }
++      this.assertCreationActive(call, generation);
++      record = new ManagedRecord(win, request);
++      this.windows.set(request.windowId, record);
++      this.subscribe(record, desktop);
++      if (request.visible) { await win.showWindow(); }
++      this.assertCreationActive(call, generation);
++      this.notify(record, "resized");
++    } catch (error) {
++      if (record !== undefined) { this.unsubscribe(record); }
++      this.windows.delete(request.windowId);
++      WindowSurfaceRegistry.remove(this.owner, request.windowId);
++      if (!main) { try { await win.destroyWindow(); } catch {} }
++      throw new Error(String(error));
++    }
++  }
++
++  private subscribe(record: ManagedRecord, desktop: boolean): void {
++    record.onRect = (options: window.RectChangeOptions): void => {
++      record.rect = options.rect;
++      this.notify(record, "resized");
++    };
++    record.onEvent = (event: window.WindowEventType): void => {
++      if (event === window.WindowEventType.WINDOW_ACTIVE) { record.focused = true; }
++      if (event === window.WindowEventType.WINDOW_INACTIVE) { record.focused = false; }
++      if (event === window.WindowEventType.WINDOW_SHOWN) { record.visible = true; }
++      if (event === window.WindowEventType.WINDOW_HIDDEN) { record.visible = false; }
++      if (event === window.WindowEventType.WINDOW_DESTROYED) { this.closed(record); return; }
++      this.notify(record, "focused");
++    };
++    record.onStatus = (status: window.WindowStatusType): void => {
++      record.status = status;
++      this.notify(record, "state");
++    };
++    record.win.on("windowRectChange", record.onRect);
++    record.win.on("windowEvent", record.onEvent);
++    if (desktop) {
++      record.win.on("windowStatusChange", record.onStatus);
++      record.onClose = async (): Promise<boolean> => {
++        this.notify(record, "close-requested");
++        return true; // Tauri decides whether to cancel or destroy this particular window.
++      };
++      record.win.on("windowWillClose", record.onClose);
++    }
++  }
++
++  private unsubscribe(record: ManagedRecord): void {
++    try { record.win.off("windowRectChange", record.onRect); } catch {}
++    try { record.win.off("windowEvent", record.onEvent); } catch {}
++    if (record.onClose !== undefined) { try { record.win.off("windowWillClose", record.onClose); } catch {} }
++    if (record.onStatus !== undefined) { try { record.win.off("windowStatusChange", record.onStatus); } catch {} }
++  }
++
++  private notify(record: ManagedRecord, kind: string): void {
++    if (this.disposed || this.windows.get(record.request.windowId) !== record) { return; }
++    this.dispatch(new WindowNotification(record.request.windowId, kind, record));
++  }
++
++  private dispatch(notification: WindowNotification): void {
++    if (this.disposed) { return; }
++    try {
++      this.context.invokeNativeSync("window-event", "ohos.window.WindowEvent", "ohos.window.Acknowledgement", notification as ESObject);
++    } catch (error) { console.error(`Native window event failed: ${String(error)}`); }
++  }
++
++  private closed(record: ManagedRecord): void {
++    if (this.windows.get(record.request.windowId) !== record) { return; }
++    // WINDOW_DESTROYED carries no reason and may precede Ability teardown hooks.
++    // Only Tauri's explicit destroy decision closes the logical resource owner.
++    if (record.closeAuthorized) { this.notify(record, "destroyed"); }
++    this.windows.delete(record.request.windowId);
++    this.unsubscribe(record);
++    WindowSurfaceRegistry.remove(this.owner, record.request.windowId);
++  }
++
++  async update(payload: BridgeTypedValue): Promise<void> {
++    if (payload.typeName !== MANAGED_COMMAND) { throw new Error("Invalid managed window command type"); }
++    const command = payload.value as ManagedCommand;
++    const pending = this.creating.get(command.windowId);
++    if (pending !== undefined) { await pending; }
++    const record = this.windows.get(command.windowId);
++    if (record === undefined) { throw new Error(`Unknown managed window ${command.windowId}`); }
++    const win = record.win;
++    switch (command.operation) {
++      case "title": await win.setWindowTitle(command.text ?? ""); record.request.title = command.text ?? ""; break;
++      case "resize": await win.resize(command.x!, command.y!); break;
++      case "move": await win.moveWindowTo(command.x!, command.y!); break;
++      case "visible": if (command.value) { await win.showWindow(); } else { await win.minimize(); } break;
++      case "focus": await win.raiseToAppTop(); break;
++      case "focusable": await win.setWindowFocusable(command.value!); break;
++      case "minimized":
++        if (command.value) { await win.minimize(); }
++        else if (command.windowId === 0) { await win.restore(); }
++        else { await win.showWindow(); }
++        break;
++      case "maximized": if (command.value) { await win.maximize(window.MaximizePresentation.EXIT_IMMERSIVE); } else { await win.recover(); } break;
++      case "decorations": win.setWindowDecorVisible(command.value!); break;
++      case "resizable": await win.setResizeByDragEnabled(command.value!); break;
++      case "topmost": await win.setWindowTopmost(command.value!); break;
++      case "drag": await win.startMoving(); break;
++      case "background": win.setWindowBackgroundColor(command.text!); break;
++      case "destroy":
++        record.closeAuthorized = true;
++        if (command.windowId === 0) {
++          this.closing = true;
++          // Pending native creation already has a logical Tauri owner. Cancel it and
++          // close that owner before destroying the stage needed by the bridge.
++          for (const entry of Array.from(this.creating.entries())) {
++            if (entry[0] === 0) { continue; }
++            try { await entry[1]; } catch {} // Cancellation is expected during closure.
++            this.dispatch(new WindowNotification(entry[0], "destroyed"));
++          }
++          // OS sub-windows cannot outlive the Ability main window. Close their logical
++          // owners while the bridge still exists, before the main stage tears it down.
++          for (const child of Array.from(this.windows.values())) {
++            if (child === record) { continue; }
++            child.closeAuthorized = true;
++            try { await child.win.destroyWindow(); }
++            catch (error) { console.error(`Unable to destroy owned sub-window: ${String(error)}`); }
++            this.closed(child);
++          }
++        }
++        WindowSurfaceRegistry.remove(this.owner, command.windowId);
++        await win.destroyWindow();
++        this.closed(record);
++        return;
++      default: throw new Error(`Unsupported managed window operation '${command.operation}'`);
++    }
++  }
++
++  async dispose(): Promise<void> {
++    this.disposed = true;
++    this.generation += 1;
++    WindowSurfaceRegistry.clear(this.owner);
++    const records = Array.from(this.windows.values());
++    this.windows.clear();
++    for (const record of records) {
++      this.unsubscribe(record);
++      WindowSurfaceRegistry.remove(this.owner, record.request.windowId);
++      if (record.request.windowId !== 0) { try { await record.win.destroyWindow(); } catch {} }
++    }
++  }
++}
+diff --git a/plugins/window/src/main/ets/WindowPlugin.ets b/plugins/window/src/main/ets/WindowPlugin.ets
+index ca6b05b..25b9986 100644
+--- a/plugins/window/src/main/ets/WindowPlugin.ets
++++ b/plugins/window/src/main/ets/WindowPlugin.ets
+@@ -1,6 +1,8 @@
+ import window from "@ohos.window";
++import { ManagedWindows } from "./ManagedWindows";
+ import {
+   BridgeCallContext,
++  BridgeLifecycleEvent,
+   BridgePluginHookContext,
+   BridgeTypedValue,
+   BridgeContextRequirement,
+@@ -289,12 +291,33 @@ export class WindowPlugin extends AsyncPluginBase {
+   readonly id = "ohos.window";
+   readonly requires: BridgeContextRequirement[] = ["ui-context"];
+   private readonly windows: Map<number, window.Window> = new Map();
++  private managed?: ManagedWindows;
++
++  override onInstall(_context: BridgePluginHookContext): void {
++    this.managed = new ManagedWindows(this.getContext());
++  }
++
++  override async onLifecycle(event: BridgeLifecycleEvent, _context: BridgePluginHookContext): Promise<void> {
++    if (event.kind === "ui-context-ready" && this.managed === undefined) { this.managed = new ManagedWindows(this.getContext()); }
++    if (event.kind === "ui-context-destroy") {
++      const managed = this.managed;
++      this.managed = undefined;
++      await managed?.dispose();
++    }
++  }
+ 
+   async invokeAsync(
+     action: string,
+     payload: BridgeTypedValue,
+     context: BridgeCallContext,
+   ): Promise<BridgeTypedValue> {
++    if (action === "attach-managed-window" || action === "update-managed-window") {
++      const managed = this.managed;
++      if (managed === undefined) { throw new Error("Window UI context is unavailable"); }
++      if (action === "attach-managed-window") { await managed.attach(payload, context); }
++      else { await managed.update(payload); }
++      return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
++    }
+     if (action === "get-avoid-area") {
+       const request = parseAvoidAreaRequest(payload);
+       try {
+@@ -310,26 +333,27 @@ export class WindowPlugin extends AsyncPluginBase {
+       const request = parseCreateRequest(payload);
+       let created: window.Window | undefined;
+       try {
+-        created = await context.getWindowStage().createSubWindow(request.name.trim());
++        const win: window.Window = await context.getWindowStage().createSubWindow(request.name.trim());
++        created = win;
+         this.assertCallActive(context);
+-        await created.moveWindowTo(request.x, request.y);
+-        await created.resize(request.width, request.height);
+-        created.setWindowDecorVisible(request.decorations);
++        await win.moveWindowTo(request.x, request.y);
++        await win.resize(request.width, request.height);
++        win.setWindowDecorVisible(request.decorations);
+         const backgroundColor = request.transparent
+           ? "#00000000"
+           : this.colorString(request.backgroundColor ?? 0xffffffff);
+-        created.setWindowBackgroundColor(backgroundColor);
+-        await created.showWindow();
++        win.setWindowBackgroundColor(backgroundColor);
++        await win.showWindow();
+         this.assertCallActive(context);
+-        const windowId = created.getWindowProperties().id;
++        const windowId = win.getWindowProperties().id;
+         if (!isWindowId(windowId)) {
+           throw new Error(`createSubWindow returned invalid window id '${windowId}'`);
+         }
+         const replaced = this.windows.get(windowId);
+-        if (replaced !== undefined && replaced !== created) {
++        if (replaced !== undefined && replaced !== win) {
+           await replaced.destroyWindow();
+         }
+-        this.windows.set(windowId, created);
++        this.windows.set(windowId, win);
+         return { typeName: CREATE_RESPONSE_TYPE, value: new WindowCreateResponse(windowId) };
+       } catch (error) {
+         if (created !== undefined) {
+@@ -517,6 +541,8 @@ export class WindowPlugin extends AsyncPluginBase {
+   }
+ 
+   override async onDispose(_context: BridgePluginHookContext): Promise<void> {
++    await this.managed?.dispose();
++    this.managed = undefined;
+     const windows = Array.from(this.windows.values());
+     this.windows.clear();
+     await Promise.all(

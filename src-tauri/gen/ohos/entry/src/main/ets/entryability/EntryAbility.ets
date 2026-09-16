@@ -7,6 +7,8 @@ import { WebviewPlugin } from '@ohos-rs/ability-plugin-webview';
 import { WindowPlugin } from '@ohos-rs/ability-plugin-window';
 import { ClipboardPlugin } from '../plugins/ClipboardPlugin';
 import { FilesAccessPlugin } from '../plugins/FilesAccessPlugin';
+import { RuntimePlugin } from '../plugins/RuntimePlugin';
+import { SerialPlugin } from '../plugins/SerialPlugin';
 
 export default class EntryAbility extends NativeAbility {
   public moduleName: string = 'rssh_lib';
@@ -19,6 +21,8 @@ export default class EntryAbility extends NativeAbility {
     new LazyPlugin(() => new WindowPlugin()),
     new LazyPlugin(() => new ClipboardPlugin()),
     new LazyPlugin(() => new FilesAccessPlugin()),
+    new LazyPlugin(() => new RuntimePlugin()),
+    new LazyPlugin(() => new SerialPlugin()),
   ];
 
   protected override createInitContext(moduleName: string) {

@@ -476,7 +476,7 @@ pub async fn ai_session_start_impl(
             }
             Some(handle)
         }
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_env = "ohos"))]
         AiTarget::Local(target_id) => {
             let shell_path = match crate::commands::lifecycle::owned_ready_ai_target(
                 state,
@@ -490,9 +490,9 @@ pub async fn ai_session_start_impl(
             initial_shell = super::shell::ShellKind::from_local_path(&shell_path);
             None
         }
-        #[cfg(mobile)]
+        #[cfg(all(mobile, not(target_env = "ohos")))]
         AiTarget::Local(_) => return Err(AppError::not_found("local_pty_not_found", json!({}))),
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_env = "ohos"))]
         AiTarget::Serial(target_id) => {
             // No shell to probe — a serial port is raw bytes. Validate it exists,
             // then run with ShellKind::Serial (no sentinel, no exit code) and no
@@ -506,7 +506,7 @@ pub async fn ai_session_start_impl(
             initial_shell = super::shell::ShellKind::Serial;
             None
         }
-        #[cfg(mobile)]
+        #[cfg(all(mobile, not(target_env = "ohos")))]
         AiTarget::Serial(_) => {
             return Err(AppError::not_found("serial_session_not_found", json!({})))
         }
@@ -1156,7 +1156,7 @@ pub(crate) fn ai_session_rebind_target_impl(
             crate::commands::lifecycle::OwnedAiTarget::Ssh { handle, .. } => Some(handle),
             _ => unreachable!("SSH lifecycle kind returned a non-SSH target"),
         },
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_env = "ohos"))]
         AiTarget::Local(target_id) => {
             let _ = crate::commands::lifecycle::owned_ready_ai_target(
                 state,
@@ -1166,9 +1166,9 @@ pub(crate) fn ai_session_rebind_target_impl(
             )?;
             None
         }
-        #[cfg(mobile)]
+        #[cfg(all(mobile, not(target_env = "ohos")))]
         AiTarget::Local(_) => return Err(AppError::not_found("local_pty_not_found", json!({}))),
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_env = "ohos"))]
         AiTarget::Serial(target_id) => {
             let _ = crate::commands::lifecycle::owned_ready_ai_target(
                 state,
@@ -1178,7 +1178,7 @@ pub(crate) fn ai_session_rebind_target_impl(
             )?;
             None
         }
-        #[cfg(mobile)]
+        #[cfg(all(mobile, not(target_env = "ohos")))]
         AiTarget::Serial(_) => {
             return Err(AppError::not_found("serial_session_not_found", json!({})))
         }
@@ -1344,7 +1344,7 @@ pub(crate) fn conversation_target_key(state: &AppState, target: &AiTarget) -> Ap
             crate::db::ai_conversation::ssh_target_key(h.profile_id())
         }
         AiTarget::Local(_) => "local".to_string(),
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_env = "ohos"))]
         AiTarget::Serial(id) => {
             let g = locked(&state.serial_sessions)?;
             let h = g
@@ -1352,7 +1352,7 @@ pub(crate) fn conversation_target_key(state: &AppState, target: &AiTarget) -> Ap
                 .ok_or_else(|| AppError::not_found("serial_session_not_found", json!({})))?;
             format!("serial:{}", h.port_name())
         }
-        #[cfg(mobile)]
+        #[cfg(all(mobile, not(target_env = "ohos")))]
         AiTarget::Serial(_) => {
             return Err(AppError::not_found("serial_session_not_found", json!({})))
         }

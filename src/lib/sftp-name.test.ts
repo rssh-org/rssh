@@ -21,6 +21,12 @@ describe("remoteUploadName", () => {
     expect(remoteUploadName("C:\\Users\\me\\key.pem")).toBe("key.pem");
   });
 
+  it("preserves spaces and colons in filesystem and document filenames", () => {
+    expect(remoteUploadName("/tmp/ report: final ")).toBe(" report: final ");
+    expect(remoteUploadName("file://docs/storage/Users/currentUser/Download/%20report%3A%20final%20"))
+      .toBe(" report: final ");
+  });
+
   it.each([
     ["/tmp/a%2Fb.txt", "a%2Fb.txt"],
     ["/tmp/report%20one.txt", "report%20one.txt"],

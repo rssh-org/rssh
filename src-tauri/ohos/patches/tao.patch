@@ -1,8 +1,8 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 971c89c..a249377 100644
+index 971c89c..9b3154e 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -110,8 +110,10 @@ percent-encoding = "2.3"
+@@ -110,8 +110,11 @@ percent-encoding = "2.3"
  tao-macros = { version = "0.1.4", path = "./tao-macros" }
  
  [target."cfg(target_env = \"ohos\")".dependencies]
@@ -11,28 +11,63 @@ index 971c89c..a249377 100644
 +openharmony-ability = { path = "../ability/crates/ability" }
 +openharmony-ability-derive = { path = "../ability/crates/derive" }
 +openharmony-ability-plugin-app-control = { path = "../ability/crates/plugin-app-control" }
++openharmony-ability-plugin-window = { path = "../ability/crates/plugin-window" }
 +futures-executor = "0.3"
  
  [target."cfg(any(target_os = \"ios\", target_os = \"macos\"))".dependencies]
  objc2 = "0.6"
+diff --git a/src/platform/ohos.rs b/src/platform/ohos.rs
+index c18665c..1b0afde 100644
+--- a/src/platform/ohos.rs
++++ b/src/platform/ohos.rs
+@@ -23,12 +23,17 @@ impl<T> EventLoopExtOpenHarmony for EventLoop<T> {}
+ 
+ /// Additional methods on [`Window`] that are specific to OpenHarmony.
+ pub trait WindowExtOpenHarmony {
++  /// Logical window owner used to mount ArkUI content in this OS window.
++  fn ohos_window_id(&self) -> u64;
++
+   fn content_rect(&self) -> Rect;
+ 
+   fn config(&self) -> Configuration;
+ }
+ 
+ impl WindowExtOpenHarmony for Window {
++  fn ohos_window_id(&self) -> u64 { self.window.id().into() }
++
+   fn content_rect(&self) -> Rect {
+     self.window.content_rect()
+   }
 diff --git a/src/platform_impl/ohos/mod.rs b/src/platform_impl/ohos/mod.rs
-index 09eb639..e32a34b 100644
+index 09eb639..d92a43d 100644
 --- a/src/platform_impl/ohos/mod.rs
 +++ b/src/platform_impl/ohos/mod.rs
-@@ -10,7 +10,11 @@ use openharmony_ability::xcomponent::{Action, TouchEvent};
+@@ -1,16 +1,22 @@
++use openharmony_ability_plugin_window::{
++  ManagedWindowCommand, ManagedWindowRequest, WindowEvent as NativeWindowEvent,
++};
+ use std::cell::{Cell, RefCell};
+ use std::collections::VecDeque;
+ use std::hash::Hash;
+ use std::marker::PhantomData;
++use std::sync::atomic::AtomicU64;
+ use std::sync::atomic::{AtomicBool, Ordering};
+-use std::sync::mpsc;
++use std::sync::{mpsc, Arc, Mutex};
++mod window_queue;
++use window_queue::{WindowQueue, WindowState};
+ 
+ use keycodes::{to_location, to_logical};
+ use openharmony_ability::xcomponent::{Action, TouchEvent};
  
  use openharmony_ability::{
    ime::KeyboardStatus, Configuration, Event as MainEvent, ImeEvent, InputEvent, OpenHarmonyApp,
 -  OpenHarmonyWaker, Rect,
 +  OpenHarmonyWaker, Rect, XComponentInputEvent,
-+};
-+
-+use openharmony_ability_plugin_app_control::{
-+  AppControlBridgePlugin, TerminateRequest, TerminateResponse,
  };
  
  use crate::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
-@@ -51,7 +55,7 @@ pub struct KeyEventExtra {}
+@@ -51,9 +57,10 @@ pub struct KeyEventExtra {}
  pub struct EventLoop<T: 'static> {
    pub(crate) openharmony_app: OpenHarmonyApp,
    window_target: event_loop::EventLoopWindowTarget<T>,
@@ -40,10 +75,25 @@ index 09eb639..e32a34b 100644
 +  initialized: Cell<bool>,
    user_events_sender: mpsc::Sender<T>,
    user_events_receiver: PeekableReceiver<T>,
++  native_events_receiver: mpsc::Receiver<NativeWindowEvent>,
    event_handler: RefCell<Option<Box<dyn FnMut(event::Event<T>)>>>,
-@@ -85,12 +89,11 @@ impl<T: 'static> EventLoop<T> {
+ }
+ 
+@@ -73,6 +80,7 @@ impl Default for PlatformSpecificEventLoopAttributes {
+ impl<T: 'static> EventLoop<T> {
+   pub(crate) fn new(attributes: &PlatformSpecificEventLoopAttributes) -> Self {
+     let (user_events_sender, user_events_receiver) = mpsc::channel();
++    let (native_events_sender, native_events_receiver) = mpsc::channel();
+ 
+     let openharmony_app = attributes.openharmony_app.as_ref().expect(
+       "An `OpenHarmonyApp` as passed to lib is required to create an `EventLoop` on \
+@@ -84,15 +92,18 @@ impl<T: 'static> EventLoop<T> {
+       window_target: event_loop::EventLoopWindowTarget {
          p: EventLoopWindowTarget {
            app: openharmony_app.clone(),
++          native_events_sender,
++          next_window_id: Arc::new(AtomicU64::new(0)),
++          main_closed: Arc::new(AtomicBool::new(false)),
            control_flow: Cell::new(ControlFlow::default()),
 -          exit: Cell::new(false),
            _marker: PhantomData,
@@ -54,17 +104,22 @@ index 09eb639..e32a34b 100644
 +      initialized: Cell::new(false),
        user_events_sender,
        user_events_receiver: PeekableReceiver::from_recv(user_events_receiver),
++      native_events_receiver,
        event_handler: RefCell::new(None),
-@@ -104,7 +107,7 @@ impl<T: 'static> EventLoop<T> {
+     }
+   }
+@@ -104,8 +115,8 @@ impl<T: 'static> EventLoop<T> {
    // TODO: For input event, we need some real examples to test it
    fn handle_input_event(&self, event: &InputEvent) {
      match event {
 -      InputEvent::TouchEvent(motion_event) => {
+-        let window_id = window::WindowId(WindowId);
 +      InputEvent::XComponent(XComponentInputEvent::Touch(motion_event)) => {
-         let window_id = window::WindowId(WindowId);
++        let window_id = window::WindowId(WindowId(0));
          let device_id = event::DeviceId(DeviceId(motion_event.device_id as _));
          let action = motion_event.event_type;
-@@ -146,7 +149,7 @@ impl<T: 'static> EventLoop<T> {
+ 
+@@ -146,7 +157,7 @@ impl<T: 'static> EventLoop<T> {
            }
          }
        }
@@ -73,7 +128,16 @@ index 09eb639..e32a34b 100644
          match key.code {
            keycode => {
              let state = match key.action {
-@@ -182,7 +185,7 @@ impl<T: 'static> EventLoop<T> {
+@@ -160,7 +171,7 @@ impl<T: 'static> EventLoop<T> {
+             let logical_key = to_logical(keycode);
+ 
+             let event = event::Event::WindowEvent {
+-              window_id: window::WindowId(WindowId),
++              window_id: window::WindowId(WindowId(0)),
+               event: event::WindowEvent::KeyboardInput {
+                 device_id: event::DeviceId(DeviceId(key.device_id as _)),
+                 event: event::KeyEvent {
+@@ -182,11 +193,11 @@ impl<T: 'static> EventLoop<T> {
            }
          }
        }
@@ -82,7 +146,39 @@ index 09eb639..e32a34b 100644
          ImeEvent::TextInputEvent(s) => {
            if let Some(ref mut h) = *self.event_handler.borrow_mut() {
              h(event::Event::WindowEvent {
-@@ -295,6 +298,7 @@ impl<T: 'static> EventLoop<T> {
+-              window_id: window::WindowId(WindowId),
++              window_id: window::WindowId(WindowId(0)),
+               event: event::WindowEvent::ReceivedImeText(s.text.clone()),
+             })
+           }
+@@ -196,7 +207,7 @@ impl<T: 'static> EventLoop<T> {
+             // Mock keyboard input event
+             let _ = [ElementState::Pressed, ElementState::Released].map(|state| {
+               h(event::Event::WindowEvent {
+-                window_id: window::WindowId(WindowId),
++                window_id: window::WindowId(WindowId(0)),
+                 event: event::WindowEvent::KeyboardInput {
+                   device_id: event::DeviceId(DeviceId(0)),
+                   event: event::KeyEvent {
+@@ -220,7 +231,7 @@ impl<T: 'static> EventLoop<T> {
+             // Mock keyboard input event
+             let _ = [ElementState::Pressed, ElementState::Released].map(|state| {
+               h(event::Event::WindowEvent {
+-                window_id: window::WindowId(WindowId),
++                window_id: window::WindowId(WindowId(0)),
+                 event: event::WindowEvent::KeyboardInput {
+                   device_id: event::DeviceId(DeviceId(0)),
+                   event: event::KeyEvent {
+@@ -244,7 +255,7 @@ impl<T: 'static> EventLoop<T> {
+               // Mock keyboard input event that make sure egui can receive the event and trigger onblur event
+               for state in [ElementState::Pressed, ElementState::Released] {
+                 h(event::Event::WindowEvent {
+-                  window_id: window::WindowId(WindowId),
++                  window_id: window::WindowId(WindowId(0)),
+                   event: event::WindowEvent::KeyboardInput {
+                     device_id: event::DeviceId(DeviceId(0)),
+                     event: event::KeyEvent {
+@@ -295,6 +306,7 @@ impl<T: 'static> EventLoop<T> {
              event_handler(e, &target, &mut control_flow);
              // We need to dispatch it after every event callbacks.
              event_handler(event::Event::MainEventsCleared, &target, &mut control_flow);
@@ -90,7 +186,7 @@ index 09eb639..e32a34b 100644
            }),
          )
        };
-@@ -305,7 +309,9 @@ impl<T: 'static> EventLoop<T> {
+@@ -305,9 +317,11 @@ impl<T: 'static> EventLoop<T> {
        match event {
          MainEvent::SurfaceCreate { .. } => {
            if let Some(ref mut h) = *self.event_handler.borrow_mut() {
@@ -99,18 +195,77 @@ index 09eb639..e32a34b 100644
 +              h(event::Event::NewEvents(StartCause::Init));
 +            }
              h(event::Event::WindowEvent {
-               window_id: window::WindowId(WindowId),
+-              window_id: window::WindowId(WindowId),
++              window_id: window::WindowId(WindowId(0)),
                event: event::WindowEvent::Resumed,
-@@ -357,7 +363,7 @@ impl<T: 'static> EventLoop<T> {
+             });
+           }
+@@ -315,7 +329,7 @@ impl<T: 'static> EventLoop<T> {
+         MainEvent::SurfaceDestroy { .. } => {
            if let Some(ref mut h) = *self.event_handler.borrow_mut() {
              h(event::Event::WindowEvent {
-               window_id: window::WindowId(WindowId),
+-              window_id: window::WindowId(WindowId),
++              window_id: window::WindowId(WindowId(0)),
+               event: event::WindowEvent::Suspended,
+             });
+           }
+@@ -323,7 +337,7 @@ impl<T: 'static> EventLoop<T> {
+         MainEvent::WindowResize(size) => {
+           let size = PhysicalSize::new(size.width as _, size.height as _);
+           let event = event::Event::WindowEvent {
+-            window_id: window::WindowId(WindowId),
++            window_id: window::WindowId(WindowId(0)),
+             event: event::WindowEvent::Resized(size),
+           };
+ 
+@@ -332,7 +346,7 @@ impl<T: 'static> EventLoop<T> {
+           }
+         }
+         MainEvent::WindowRedraw { .. } => {
+-          let event = event::Event::RedrawRequested(window::WindowId(WindowId));
++          let event = event::Event::RedrawRequested(window::WindowId(WindowId(0)));
+ 
+           if let Some(ref mut h) = *self.event_handler.borrow_mut() {
+             h(event);
+@@ -346,7 +360,7 @@ impl<T: 'static> EventLoop<T> {
+ 
+           if let Some(ref mut h) = *self.event_handler.borrow_mut() {
+             h(event::Event::WindowEvent {
+-              window_id: window::WindowId(WindowId),
++              window_id: window::WindowId(WindowId(0)),
+               event: event::WindowEvent::Focused(true),
+             });
+           }
+@@ -356,8 +370,8 @@ impl<T: 'static> EventLoop<T> {
+ 
+           if let Some(ref mut h) = *self.event_handler.borrow_mut() {
+             h(event::Event::WindowEvent {
+-              window_id: window::WindowId(WindowId),
 -              event: event::WindowEvent::Focused(true),
++              window_id: window::WindowId(WindowId(0)),
 +              event: event::WindowEvent::Focused(false),
              });
            }
          }
-@@ -400,12 +406,13 @@ impl<T: 'static> EventLoop<T> {
+@@ -366,7 +380,7 @@ impl<T: 'static> EventLoop<T> {
+           let scale = self.openharmony_app.scale();
+           let mut size = PhysicalSize::new(size.width as _, size.height as _);
+           let event = event::Event::WindowEvent {
+-            window_id: window::WindowId(WindowId),
++            window_id: window::WindowId(WindowId(0)),
+             event: event::WindowEvent::ScaleFactorChanged {
+               new_inner_size: &mut size,
+               scale_factor: scale as _,
+@@ -384,7 +398,7 @@ impl<T: 'static> EventLoop<T> {
+         MainEvent::Resume { .. } => {
+           if let Some(ref mut h) = *self.event_handler.borrow_mut() {
+             h(event::Event::WindowEvent {
+-              window_id: window::WindowId(WindowId),
++              window_id: window::WindowId(WindowId(0)),
+               event: event::WindowEvent::Resumed,
+             });
+           }
+@@ -400,12 +414,13 @@ impl<T: 'static> EventLoop<T> {
            // self.running = false;
          }
          MainEvent::WindowDestroy => {
@@ -118,17 +273,48 @@ index 09eb639..e32a34b 100644
 +          // Tauri windows remain alive. It is not a user-requested app exit.
            if let Some(ref mut h) = *self.event_handler.borrow_mut() {
 -            let e = event::Event::WindowEvent {
-+            h(event::Event::WindowEvent {
-               window_id: window::WindowId(WindowId),
+-              window_id: window::WindowId(WindowId),
 -              event: event::WindowEvent::CloseRequested,
 -            };
 -            h(e);
++            h(event::Event::WindowEvent {
++              window_id: window::WindowId(WindowId(0)),
 +              event: event::WindowEvent::Suspended,
 +            });
            }
          }
          MainEvent::Destroy => {
-@@ -429,16 +436,47 @@ impl<T: 'static> EventLoop<T> {
+@@ -418,9 +433,26 @@ impl<T: 'static> EventLoop<T> {
+         }
+         MainEvent::UserEvent { .. } => {
+           if let Some(ref mut h) = *self.event_handler.borrow_mut() {
+-            if let Ok(event) = self.user_events_receiver.try_recv() {
+-              let event = event::Event::UserEvent(event);
+-              h(event);
++            // One wake may coalesce several messages; drain both queues completely.
++            while let Ok(event) = self.user_events_receiver.try_recv() {
++              h(event::Event::UserEvent(event));
++            }
++            while let Ok(native) = self.native_events_receiver.try_recv() {
++              let window_id = window::WindowId(WindowId(native.window_id as u64));
++              let event = match native.kind.as_str() {
++                "resized" => event::WindowEvent::Resized(PhysicalSize::new(
++                  native.width.max(0) as u32,
++                  native.height.max(0) as u32,
++                )),
++                "focused" => event::WindowEvent::Focused(native.focused),
++                "close-requested" => event::WindowEvent::CloseRequested,
++                "destroyed" => {
++                  openharmony_ability_plugin_window::forget_window(native.window_id);
++                  event::WindowEvent::Destroyed
++                }
++                _ => continue,
++              };
++              h(event::Event::WindowEvent { window_id, event });
+             }
+           }
+         }
+@@ -429,16 +461,24 @@ impl<T: 'static> EventLoop<T> {
          }
        };
  
@@ -147,54 +333,576 @@ index 09eb639..e32a34b 100644
    }
  
 +  fn request_exit(&self, code: i32) {
-+    let bridge = match self.openharmony_app.bridge() {
-+      Ok(bridge) => bridge,
-+      Err(error) => {
-+        error!("Cannot terminate OpenHarmony ability: {error}");
-+        return;
-+      }
-+    };
-+    // Event callbacks run on the N-API thread. The framework's worker API
-+    // dispatches the synchronous capability there without blocking that thread.
-+    if let Err(error) = std::thread::Builder::new()
-+      .name("tao-ohos-exit".into())
-+      .spawn(move || {
-+        let response = futures_executor::block_on(
-+          bridge
-+            .call_sync_from_worker::<AppControlBridgePlugin, TerminateRequest, TerminateResponse>(
-+              "terminate",
-+              TerminateRequest { code },
-+            ),
-+        );
-+        match response {
-+          Ok(response) if response.accepted => {}
-+          Ok(_) => error!("OpenHarmony ability rejected termination"),
-+          Err(error) => error!("Cannot terminate OpenHarmony ability: {error}"),
-+        }
-+      })
-+    {
-+      error!("Cannot schedule OpenHarmony ability termination: {error}");
-+    }
++    // The native runtime is configured once per process. After LoopDestroyed it cannot
++    // be resumed by a replacement Ability. Finish the process after RunEvent::Exit,
++    // without relying on the bridge of the window that has just been destroyed.
++    // UIContext/background teardown only emits Suspended and never reaches this path.
++    std::process::exit(code);
 +  }
 +
    pub fn create_proxy(&self) -> EventLoopProxy<T> {
      EventLoopProxy {
        user_events_sender: self.user_events_sender.clone(),
-@@ -476,7 +514,6 @@ impl<T: 'static> Clone for EventLoopProxy<T> {
+@@ -475,8 +515,10 @@ impl<T: 'static> Clone for EventLoopProxy<T> {
+ #[derive(Clone)]
  pub struct EventLoopWindowTarget<T: 'static> {
    pub(crate) app: OpenHarmonyApp,
++  native_events_sender: mpsc::Sender<NativeWindowEvent>,
++  next_window_id: Arc<AtomicU64>,
++  main_closed: Arc<AtomicBool>,
    control_flow: Cell<ControlFlow>,
 -  exit: Cell<bool>,
    _marker: std::marker::PhantomData<T>,
  }
  
-@@ -634,8 +671,7 @@ impl Window {
+@@ -520,23 +562,23 @@ impl<T: 'static> EventLoopWindowTarget<T> {
+ }
+ 
+ #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+-pub(crate) struct WindowId;
++pub(crate) struct WindowId(u64);
+ 
+ impl WindowId {
+   pub const fn dummy() -> Self {
+-    WindowId
++    WindowId(u64::MAX)
+   }
+ }
+ 
+ impl From<WindowId> for u64 {
+-  fn from(_: WindowId) -> Self {
+-    0
++  fn from(id: WindowId) -> Self {
++    id.0
+   }
+ }
+ 
+ impl From<u64> for WindowId {
+-  fn from(_: u64) -> Self {
+-    Self
++  fn from(id: u64) -> Self {
++    Self(id)
+   }
+ }
+ 
+@@ -554,21 +596,79 @@ pub struct PlatformSpecificWindowBuilderAttributes;
+ 
+ pub(crate) struct Window {
+   app: OpenHarmonyApp,
++  id: WindowId,
++  state: Arc<Mutex<WindowState>>,
++  queue: WindowQueue,
+ }
+ 
+ impl Window {
+   pub(crate) fn new<T: 'static>(
+     el: &EventLoopWindowTarget<T>,
+-    _window_attrs: window::WindowAttributes,
++    attributes: window::WindowAttributes,
+     _: PlatformSpecificWindowBuilderAttributes,
+   ) -> Result<Self, error::OsError> {
+-    // FIXME this ignores requested window attributes
+-
++    if el.main_closed.load(Ordering::Acquire) {
++      return Err(os_error!(OsError));
++    }
++    let id = WindowId(el.next_window_id.fetch_add(1, Ordering::Relaxed));
++    let scale = el.app.scale() as f64;
++    let size = attributes
++      .inner_size
++      .map(|size| size.to_physical::<u32>(scale))
++      .unwrap_or_else(|| PhysicalSize::new(1024, 768));
++    let position = attributes
++      .position
++      .map(|position| position.to_physical::<i32>(scale))
++      .unwrap_or_else(|| PhysicalPosition::new(80, 80));
++    let request = ManagedWindowRequest {
++      window_id: id.0 as i64,
++      title: attributes.title,
++      width: size.width as i32,
++      height: size.height as i32,
++      x: position.x,
++      y: position.y,
++      visible: attributes.visible,
++      decorations: attributes.decorations,
++      resizable: attributes.resizable,
++      minimizable: attributes.minimizable,
++      maximizable: attributes.maximizable,
++      closable: attributes.closable,
++      maximized: attributes.maximized,
++    };
++    let state = Arc::new(Mutex::new(WindowState::new(request, scale)));
++    let queue = WindowQueue::start(
++      el.app.clone(),
++      state.clone(),
++      el.native_events_sender.clone(),
++      el.main_closed.clone(),
++    )
++    .map_err(|_| os_error!(OsError))?;
+     Ok(Self {
+       app: el.app.clone(),
++      id,
++      state,
++      queue,
+     })
+   }
+ 
++  fn command(
++    &self,
++    operation: &str,
++    value: Option<bool>,
++    text: Option<String>,
++    x: Option<i32>,
++    y: Option<i32>,
++  ) {
++    self.queue.send(ManagedWindowCommand {
++      window_id: self.id.0 as i64,
++      operation: operation.into(),
++      value,
++      text,
++      x,
++      y,
++    });
++  }
++
+   pub fn request_redraw(&self) {}
+ 
+   #[inline]
+@@ -578,11 +678,11 @@ impl Window {
+   }
+ 
+   pub fn id(&self) -> WindowId {
+-    WindowId
++    self.id
+   }
+ 
+   pub fn scale_factor(&self) -> f64 {
+-    self.app.scale() as f64
++    self.state.lock().unwrap().scale
+   }
+ 
+   pub fn available_monitors(&self) -> VecDeque<MonitorHandle> {
+@@ -592,59 +692,73 @@ impl Window {
+   }
+ 
+   pub fn inner_position(&self) -> Result<PhysicalPosition<i32>, error::NotSupportedError> {
+-    Err(error::NotSupportedError::new())
++    self.outer_position()
+   }
+ 
+   pub fn inner_size(&self) -> PhysicalSize<u32> {
+     self.outer_size()
+   }
+ 
+-  pub fn set_inner_size(&self, _size: Size) {
+-    warn!("Cannot set window size on OpenHarmony");
++  pub fn set_inner_size(&self, size: Size) {
++    let size = size.to_physical::<u32>(self.scale_factor());
++    self.command(
++      "resize",
++      None,
++      None,
++      Some(size.width as i32),
++      Some(size.height as i32),
++    );
+   }
+   pub fn set_inner_size_constraints(&self, _: WindowSizeConstraints) {}
+ 
+   pub fn outer_position(&self) -> Result<PhysicalPosition<i32>, error::NotSupportedError> {
+-    Err(error::NotSupportedError::new())
++    let state = self.state.lock().unwrap();
++    Ok(PhysicalPosition::new(state.request.x, state.request.y))
+   }
+ 
+-  pub fn set_outer_position(&self, _position: Position) {
+-    // no effect
++  pub fn set_outer_position(&self, position: Position) {
++    let position = position.to_physical::<i32>(self.scale_factor());
++    self.command("move", None, None, Some(position.x), Some(position.y));
+   }
+ 
+   pub fn outer_size(&self) -> PhysicalSize<u32> {
+-    MonitorHandle::new(self.app.clone()).size()
++    let state = self.state.lock().unwrap();
++    PhysicalSize::new(
++      state.request.width.max(0) as u32,
++      state.request.height.max(0) as u32,
++    )
+   }
+ 
+   pub fn set_min_inner_size(&self, _: Option<Size>) {}
+ 
+   pub fn set_max_inner_size(&self, _: Option<Size>) {}
+ 
+-  pub fn set_title(&self, _title: &str) {}
++  pub fn set_title(&self, title: &str) {
++    self.command("title", None, Some(title.into()), None, None);
++  }
+ 
+-  pub fn set_visible(&self, _visibility: bool) {}
++  pub fn set_visible(&self, visible: bool) {
++    self.command("visible", Some(visible), None, None, None);
++  }
+ 
+   pub fn set_focus(&self) {
+-    //FIXME: implementation goes here
+-    warn!("set_focus not yet implemented on OpenHarmony");
++    self.command("focus", None, None, None, None);
+   }
+ 
+-  pub fn set_focusable(&self, _focusable: bool) {
+-    warn!("set_focusable not yet implemented on OpenHarmony");
++  pub fn set_focusable(&self, focusable: bool) {
++    self.command("focusable", Some(focusable), None, None, None);
    }
  
    pub fn is_focused(&self) -> bool {
 -    log::warn!("`Window::is_focused` is ignored on OpenHarmony");
 -    false
-+    HAS_FOCUS.load(Ordering::Relaxed)
++    self.state.lock().unwrap().focused
    }
  
    pub fn is_always_on_top(&self) -> bool {
+-    log::warn!("`Window::is_always_on_top` is ignored on OpenHarmony");
+-    false
++    self.state.lock().unwrap().topmost
+   }
+ 
+-  pub fn set_resizable(&self, _resizeable: bool) {
+-    warn!("`Window::set_resizable` is ignored on OpenHarmony")
++  pub fn set_resizable(&self, resizable: bool) {
++    self.command("resizable", Some(resizable), None, None, None);
+   }
+ 
+   pub fn set_minimizable(&self, _minimizable: bool) {
+@@ -659,16 +773,20 @@ impl Window {
+     warn!("`Window::set_closable` is ignored on OpenHarmony")
+   }
+ 
+-  pub fn set_minimized(&self, _minimized: bool) {}
++  pub fn set_minimized(&self, minimized: bool) {
++    self.command("minimized", Some(minimized), None, None, None);
++  }
+ 
+   pub fn is_minimized(&self) -> bool {
+-    false
++    self.state.lock().unwrap().minimized
+   }
+ 
+-  pub fn set_maximized(&self, _maximized: bool) {}
++  pub fn set_maximized(&self, maximized: bool) {
++    self.command("maximized", Some(maximized), None, None, None);
++  }
+ 
+   pub fn is_maximized(&self) -> bool {
+-    false
++    self.state.lock().unwrap().request.maximized
+   }
+ 
+   pub fn set_fullscreen(&self, _monitor: Option<Fullscreen>) {
+@@ -679,39 +797,38 @@ impl Window {
+     None
+   }
+ 
+-  pub fn set_decorations(&self, _decorations: bool) {}
++  pub fn set_decorations(&self, decorations: bool) {
++    self.command("decorations", Some(decorations), None, None, None);
++  }
+   pub fn set_always_on_bottom(&self, _always_on_bottom: bool) {}
+ 
+-  pub fn set_always_on_top(&self, _always_on_top: bool) {}
++  pub fn set_always_on_top(&self, topmost: bool) {
++    self.command("topmost", Some(topmost), None, None, None);
++  }
+   pub fn set_ime_position(&self, _position: Position) {}
+ 
+   pub fn is_decorated(&self) -> bool {
+-    true
++    self.state.lock().unwrap().request.decorations
+   }
+ 
+   pub fn is_visible(&self) -> bool {
+-    log::warn!("`Window::is_visible` is ignored on OpenHarmony");
+-    false
++    self.state.lock().unwrap().request.visible
+   }
+ 
+   pub fn is_resizable(&self) -> bool {
+-    warn!("`Window::is_resizable` is ignored on OpenHarmony");
+-    false
++    self.state.lock().unwrap().request.resizable
+   }
+ 
+   pub fn is_minimizable(&self) -> bool {
+-    warn!("`Window::is_minimizable` is ignored on OpenHarmony");
+-    false
++    self.state.lock().unwrap().request.minimizable
+   }
+ 
+   pub fn is_maximizable(&self) -> bool {
+-    warn!("`Window::is_maximizable` is ignored on OpenHarmony");
+-    false
++    self.state.lock().unwrap().request.maximizable
+   }
+ 
+   pub fn is_closable(&self) -> bool {
+-    warn!("`Window::is_closable` is ignored on OpenHarmony");
+-    false
++    self.state.lock().unwrap().request.closable
+   }
+ 
+   pub fn set_window_icon(&self, _window_icon: Option<crate::icon::Icon>) {}
+@@ -744,9 +861,8 @@ impl Window {
+ 
+   pub fn set_cursor_visible(&self, _: bool) {}
+   pub fn drag_window(&self) -> Result<(), error::ExternalError> {
+-    Err(error::ExternalError::NotSupported(
+-      error::NotSupportedError::new(),
+-    ))
++    self.command("drag", None, None, None, None);
++    Ok(())
+   }
+ 
+   pub fn drag_resize_window(
+@@ -758,14 +874,24 @@ impl Window {
+     ))
+   }
+ 
+-  pub fn set_background_color(&self, _color: Option<crate::window::RGBA>) {}
++  pub fn set_background_color(&self, color: Option<crate::window::RGBA>) {
++    if let Some((r, g, b, a)) = color {
++      self.command(
++        "background",
++        None,
++        Some(format!("#{a:02X}{r:02X}{g:02X}{b:02X}")),
++        None,
++        None,
++      );
++    }
++  }
+ 
+   pub fn theme(&self) -> Theme {
+     Theme::Light
+   }
+ 
+   pub fn title(&self) -> String {
+-    String::new()
++    self.state.lock().unwrap().request.title.clone()
+   }
+ 
+   #[cfg(feature = "rwh_04")]
+@@ -787,6 +913,9 @@ impl Window {
+   // Allow the usage of HasRawWindowHandle inside this function
+   #[allow(deprecated)]
+   pub fn raw_window_handle_rwh_06(&self) -> Result<rwh_06::RawWindowHandle, rwh_06::HandleError> {
++    // Only the main window owns the native XComponent surface. Child ArkWeb windows
++    // are bound by logical ID; returning the main pointer would violate ownership.
++    if self.id.0 != 0 { return Err(rwh_06::HandleError::Unavailable); }
+     if let Some(native_window) = self.app.native_window().as_ref() {
+       if let Some(win) = native_window.raw_window_handle() {
+         return Ok(win);
+@@ -809,7 +938,8 @@ impl Window {
+   }
+ 
+   pub fn content_rect(&self) -> Rect {
+-    self.app.content_rect()
++    let state = self.state.lock().unwrap();
++    Rect { top: 0, left: 0, width: state.request.width, height: state.request.height }
+   }
+ 
+   pub fn current_monitor(&self) -> Option<monitor::MonitorHandle> {
+diff --git a/src/platform_impl/ohos/window_queue.rs b/src/platform_impl/ohos/window_queue.rs
+new file mode 100644
+index 0000000..4802ce1
+--- /dev/null
++++ b/src/platform_impl/ohos/window_queue.rs
+@@ -0,0 +1,189 @@
++use openharmony_ability::OpenHarmonyApp;
++use openharmony_ability_plugin_window::{
++  observe_window, ManagedWindowCommand, ManagedWindowRequest, WindowEvent, WindowExt,
++};
++use std::sync::{
++  atomic::{AtomicBool, Ordering},
++  mpsc, Arc, Mutex,
++};
++
++pub struct WindowState {
++  pub request: ManagedWindowRequest,
++  pub scale: f64,
++  pub focused: bool,
++  pub minimized: bool,
++  pub topmost: bool,
++}
++
++impl WindowState {
++  pub fn new(request: ManagedWindowRequest, scale: f64) -> Self {
++    Self {
++      request,
++      scale,
++      focused: false,
++      minimized: false,
++      topmost: false,
++    }
++  }
++
++  fn update(&mut self, event: &WindowEvent) {
++    self.request.x = event.x;
++    self.request.y = event.y;
++    self.request.width = event.width;
++    self.request.height = event.height;
++    self.request.visible = event.visible;
++    self.request.maximized = event.maximized;
++    self.focused = event.focused;
++    self.minimized = event.minimized;
++    if event.scale > 0.0 {
++      self.scale = event.scale;
++    }
++  }
++
++  fn applied(&mut self, command: &ManagedWindowCommand) {
++    match command.operation.as_str() {
++      "title" => self.request.title = command.text.clone().unwrap_or_default(),
++      "decorations" => self.request.decorations = command.value.unwrap_or(true),
++      "resizable" => self.request.resizable = command.value.unwrap_or(true),
++      "topmost" => self.topmost = command.value.unwrap_or(false),
++      _ => {}
++    }
++  }
++}
++
++enum Operation {
++  Attach,
++  Update(ManagedWindowCommand),
++  Destroy,
++}
++
++/// Serial OS operations execute outside the N-API thread. The queue owns native-window
++/// lifetime; asynchronous creation and a following destroy cannot overtake each other.
++pub struct WindowQueue {
++  sender: mpsc::Sender<Operation>,
++  alive: Arc<AtomicBool>,
++  main_closed: Arc<AtomicBool>,
++  main: bool,
++}
++
++impl WindowQueue {
++  pub fn start(
++    app: OpenHarmonyApp,
++    state: Arc<Mutex<WindowState>>,
++    events: mpsc::Sender<WindowEvent>,
++    main_closed: Arc<AtomicBool>,
++  ) -> std::io::Result<Self> {
++    let (sender, receiver) = mpsc::channel();
++    let alive = Arc::new(AtomicBool::new(true));
++    let id = state.lock().unwrap().request.window_id;
++    let waker = app.create_waker();
++    let worker_state = state.clone();
++    let worker_events = events.clone();
++    let worker_waker = waker.clone();
++    let worker_main_closed = main_closed.clone();
++    std::thread::Builder::new()
++      .name(format!("tao-window-{id}"))
++      .spawn(move || {
++        while let Ok(operation) = receiver.recv() {
++          let operation = if id != 0 && worker_main_closed.load(Ordering::Acquire) {
++            Operation::Destroy
++          } else {
++            operation
++          };
++          let mut destroyed = matches!(operation, Operation::Destroy);
++          let result = (|| {
++            // The facade belongs to the current Ability session. Do not retain it across reloads.
++            let client = app.window()?;
++            match operation {
++              Operation::Attach => {
++                let request = worker_state.lock().unwrap().request.clone();
++                futures_executor::block_on(client.attach_managed_window(request))
++              }
++              Operation::Update(command) => {
++                futures_executor::block_on(client.update_managed_window(command.clone()))?;
++                worker_state.lock().unwrap().applied(&command);
++                Ok(())
++              }
++              Operation::Destroy => {
++                futures_executor::block_on(client.update_managed_window(ManagedWindowCommand {
++                  window_id: id,
++                  operation: "destroy".into(),
++                  value: None,
++                  text: None,
++                  x: None,
++                  y: None,
++                }))
++              }
++            }
++          })();
++          if let Err(error) = result {
++            log::error!("OpenHarmony window {id}: {error}");
++          }
++          if !destroyed && id != 0 && worker_main_closed.load(Ordering::Acquire) {
++            // The main window can close while this child's attach is in flight.
++            // Always finish its logical owner, including a failed/cancelled attach.
++            if let Ok(client) = app.window() {
++              let _ =
++                futures_executor::block_on(client.update_managed_window(ManagedWindowCommand {
++                  window_id: id,
++                  operation: "destroy".into(),
++                  value: None,
++                  text: None,
++                  x: None,
++                  y: None,
++                }));
++            }
++            destroyed = true;
++          }
++          if destroyed {
++            // Complete Tauri ownership cleanup even if the OS already destroyed the window.
++            let _ = worker_events.send(WindowEvent {
++              window_id: id,
++              kind: "destroyed".into(),
++              ..Default::default()
++            });
++            worker_waker.wake();
++            break;
++          }
++        }
++      })?;
++    let callback_sender = sender.clone();
++    let callback_alive = alive.clone();
++    observe_window(id, move |event| {
++      if event.kind == "ready" {
++        if callback_alive.load(Ordering::Acquire) {
++          let _ = callback_sender.send(Operation::Attach);
++        }
++        return;
++      }
++      if event.kind != "destroyed" {
++        state.lock().unwrap().update(&event);
++      }
++      let _ = events.send(event);
++      waker.wake();
++    });
++    let _ = sender.send(Operation::Attach);
++    Ok(Self {
++      sender,
++      alive,
++      main_closed,
++      main: id == 0,
++    })
++  }
++
++  pub fn send(&self, command: ManagedWindowCommand) {
++    if self.sender.send(Operation::Update(command)).is_err() {
++      log::error!("Native window queue is closed");
++    }
++  }
++}
++
++impl Drop for WindowQueue {
++  fn drop(&mut self) {
++    if self.main {
++      self.main_closed.store(true, Ordering::Release);
++    }
++    self.alive.store(false, Ordering::Release);
++    let _ = self.sender.send(Operation::Destroy);
++  }
++}

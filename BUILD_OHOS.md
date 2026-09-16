@@ -2,7 +2,7 @@
 
 鸿蒙 GUI 复用 `src-tauri/src/lib.rs` 和现有业务模块，通过单独的 Cargo
 workspace 使用固定的 Tauri/Wry/Tao OHOS 分支及 ability 1.0 beta 插件框架。
-桌面、Android、iOS、CLI 和 headless 继续使用根 `src-tauri/Cargo.toml` / `Cargo.lock` 的官方依赖。
+macOS / Windows / Linux、Android、iOS、CLI 和 headless 继续使用根 `src-tauri/Cargo.toml` / `Cargo.lock` 的官方依赖。
 
 ## 环境
 
@@ -66,14 +66,53 @@ src-tauri/gen/ohos/entry/build/default/outputs/default/entry-default-signed.hap
 当前脚本仅构建 ARM64。产出 HAP 不代表设备行为已经验证；安装、模拟器
 和真机测试应另行执行。
 
+### 发布版本
+
+`versionName` 跟随 `src-tauri/tauri.conf.json`，必须与 Cargo package version
+一致。准备脚本仅更新派生锁文件中 RSSH 自身的版本，依赖版本仍由已提交的
+OHOS 锁文件固定。组装时临时应用版本信息，结束或失败后恢复源 AppScope 文件。
+
+商店发布前需递增 `versionCode`，通过环境变量传入：
+
+```bash
+OHOS_VERSION_CODE=2 ./build-ohos.sh
+```
+
+未传入时沿用 AppScope 中的值，不会自动递增。当前 GitHub 发布流程没有
+鸿蒙签名打包任务，正式 HAP 需在已配置签名的 DevEco 环境中构建。
+
+## 手机、平板与电脑共用安装包
+
+同一个 ARM64 HAP 声明 `phone`、`tablet`、`2in1`。设备形态只决定布局与
+输入方式；`get_runtime_capabilities` 返回当前宿主实际实现的能力，前端加载
+成功后才挂载页面。鸿蒙电脑使用桌面键鼠布局，手机和平板保留触控布局。
+
+- **窗口**：Tao 为每个窗口分配独立 ID，Wry 把 ArkWeb 绑定到该窗口的
+  UIContext。系统关闭经过 Tauri 的 CloseRequested / Destroyed 流程；
+  Ability 重建保留逻辑窗口及会话。置顶仅开放给系统允许的主窗口。
+- **文件**：电脑提供多选与目录传输。原生文件引用保持不透明，目录授权、
+  后代路径解析、父目录创建和文件描述符由原生适配器处理。手机保留单文件操作。
+- **本地终端**：所有桌面目标共用 `portable-pty 0.9`。鸿蒙电脑在应用沙箱内
+  探测 openpty、启动 shell 和正常退出，成功后才开放入口，不能用 SDK
+  含有函数声明代替运行权限验证。
+- **串口**：API 26 及以上且系统提供 `SystemCapability.BusManager.Serial`
+  时，按需加载公开串口服务。打开设备由系统请求用户授权；支持流控、DTR、
+  RTS、BREAK 与断连清理。旧版系统不加载该模块，其他桌面仍用 serialport。
+  BREAK 脉冲时长由鸿蒙系统决定。电气收发及控制线行为需要 USB 硬件验收。
+- **外部工具**：Docker / kubectl 继续真实探测可执行程序。HAP 不提供桌面
+  CLI 安装、读取用户默认 SSH 密钥目录或 SSH Agent 入口；通过文件选择器
+  导入的密钥、密码认证和远程 SSH/SFTP 不受影响。
+- **插件**：资源访问范围绑定到实际应用数据目录下的 plugins；不假设桌面
+  HOME 或 APPDATA 路径。Headless 不提供原生资源协议，因此关闭插件界面。
+
 ## 四条入口与设备验收
 
 | 入口 | 处理方式 |
 | --- | --- |
-| 桌面 GUI | 使用官方 Tauri 文件、剪贴板、外链插件；文件操作统一走原生后端命令。 |
+| 桌面 GUI | 常规桌面使用官方 Tauri 插件；鸿蒙电脑通过 ability 原生适配。两者共用业务命令、会话 registry 和桌面前端。 |
 | 移动 GUI | Android / iOS 使用相同业务命令及官方插件；OHOS 通过 ability 的 files/url/permission 插件及应用能力插件支持文件选择、文件描述符传输、剪贴板和外链。 |
 | CLI | 无新增 CLI 命令，继续使用官方依赖及共享业务模块。 |
-| Headless / JetBrains | 剪贴板由 IPC shim 调浏览器；文本导出在浏览器用 Blob 下载，JetBrains 继续明确提示不支持。补齐 `open_path` 分发。 |
+| Headless / JetBrains | 剪贴板由 IPC shim 调浏览器；文本导出在浏览器用 Blob 下载，JetBrains 继续明确提示不支持。文件多选与目录入口同时要求后端支持和宿主提供选择器；JetBrains 桥准备完成后刷新能力。`resolve_local_paths` 与 `open_path` 均有 server 分发。 |
 
 手机目录上传和目录下载不提供，与现有移动 UI 一致。OHOS 向用户选定
 URI 的文件描述符流式写入；中途失败可能保留部分文件，不保证原子替换。
@@ -87,7 +126,16 @@ URI 的文件描述符流式写入；中途失败可能保留部分文件，不�
 闭包并拒绝旧 WebView 的回调，但重复创建 WebView 仍可能积累这些原生
 回调元数据。此上游缺口尚未修复；构建和单元测试不能证明原生层无泄漏。
 
-设备验收由用户执行，重点检查：
+鸿蒙 IPC 使用 Tauri 现有的 `postMessage` 通道。自定义资源协议仅接受
+GET/HEAD，其它方法返回 501，避免进入上游异步请求体读取中生命周期不安全
+的缓冲区路径；普通 HTTP/HTTPS 请求不受此限制。
+
+设备验收重点：
+
+- 电脑端独立窗口、最大化/还原、主窗置顶、关闭子窗不影响主窗会话。
+- 电脑端键鼠输入、快捷键、SSH 分屏，以及本地终端能力探测结果。
+- 电脑端多选上传、包含中文与特殊字符的嵌套目录上传/下载。
+- 有 USB 串口硬件时验证授权、收发、流控、控制线及拔出。
 
 - 选择文件上传、取消上传，以及包含中文的文件名。
 - 下载保存、同名文件确认，以及取消和失败后的文件状态。
@@ -115,8 +163,12 @@ URI 的文件描述符流式写入；中途失败可能保留部分文件，不�
 例如修改生成的 Tao checkout 后，导出业务源码和 manifest 的差异：
 
 ```bash
+git -C src-tauri/target/ohos-sources/tao add -N -- Cargo.toml src
 git -C src-tauri/target/ohos-sources/tao diff --binary HEAD -- Cargo.toml src > src-tauri/ohos/patches/tao.patch
 ```
+
+`add -N` 使新增文件进入差异；仅执行 `git diff` 会漏掉新模块。导出后须离线
+重放补丁并运行框架检查，确认重放后的源码可编译。
 
 不要把上游 checkout 中独立诊断构建生成的 `Cargo.lock` 放入补丁；应用的
 完整依赖图由 `src-tauri/ohos/Cargo.lock` 固定。

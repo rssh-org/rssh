@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const capabilitiesMock = vi.hoisted(() => vi.fn(() => ({ plugins: true })));
+vi.mock("../stores/runtime.svelte.ts", () => ({ capabilities: capabilitiesMock }));
+
 // localStorage stub BEFORE the store module loads (it reads positions at
 // module top, same as the ai store — node env has no localStorage).
 const storage = new Map<string, string>();
@@ -31,6 +34,7 @@ function plugin(id: string, area: "side" | "strip", enabled = true, sort_order =
 }
 
 beforeEach(() => {
+  capabilitiesMock.mockReturnValue({ plugins: true });
   storage.clear();
   invokeMock.mockReset();
   convertFileSrcMock.mockClear();
@@ -223,12 +227,12 @@ describe("movePluginTo", () => {
 });
 
 describe("hostSupported", () => {
-  it("true when convertFileSrc maps to a protocol URL", () => {
+  it("uses the host's implemented capability", () => {
     expect(store.hostSupported()).toBe(true);
   });
 
-  it("false under the JCEF/browser shim (identity convertFileSrc)", () => {
-    convertFileSrcMock.mockImplementation((p: string) => p);
+  it("does not infer plugin support merely from a generated asset URL", () => {
+    capabilitiesMock.mockReturnValue({ plugins: false });
     expect(store.hostSupported()).toBe(false);
   });
 });

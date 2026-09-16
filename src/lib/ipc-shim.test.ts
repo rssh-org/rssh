@@ -107,6 +107,29 @@ describe("installTauriShim", () => {
 });
 
 describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
+    it.each([
+        [false, true, false],
+        [true, true, true],
+        [true, false, false],
+    ])("intersects file capabilities with the host picker (%s, %s)", async (hasPicker, serverSupport, expected) => {
+        if (hasPicker) fakeWindow.__RSSH_PICK__ = vi.fn();
+        const { internals, ws } = installWithServer();
+        ws.open();
+        const result = internals.invoke("get_runtime_capabilities");
+        const request = ws.sentFrames()[0];
+        expect(request.cmd).toBe("get_runtime_capabilities");
+        ws.deliver({ type: "response", id: request.id, ok: true, result: {
+            localPty: true,
+            fileMultiSelect: serverSupport,
+            directoryTransfer: serverSupport,
+        } });
+        await expect(result).resolves.toEqual({
+            localPty: true,
+            fileMultiSelect: expected,
+            directoryTransfer: expected,
+        });
+    });
+
     it("provides metadata so getCurrentWindow()/getCurrentWebview() don't throw", () => {
         const { internals } = installWithServer();
         // @tauri-apps/api reads these labels SYNCHRONOUSLY in the getters; a

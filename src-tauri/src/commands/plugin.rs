@@ -348,7 +348,7 @@ fn entry_exists(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &st
 /// neither — the plugin capability contract covers SSH + local only.
 enum ExecTransport {
     Ssh(SshHandle),
-    #[cfg(desktop)]
+    #[cfg(any(desktop, target_env = "ohos"))]
     Local,
 }
 
@@ -385,7 +385,7 @@ fn exec_transport(
         }
         // Local shell tab: run on this machine. The PTY handle itself is not
         // needed — a fresh child process per call, same one-shot contract.
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_env = "ohos"))]
         SessionKind::Pty => Ok(ExecTransport::Local),
         kind => Err(AppError::not_found(
             "plugin_no_exec",
@@ -398,13 +398,16 @@ fn exec_transport(
 /// (timeout, 256 KB per stream). The timeout path kills the WHOLE process
 /// group: `kill_on_drop` takes out the shell and a group sweep takes out its
 /// children — no orphaned `sh -c "cat /dev/zero & wait"` burners.
-#[cfg(desktop)]
+#[cfg(any(desktop, target_env = "ohos"))]
 async fn local_exec(command: &str, timeout: std::time::Duration) -> AppResult<PluginExecResult> {
     const CAP: u64 = 256 * 1024;
 
     #[cfg(unix)]
     let mut cmd = {
+        #[cfg(not(target_env = "ohos"))]
         let mut c = tokio::process::Command::new("/bin/sh");
+        #[cfg(target_env = "ohos")]
+        let mut c = tokio::process::Command::new("sh");
         c.arg("-c");
         c
     };
@@ -515,7 +518,7 @@ pub async fn plugin_exec_impl(
             )
             .await
         }
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_env = "ohos"))]
         ExecTransport::Local => local_exec(&command, timeout).await,
     }
 }
@@ -958,9 +961,9 @@ mod tests {
             secret_store,
             lifecycle_sessions: Default::default(),
             sessions: Default::default(),
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             pty_sessions: Default::default(),
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             serial_sessions: Default::default(),
             telnet_sessions: Default::default(),
             sftp_sessions: Default::default(),

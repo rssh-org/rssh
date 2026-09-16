@@ -162,6 +162,15 @@ export function installTauriShim(): void {
     // web APIs (or the host bridge) so they never hit the ws. Keeps INV-1 — the
     // frontend call sites are unchanged; this one seam absorbs the difference.
     const LOCAL: Record<string, (a: any) => Promise<unknown>> = {
+        get_runtime_capabilities: async () => {
+            const capabilities = await wsInvoke("get_runtime_capabilities") as Record<string, boolean>;
+            const hasPicker = typeof (window as any).__RSSH_PICK__ === "function";
+            return {
+                ...capabilities,
+                fileMultiSelect: capabilities.fileMultiSelect && hasPicker,
+                directoryTransfer: capabilities.directoryTransfer && hasPicker,
+            };
+        },
         clipboard_read: () => navigator.clipboard.readText(),
         clipboard_write: (a) => navigator.clipboard.writeText(String(a.text ?? "")),
         open_external_url: async (a) => {

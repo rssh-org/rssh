@@ -426,3 +426,56 @@ fn spawn_builder(
 
     Ok((session_id, handle))
 }
+
+#[cfg(all(test, desktop, unix))]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn local_pty_streams_input_reports_resize_and_closes() {
+        let (sender, receiver) = mpsc::channel();
+        let sink: PtySink = Arc::new(move |_, output| {
+            let _ = sender.send(output);
+        });
+        let (_, handle) = spawn_command(
+            "pty-test".into(),
+            80,
+            24,
+            sink,
+            PathBuf::from("/bin/sh"),
+            OsString::from("/usr/bin:/bin"),
+            vec![
+                "-c".into(),
+                "stty -echo; printf 'PTY_READY\\n'; IFS= read -r line; printf 'PTY_INPUT:%s\\n' \"$line\"; stty size"
+                    .into(),
+            ],
+        )
+        .expect("spawn local PTY");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        while !String::from_utf8_lossy(&output).contains("PTY_READY") {
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(PtyOut::Data(data)) => output.extend(data),
+                _ => panic!(
+                    "PTY did not become ready: {}",
+                    String::from_utf8_lossy(&output)
+                ),
+            }
+        }
+        handle.resize(103, 41).expect("resize local PTY");
+        handle.write(b"hello-pty\n").expect("write local PTY");
+        loop {
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(PtyOut::Data(data)) => output.extend(data),
+                Ok(PtyOut::Close) => break,
+                Err(error) => panic!("PTY did not close: {error}"),
+            }
+        }
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("PTY_INPUT:hello-pty"), "{output}");
+        assert!(output.contains("41 103"), "{output}");
+        assert_eq!(handle.shell_path(), "/bin/sh");
+    }
+}

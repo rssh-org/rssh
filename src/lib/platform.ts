@@ -9,7 +9,7 @@ export interface PlatformInfo {
   isMobile: boolean;
 }
 
-/** Detect the mobile runtimes this Tauri app ships. */
+/** Device form factor only. Native features come from runtime capabilities. */
 export function detectPlatform(navigatorInfo?: NavigatorPlatformInfo): PlatformInfo {
   if (!navigatorInfo) return { isIOS: false, isHarmony: false, isMobile: false };
 
@@ -20,10 +20,13 @@ export function detectPlatform(navigatorInfo?: NavigatorPlatformInfo): PlatformI
   const isAndroid = /Android/i.test(userAgent);
   // Android-compatible HarmonyOS installs still use the Android adapters.
   const isHarmony = !isAndroid && /OpenHarmony|HarmonyOS/i.test(userAgent);
+  // ArkWeb uses Phone, Tablet and PC in the platform token. A Harmony PC
+  // may have a touchscreen; touch points do not make it a mobile device.
+  const isHarmonyPC = isHarmony && /\(PC(?:;|\))/i.test(userAgent);
   return {
     isIOS,
     isHarmony,
-    isMobile: isIOS || isHarmony || isAndroid,
+    isMobile: isIOS || (isHarmony && !isHarmonyPC) || isAndroid,
   };
 }
 

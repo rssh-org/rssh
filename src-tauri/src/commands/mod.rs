@@ -10,9 +10,10 @@ pub mod group;
 pub mod lifecycle;
 pub mod plugin;
 pub mod profile;
-#[cfg(desktop)]
+#[cfg(any(desktop, target_env = "ohos"))]
 pub mod pty;
-#[cfg(desktop)]
+pub mod runtime;
+#[cfg(any(desktop, target_env = "ohos"))]
 pub mod serial;
 pub mod session;
 pub mod settings;
@@ -20,5 +21,5 @@ pub mod sftp;
 pub mod sync;
 pub mod telnet;
 pub mod update;
-#[cfg(desktop)]
+#[cfg(any(desktop, target_env = "ohos"))]
 pub mod window;

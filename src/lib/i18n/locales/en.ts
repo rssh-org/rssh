@@ -13,6 +13,8 @@ const en = {
   "common.yes": "Yes",
   "common.no": "No",
   "common.loading": "Loading...",
+  "common.retry": "Retry",
+  "startup.failed": "RSSH could not start",
   "common.connecting": "Connecting...",
   "common.connected": "Connected",
   "common.disconnected": "Disconnected",

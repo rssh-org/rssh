@@ -39,6 +39,8 @@ function harness() {
   }
   modules["../plugins/FilesAccessPlugin"] = { FilesAccessPlugin: class { id = "rssh.files-access"; } };
   modules["../plugins/ClipboardPlugin"] = { ClipboardPlugin: class { id = "rssh.clipboard"; } };
+  modules["../plugins/RuntimePlugin"] = { RuntimePlugin: class { id = "rssh.runtime"; } };
+  modules["../plugins/SerialPlugin"] = { SerialPlugin: class { id = "rssh.serial"; } };
   const exports = {} as { default: new () => NativeAbility & { moduleName: string; bridgePlugins: { create: () => { id: string } }[] } };
   runInNewContext(code, { exports, require: (name: string) => {
     if (!(name in modules)) throw new Error(`Unexpected native dependency: ${name}`);
@@ -69,7 +71,7 @@ describe("HarmonyOS framework host", () => {
     expect(h.ability.moduleName).toBe("rssh_lib");
     expect(h.ability.bridgePlugins.map((factory) => factory.create().id).sort()).toEqual([
       "ohos.app-control", "ohos.files", "ohos.permission", "ohos.url", "ohos.webview", "ohos.window",
-      "rssh.clipboard", "rssh.files-access",
+      "rssh.clipboard", "rssh.files-access", "rssh.runtime", "rssh.serial",
     ]);
     for (const factory of h.ability.bridgePlugins) expect(factory.create()).not.toBe(factory.create());
   });

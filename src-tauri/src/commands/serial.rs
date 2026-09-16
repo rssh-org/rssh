@@ -6,12 +6,19 @@ use crate::state::{AppState, SessionKind, SessionOwner};
 use crate::terminal::serial;
 
 #[tauri::command]
-pub fn serial_list_ports() -> AppResult<Vec<String>> {
-    Ok(serial::available_ports())
+pub async fn serial_list_ports() -> AppResult<Vec<String>> {
+    #[cfg(target_env = "ohos")]
+    {
+        serial::available_ports().await
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        Ok(serial::available_ports())
+    }
 }
 
 #[tauri::command]
-pub fn serial_open(
+pub async fn serial_open(
     app: AppHandle,
     window: tauri::Window,
     state: State<'_, AppState>,
@@ -37,6 +44,9 @@ pub fn serial_open(
                 let _ = app.emit(&format!("serial:close:{id}"), ());
             }
         });
+    #[cfg(target_env = "ohos")]
+    let (id, handle) = serial::open(session_id, &port, config, sink).await?;
+    #[cfg(not(target_env = "ohos"))]
     let (id, handle) = serial::open(session_id, &port, config, sink)?;
     reservation.activate_returned(
         &id,
@@ -54,40 +64,73 @@ fn serial_handle(state: &State<'_, AppState>, session_id: &str) -> AppResult<ser
 }
 
 #[tauri::command]
-pub fn serial_write(
+pub async fn serial_write(
     state: State<'_, AppState>,
     session_id: String,
     data: Vec<u8>,
 ) -> AppResult<()> {
-    serial_handle(&state, &session_id)?.write(&data)
+    let handle = serial_handle(&state, &session_id)?;
+    #[cfg(target_env = "ohos")]
+    {
+        handle.write(&data).await
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        handle.write(&data)
+    }
 }
 
 /// Drive the DTR control line (`true` = asserted). Manual line control for
 /// MCU reset / bootloader entry / modem signalling.
 #[tauri::command]
-pub fn serial_set_dtr(
+pub async fn serial_set_dtr(
     state: State<'_, AppState>,
     session_id: String,
     level: bool,
 ) -> AppResult<()> {
-    serial_handle(&state, &session_id)?.set_dtr(level)
+    let handle = serial_handle(&state, &session_id)?;
+    #[cfg(target_env = "ohos")]
+    {
+        handle.set_dtr(level).await
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        handle.set_dtr(level)
+    }
 }
 
 /// Drive the RTS control line (`true` = asserted).
 #[tauri::command]
-pub fn serial_set_rts(
+pub async fn serial_set_rts(
     state: State<'_, AppState>,
     session_id: String,
     level: bool,
 ) -> AppResult<()> {
-    serial_handle(&state, &session_id)?.set_rts(level)
+    let handle = serial_handle(&state, &session_id)?;
+    #[cfg(target_env = "ohos")]
+    {
+        handle.set_rts(level).await
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        handle.set_rts(level)
+    }
 }
 
-/// Send a serial BREAK pulse (~250ms) — attention/interrupt signal for U-Boot,
-/// kernel SysRq-over-serial, telco gear.
+/// Send a serial BREAK pulse — attention/interrupt signal for U-Boot,
+/// kernel SysRq-over-serial, telco gear. Desktop holds it for ~250ms;
+/// HarmonyOS uses the system serial service's pulse duration.
 #[tauri::command]
-pub fn serial_send_break(state: State<'_, AppState>, session_id: String) -> AppResult<()> {
-    serial_handle(&state, &session_id)?.send_break()
+pub async fn serial_send_break(state: State<'_, AppState>, session_id: String) -> AppResult<()> {
+    let handle = serial_handle(&state, &session_id)?;
+    #[cfg(target_env = "ohos")]
+    {
+        handle.send_break().await
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        handle.send_break()
+    }
 }
 
 // No serial_resize: a serial line has no rows/cols. The frontend's transport

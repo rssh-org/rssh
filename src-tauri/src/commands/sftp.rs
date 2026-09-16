@@ -1,4 +1,6 @@
+#[cfg(not(target_env = "ohos"))]
 use std::collections::VecDeque;
+#[cfg(not(target_env = "ohos"))]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -12,10 +14,8 @@ use crate::ssh::sftp::{FileStat, RemoteEntry, SftpHandle, WalkEntry};
 use crate::state::AppState;
 use crate::state::{SessionKind, SessionOwner};
 
-#[cfg(desktop)]
-use tauri_plugin_dialog::{DialogExt, FilePath};
-
 /// Maximum recursion depth for the local walker. Mirrors the remote-side cap.
+#[cfg(not(target_env = "ohos"))]
 const LOCAL_WALK_DEPTH_CAP: u32 = 32;
 
 /// RAII：注册 cancel flag 并在 drop 时自动 unregister，无论 streaming 正常返回、
@@ -152,15 +152,28 @@ pub async fn sftp_walk_remote_dir(
     h.walk_files(&remote_root).await
 }
 
-/// Recursively list every file under a local directory; the local-side
-/// counterpart of `sftp_walk_remote_dir`. `rel_path` always uses '/'; the
-/// frontend swaps the separator when rebuilding the local physical path.
+/// Walk a selected source directory. Local locations stay opaque to callers;
+/// only rel_path is used to construct the destination on the remote server.
 #[tauri::command]
-pub async fn walk_local_dir(local_root: String) -> AppResult<Vec<WalkEntry>> {
-    let root = PathBuf::from(&local_root);
+pub async fn walk_local_dir(local_root: String) -> AppResult<Vec<super::files::LocalWalkEntry>> {
+    #[cfg(target_env = "ohos")]
+    {
+        crate::ohos::files::walk_directory(local_root).await
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        walk_filesystem_directory(local_root).await
+    }
+}
+
+#[cfg(not(target_env = "ohos"))]
+async fn walk_filesystem_directory(
+    local_root: String,
+) -> AppResult<Vec<super::files::LocalWalkEntry>> {
+    let root = super::files::filesystem_path(local_root)?;
     let mut queue: VecDeque<(PathBuf, u32)> = VecDeque::new();
     queue.push_back((root.clone(), 0));
-    let mut result: Vec<WalkEntry> = Vec::new();
+    let mut result: Vec<super::files::LocalWalkEntry> = Vec::new();
 
     while let Some((dir, depth)) = queue.pop_front() {
         if depth >= LOCAL_WALK_DEPTH_CAP {
@@ -183,7 +196,8 @@ pub async fn walk_local_dir(local_root: String) -> AppResult<Vec<WalkEntry>> {
             if meta.is_dir() {
                 queue.push_back((path, depth + 1));
             } else if meta.is_file() {
-                result.push(WalkEntry {
+                result.push(super::files::LocalWalkEntry {
+                    local_path: path.to_string_lossy().into_owned(),
                     rel_path: rel_unix(&path, &root),
                     size: meta.len(),
                 });
@@ -192,7 +206,8 @@ pub async fn walk_local_dir(local_root: String) -> AppResult<Vec<WalkEntry>> {
                 // to avoid cycles, and silently skip broken symlinks.
                 if let Ok(target_meta) = tokio::fs::metadata(&path).await {
                     if target_meta.is_file() {
-                        result.push(WalkEntry {
+                        result.push(super::files::LocalWalkEntry {
+                            local_path: path.to_string_lossy().into_owned(),
                             rel_path: rel_unix(&path, &root),
                             size: target_meta.len(),
                         });
@@ -208,6 +223,7 @@ pub async fn walk_local_dir(local_root: String) -> AppResult<Vec<WalkEntry>> {
 /// Convert the portion of `full` relative to `root` into a '/'-separated string.
 /// On Windows std::path::Component uses '\'; we normalise here and the frontend
 /// converts back to the platform separator when joining.
+#[cfg(not(target_env = "ohos"))]
 fn rel_unix(full: &Path, root: &Path) -> String {
     let stripped = full.strip_prefix(root).unwrap_or(full);
     stripped
@@ -215,6 +231,40 @@ fn rel_unix(full: &Path, root: &Path) -> String {
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+#[cfg(all(test, not(target_env = "ohos")))]
+mod local_walk_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn file_uri_walk_returns_openable_locations_and_preserves_symlink_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("目录 #%");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(source.join("nested/file #%.txt"), b"content").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&source, source.join("cycle")).unwrap();
+            std::os::unix::fs::symlink(
+                source.join("nested/file #%.txt"),
+                source.join("file-alias"),
+            )
+            .unwrap();
+        }
+        let entries = walk_local_dir(tauri::Url::from_file_path(&source).unwrap().to_string())
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), if cfg!(unix) { 2 } else { 1 });
+        assert!(entries
+            .iter()
+            .any(|entry| entry.rel_path == "nested/file #%.txt"));
+        for entry in entries {
+            assert_eq!(entry.size, 7);
+            assert_eq!(std::fs::read(&entry.local_path).unwrap(), b"content");
+            assert_eq!(PathBuf::from(entry.local_path), source.join(entry.rel_path));
+        }
+    }
 }
 
 #[tauri::command]
@@ -262,20 +312,6 @@ pub async fn sftp_close(
     )
 }
 
-/// dialog plugin 的 FilePath → 本地 PathBuf。这里的命令仅在桌面注册，
-/// 所以 dialog 总返回真实路径，移动端 URI 不会出现在这里。
-#[cfg(desktop)]
-fn dialog_to_path(fp: FilePath) -> AppResult<PathBuf> {
-    fp.into_path()
-        .map_err(|e| AppError::other("file_path_invalid", json!({ "err": e.to_string() })))
-}
-
-/// `spawn_blocking` 的 JoinError → AppError。
-#[cfg(desktop)]
-fn dialog_join_err(e: tokio::task::JoinError) -> AppError {
-    AppError::other("dialog_task_failed", json!({ "err": e.to_string() }))
-}
-
 /// Pick a destination or source using the native host; keep authorization URIs intact.
 #[tauri::command]
 pub async fn sftp_pick_save_path(
@@ -290,35 +326,17 @@ pub async fn sftp_pick_open_path(app: tauri::AppHandle) -> AppResult<Option<Stri
     super::files::pick_open(&app).await
 }
 
-/// Pick a folder via the native dialog. Used both as the destination root
-/// (multi-select download) and the source root (recursive upload) — both
-/// flows want the same `blocking_pick_folder()` call, so a single command suffices.
-#[cfg(desktop)]
+/// Select a source or destination directory and retain its platform grant.
+#[cfg(any(desktop, target_env = "ohos"))]
 #[tauri::command]
-pub async fn sftp_pick_folder(app: tauri::AppHandle) -> AppResult<Option<String>> {
-    let picked = tokio::task::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
-        .await
-        .map_err(dialog_join_err)?;
-    match picked {
-        Some(fp) => Ok(Some(dialog_to_path(fp)?.display().to_string())),
-        None => Ok(None),
-    }
+pub async fn sftp_pick_folder(app: tauri::AppHandle, write: bool) -> AppResult<Option<String>> {
+    super::files::pick_folder(&app, write).await
 }
 
-/// Pick multiple source files for upload. `blocking_pick_files` supports
-/// multi-selection on every desktop platform we ship to.
-#[cfg(desktop)]
+#[cfg(any(desktop, target_env = "ohos"))]
 #[tauri::command]
 pub async fn sftp_pick_open_files(app: tauri::AppHandle) -> AppResult<Option<Vec<String>>> {
-    let picked = tokio::task::spawn_blocking(move || app.dialog().file().blocking_pick_files())
-        .await
-        .map_err(dialog_join_err)?;
-    let Some(fps) = picked else { return Ok(None) };
-    let paths = fps
-        .into_iter()
-        .map(|fp| dialog_to_path(fp).map(|p| p.display().to_string()))
-        .collect::<AppResult<Vec<_>>>()?;
-    Ok(Some(paths))
+    super::files::pick_open_files(&app).await
 }
 
 /// Stream-download to a caller-supplied local target. transfer_id is used as the

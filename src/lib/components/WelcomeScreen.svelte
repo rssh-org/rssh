@@ -9,7 +9,7 @@
   import { onDestroy, onMount } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { t } from "../i18n/index.svelte.ts";
-  import { isMobile } from "../stores/app.svelte.ts";
+  import { capabilities } from "../stores/runtime.svelte.ts";
 
   import SceneIntro from "./welcome/SceneIntro.svelte";
   import SceneAi from "./welcome/SceneAi.svelte";
@@ -23,18 +23,19 @@
 
   // Linear scene flow. CTA is terminal — its "Next" is dismiss.
   type Scene = "intro" | "ai" | "blocks" | "discovery" | "sync" | "cli" | "cta";
-  const FLOW: readonly Scene[] = isMobile
-    ? ["intro", "ai", "blocks", "discovery", "sync", "cta"]
-    : ["intro", "ai", "blocks", "discovery", "sync", "cli", "cta"];
+  const FEATURE_SCENES: Scene[] = [
+    "ai", "blocks",
+    ...(capabilities().localDiscovery ? ["discovery" as const] : []),
+    "sync",
+    ...(capabilities().cliInstall ? ["cli" as const] : []),
+  ];
+  const FLOW: readonly Scene[] = ["intro", ...FEATURE_SCENES, "cta"];
 
   let scene = $state<Scene>("intro");
   // Bumping this remounts the active scene to replay it from the start.
   let replayKey = $state(0);
 
   // Demo-scene indicator only shows for the "feature" scenes.
-  const FEATURE_SCENES: Scene[] = isMobile
-    ? ["ai", "blocks", "discovery", "sync"]
-    : ["ai", "blocks", "discovery", "sync", "cli"];
   let featureIdx = $derived(FEATURE_SCENES.indexOf(scene));
   let showIndicator = $derived(featureIdx >= 0);
 
@@ -82,7 +83,7 @@
   let decorChanged = false;
 
   onMount(async () => {
-    if (isMobile) return;
+    if (!capabilities().windowControls) return;
     try {
       const win = getCurrentWindow();
       originalDecorated = await win.isDecorated();

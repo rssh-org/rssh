@@ -35,6 +35,8 @@ fn register_plugins(app: &OpenHarmonyApp) -> napi_ohos::Result<()> {
     app.register_plugin(PermissionBridgePlugin)?;
     app.register_plugin(super::files::FilesAccessPlugin)?;
     app.register_plugin(super::clipboard::ClipboardPlugin)?;
+    app.register_plugin(super::device::RuntimePlugin)?;
+    app.register_plugin(super::serial::SerialPlugin)?;
     Ok(())
 }
 

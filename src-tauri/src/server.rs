@@ -739,6 +739,9 @@ fn dispatch(
         }
 
         // ---- CLI: PATH-based status; install is host-managed in embedded mode ----
+        "get_runtime_capabilities" => ok(Ok::<_, AppError>(
+            crate::commands::runtime::RuntimeCapabilities::headless(),
+        )),
         "cli_status" => ok(Ok::<_, AppError>(
             crate::commands::cli::cli_status_headless(),
         )),
@@ -966,6 +969,12 @@ async fn dispatch_async(
             let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
             ok(h.walk_files(&arg::<String>(&args, "remoteRoot")?).await)
         }
+        "resolve_local_paths" => ok(crate::commands::files::resolve_local_paths(
+            arg(&args, "localRoot")?,
+            arg(&args, "relativePaths")?,
+            arg(&args, "write")?,
+        )
+        .await),
         "walk_local_dir" => {
             ok(crate::commands::sftp::walk_local_dir(arg::<String>(&args, "localRoot")?).await)
         }

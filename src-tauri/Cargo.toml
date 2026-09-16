@@ -88,13 +88,16 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc = "0.2"
 
-# PTY and serial — the three desktop targets RSSH actually ships.
+# PTY uses the native Unix API on HarmonyOS too. Availability is probed inside
+# the application sandbox before the UI exposes a local shell.
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+portable-pty = "0.9"
+
+# Serial — the three desktop targets RSSH actually ships.
 # Cargo target tables cannot use Tauri's `desktop` cfg alias, so keep this as a
 # positive OS list instead of treating every non-mobile target as a desktop.
-# OHOS is target_os = "linux" but links none of this (libudev/PTY have no
-# place on a phone), so it is carved out explicitly.
+# OHOS is target_os = "linux" but has no libudev serial backend.
 [target.'cfg(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos"))))'.dependencies]
-portable-pty = "0.8"
 # Serial console transport — a 3rd byte-stream alongside SSH/PTY. macOS uses
 # IOKit and Windows uses the Win32 API (no extra system dep); Linux links
 # libudev for port enumeration, so Linux CI/packaging needs `libudev-dev` at

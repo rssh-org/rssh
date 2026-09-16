@@ -40,7 +40,7 @@
   let customMode = $derived(pendingCustom || (selectedShell !== "" && !shells.includes(selectedShell)));
 
   onMount(async () => {
-    if (!app.isMobile) {
+    if (app.capabilities().localPty) {
       try { shells = await invoke<string[]>("list_shells"); } catch { shells = []; }
       selectedShell = await invoke<string | null>("get_setting", { key: "local_shell" }) ?? "";
       if (selectedShell && !shells.includes(selectedShell)) {
@@ -151,7 +151,7 @@
 </script>
 
 <div class="page">
-  {#if !app.isMobile}
+  {#if app.capabilities().localPty}
     <div class="section-label" id="local-shell-label">{t("settings.shell.local_shell")}</div>
     <div class="card surface-raised shell-card">
       <div class="shell-hint">

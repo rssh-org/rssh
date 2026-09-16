@@ -70,9 +70,9 @@ Tab、导航和连接会话协调在 `app.svelte.ts`；AI、主题、快捷键�
 rg '^let _.*\$state|^export function' src/lib/stores src/lib/ai src/lib/themes
 ```
 
-### R9. 平台条件统一走 `cfg` / `app.isMobile`
+### R9. 设备形态与宿主能力分别判断
 
-OS / 设备形态分支：Rust 端用 `#[cfg(...)]`，前端用 `app.isMobile`（UA 嗅探，顶层 const），不要在各组件重复造一套判断。Docker CLI、kubectl、keychain 等外部能力是否可用，仍应在运行时真实探测。
+OS 分支：Rust 端用 `#[cfg(...)]`。前端设备形态统一用 `app.isMobile`（集中 UA 判断，顶层 const），只控制布局、键鼠和软键盘；鸿蒙 PC 是桌面形态。原生功能必须走 `app.capabilities()`（后端 `get_runtime_capabilities`），不能用 `!app.isMobile` 推断 PTY、串口、多窗口、目录授权等能力。App 成功加载能力后才挂载资源页面。Docker CLI、kubectl、keychain 等外部能力是否可用，仍应在运行时真实探测。
 
 ```bash
 rg 'cfg\(target_os|isMobile' src src-tauri/src

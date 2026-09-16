@@ -16,7 +16,7 @@
   const copyFromId = intent.mode === "copy" ? intent.sourceId : null;
   let selectedKind = $state<ConnectionKind>(intent.kind);
 
-  let typeOptions = $derived(availableConnectionKinds(app.isMobile).map((kind) => ({
+  let typeOptions = $derived(availableConnectionKinds(app.capabilities().serial).map((kind) => ({
     kind,
     label: kindLabel(kind),
     description: kindDescription(kind),

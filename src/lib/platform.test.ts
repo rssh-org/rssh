@@ -40,6 +40,18 @@ describe("detectPlatform", () => {
       .toEqual({ isIOS: false, isHarmony: true, isMobile: true });
   });
 
+  it.each(["OpenHarmony 5.1", "HarmonyOS 6.0"])("recognizes a touch-capable Harmony PC as desktop: %s", (system) => {
+    expect(detectPlatform({
+      userAgent: `Mozilla/5.0 (PC; ${system}) AppleWebKit/537.36 Chrome/132.0.0.0 Safari/537.36 ArkWeb/5.0.0.0`,
+      maxTouchPoints: 10,
+    })).toEqual({ isIOS: false, isHarmony: true, isMobile: false });
+  });
+
+  it("keeps Harmony tablets on the touch interface", () => {
+    expect(detectPlatform({ userAgent: "Mozilla/5.0 (Tablet; OpenHarmony 5.1) ArkWeb/5.0.0.0" }))
+      .toEqual({ isIOS: false, isHarmony: true, isMobile: true });
+  });
+
   it("keeps Android-compatible HarmonyOS on the Android path", () => {
     expect(detectPlatform({ userAgent: "Mozilla/5.0 (Linux; Android 12; HarmonyOS 4.0)" }))
       .toEqual({ isIOS: false, isHarmony: false, isMobile: true });

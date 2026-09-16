@@ -18,11 +18,67 @@ index 4006cd1..bbdb1ff 100644
  
  [dev-dependencies]
  pollster = "1.0.0"
+diff --git a/src/lib.rs b/src/lib.rs
+index 0b68434..91a4fee 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2028,13 +2028,23 @@ impl WebViewBuilderExtAndroid for WebViewBuilder<'_> {
+ 
+ #[cfg(target_env = "ohos")]
+ #[derive(Default)]
+-pub struct PlatformSpecificWebViewAttributes {}
++pub struct PlatformSpecificWebViewAttributes {
++  pub window_id: u64,
++}
+ 
+ #[cfg(target_env = "ohos")]
+-pub trait WebViewBuilderExtOhos {}
++pub trait WebViewBuilderExtOhos {
++  /// Mount this WebView in the logical window created by the native windowing runtime.
++  fn with_ohos_window(self, window_id: u64) -> Self;
++}
+ 
+ #[cfg(target_env = "ohos")]
+-impl WebViewBuilderExtOhos for WebViewBuilder<'_> {}
++impl WebViewBuilderExtOhos for WebViewBuilder<'_> {
++  fn with_ohos_window(mut self, window_id: u64) -> Self {
++    self.platform_specific.window_id = window_id;
++    self
++  }
++}
+ 
+ #[cfg(all(
+   any(
+diff --git a/src/ohos/initialization.rs b/src/ohos/initialization.rs
+new file mode 100644
+index 0000000..5b5e554
+--- /dev/null
++++ b/src/ohos/initialization.rs
+@@ -0,0 +1,19 @@
++/// API 11's ArkWeb document-start hook sorts ScriptItems by source text, not insertion
++/// order. Submit one script so framework bootstrap, metadata and plugin setup retain
++/// Wry's order on the API 12 baseline. Keep each script's runtime failures independent.
++pub fn ordered_script(scripts: impl IntoIterator<Item = (String, bool)>) -> String {
++  let mut source = String::new();
++  for (script, main_frame_only) in scripts {
++    source.push_str("try {\n");
++    if main_frame_only {
++      source.push_str("if (window === window.top) {\n");
++    }
++    source.push_str(&script);
++    source.push('\n');
++    if main_frame_only {
++      source.push_str("}\n");
++    }
++    source.push_str("} catch (__wryInitError) { console.error('WebView initialization script failed', __wryInitError); }\n");
++  }
++  source
++}
 diff --git a/src/ohos/mod.rs b/src/ohos/mod.rs
-index 2f37a5a..da650bd 100644
+index 2f37a5a..d0bb1ca 100644
 --- a/src/ohos/mod.rs
 +++ b/src/ohos/mod.rs
-@@ -1,28 +1,396 @@
+@@ -1,35 +1,407 @@
 -use std::borrow::Cow;
 +use std::{
 +  borrow::Cow,
@@ -52,6 +108,7 @@ index 2f37a5a..da650bd 100644
  use raw_window_handle::HasWindowHandle;
  
  use crate::util::Counter;
++mod initialization;
 +mod queue;
 +use queue::Queue;
  
@@ -426,9 +483,10 @@ index 2f37a5a..da650bd 100644
    }
  
    pub fn new(
-@@ -30,6 +398,9 @@ impl InnerWebView {
+     _window: &impl HasWindowHandle,
      attributes: WebViewAttributes,
-     _pl_attrs: super::PlatformSpecificWebViewAttributes,
+-    _pl_attrs: super::PlatformSpecificWebViewAttributes,
++    pl_attrs: super::PlatformSpecificWebViewAttributes,
    ) -> Result<Self> {
 +    let app = APP
 +      .with(|app| app.borrow().clone())
@@ -436,7 +494,7 @@ index 2f37a5a..da650bd 100644
      let WebViewAttributes {
        id,
        url,
-@@ -41,133 +412,117 @@ impl InnerWebView {
+@@ -41,133 +413,116 @@ impl InnerWebView {
        custom_protocols,
        background_color,
        transparent,
@@ -494,16 +552,14 @@ index 2f37a5a..da650bd 100644
 -
 +      .transparent(transparent)
 +      .dom_storage_access(true)
-+      .initialization_scripts(initialization_scripts.into_iter().map(|script| {
-+        WebviewInitializationScript {
-+          script: if script.for_main_frame_only {
-+            format!("if (window === window.top) {{\n{}\n}}", script.script)
-+          } else {
-+            script.script
-+          },
-+          script_rules: vec!["*".into()],
-+        }
-+      }));
++      .initialization_scripts([WebviewInitializationScript {
++        script: initialization::ordered_script(
++          initialization_scripts
++            .into_iter()
++            .map(|script| (script.script, script.for_main_frame_only)),
++        ),
++        script_rules: vec!["*".into()],
++      }]);
 +    request.javascript_enabled = Some(!javascript_disabled);
 +    request.autoplay = Some(autoplay);
 +    request.user_agent = user_agent;
@@ -513,6 +569,7 @@ index 2f37a5a..da650bd 100644
 +      request.devtools = Some(devtools);
      }
 -
++    request.window_id = Some(pl_attrs.window_id as i64);
      if let Some(html) = html {
 -      webview_builder = webview_builder.html(html);
 -    } else if let Some(url) = initial_url {

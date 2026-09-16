@@ -3,6 +3,7 @@ import * as ai from "../ai/store.svelte.ts";
 import * as pluginStore from "../plugins/store.svelte.ts";
 import { errMsg, t } from "../i18n/index.svelte.ts";
 import { isIOS, isMobile } from "../platform.ts";
+import { capabilities } from "./runtime.svelte.ts";
 import type {
   CommandBlockRedactionRule as RedactionRule,
   CommandBlockRedactionSettings as RedactionSettings,
@@ -24,6 +25,7 @@ import { createSidePanelState } from "./panel-state.svelte.ts";
    Platform
    ═══════════════════════════════════════════════════════ */
 export { isIOS, isMobile };
+export { capabilities };
 
 /* ═══════════════════════════════════════════════════════
    Types
@@ -507,7 +509,7 @@ export function addTab(tab: Tab) {
   // shell tabs run exec as a child process, same capability class as ssh.
   // Mobile stays out of v1: the panels have no touch close affordance yet
   // (desktop closes via Esc) — same scope the old desktop-only menu had.
-  if (!isMobile && (rootTab.type === "ssh" || rootTab.type === "local")) {
+  if (!isMobile && capabilities().plugins && (rootTab.type === "ssh" || rootTab.type === "local")) {
     pluginStore.openForNewTab(rootTab.id);
   }
   // MRU on: new tab is the most-recently-focused → front of the session region.
@@ -1299,13 +1301,9 @@ export async function loadForwards(): Promise<Forward[]> {
   return invoke<Forward[]>("list_forwards");
 }
 export async function loadSerialProfiles(): Promise<SerialProfile[]> {
-  // Desktop-only: the command isn't registered on mobile. Degrade to [] rather
-  // than rejecting, so callers (e.g. HomeScreen's Promise.all) don't break on mobile.
-  // On desktop the command IS registered, so a failure is a real problem (DB /
-  // serialization) — log it so it's diagnosable instead of silently showing "no
-  // profiles". Mobile stays quiet (expected "not registered").
+  if (!capabilities().serial) return [];
   return invoke<SerialProfile[]>("list_serial_profiles").catch((e) => {
-    if (!isMobile) console.warn("[serial] list_serial_profiles failed:", e);
+    console.warn("[serial] list_serial_profiles failed:", e);
     return [];
   });
 }

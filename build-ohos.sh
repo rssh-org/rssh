@@ -79,11 +79,12 @@ echo "Building OHOS Rust library (isolated Cargo workspace)"
 (
     cd "$WORKSPACE"
     # ohrs performs cargo metadata internally; check the lock before it can
-    # resolve anything, then verify that it left the checked-in lock unchanged.
+    # resolve anything, then verify that it left the normalized lock unchanged.
+    # Only this application's release version differs from the checked-in lock.
     cargo metadata --locked --format-version 1 --filter-platform "$TARGET" >/dev/null
     ohrs build --arch arm64 --release --dist "$STAGING" --target-dir "$CARGO_TARGET_DIR" -- \
         --locked --lib --features custom-protocol
-    cmp Cargo.lock "$ROOT/src-tauri/ohos/Cargo.lock"
+    cmp Cargo.lock Cargo.lock.expected
 )
 [ -s "$STAGING/arm64-v8a/librssh_lib.so" ] || { echo "Build produced no librssh_lib.so." >&2; exit 1; }
 [ -s "$FRONTEND/index.html" ] || { echo "Build produced no frontend index.html." >&2; exit 1; }
@@ -93,6 +94,19 @@ rm -rf "$OHOS_PROJECT/entry/libs/arm64-v8a" "$OHOS_PROJECT/entry/src/main/resour
 mkdir -p "$OHOS_PROJECT/entry/libs" "$OHOS_PROJECT/entry/src/main/resources/rawfile"
 cp -R "$STAGING/arm64-v8a" "$OHOS_PROJECT/entry/libs/"
 cp -R "$FRONTEND/." "$OHOS_PROJECT/entry/src/main/resources/rawfile/"
+# HAP metadata follows Tauri's version without dirtying the source manifest.
+# An explicit OHOS_VERSION_CODE overrides the configured monotonic build code.
+APP_CONFIG="$OHOS_PROJECT/AppScope/app.json5"
+APP_CONFIG_BACKUP="$(mktemp "$WORKSPACE/app.json5.XXXXXX")"
+cp "$APP_CONFIG" "$APP_CONFIG_BACKUP"
+restore_app_config() {
+    cp "$APP_CONFIG_BACKUP" "$APP_CONFIG"
+    rm -f "$APP_CONFIG_BACKUP"
+}
+trap restore_app_config EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+cp "$WORKSPACE/app.json5" "$APP_CONFIG"
 echo "Assembling OHOS HAP"
 (
     cd "$OHOS_PROJECT"

@@ -90,13 +90,20 @@
   ]);
 
   const hiddenOnCompact = new Set<string>([]);
-  const hiddenOnMobile = new Set<string>(["cli", "dynamic-discovery", "shortcuts", "plugins"]);
-  // ConnectionEditor removes the desktop-only Serial type on mobile;
-  // the unified connection-list entry itself remains available.
+  function pageAvailable(id: app.SettingsPage): boolean {
+    const capabilities = app.capabilities();
+    switch (id) {
+      case "cli": return capabilities.cliInstall;
+      case "dynamic-discovery": return capabilities.localDiscovery;
+      case "plugins": return capabilities.plugins && !app.isMobile;
+      case "shortcuts": return !app.isMobile;
+      default: return true;
+    }
+  }
   let menu = $derived(
     allMenu
       .filter(m => !(compact && hiddenOnCompact.has(m.id)))
-      .filter(m => !(app.isMobile && hiddenOnMobile.has(m.id)))
+      .filter(m => pageAvailable(m.id))
   );
 
   let sections = $derived((() => {
@@ -170,7 +177,7 @@
       </div>
     {:else}
       {@const route = routes[app.settingsPage()]}
-      {#if route}
+      {#if route && pageAvailable(app.settingsPage())}
         {@const C = route.component}
         {#if route.needsId}
           <C id={app.editingId()} />

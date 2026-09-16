@@ -100,6 +100,7 @@
     }
 
     function togglePin() {
+        if (!app.capabilities().windowPin) return;
         pinned = !pinned;
         getCurrentWindow().setAlwaysOnTop(pinned).catch(e => {
             console.error("setAlwaysOnTop failed:", e);
@@ -162,7 +163,7 @@
                 handler: () => {
                     const tab = app.activeTab();
                     // serial excluded: the port is exclusive, a second window would fail.
-                    if (!tab || !canOpenTabInNewWindow(tab) || app.isMobile) return false;
+                    if (!tab || !canOpenTabInNewWindow(tab)) return false;
                     openInNewWindow(tab);
                 },
             },
@@ -235,7 +236,7 @@
         if (!bypassStartupReconcile) {
             void initializePrimarySessionWindow({
                 signal: startup.signal,
-                canOpenLocal: !app.isMobile,
+                canOpenLocal: app.capabilities().localPty,
                 reconcile: () => invoke("reconcile_sessions", { activeIds: [] }),
                 allowResourcePanes: () => { resourcePanesAllowed = true; },
                 loadAutoOpenLocal: async () =>
@@ -249,7 +250,9 @@
         // Plugin registry: manifest rows + on-disk root (for iframe entry URLs).
         // A failed load (e.g. plain-browser dev without the shim server) only
         // means no plugins — never block startup on it.
-        void plugins.load().catch((e) => console.warn("[plugins] registry load failed:", e));
+        if (app.capabilities().plugins) {
+            void plugins.load().catch((e) => console.warn("[plugins] registry load failed:", e));
+        }
 
         const detachKeydown = attachShortcuts(shortcutsTable());
         const detachKeyup = attachKeyup((e) => {
@@ -279,6 +282,7 @@
         const data = window.__rssh_ai_handoff;
         if (!data) return;
         delete window.__rssh_ai_handoff;
+        if (!app.capabilities().localPty) return;
         let payload: { local_path: string; task: string };
         try {
             payload = JSON.parse(data);
@@ -345,6 +349,7 @@
     }
 
     function openInNewWindow(tab: Tab) {
+        if (!canOpenTabInNewWindow(tab)) return;
         invoke("open_tab_in_new_window", {
             clone: JSON.stringify({type: tab.type, label: tab.label, meta: tab.meta}),
         }).catch(e => console.error("open_tab_in_new_window failed:", e));
@@ -371,6 +376,7 @@
 
 
     $effect(() => {
+        if (!app.capabilities().windowControls) return;
         const workspace = app.workspaceTabs().find((tab) => tab.id === app.activeWorkspaceId())
             ?? app.tabs().find((tab) => tab.id === "home");
         const pane = app.tabs().find((tab) => tab.id === app.activePaneId());
@@ -699,7 +705,8 @@
     let navSections = $derived<{ header: NavItem[]; middle: NavItem[]; footer: NavItem[] }>({
         header: [
             {kind: "tab" as const, tab: {id: "home", type: "home", label: app.tabLabel(app.tabs().find((tab) => tab.id === "home")!)} },
-            ...(app.isMobile ? [] : [{kind: "new-tab" as const}, {kind: "new-edit" as const}]),
+            ...(app.capabilities().localPty ? [{kind: "new-tab" as const}] : []),
+            ...(app.isMobile ? [] : [{kind: "new-edit" as const}]),
             // Horizontal strip would burst sideways with N pinned profiles — collapse
             // them into one star button that pops a menu. Vertical sidebar keeps the list.
             ...(isHorizontal
@@ -708,9 +715,8 @@
         ],
         middle: app.workspaceTabs().map(t => ({kind: "tab" as const, tab: t})),
         footer: [
-            // Downloads (transfer queue) is now reachable on mobile too — SFTP
-            // single-file transfer runs through it. pin-window stays desktop-only.
-            ...(app.isMobile ? [{kind: "downloads" as const}] : [{kind: "pin-window" as const}, {kind: "downloads" as const}]),
+            ...(app.capabilities().windowPin ? [{kind: "pin-window" as const}] : []),
+            {kind: "downloads" as const},
             {kind: "settings" as const},
         ],
     });
@@ -820,6 +826,7 @@
     }
 
     function addLocalTab() {
+        if (!app.capabilities().localPty) return;
         const id = `local:${crypto.randomUUID()}`;
         app.addTab({id, type: "local", label: "Local"});
         closeDrawer();
@@ -864,12 +871,16 @@
     }
 
     function canOpenTabInNewWindow(tab: Tab): boolean {
-        return app.isTerminalTabType(tab.type) && tab.type !== "serial";
+        return app.capabilities().multiWindow && canSplitTab(tab);
+    }
+
+    function canSplitTab(tab: Tab): boolean {
+        return !app.isMobile && app.isTerminalTabType(tab.type) && tab.type !== "serial";
     }
     type SplitSide = "left" | "right" | "top" | "bottom";
 
     function splitCurrentPane(tab: Tab, side: SplitSide) {
-        if (!app.isTerminalTabType(tab.type) || tab.type === "serial") return;
+        if (!canSplitTab(tab)) return;
         const workspaceId = tab.workspaceId ?? tab.id;
         if (!app.isTerminalWorkspace(workspaceId)) return;
         if (tab.paneOf) app.setActivePane(tab.id);
@@ -1040,13 +1051,9 @@
             ]);
         }
 
-        // Split panes + multi-window: one desktop-only terminal section.
-        // canOpenTabInNewWindow already excludes serial (panes would fight the
-        // exclusive port), so a single guard covers both items. Split follows
-        // the old directional open-new-window submenu idiom: the parent click
-        // runs the common default (split right, VS Code/iTerm style), the four
-        // directions live one hover away.
-        if (canOpenTabInNewWindow(tab) && !app.isMobile) {
+        // Splitting is a frontend layout operation and does not require
+        // native multi-window support. Serial ports remain exclusive.
+        if (canSplitTab(tab)) {
             sections.push([
                 {
                     label: t("tab.context.split"),
@@ -1058,11 +1065,11 @@
                         {label: t("tab.context.split.right"), onClick: () => splitCurrentPane(tab, "right")},
                     ],
                 },
-                {
+                ...(canOpenTabInNewWindow(tab) ? [{
                     label: t("tab.context.open_new_window"),
                     shortcut: keymap.format("tab.openNewWindow"),
                     onClick: () => openInNewWindow(tab),
-                },
+                }] : []),
             ]);
         }
 

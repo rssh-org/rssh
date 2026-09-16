@@ -493,9 +493,9 @@ pub(crate) fn register_prompt_waiter<T>(
 
 pub enum ReadySession {
     Ssh(crate::ssh::client::SessionHandle),
-    #[cfg(desktop)]
+    #[cfg(any(desktop, target_env = "ohos"))]
     Pty(crate::terminal::pty::PtyHandle),
-    #[cfg(desktop)]
+    #[cfg(any(desktop, target_env = "ohos"))]
     Serial(crate::terminal::serial::SerialHandle),
     Telnet(crate::terminal::telnet::TelnetHandle),
     Sftp(std::sync::Arc<crate::ssh::sftp::SftpHandle>),
@@ -511,9 +511,9 @@ impl ReadySession {
     fn kind(&self) -> SessionKind {
         match self {
             Self::Ssh(_) => SessionKind::Ssh,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             Self::Pty(_) => SessionKind::Pty,
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             Self::Serial(_) => SessionKind::Serial,
             Self::Telnet(_) => SessionKind::Telnet,
             Self::Sftp(_) => SessionKind::Sftp,
@@ -531,8 +531,10 @@ impl ReadySession {
             Self::CleanupProbe { cleaned, .. } => {
                 cleaned.store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            #[cfg(desktop)]
-            Self::Pty(_) | Self::Serial(_) => {}
+            #[cfg(any(desktop, target_env = "ohos"))]
+            Self::Pty(_) => {}
+            #[cfg(any(desktop, target_env = "ohos"))]
+            Self::Serial(_) => {}
             Self::Telnet(_) | Self::Sftp(_) => {}
         }
     }
@@ -652,9 +654,9 @@ fn insert_ready_handle(state: &AppState, session_id: &str, handle: ReadySession)
             sessions.insert(session_id.to_owned(), handle);
             Ok(())
         }
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_env = "ohos"))]
         ReadySession::Pty(handle) => insert_unique(&state.pty_sessions, session_id, handle),
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_env = "ohos"))]
         ReadySession::Serial(handle) => insert_unique(&state.serial_sessions, session_id, handle),
         ReadySession::Telnet(handle) => insert_unique(&state.telnet_sessions, session_id, handle),
         ReadySession::Sftp(handle) => insert_unique(&state.sftp_sessions, session_id, handle),
@@ -805,9 +807,9 @@ pub enum OwnedAiTarget {
         handle: crate::ssh::client::SshHandle,
         profile_id: String,
     },
-    #[cfg(desktop)]
+    #[cfg(any(desktop, target_env = "ohos"))]
     PtyShellPath(String),
-    #[cfg(desktop)]
+    #[cfg(any(desktop, target_env = "ohos"))]
     Serial,
     Telnet,
 }
@@ -851,7 +853,7 @@ pub fn owned_ready_ai_target(
                     serde_json::json!({ "id": id }),
                 )
             }),
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_env = "ohos"))]
         SessionKind::Pty => locked(&state.pty_sessions)?
             .get(id)
             .map(|session| OwnedAiTarget::PtyShellPath(session.shell_path().to_owned()))
@@ -861,7 +863,7 @@ pub fn owned_ready_ai_target(
                     serde_json::json!({ "id": id }),
                 )
             }),
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_env = "ohos"))]
         SessionKind::Serial => locked(&state.serial_sessions)?
             .contains_key(id)
             .then_some(OwnedAiTarget::Serial)
@@ -896,11 +898,11 @@ fn take_ready_handle(
         SessionKind::Ssh => locked(&state.sessions)?
             .remove(session_id)
             .map(ReadySession::Ssh),
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_env = "ohos"))]
         SessionKind::Pty => locked(&state.pty_sessions)?
             .remove(session_id)
             .map(ReadySession::Pty),
-        #[cfg(desktop)]
+        #[cfg(any(desktop, target_env = "ohos"))]
         SessionKind::Serial => locked(&state.serial_sessions)?
             .remove(session_id)
             .map(ReadySession::Serial),
@@ -1265,9 +1267,9 @@ mod tests {
             secret_store,
             lifecycle_sessions: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             pty_sessions: Mutex::new(HashMap::new()),
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_env = "ohos"))]
             serial_sessions: Mutex::new(HashMap::new()),
             telnet_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
