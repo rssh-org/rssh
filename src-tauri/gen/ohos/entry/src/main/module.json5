@@ -2,7 +2,7 @@
   "module": {
     "name": "entry",
     "type": "entry",
-    "description": "$string:module_desc",
+    "description": "$string:app_description",
     "mainElement": "EntryAbility",
     "deviceTypes": [
       "phone",
@@ -16,10 +16,10 @@
       {
         "name": "EntryAbility",
         "srcEntry": "./ets/entryability/EntryAbility.ets",
-        "description": "$string:EntryAbility_desc",
-        "icon": "$media:layered_image",
-        "label": "$string:EntryAbility_label",
-        "startWindowIcon": "$media:startIcon",
+        "description": "$string:app_description",
+        "icon": "$media:rssh_icon",
+        "label": "$string:app_name",
+        "startWindowIcon": "$media:rssh_icon",
         "startWindowBackground": "$color:start_window_background",
         "orientation": "auto_rotation_restricted",
         "exported": true,

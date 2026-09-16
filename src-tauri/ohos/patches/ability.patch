@@ -1,3 +1,69 @@
+diff --git a/crates/ability/src/app.rs b/crates/ability/src/app.rs
+index 9d52dcd..3bcbc3b 100644
+--- a/crates/ability/src/app.rs
++++ b/crates/ability/src/app.rs
+@@ -22,7 +22,7 @@ use crate::{
+     bridge::MainThreadBridgeEndpoint, AvoidArea, AvoidAreaType, BridgeMainThread,
+     BridgeMainThreadEvent, BridgePlugin, BridgePluginDeclaration, BridgePluginRegistry,
+     BridgeRuntime, Configuration, Event, MainThreadScheduler, OpenHarmonyWaker,
+-    PluginLifecycleEvent, Rect, TouchInputDelivery, WAKER,
++    PluginLifecycleEvent, Rect, TouchInputDelivery,
+ };
+ 
+ static ID: AtomicI64 = AtomicI64::new(0);
+@@ -170,8 +170,7 @@ impl OpenHarmonyAppInner {
+     }
+ 
+     pub fn create_waker(&self) -> OpenHarmonyWaker {
+-        let guard = (*WAKER).read().expect("Failed to read WAKER");
+-        OpenHarmonyWaker::new((*guard).clone())
++        OpenHarmonyWaker::new()
+     }
+ 
+     pub fn config(&self) -> Configuration {
+diff --git a/crates/ability/src/waker.rs b/crates/ability/src/waker.rs
+index 6183607..64609d1 100644
+--- a/crates/ability/src/waker.rs
++++ b/crates/ability/src/waker.rs
+@@ -6,30 +6,20 @@ type WakerType = LazyLock<RwLock<Option<Arc<ThreadsafeFunction<(), ()>>>>>;
+ 
+ pub(crate) static WAKER: WakerType = LazyLock::new(|| RwLock::new(None));
+ 
+-pub struct OpenHarmonyWaker {
+-    waker: Option<Arc<ThreadsafeFunction<(), ()>>>,
+-}
+-
+-// Safety: ThreadsafeFunction can be called from any thread.
+-unsafe impl Send for OpenHarmonyWaker {}
+-unsafe impl Sync for OpenHarmonyWaker {}
++#[derive(Clone, Default)]
++pub struct OpenHarmonyWaker;
+ 
+ impl OpenHarmonyWaker {
+-    pub fn new(waker: Option<Arc<ThreadsafeFunction<(), ()>>>) -> Self {
+-        Self { waker }
++    pub fn new() -> Self {
++        Self
+     }
+ 
+     pub fn wake(&self) {
+-        if let Some(waker) = &self.waker {
++        // Proxies may precede lifecycle registration and survive Ability recreation.
++        // Clone the current callback, releasing the slot lock before scheduling.
++        let waker = WAKER.read().expect("Failed to read WAKER").clone();
++        if let Some(waker) = waker {
+             waker.call(Ok(()), ThreadsafeFunctionCallMode::NonBlocking);
+         }
+     }
+ }
+-
+-impl Clone for OpenHarmonyWaker {
+-    fn clone(&self) -> Self {
+-        Self {
+-            waker: self.waker.clone(),
+-        }
+-    }
+-}
 diff --git a/crates/plugin-files/src/lib.rs b/crates/plugin-files/src/lib.rs
 index 2cd0fd7..d918b7c 100644
 --- a/crates/plugin-files/src/lib.rs

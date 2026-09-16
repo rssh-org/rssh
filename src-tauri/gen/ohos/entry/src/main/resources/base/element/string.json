@@ -1,18 +1,6 @@
 {
   "string": [
     {
-      "name": "module_desc",
-      "value": "module description"
-    },
-    {
-      "name": "EntryAbility_desc",
-      "value": "description"
-    },
-    {
-      "name": "EntryAbility_label",
-      "value": "label"
-    },
-    {
       "name": "pasteboard_perm_reason",
       "value": "Paste text into the terminal when you choose Paste"
     }
