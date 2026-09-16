@@ -66,12 +66,6 @@ pub use hybrid_store::HybridStore;
     target_os = "macos",
     target_os = "ios",
     target_os = "windows",
-    target_os = "linux"
-))]
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "windows",
     all(target_os = "linux", not(target_env = "ohos"))
 ))]
 pub use keyring_store::KeyringStore;

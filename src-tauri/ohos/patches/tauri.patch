@@ -1,0 +1,52 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index fe427ec..f6e509e 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -73,5 +73,5 @@ tauri = { path = "./crates/tauri" }
+ tauri-plugin = { path = "./crates/tauri-plugin" }
+ tauri-utils = { path = "./crates/tauri-utils" }
+ cargo-mobile2 = { git = "https://github.com/tauri-apps/cargo-mobile2", branch = "feat/ohos" }
+-wry = { git = "https://github.com/tauri-apps/wry", branch = "feat/open-harmony" }
+-tao = { git = "https://github.com/tauri-apps/tao", branch = "feat/open-harmony" }
++wry = { path = "../wry" }
++tao = { path = "../tao" }
+diff --git a/crates/tauri-runtime-wry/src/lib.rs b/crates/tauri-runtime-wry/src/lib.rs
+index 2d51378..77f4738 100644
+--- a/crates/tauri-runtime-wry/src/lib.rs
++++ b/crates/tauri-runtime-wry/src/lib.rs
+@@ -2898,6 +2898,7 @@ impl<T: UserEvent> Wry<T> {
+ 
+     #[cfg(target_env = "ohos")]
+     {
++      wry::setup_ohos(args.app.clone()).map_err(|e| Error::CreateWebview(Box::new(e)))?;
+       event_loop_builder.with_openharmony_app(args.app);
+     }
+ 
+diff --git a/crates/tauri-runtime/Cargo.toml b/crates/tauri-runtime/Cargo.toml
+index e3a5d34..5e5a3f3 100644
+--- a/crates/tauri-runtime/Cargo.toml
++++ b/crates/tauri-runtime/Cargo.toml
+@@ -50,7 +50,7 @@ webkit2gtk = { version = "=2.0", features = ["v2_40"] }
+ jni = "0.21"
+ 
+ [target.'cfg(target_env = "ohos")'.dependencies]
+-openharmony-ability = { git = "https://github.com/harmony-contrib/openharmony-ability.git" }
++openharmony-ability = { path = "../../../ability/crates/ability" }
+ 
+ [target.'cfg(all(target_vendor = "apple", not(target_os = "macos")))'.dependencies]
+ objc2 = "0.6"
+diff --git a/crates/tauri/Cargo.toml b/crates/tauri/Cargo.toml
+index cc13248..b809930 100644
+--- a/crates/tauri/Cargo.toml
++++ b/crates/tauri/Cargo.toml
+@@ -153,8 +153,8 @@ rustls = { version = "0.23", default-features = false, features = [
+ ], optional = true }
+ 
+ [target.'cfg(target_env = "ohos")'.dependencies]
+-openharmony-ability = { git = "https://github.com/harmony-contrib/openharmony-ability.git" }
+-openharmony-ability-derive = { git = "https://github.com/harmony-contrib/openharmony-ability.git" }
++openharmony-ability = { path = "../../../ability/crates/ability" }
++openharmony-ability-derive = { path = "../../../ability/crates/derive" }
+ 
+ # android
+ [target.'cfg(target_os = "android")'.dependencies]

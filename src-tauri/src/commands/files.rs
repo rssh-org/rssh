@@ -1,0 +1,153 @@
+//! Native file capabilities. Callers keep URIs opaque and own opened files
+//! for the entire operation; the platform owns picker and access mechanics.
+
+use crate::error::AppResult;
+
+#[derive(serde::Deserialize)]
+pub struct FileFilter {
+    name: String,
+    extensions: Vec<String>,
+}
+
+pub async fn pick_save(
+    app: &tauri::AppHandle,
+    default_name: String,
+    filters: Vec<FileFilter>,
+) -> AppResult<Option<String>> {
+    #[cfg(target_env = "ohos")]
+    {
+        let _ = app;
+        let filters = filters
+            .into_iter()
+            .map(|filter| {
+                openharmony_ability_plugin_files::FileDialogFilter::new()
+                    .name(filter.name)
+                    .pattern(filter.extensions.join(";"))
+            })
+            .collect();
+        crate::ohos::files::pick_save(default_name, filters).await
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        use tauri_plugin_dialog::DialogExt;
+        let app = app.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut dialog = app.dialog().file().set_file_name(default_name);
+            for filter in filters {
+                let extensions: Vec<_> = filter.extensions.iter().map(String::as_str).collect();
+                dialog = dialog.add_filter(filter.name, &extensions);
+            }
+            dialog.blocking_save_file().map(|path| path.to_string())
+        })
+        .await
+        .map_err(dialog_error)
+    }
+}
+
+pub async fn pick_open(app: &tauri::AppHandle) -> AppResult<Option<String>> {
+    #[cfg(target_env = "ohos")]
+    {
+        let _ = app;
+        crate::ohos::files::pick_open().await
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        use tauri_plugin_dialog::DialogExt;
+        let app = app.clone();
+        tokio::task::spawn_blocking(move || {
+            app.dialog()
+                .file()
+                .blocking_pick_file()
+                .map(|path| path.to_string())
+        })
+        .await
+        .map_err(dialog_error)
+    }
+}
+
+#[cfg(not(target_env = "ohos"))]
+fn dialog_error(error: tokio::task::JoinError) -> crate::error::AppError {
+    crate::error::AppError::other(
+        "dialog_task_failed",
+        serde_json::json!({"err": error.to_string()}),
+    )
+}
+
+/// The iOS authorization must outlive the file it grants access to.
+pub struct FileAccessGuard {
+    #[cfg(target_os = "ios")]
+    app: tauri::AppHandle,
+    #[cfg(target_os = "ios")]
+    path: Option<tauri_plugin_fs::FilePath>,
+}
+
+impl Drop for FileAccessGuard {
+    fn drop(&mut self) {
+        #[cfg(target_os = "ios")]
+        if let Some(path) = self.path.take() {
+            use tauri_plugin_fs::FsExt;
+            if let Err(error) = self.app.fs().stop_accessing_security_scoped_resource(path) {
+                log::warn!("failed to release iOS security-scoped file: {error}");
+            }
+        }
+    }
+}
+
+pub async fn open_file(
+    app: &tauri::AppHandle,
+    path: String,
+    write: bool,
+) -> AppResult<(std::fs::File, FileAccessGuard)> {
+    #[cfg(target_env = "ohos")]
+    {
+        let _ = app;
+        Ok((
+            crate::ohos::files::open_file(path, write).await?,
+            FileAccessGuard {},
+        ))
+    }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
+        let path = path
+            .parse::<FilePath>()
+            .expect("FilePath::from_str is infallible");
+        let access = FileAccessGuard {
+            #[cfg(target_os = "ios")]
+            app: app.clone(),
+            #[cfg(target_os = "ios")]
+            path: match &path {
+                FilePath::Url(url) if url.scheme() == "file" => Some(path.clone()),
+                _ => None,
+            },
+        };
+        let mut options = OpenOptions::new();
+        options
+            .read(!write)
+            .write(write)
+            .create(write)
+            .truncate(write);
+        let file = app.fs().open(path, options)?;
+        Ok((file, access))
+    }
+}
+
+#[tauri::command]
+// Browser exports use Blob downloads in save-file.ts; JCEF explicitly rejects
+// them. This command belongs to native GUI hosts, never the headless server.
+pub async fn save_text_file(
+    app: tauri::AppHandle,
+    default_name: String,
+    contents: String,
+    filters: Vec<FileFilter>,
+) -> AppResult<Option<String>> {
+    use tokio::io::AsyncWriteExt;
+    let Some(path) = pick_save(&app, default_name, filters).await? else {
+        return Ok(None);
+    };
+    let (file, _access) = open_file(&app, path.clone(), true).await?;
+    let mut file = tokio::fs::File::from_std(file);
+    file.write_all(contents.as_bytes()).await?;
+    file.flush().await?;
+    Ok(Some(path))
+}

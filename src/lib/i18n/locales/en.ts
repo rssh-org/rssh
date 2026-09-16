@@ -92,8 +92,6 @@ const en = {
   "sftp.column.size": "Size",
   "sftp.column.modified": "Modified",
   "sftp.queued_n": "Queued {n} transfer(s)",
-  "sftp.ohos_stage_empty": "Nothing to upload — stage files in Downloads/rssh first",
-  "sftp.ohos_pick_file": "Pick a file to upload (from Downloads/rssh)",
   "sftp.folder_empty": "Folder has no files",
   "sftp.walk_failed": "Walk failed:",
   "sftp.ctx.download": "Download",
@@ -1044,6 +1042,9 @@ const en = {
   "error.sync_local_metadata_invalid": "Local sync metadata is corrupted: {err}",
   "error.sync_fingerprint_secret_store_read_only": "Sync fingerprint attempted to modify a secret",
   "error.window_clipboard_failed": "Clipboard {op} failed: {err}",
+  "error.ohos_native_unavailable": "HarmonyOS system services are unavailable. Restart RSSH and try again.",
+  "error.ohos_native_failed": "HarmonyOS system operation failed: {err}",
+  "error.ohos_invalid_filename": "Invalid filename. The name must not contain a directory path.",
 
   // ── CLI install (GUI-triggered Tauri commands) ──
   "error.cli_not_bundled": "CLI binary not bundled in this build. Build with: cargo build --release --features cli --bin rssh-cli",

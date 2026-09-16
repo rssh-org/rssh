@@ -1,3 +1,4 @@
+#[cfg(not(target_env = "ohos"))]
 use tauri::AppHandle;
 
 use crate::error::{AppError, AppResult};
@@ -28,19 +29,21 @@ pub fn open_external_url(app: AppHandle, url: String) -> AppResult<()> {
     })
 }
 
-/// OHOS stub: tauri-plugin-opener has no ohos backend yet. The scheme guard
-/// stays so the failure mode is identical for bad input on every target.
+/// HarmonyOS invokes UIAbilityContext.openLink on its owning UI thread.
 #[cfg(target_env = "ohos")]
 #[tauri::command]
-pub fn open_external_url(_app: AppHandle, url: String) -> AppResult<()> {
-    if !url.starts_with("http://") && !url.starts_with("https://") {
+pub async fn open_external_url(url: String) -> AppResult<()> {
+    let parsed = url::Url::parse(&url)
+        .map_err(|_| AppError::config("window_non_https_url", serde_json::json!({ "url": url })))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err(AppError::config(
             "window_non_https_url",
             serde_json::json!({ "url": url }),
         ));
     }
-    Err(AppError::other(
-        "ohos_opener_pending",
-        serde_json::json!({ "hint": "URL opening arrives with the ohos opener bridge" }),
-    ))
+    use openharmony_ability_plugin_url::UrlExt;
+    crate::ohos::app()?
+        .open_url(url)
+        .await
+        .map_err(crate::ohos::native_error)
 }

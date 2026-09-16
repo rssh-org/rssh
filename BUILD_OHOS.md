@@ -1,107 +1,156 @@
-# RSSH 鸿蒙（HarmonyOS）打包与测试指南
+# RSSH 鸿蒙构建
 
-`feat/ohos-port` 分支的 PoC 移植。目标只有一个：**在鸿蒙真机上开一个 SSH
-会话，能敲命令、看渲染**。本指南面向在自己机器上打包的人。
+鸿蒙 GUI 复用 `src-tauri/src/lib.rs` 和现有业务模块，通过单独的 Cargo
+workspace 使用固定的 Tauri/Wry/Tao OHOS 分支及 ability 1.0 beta 插件框架。
+桌面、Android、iOS、CLI 和 headless 继续使用根 `src-tauri/Cargo.toml` / `Cargo.lock` 的官方依赖。
 
-## 一、前置环境
+## 环境
 
-| 组件 | 要求 | 说明 |
-| --- | --- | --- |
-| DevEco Studio | 5.0+（含 HarmonyOS NEXT SDK） | Windows / macOS / Linux 均可 |
-| Rust | rustup + stable | https://rustup.rs |
-| Node.js | 18+ | DevEco 自带的也行 |
-| 华为账号 | 已实名 | 签名用，免费 |
-
-## 二、一次性设置
+- DevEco Studio 与完整 HarmonyOS SDK（含 `native/`、hvigor、ohpm）。
+- Rust stable、Node.js 18+、npm、Git、Bash。
+- `ohrs` 固定为 1.5.0。无需替换系统或 npm 的 Tauri CLI。
 
 ```bash
-# 1. 拉代码切分支
-git clone https://github.com/rssh-org/rssh.git
-cd rssh && git checkout feat/ohos-port
-
-# 2. 装 fork 的 tauri CLI（crates.io 官方版没有 ohos 子命令，必须装这个）
-cargo install --git https://github.com/yangyongzhen/tauri --branch feat/open-harmony tauri-cli
-
-# 3. 构建助手（cargo tauri ohos build 内部调用）
-cargo install ohrs
-
-# 4. Rust 目标（build-ohos.sh 也会自动装）
+cargo install ohrs --version 1.5.0 --locked
 rustup target add aarch64-unknown-linux-ohos
+npm ci
 ```
 
-网络提示：构建要拉 GitHub 的 git 依赖和 npm 包，国内网络建议先配好代理。
-拉不动 `cargo install --git` 的话，可以给 git 配置加速镜像后再试。
+`OHOS_HOME` 指向完整 SDK 根目录，即包含 `native/` 的目录。脚本会探测
+macOS DevEco 常见路径，也支持显式设置：
 
-`OHOS_HOME` 环境变量指向**完整 SDK 根目录**（包含 `native/` 的那个，不是
-纯 NDK）。不设的话 `build-ohos.sh` 会自动探测常见安装路径。
+```bash
+export OHOS_HOME="/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony"
+```
 
-## 三、签名（出能安装的包的前提，需要做一次）
+非标准安装位置还可以设置 `DEVECO_SDK_HOME`、`HVIGOR_BIN`（`hvigorw.js`
+文件路径）和 `OHPM_BIN`（`ohpm` 可执行文件路径）。脚本不会安装 SDK、
+启动模拟器、连接设备或安装应用。
 
-1. DevEco Studio → Open → 打开 `src-tauri/gen/ohos` 工程；
-2. File → Project Structure → Signing Configs → 勾选
-   **Automatically generate signature**（未登录会弹华为账号登录）；
-3. 之后命令行 hvigor 打包自动复用这套签名材料。
+## 签名
 
-注意：`cargo tauri ohos init` 重新生成工程会清空签名配置；bundle 名不变
-的话，从 `~/.ohos/config/` 恢复 material 段即可，不用重新登录。
+用 DevEco Studio 打开 `src-tauri/gen/ohos`，在 Project Structure →
+Signing Configs 中配置签名。签名材料保存在本机，不提交仓库。
+构建脚本要求产出 signed HAP；缺少签名时会报错退出。
 
-## 四、打包
+## 构建
 
 ```bash
 ./build-ohos.sh
 ```
 
-脚本做这些事：探测 SDK → 配 NDK 交叉编译环境变量 →
-`cargo tauri ohos build -t aarch64 --features custom-protocol`。
+脚本按顺序执行：
 
-### Windows 已知坑
+1. 用普通 `npm run build -- --outDir ...` 将前端生成到
+   `src-tauri/target/ohos-frontend`。所有平台共用相同前端入口；独立产物目录
+   保证鸿蒙构建不覆盖普通 GUI/server 使用的 `dist/`。
+2. 根据 `src-tauri/ohos/sources.json` 获取完整 commit 固定的上游源码，
+   逐个校验并应用 `patches/` 中的补丁，再生成
+   `src-tauri/target/ohos-sources` 和 DevEco 的 ability HAR 模块。
+3. 从根 Cargo manifest 派生 `src-tauri/target/ohos-workspace`，复用同一份
+   `src/`、`build.rs`、capabilities、图标及资源，加载 OHOS 专属依赖与独立
+   `Cargo.lock`。运行 `cargo metadata --locked` 和
+   `ohrs build --locked --lib --features custom-protocol`。
+4. 将本次成功构建的库、运行时依赖和前端资源复制到 DevEco 工程。
+5. 执行 `ohpm install`、hvigor HAP 组装，并检查 signed HAP 存在。
 
-脚本会自动做三件善后：前端同步进 `rawfile`、剥掉 `entry/hvigorfile.ts` 的
-cargo 钩子、用 node 直调 hvigorw.js 重打 HAP。但 `cargo tauri ohos build`
-最后一步在 Windows 上仍会报 `.bat` 启动失败——脚本把它当非致命继续跑。若
-脚本尾部的 hvigor 重打也失败（PATH 里缺 cmd.exe/java），在**纯 Windows 风格
-PATH**（含 `System32` + DevEco 的 node、`jbr\bin`）下手动执行：
+任一步失败都会中止。脚本先清理旧 HAP 和暂存产物，编译失败不会继续
+用旧 `.so` 打包；也不会修改 DevEco 的 `hvigorfile.ts` 或重新生成工程。
 
-```bash
-cd src-tauri/gen/ohos
-node "<DevEco>/tools/hvigor/bin/hvigorw.js" assembleHap --mode module -p product=default --no-daemon
+输出：
+
+```text
+src-tauri/gen/ohos/entry/build/default/outputs/default/entry-default-signed.hap
 ```
 
-macOS / Linux 上这些坑不存在，脚本应一路走通。
+当前脚本仅构建 ARM64。产出 HAP 不代表设备行为已经验证；安装、模拟器
+和真机测试应另行执行。
 
-## 五、装到手机
+## 四条入口与设备验收
 
-手机：设置 → 关于手机 → 连点版本号开开发者模式 → 开发人员选项 → 打开
-USB 调试。然后：
+| 入口 | 处理方式 |
+| --- | --- |
+| 桌面 GUI | 使用官方 Tauri 文件、剪贴板、外链插件；文件操作统一走原生后端命令。 |
+| 移动 GUI | Android / iOS 使用相同业务命令及官方插件；OHOS 通过 ability 的 files/url/permission 插件及应用能力插件支持文件选择、文件描述符传输、剪贴板和外链。 |
+| CLI | 无新增 CLI 命令，继续使用官方依赖及共享业务模块。 |
+| Headless / JetBrains | 剪贴板由 IPC shim 调浏览器；文本导出在浏览器用 Blob 下载，JetBrains 继续明确提示不支持。补齐 `open_path` 分发。 |
+
+手机目录上传和目录下载不提供，与现有移动 UI 一致。OHOS 向用户选定
+URI 的文件描述符流式写入；中途失败可能保留部分文件，不保证原子替换。
+
+配置和密钥导入继续共用 HTML 文件输入框。ArkWeb 在未覆盖
+`onShowFileSelector` 时提供系统文件选择界面，无需另写鸿蒙导入命令。
+参见[官方文件选择事件说明](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/reference/apis-arkweb/arkts-basic-components-web-events.md#onshowfileselector9)。
+
+当前底层 `ohos-web-binding 0.2.3` 的 JavaScript proxy 与 scheme callback
+使用裸指针保存回调上下文，缺少对应的 Rust 回收路径。适配层会释放应用
+闭包并拒绝旧 WebView 的回调，但重复创建 WebView 仍可能积累这些原生
+回调元数据。此上游缺口尚未修复；构建和单元测试不能证明原生层无泄漏。
+
+设备验收由用户执行，重点检查：
+
+- 选择文件上传、取消上传，以及包含中文的文件名。
+- 下载保存、同名文件确认，以及取消和失败后的文件状态。
+- 复制粘贴及系统授权、打开外部链接。
+- 重启后的偏好设置。原型版本的主题、语言等 UI 偏好不迁移。
+- 横屏布局、后台切回后的终端会话与文件传输。
+
+## 依赖隔离与更新
+
+`src-tauri/Cargo.toml` 是共享依赖的唯一来源。`scripts/prepare-ohos.mjs`
+保留它的内容，只在派生文件中固定 `tauri` 与 `tauri-build`，再加入 OHOS
+专属依赖和 patch。**不要把 OHOS patch 放回根 manifest**：Cargo 的 patch
+作用于整张依赖图，包括在主机上运行的 build-dependencies，并不能通过
+`target.cfg` 隔离。
+
+普通构建使用 `src-tauri/Cargo.lock`；OHOS 构建只使用
+`src-tauri/ohos/Cargo.lock`。OHOS 源码中的其他平台实现不进入普通依赖图。
+
+`sources.json` 固定上游 commit；`patches/ability.patch`、`tao.patch`、
+`wry.patch`、`tauri.patch` 记录兼容改动。Rust 与 ArkTS 从同一 ability 源码
+生成，避免手工维护两份框架。`target/ohos-sources` 和
+`gen/ohos/vendor/ability` 都是生成目录；直接修改会在下一次准备时被覆盖。
+框架变更应先导出补丁并重新执行准备，不能修改 `~/.cargo/git/checkouts`。
+
+例如修改生成的 Tao checkout 后，导出业务源码和 manifest 的差异：
 
 ```bash
-hdc install -r src-tauri/gen/ohos/entry/build/default/outputs/default/entry-default-signed.hap
-hdc shell "aa start -a EntryAbility -b com.rssh.app"
+git -C src-tauri/target/ohos-sources/tao diff --binary HEAD -- Cargo.toml src > src-tauri/ohos/patches/tao.patch
 ```
 
-或者直接在 DevEco Studio 里 Run。
+不要把上游 checkout 中独立诊断构建生成的 `Cargo.lock` 放入补丁；应用的
+完整依赖图由 `src-tauri/ohos/Cargo.lock` 固定。
 
-## 六、重点测试项（这就是这次 PoC 要的答案）
+源码缓存在 `src-tauri/target/ohos-git`。已缓存全部固定 commit 时可离线重放：
 
-1. **启动**：能装上、能起，看到连接列表 UI（不闪退、不白屏）；
-2. **核心链路**：新建一个 SSH 连接，敲命令，看输出——重点看字体渲染、
-   颜色、有没有乱码/残影/花屏（xterm.js 在 ArkWeb 上的表现是本次最大未知数）；
-3. **软键盘**：能唤起、能输入、组合键条是否正常；
-4. **触控**：长按选择、复制粘贴；
-5. **后台**：切到后台再回来，会话是否存活。
+```bash
+node scripts/prepare-ohos-sources.mjs --offline
+```
 
-## 七、已知限制（预期内，不要当 bug 报）
+缺少固定 commit 或补丁不再适用都会报错中止，不会自动切换分支或跳过补丁。
+完整离线构建还需要已经缓存 Rust、npm、OHPM 的依赖；`--offline` 仅控制
+源码准备步骤。
 
-- **SFTP 的上传/下载保存不可用**：官方文件插件没有鸿蒙实现，属于本 PoC
-  刻意未做的部分（后续版本接 ArkTS filePicker 桥）；
-- **部分 UI 状态重启丢失**：ArkWeb 的 localStorage 是内存降级实现；
-- AI 相关功能未在鸿蒙上验证过。
+共享依赖更新后，如 OHOS 的 `--locked` 检查提示锁文件过期：
 
-## 八、遇到编译错误
+```bash
+node scripts/prepare-ohos-sources.mjs
+node scripts/prepare-ohos.mjs
+# 在派生 workspace 中按需执行 cargo update -p <包名>，审查变更后：
+cp src-tauri/target/ohos-workspace/Cargo.lock src-tauri/ohos/Cargo.lock
+```
 
-- **`aws-lc-sys` 编不过**：这是已知风险点（russh 传递依赖的 C 库），
-  把报错发回来，需要调整 russh 的加密后端 feature；
-- 其他编译错误：把 `cargo tauri ohos build` 的完整输出发回来。
+同时提交共享 manifest 和适用的锁文件更新。不要手工维护第二份完整
+Cargo manifest，也不要提交 `target/` 下的派生文件。
 
-数据目录在 `/data/storage/el2/base/files/`（与
-`/data/app/el2/100/base/com.rssh.app/files` 是同一存储的两个视图）。
+## 构建流程自动化检查
+
+```bash
+node --test scripts/prepare-ohos-sources.test.mjs scripts/prepare-ohos.test.mjs scripts/build-ohos.test.mjs
+# 已准备固定源码后，检查真实 ability 框架的生命周期契约：
+node --test src-tauri/ohos/tests/*.test.mjs
+```
+
+这些检查在临时目录中使用小型 Git 仓库及替身构建工具，验证固定 commit、
+离线缓存重放、补丁失败中止、正常 Cargo 文件及 `dist/` 保持原样，以及前端、
+源码准备、依赖解析、Rust 或 OHPM 失败时不会继续组装旧 HAP。它们不运行 GUI、服务器、模拟器或设备操作。

@@ -94,8 +94,6 @@ const zh: Messages = {
   "sftp.column.size": "大小",
   "sftp.column.modified": "修改时间",
   "sftp.queued_n": "已加入队列：{n} 项",
-  "sftp.ohos_stage_empty": "没有可上传的文件——请先把文件放到 下载/rssh 目录",
-  "sftp.ohos_pick_file": "选择要上传的文件（来自 下载/rssh）",
   "sftp.folder_empty": "文件夹内没有文件",
   "sftp.walk_failed": "目录展开失败：",
   "sftp.ctx.download": "下载",
@@ -1047,6 +1045,9 @@ const zh: Messages = {
   "error.sync_local_metadata_invalid": "本地同步元数据已损坏：{err}",
   "error.sync_fingerprint_secret_store_read_only": "计算同步摘要时尝试修改密钥",
   "error.window_clipboard_failed": "剪贴板 {op} 失败：{err}",
+  "error.ohos_native_unavailable": "鸿蒙系统服务暂不可用，请重启 RSSH 后重试。",
+  "error.ohos_native_failed": "鸿蒙系统操作失败：{err}",
+  "error.ohos_invalid_filename": "文件名无效，名称不能包含目录路径。",
 
   // ── CLI 安装（GUI 触发的 Tauri command） ──
   "error.cli_not_bundled": "CLI 二进制未打包到此版本。构建：cargo build --release --features cli --bin rssh-cli",

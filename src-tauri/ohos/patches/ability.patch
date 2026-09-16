@@ -1,0 +1,861 @@
+diff --git a/crates/plugin-files/src/lib.rs b/crates/plugin-files/src/lib.rs
+index 2cd0fd7..d918b7c 100644
+--- a/crates/plugin-files/src/lib.rs
++++ b/crates/plugin-files/src/lib.rs
+@@ -74,6 +74,8 @@ pub struct FileDialogOptions {
+     pub dialog_type: String,
+     pub allow_many: bool,
+     pub default_location: Option<String>,
++    /// Suggested basename for a save dialog, separate from its directory URI.
++    pub default_name: Option<String>,
+     pub filters: Vec<FileDialogFilter>,
+ }
+ 
+@@ -85,6 +87,7 @@ impl FileDialogOptions {
+             dialog_type: dialog_type.into(),
+             allow_many: false,
+             default_location: None,
++            default_name: None,
+             filters: Vec::new(),
+         }
+     }
+@@ -104,7 +107,22 @@ impl FileDialogOptions {
+         self
+     }
+ 
++    pub fn default_name(mut self, default_name: impl Into<String>) -> Self {
++        self.default_name = Some(default_name.into());
++        self
++    }
++
+     fn validate(&self) -> Result<()> {
++        if let Some(name) = &self.default_name {
++            if name.is_empty()
++                || matches!(name.as_str(), "." | "..")
++                || name.contains(['/', '\\', '\0'])
++            {
++                return Err(Error::from_reason(
++                    "default_name must be a non-empty file name",
++                ));
++            }
++        }
+         match self.dialog_type.as_str() {
+             dialog_type::OPEN_FILE | dialog_type::SAVE_FILE | dialog_type::OPEN_FOLDER => {}
+             _ => {
+@@ -219,4 +237,25 @@ mod tests {
+         assert_eq!(response.files.len(), 1);
+         assert_eq!(response.filter, -1);
+     }
++
++    #[test]
++    fn save_dialog_preserves_a_suggested_file_name() {
++        let options = FileDialogOptions::new(dialog_type::SAVE_FILE).default_name("report.txt");
++        assert_eq!(options.default_name.as_deref(), Some("report.txt"));
++        assert!(options.validate().is_ok());
++        for invalid in [
++            "",
++            "../report.txt",
++            "sub/report.txt",
++            "a\\b",
++            ".",
++            "..",
++            "\0",
++        ] {
++            assert!(FileDialogOptions::new(dialog_type::SAVE_FILE)
++                .default_name(invalid)
++                .validate()
++                .is_err());
++        }
++    }
+ }
+diff --git a/crates/plugin-webview/README.md b/crates/plugin-webview/README.md
+index 6a59eab..0d8b117 100644
+--- a/crates/plugin-webview/README.md
++++ b/crates/plugin-webview/README.md
+@@ -138,6 +138,7 @@ WebviewCallbacksBuilder::new("article")
+     .on_download_start(|request| WebviewDownloadStartResponse::allow(request.temp_path))
+     .on_download_end(|event| tracing::info!(?event, "download completed"))
+     .on_title_change(|event| tracing::info!(?event, "title changed"))
++    .on_page_load(|event| tracing::info!(?event, "document load phase changed"))
+     .build()?;
+ ```
+ 
+diff --git a/crates/plugin-webview/src/callbacks.rs b/crates/plugin-webview/src/callbacks.rs
+index b52e6c5..1641d9b 100644
+--- a/crates/plugin-webview/src/callbacks.rs
++++ b/crates/plugin-webview/src/callbacks.rs
+@@ -10,11 +10,12 @@ use std::{
+ };
+ 
+ use napi_ohos::{Error, Result};
++use openharmony_ability::PluginLifecycleEvent;
+ 
+ use super::{
+     controller, WebviewCallbackOptions, WebviewDownloadEndEvent, WebviewDownloadStartRequest,
+     WebviewDownloadStartResponse, WebviewNavigationRequest, WebviewNavigationResponse,
+-    WebviewTitleChangeEvent,
++    WebviewPageLoadEvent, WebviewTitleChangeEvent,
+ };
+ 
+ type NavigationCallback = Arc<dyn Fn(WebviewNavigationRequest) -> bool + Send + Sync + 'static>;
+@@ -23,6 +24,8 @@ type DownloadStartCallback = Arc<
+ >;
+ type DownloadEndCallback = Arc<dyn Fn(WebviewDownloadEndEvent) + Send + Sync + 'static>;
+ type TitleChangeCallback = Arc<dyn Fn(WebviewTitleChangeEvent) + Send + Sync + 'static>;
++type PageLoadCallback = Arc<dyn Fn(WebviewPageLoadEvent) + Send + Sync + 'static>;
++type LifecycleCallback = Arc<dyn Fn(PluginLifecycleEvent) + Send + Sync + 'static>;
+ 
+ #[derive(Default, Clone)]
+ struct WebviewCallbacks {
+@@ -30,6 +33,8 @@ struct WebviewCallbacks {
+     download_start: Option<DownloadStartCallback>,
+     download_end: Option<DownloadEndCallback>,
+     title_change: Option<TitleChangeCallback>,
++    page_load: Option<PageLoadCallback>,
++    lifecycle: Option<LifecycleCallback>,
+ }
+ 
+ impl WebviewCallbacks {
+@@ -39,6 +44,7 @@ impl WebviewCallbacks {
+             download_start: self.download_start.is_some(),
+             download_end: self.download_end.is_some(),
+             title_change: self.title_change.is_some(),
++            page_load: self.page_load.is_some(),
+         }
+     }
+ 
+@@ -47,12 +53,22 @@ impl WebviewCallbacks {
+             && self.download_start.is_none()
+             && self.download_end.is_none()
+             && self.title_change.is_none()
++            && self.page_load.is_none()
++            && self.lifecycle.is_none()
+     }
+ }
+ 
+ static CALLBACKS: LazyLock<RwLock<BTreeMap<String, WebviewCallbacks>>> =
+     LazyLock::new(|| RwLock::new(BTreeMap::new()));
+ 
++pub(crate) fn release(webview_id: &str) -> Result<()> {
++    CALLBACKS
++        .write()
++        .map_err(|_| Error::from_reason("Failed to lock WebView callback registry"))?
++        .remove(webview_id);
++    Ok(())
++}
++
+ /// Builder for Rust-owned WebView lifecycle and platform callbacks.
+ ///
+ /// Build this before WebviewClient::create. Calling build for the same ID replaces the previous
+@@ -71,6 +87,17 @@ impl WebviewCallbacksBuilder {
+         }
+     }
+ 
++    /// Observes this module's plugin lifecycle on the active N-API callback.
++    /// Schedule asynchronous work to recreate a WebView after UiContextReady;
++    /// never block this callback waiting for an ArkTS operation.
++    pub fn on_lifecycle<F>(mut self, callback: F) -> Self
++    where
++        F: Fn(PluginLifecycleEvent) + Send + Sync + 'static,
++    {
++        self.callbacks.lifecycle = Some(Arc::new(callback));
++        self
++    }
++
+     /// Decides whether ArkWeb should intercept a navigation. The callback runs synchronously on
+     /// the active N-API main-thread callback and must return promptly.
+     pub fn on_navigation_request<F>(mut self, callback: F) -> Self
+@@ -110,6 +137,15 @@ impl WebviewCallbacksBuilder {
+         self
+     }
+ 
++    /// Receives main-document load start and completion on the active N-API callback.
++    pub fn on_page_load<F>(mut self, callback: F) -> Self
++    where
++        F: Fn(WebviewPageLoadEvent) + Send + Sync + 'static,
++    {
++        self.callbacks.page_load = Some(Arc::new(callback));
++        self
++    }
++
+     pub fn build(self) -> Result<()> {
+         if self.webview_id.trim().is_empty() {
+             return Err(Error::from_reason("WebView callback id must not be empty"));
+@@ -127,6 +163,20 @@ impl WebviewCallbacksBuilder {
+     }
+ }
+ 
++pub(crate) fn dispatch_lifecycle(event: &PluginLifecycleEvent) -> Result<()> {
++    let callbacks: Vec<LifecycleCallback> = CALLBACKS
++        .read()
++        .map_err(|_| Error::from_reason("Failed to lock WebView callback registry"))?
++        .values()
++        .filter_map(|callbacks| callbacks.lifecycle.clone())
++        .collect();
++    // Observers may release or replace declarations while responding to teardown.
++    for callback in callbacks {
++        callback(event.clone());
++    }
++    Ok(())
++}
++
+ pub(crate) fn options_for(webview_id: &str) -> Result<WebviewCallbackOptions> {
+     let callbacks = CALLBACKS
+         .read()
+@@ -187,6 +237,22 @@ pub(crate) fn dispatch_download_end(event: WebviewDownloadEndEvent) -> Result<()
+     Ok(())
+ }
+ 
++pub(crate) fn dispatch_page_load(event: WebviewPageLoadEvent) -> Result<()> {
++    if !controller::is_current(&event.id, &event.native_tag)? {
++        return Ok(());
++    }
++    let callback = CALLBACKS
++        .read()
++        .map_err(|_| Error::from_reason("Failed to lock WebView callback registry"))?
++        .get(&event.id)
++        .and_then(|callbacks| callbacks.page_load.as_ref())
++        .cloned();
++    if let Some(callback) = callback {
++        callback(event);
++    }
++    Ok(())
++}
++
+ pub(crate) fn dispatch_title_change(event: WebviewTitleChangeEvent) -> Result<()> {
+     if !controller::is_current(&event.id, &event.native_tag)? {
+         return Ok(());
+@@ -218,6 +284,80 @@ mod tests {
+         assert!(WebviewCallbacksBuilder::new("webview").build().is_err());
+     }
+ 
++    #[test]
++    fn page_load_reports_phases_and_ignores_stale_or_released_controllers() {
++        use crate::WebviewPageLoadEvent;
++        use std::sync::Mutex;
++
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let received = Arc::clone(&events);
++        let id = "page-load-test";
++        WebviewCallbacksBuilder::new(id)
++            .on_page_load(move |event| {
++                received.lock().unwrap().push((event.url, event.started));
++            })
++            .build()
++            .unwrap();
++        assert!(super::options_for(id).unwrap().page_load);
++        controller::on_attached(id, "current").unwrap();
++        for (native_tag, started) in [("stale", true), ("current", true), ("current", false)] {
++            super::dispatch_page_load(WebviewPageLoadEvent {
++                id: id.into(),
++                native_tag: native_tag.into(),
++                url: "https://example.test".into(),
++                started,
++            })
++            .unwrap();
++        }
++        assert_eq!(
++            *events.lock().unwrap(),
++            vec![
++                ("https://example.test".into(), true),
++                ("https://example.test".into(), false),
++            ]
++        );
++        super::release(id).unwrap();
++        assert!(!super::options_for(id).unwrap().page_load);
++        super::dispatch_page_load(WebviewPageLoadEvent {
++            id: id.into(),
++            native_tag: "current".into(),
++            url: "https://example.test/late".into(),
++            started: false,
++        })
++        .unwrap();
++        assert_eq!(events.lock().unwrap().len(), 2);
++        controller::on_removed(id, "current").unwrap();
++    }
++
++    #[test]
++    fn lifecycle_observers_are_reentrant_and_release_only_their_webview() {
++        use openharmony_ability::PluginLifecycleEvent;
++
++        let first = Arc::new(AtomicUsize::new(0));
++        let second = Arc::new(AtomicUsize::new(0));
++        let first_calls = first.clone();
++        let second_calls = second.clone();
++        WebviewCallbacksBuilder::new("lifecycle-first")
++            .on_lifecycle(move |_| {
++                first_calls.fetch_add(1, Ordering::Relaxed);
++                super::release("lifecycle-first").unwrap();
++            })
++            .build()
++            .unwrap();
++        WebviewCallbacksBuilder::new("lifecycle-second")
++            .on_lifecycle(move |_| {
++                second_calls.fetch_add(1, Ordering::Relaxed);
++            })
++            .build()
++            .unwrap();
++
++        super::dispatch_lifecycle(&PluginLifecycleEvent::UiContextReady).unwrap();
++        super::dispatch_lifecycle(&PluginLifecycleEvent::UiContextDestroyed).unwrap();
++        assert_eq!(first.load(Ordering::Relaxed), 1);
++        assert_eq!(second.load(Ordering::Relaxed), 2);
++        super::release("lifecycle-second").unwrap();
++    }
++
+     #[test]
+     fn stale_controller_callback_cannot_reach_a_replacement_webview() {
+         let calls = Arc::new(AtomicUsize::new(0));
+diff --git a/crates/plugin-webview/src/js_proxy.rs b/crates/plugin-webview/src/js_proxy.rs
+index 8e27af1..9d5f862 100644
+--- a/crates/plugin-webview/src/js_proxy.rs
++++ b/crates/plugin-webview/src/js_proxy.rs
+@@ -39,6 +39,15 @@ struct ProxyState {
+ static PROXY_STATE: LazyLock<Mutex<ProxyState>> =
+     LazyLock::new(|| Mutex::new(ProxyState::default()));
+ 
++pub(crate) fn release(webview_id: &str) -> Result<()> {
++    let mut state = PROXY_STATE
++        .lock()
++        .map_err(|_| Error::from_reason("Failed to lock WebView JavaScript proxy state"))?;
++    state.declarations.remove(webview_id);
++    state.attached_webviews.remove(webview_id);
++    Ok(())
++}
++
+ /// Builder for a persistent JavaScript object exposed to a WebView page.
+ ///
+ /// The registered object is available as `window.<object_name>` and each declared method receives
+diff --git a/crates/plugin-webview/src/lib.rs b/crates/plugin-webview/src/lib.rs
+index 53806e9..e314d4d 100644
+--- a/crates/plugin-webview/src/lib.rs
++++ b/crates/plugin-webview/src/lib.rs
+@@ -27,6 +27,15 @@ pub use protocol::{
+     WebviewProtocolRequest, WebviewProtocolResponder, WebviewProtocolResponse,
+ };
+ 
++/// Releases Rust callback, protocol and JavaScript proxy declarations for one removed WebView.
++/// Call after `WebviewHandle::remove` (or a failed create). Other WebViews are unaffected.
++/// A later create with this ID must declare its bindings again before creation.
++pub fn release_webview_bindings(webview_id: &str) -> Result<()> {
++    callbacks::release(webview_id)?;
++    protocol::release(webview_id)?;
++    js_proxy::release(webview_id)
++}
++
+ const BEFORE_ENGINE_INIT_EVENT: &str = "before-engine-init";
+ const SEAL_ENGINE_SCHEMES_EVENT: &str = "seal-engine-schemes";
+ const ENGINE_INITIALIZED_EVENT: &str = "engine-initialized";
+@@ -114,6 +123,11 @@ impl BridgePlugin for WebviewBridgePlugin {
+                 callbacks::dispatch_title_change(notification)?;
+                 event.respond(WebviewEventAcknowledgement { accepted: true })
+             }
++            "page-load" => {
++                let notification = event.decode::<WebviewPageLoadEvent>()?;
++                callbacks::dispatch_page_load(notification)?;
++                event.respond(WebviewEventAcknowledgement { accepted: true })
++            }
+             _ => Err(Error::from_reason(format!(
+                 "Unsupported ohos.webview main-thread event '{}'",
+                 event.name()
+@@ -122,13 +136,16 @@ impl BridgePlugin for WebviewBridgePlugin {
+     }
+ 
+     fn on_lifecycle(&self, event: &PluginLifecycleEvent) -> Result<()> {
+-        if matches!(
++        let cleanup = if matches!(
+             event,
+             PluginLifecycleEvent::UiContextDestroyed | PluginLifecycleEvent::AbilityDestroyed
+         ) {
+-            clear_attached_webview_state()?;
+-        }
+-        Ok(())
++            clear_attached_webview_state()
++        } else {
++            Ok(())
++        };
++        let notification = callbacks::dispatch_lifecycle(event);
++        cleanup.and(notification)
+     }
+ }
+ 
+@@ -267,6 +284,7 @@ pub struct WebviewCallbackOptions {
+     pub download_start: bool,
+     pub download_end: bool,
+     pub title_change: bool,
++    pub page_load: bool,
+ }
+ 
+ /// A document-start script and the URL rules for pages where ArkWeb may inject it.
+@@ -469,8 +487,20 @@ pub struct WebviewTitleChangeEvent {
+     pub title: String,
+ }
+ 
++/// Main-document load start or completion, delivered on the active N-API callback.
++#[napi(object)]
++#[derive(Clone, Debug)]
++pub struct WebviewPageLoadEvent {
++    pub id: String,
++    /// Process-unique controller generation used to reject stale notifications.
++    pub native_tag: String,
++    pub url: String,
++    pub started: bool,
++}
++
+ impl_bridge_napi_type!(WebviewDownloadEndEvent, "ohos.webview.DownloadEndEvent");
+ impl_bridge_napi_type!(WebviewTitleChangeEvent, "ohos.webview.TitleChangeEvent");
++impl_bridge_napi_type!(WebviewPageLoadEvent, "ohos.webview.PageLoadEvent");
+ 
+ /// Response used by one-way named N-API notifications sent directly from ArkTS.
+ #[napi(object)]
+@@ -1033,6 +1063,10 @@ mod tests {
+             <WebviewTitleChangeEvent as BridgeNapiType>::TYPE_NAME,
+             "ohos.webview.TitleChangeEvent"
+         );
++        assert_eq!(
++            <WebviewPageLoadEvent as BridgeNapiType>::TYPE_NAME,
++            "ohos.webview.PageLoadEvent"
++        );
+         assert_eq!(
+             <WebviewEventAcknowledgement as BridgeNapiType>::TYPE_NAME,
+             "ohos.webview.EventAcknowledgement"
+diff --git a/crates/plugin-webview/src/protocol.rs b/crates/plugin-webview/src/protocol.rs
+index c2acbe2..4afea47 100644
+--- a/crates/plugin-webview/src/protocol.rs
++++ b/crates/plugin-webview/src/protocol.rs
+@@ -49,6 +49,19 @@ struct ProtocolState {
+ static PROTOCOL_STATE: LazyLock<Mutex<ProtocolState>> =
+     LazyLock::new(|| Mutex::new(ProtocolState::default()));
+ 
++pub(crate) fn release(webview_id: &str) -> Result<()> {
++    let mut state = PROTOCOL_STATE
++        .lock()
++        .map_err(|_| Error::from_reason("Failed to lock WebView protocol state"))?;
++    state.declarations.remove(webview_id);
++    if let Some(native_tag) = state.attached_webviews.remove(webview_id) {
++        state.installing_schemes.remove(&native_tag);
++        state.installed_schemes.remove(&native_tag);
++    }
++    // Schemes belong to the process-wide engine and must remain registered.
++    Ok(())
++}
++
+ /// ArkWeb scheme flags re-exported under the WebView plugin API.
+ pub use ohos_web_binding::CustomProtocolOption as WebviewProtocolOptions;
+ 
+diff --git a/docs/plugin-development-standard.md b/docs/plugin-development-standard.md
+index 6436d31..40ef0dc 100644
+--- a/docs/plugin-development-standard.md
++++ b/docs/plugin-development-standard.md
+@@ -511,6 +511,7 @@ WebView 的 callback builder 必须在 `WebviewClient::create` 前按 facade-loc
+ | `WebDownloadDelegate.onBeforeDownload` | `DownloadStartRequest` → `DownloadStartResponse` | 失败时取消下载，fail-closed；允许改写临时保存路径 |
+ | `onDownloadFinish` / `onDownloadFailed` | `DownloadEndEvent` → `EventAcknowledgement` | 含 success 与可选 temp path；通知失败只记录 |
+ | `onTitleReceive` | `TitleChangeEvent` → `EventAcknowledgement` | 通知失败只记录 |
++| `onPageBegin` / `onPageEnd` | `PageLoadEvent` → `EventAcknowledgement` | 主文档加载开始/完成，含 URL 与 started；旧 controller 事件丢弃，通知失败只记录 |
+ 
+ `transparent` 是 create 时的行为：当 `.transparent(true)` 且未显式指定 background color 时，ArkTS
+ 必须在创建根节点时使用透明色 `#00000000`；显式 background color 优先。不能把这一语义退化为
+diff --git a/native_ability/src/main/ets/ability/NativeAbility.ets b/native_ability/src/main/ets/ability/NativeAbility.ets
+index a542f8a..6b51153 100644
+--- a/native_ability/src/main/ets/ability/NativeAbility.ets
++++ b/native_ability/src/main/ets/ability/NativeAbility.ets
+@@ -278,7 +278,7 @@ export class NativeAbility extends UIAbility {
+ 
+     // Prepare hosts without activating `ability` plugins. Their onInstall hooks are allowed to
+     // call Rust synchronously, so module.init and both sinks must exist first.
+-    const sessionId = BridgeHostRegistry.prepare(
++    const sessionId = await BridgeHostRegistry.prepare(
+       requestedModules,
+       this.context as common.UIAbilityContext,
+       this.bridgePlugins,
+@@ -288,6 +288,7 @@ export class NativeAbility extends UIAbility {
+     const loadedModules: LoadedNativeModule[] = [];
+     const initializedRuntimes: NativeModuleRuntime[] = [];
+     try {
++      this.assertInitializationActive(generation);
+       // Loading is transactional. Parallel arrays and partial "continue after error" states made
+       // a module name point at the wrong lifecycle object after one dynamic import failed.
+       for (const moduleName of requestedModules) {
+diff --git a/native_ability/src/main/ets/bridge/BridgeHost.ets b/native_ability/src/main/ets/bridge/BridgeHost.ets
+index b4e7b2c..f86717f 100644
+--- a/native_ability/src/main/ets/bridge/BridgeHost.ets
++++ b/native_ability/src/main/ets/bridge/BridgeHost.ets
+@@ -1710,6 +1710,20 @@ class BridgeHost {
+   }
+ }
+ 
++class SessionRelease {
++  readonly finished: Promise<void>;
++  private finish?: () => void;
++
++  constructor() {
++    this.finished = new Promise<void>((resolve) => { this.finish = resolve; });
++  }
++
++  complete(): void {
++    this.finish?.();
++    this.finish = undefined;
++  }
++}
++
+ /**
+  * Session registry is transport plumbing only. It is keyed by a NativeAbility-created session
+  * instead of a process-global Helper, so stale calls cannot reach a recreated ability instance.
+@@ -1718,19 +1732,21 @@ export class BridgeHostRegistry {
+   private static readonly sessions: Map<string, Map<string, BridgeHost>> = new Map();
+   /** One loaded native module may belong to only one active Ability session. */
+   private static readonly moduleOwners: Map<string, string> = new Map();
++  private static readonly closingSessions: Map<string, SessionRelease> = new Map();
+   private static nextSession: number = 1;
+ 
+-  static prepare(
++  static async prepare(
+     moduleNames: string[],
+     abilityContext: common.UIAbilityContext,
+     factories: BridgePluginFactory[],
+-  ): string {
++  ): Promise<string> {
+     const sessionId = `bridge-${Date.now()}-${BridgeHostRegistry.nextSession++}`;
+     const hosts: Map<string, BridgeHost> = new Map();
+     if (moduleNames.length === 0) {
+       throw new Error("NativeAbility must declare at least one native module");
+     }
+     const requestedModules: Map<string, boolean> = new Map();
++    const releases: Promise<void>[] = [];
+     for (const moduleName of moduleNames) {
+       if (!isBridgeIdentifier(moduleName)) {
+         throw new Error(`Invalid native module name '${moduleName}'`);
+@@ -1739,6 +1755,22 @@ export class BridgeHostRegistry {
+         throw new Error(`Native module '${moduleName}' is declared more than once for one Ability`);
+       }
+       requestedModules.set(moduleName, true);
++      const owner = BridgeHostRegistry.moduleOwners.get(moduleName);
++      if (owner !== undefined) {
++        const closing = BridgeHostRegistry.closingSessions.get(owner);
++        if (closing !== undefined) {
++          releases.push(closing.finished);
++          continue;
++        }
++        throw new Error(
++          `Native module '${moduleName}' already belongs to active Ability session '${owner}'; use a distinct native module for another Ability`,
++        );
++      }
++    }
++    // UIAbility does not await another instance's async onDestroy. A replacement
++    // may reserve this module only after the closing owner's plugins release it.
++    await Promise.all(releases);
++    for (const moduleName of moduleNames) {
+       const owner = BridgeHostRegistry.moduleOwners.get(moduleName);
+       if (owner !== undefined) {
+         throw new Error(
+@@ -1923,6 +1955,9 @@ export class BridgeHostRegistry {
+     if (hosts === undefined) {
+       return;
+     }
++    if (!BridgeHostRegistry.closingSessions.has(sessionId)) {
++      BridgeHostRegistry.closingSessions.set(sessionId, new SessionRelease());
++    }
+     for (const host of hosts.values()) {
+       host.beginClosing();
+     }
+@@ -1931,8 +1966,11 @@ export class BridgeHostRegistry {
+   static async dispose(sessionId: string): Promise<void> {
+     const hosts = BridgeHostRegistry.sessions.get(sessionId);
+     if (!hosts) {
++      await BridgeHostRegistry.closingSessions.get(sessionId)?.finished;
+       return;
+     }
++    BridgeHostRegistry.beginClosing(sessionId);
++    const release = BridgeHostRegistry.closingSessions.get(sessionId);
+     BridgeHostRegistry.sessions.delete(sessionId);
+     try {
+       await BridgeHostRegistry.disposeHosts(hosts);
+@@ -1943,6 +1981,8 @@ export class BridgeHostRegistry {
+         }
+       }
+       hosts.clear();
++      BridgeHostRegistry.closingSessions.delete(sessionId);
++      release?.complete();
+     }
+   }
+ 
+diff --git a/native_ability/src/test/LocalUnit.test.ets b/native_ability/src/test/LocalUnit.test.ets
+index 7fd5709..9fbc781 100644
+--- a/native_ability/src/test/LocalUnit.test.ets
++++ b/native_ability/src/test/LocalUnit.test.ets
+@@ -289,7 +289,7 @@ export default function localUnitTest() {
+     it("abilityPluginActivatesOnlyAfterRustSinkIsAttached", 0, async () => {
+       installProbeCount = 0;
+       installProbeSinkCount = 0;
+-      const sessionId = BridgeHostRegistry.prepare(["test_native"], {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare(["test_native"], {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new InstallProbePlugin()),
+       ]);
+       BridgeHostRegistry.configurePlugins(sessionId, "test_native", [
+@@ -314,7 +314,7 @@ export default function localUnitTest() {
+     it("pluginFactoriesAreSelectedByEachRustRegistryWithoutModuleFilters", 0, async () => {
+       installProbeCount = 0;
+       const modules = ["factory_match_module_a", "factory_match_module_b"];
+-      const sessionId = BridgeHostRegistry.prepare(modules, {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare(modules, {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new InstallProbePlugin()),
+         new LazyPlugin(() => new AbilityEchoPlugin()),
+       ]);
+@@ -359,7 +359,7 @@ export default function localUnitTest() {
+     });
+     it("pluginConfigurationFailsWhenRustPluginHasNoArkTSFactory", 0, async () => {
+       const moduleName = "missing_factory_module";
+-      const sessionId = BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, []);
++      const sessionId = await BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, []);
+       let configurationError = "";
+       try {
+         BridgeHostRegistry.configurePlugins(sessionId, moduleName, [
+@@ -375,7 +375,7 @@ export default function localUnitTest() {
+     });
+     it("pluginConfigurationRejectsExecutionAndContextMismatches", 0, async () => {
+       const executionModule = "execution_mismatch_module";
+-      const executionSession = BridgeHostRegistry.prepare(
++      const executionSession = await BridgeHostRegistry.prepare(
+         [executionModule],
+         {} as common.UIAbilityContext,
+         [new LazyPlugin(() => new AbilityEchoPlugin())],
+@@ -397,7 +397,7 @@ export default function localUnitTest() {
+       await BridgeHostRegistry.dispose(executionSession);
+ 
+       const contextModule = "context_mismatch_module";
+-      const contextSession = BridgeHostRegistry.prepare(
++      const contextSession = await BridgeHostRegistry.prepare(
+         [contextModule],
+         {} as common.UIAbilityContext,
+         [new LazyPlugin(() => new AbilityEchoPlugin())],
+@@ -416,7 +416,7 @@ export default function localUnitTest() {
+     });
+     it("pluginConfigurationRejectsBuiltInPluginIdConflicts", 0, async () => {
+       const moduleName = "reserved_plugin_id_module";
+-      const sessionId = BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new ReservedNodePlugin()),
+       ]);
+       let configurationError = "";
+@@ -432,7 +432,7 @@ export default function localUnitTest() {
+     });
+     it("pluginContextRequirementsAreComparedAsASet", 0, async () => {
+       const moduleName = "requirement_order_module";
+-      const sessionId = BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new OrderedRequirementsPlugin()),
+       ]);
+       BridgeHostRegistry.configurePlugins(sessionId, moduleName, [
+@@ -444,7 +444,7 @@ export default function localUnitTest() {
+     });
+     it("abilityPluginDoesNotDependOnDefaultXComponentLifetime", 0, async () => {
+       const moduleName = "ability_only_module";
+-      const sessionId = BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new AbilityEchoPlugin()),
+       ]);
+       BridgeHostRegistry.configurePlugins(sessionId, moduleName, [
+@@ -487,7 +487,7 @@ export default function localUnitTest() {
+     });
+     it("invalidatedWindowStageCannotBecomeReadyFromAQueuedCreate", 0, async () => {
+       stageInstallProbeCount = 0;
+-      const sessionId = BridgeHostRegistry.prepare(["test_native"], {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare(["test_native"], {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new StageInstallProbePlugin()),
+       ]);
+       BridgeHostRegistry.configurePlugins(sessionId, "test_native", [
+@@ -515,7 +515,7 @@ export default function localUnitTest() {
+       await BridgeHostRegistry.dispose(sessionId);
+     });
+     it("oneNativeModuleCannotBelongToTwoActiveAbilities", 0, async () => {
+-      const firstSession = BridgeHostRegistry.prepare(
++      const firstSession = await BridgeHostRegistry.prepare(
+         ["module_owner_test"],
+         {} as common.UIAbilityContext,
+         [],
+@@ -523,7 +523,7 @@ export default function localUnitTest() {
+       BridgeHostRegistry.configurePlugins(firstSession, "module_owner_test", []);
+       let duplicateError = "";
+       try {
+-        BridgeHostRegistry.prepare(["module_owner_test"], {} as common.UIAbilityContext, []);
++        await BridgeHostRegistry.prepare(["module_owner_test"], {} as common.UIAbilityContext, []);
+       } catch (error) {
+         duplicateError = String(error);
+       }
+@@ -531,7 +531,7 @@ export default function localUnitTest() {
+ 
+       BridgeHostRegistry.beginClosing(firstSession);
+       await BridgeHostRegistry.dispose(firstSession);
+-      const replacementSession = BridgeHostRegistry.prepare(
++      const replacementSession = await BridgeHostRegistry.prepare(
+         ["module_owner_test"],
+         {} as common.UIAbilityContext,
+         [],
+@@ -543,7 +543,7 @@ export default function localUnitTest() {
+     it("pluginInstanceCannotBeSharedAcrossNativeModules", 0, async () => {
+       const singleton = new InstallProbePlugin();
+       let reuseError = "";
+-      const sessionId = BridgeHostRegistry.prepare(
++      const sessionId = await BridgeHostRegistry.prepare(
+         ["singleton_module_a", "singleton_module_b"],
+         {} as common.UIAbilityContext,
+         [new LazyPlugin(() => singleton)],
+@@ -564,7 +564,7 @@ export default function localUnitTest() {
+     });
+     it("oneNativeModuleRejectsASecondDefaultXComponent", 0, async () => {
+       const moduleName = "single_component_module";
+-      const sessionId = BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, []);
++      const sessionId = await BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, []);
+       BridgeHostRegistry.configurePlugins(sessionId, moduleName, []);
+       await BridgeHostRegistry.activateAbility(sessionId, moduleName, {
+         kind: "ability-create",
+@@ -615,7 +615,7 @@ export default function localUnitTest() {
+     });
+     it("oneAbilityCanAttachComponentsBackedByDifferentModules", 0, async () => {
+       const modules = ["component_module_a", "component_module_b"];
+-      const sessionId = BridgeHostRegistry.prepare(modules, {} as common.UIAbilityContext, []);
++      const sessionId = await BridgeHostRegistry.prepare(modules, {} as common.UIAbilityContext, []);
+       for (const moduleName of modules) {
+         BridgeHostRegistry.configurePlugins(sessionId, moduleName, []);
+         await BridgeHostRegistry.activateAbility(sessionId, moduleName, {
+@@ -642,7 +642,7 @@ export default function localUnitTest() {
+       broadcastProbeContext = undefined;
+       const modules = ["broadcast_module_a", "broadcast_module_b"];
+       const receivedBy: string[] = [];
+-      const sessionId = BridgeHostRegistry.prepare(modules, {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare(modules, {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new BroadcastProbePlugin()),
+       ]);
+       for (const moduleName of modules) {
+@@ -679,7 +679,7 @@ export default function localUnitTest() {
+     it("windowStageCleanupCannotOvertakeComponentCleanup", 0, async () => {
+       lifecycleOrderProbe = [];
+       const moduleName = "lifecycle_order_module";
+-      const sessionId = BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new LifecycleOrderProbePlugin()),
+       ]);
+       BridgeHostRegistry.configurePlugins(sessionId, moduleName, [
+diff --git a/plugins/files/src/main/ets/FilesPlugin.ets b/plugins/files/src/main/ets/FilesPlugin.ets
+index 7abd128..c560d27 100644
+--- a/plugins/files/src/main/ets/FilesPlugin.ets
++++ b/plugins/files/src/main/ets/FilesPlugin.ets
+@@ -22,6 +22,7 @@ interface FileDialogOptions {
+   dialogType: string;
+   allowMany: boolean;
+   defaultLocation?: string | null;
++  defaultName?: string | null;
+   filters: FileDialogFilter[];
+ }
+ 
+@@ -57,6 +58,14 @@ function parseDialogOptions(payload: BridgeTypedValue): FileDialogOptions {
+   if (typeof request.filters !== "object") {
+     throw new Error("file-dialog.filters must be an array");
+   }
++  const name = request.defaultName;
++  if (
++    name !== undefined && name !== null &&
++    (typeof name !== "string" || name.length === 0 || name === "." || name === ".." ||
++      name.includes("/") || name.includes("\\") || name.includes("\0"))
++  ) {
++    throw new Error("file-dialog.defaultName must be a non-empty file name");
++  }
+   return request;
+ }
+ 
+@@ -108,6 +117,7 @@ async function showFileDialog(
+   if (options.dialogType === "save-file") {
+     const saveOptions = new picker.DocumentSaveOptions();
+     saveOptions.defaultFilePathUri = location;
++    if (options.defaultName) saveOptions.newFileNames = [options.defaultName];
+     saveOptions.fileSuffixChoices = suffixFilters;
+     const files = await documentPicker.save(saveOptions);
+     let filter = -1;
+diff --git a/plugins/webview/src/main/ets/WebviewPlugin.ets b/plugins/webview/src/main/ets/WebviewPlugin.ets
+index ef07248..5e78bde 100644
+--- a/plugins/webview/src/main/ets/WebviewPlugin.ets
++++ b/plugins/webview/src/main/ets/WebviewPlugin.ets
+@@ -24,6 +24,7 @@ const DOWNLOAD_START_REQUEST_TYPE = "ohos.webview.DownloadStartRequest";
+ const DOWNLOAD_START_RESPONSE_TYPE = "ohos.webview.DownloadStartResponse";
+ const DOWNLOAD_END_EVENT_TYPE = "ohos.webview.DownloadEndEvent";
+ const TITLE_CHANGE_EVENT_TYPE = "ohos.webview.TitleChangeEvent";
++const PAGE_LOAD_EVENT_TYPE = "ohos.webview.PageLoadEvent";
+ const ENGINE_LIFECYCLE_EVENT_TYPE = "ohos.webview.EngineLifecycleEvent";
+ const ENGINE_LIFECYCLE_RESPONSE_TYPE = "ohos.webview.EngineLifecycleResponse";
+ const CONTROLLER_EVENT_TYPE = "ohos.webview.ControllerEvent";
+@@ -64,6 +65,7 @@ interface WebviewEventOptions {
+   downloadStart?: boolean | null;
+   downloadEnd?: boolean | null;
+   titleChange?: boolean | null;
++  pageLoad?: boolean | null;
+ }
+ 
+ interface WebviewCreatePayload {
+@@ -116,6 +118,7 @@ interface ManagedWebview extends WebviewCreatePayload {
+   failControllerAttach: (reason: string) => void;
+   onNavigationRequest: (url: string) => boolean;
+   onTitleChange: (title: string) => void;
++  onPageLoad: (url: string, started: boolean) => void;
+   onDownloadStart: (url: string, tempPath: string | null) => WebviewDownloadStartResponse;
+   onDownloadEnd: (url: string, tempPath: string | null, success: boolean) => void;
+   /** How this WebView was mounted: a parent-handle container or the component root. */
+@@ -320,6 +323,20 @@ class WebviewTitleChangeEvent {
+   }
+ }
+ 
++class WebviewPageLoadEvent {
++  readonly id: string;
++  readonly nativeTag: string;
++  readonly url: string;
++  readonly started: boolean;
++
++  constructor(id: string, nativeTag: string, url: string, started: boolean) {
++    this.id = id;
++    this.nativeTag = nativeTag;
++    this.url = url;
++    this.started = started;
++  }
++}
++
+ class WebviewEngineLifecycleEvent {
+   readonly phase: string;
+   readonly schemes: WebviewSchemeDeclaration[];
+@@ -496,6 +513,7 @@ function normalizeEventOptions(
+     downloadStart: optionalEventFlag(options?.downloadStart, "WebView eventOptions.downloadStart"),
+     downloadEnd: optionalEventFlag(options?.downloadEnd, "WebView eventOptions.downloadEnd"),
+     titleChange: optionalEventFlag(options?.titleChange, "WebView eventOptions.titleChange"),
++    pageLoad: optionalEventFlag(options?.pageLoad, "WebView eventOptions.pageLoad"),
+   };
+ }
+ 
+@@ -772,6 +790,8 @@ function BuildWebview(data: ManagedWebview) {
+       }
+     })
+     .onLoadIntercept((event) => data.onNavigationRequest(event.data.getRequestUrl()))
++    .onPageBegin((event) => data.onPageLoad(event.url, true))
++    .onPageEnd((event) => data.onPageLoad(event.url, false))
+     .onTitleReceive((event) => data.onTitleChange(event.title));
+ }
+ 
+@@ -846,6 +866,21 @@ class WebviewSurface {
+           console.error("WebView title notification failed: " + String(error));
+         }
+       },
++      onPageLoad: (url: string, started: boolean): void => {
++        if (eventOptions.pageLoad !== true) {
++          return;
++        }
++        try {
++          notifyNative(
++            this.pluginContext,
++            "page-load",
++            PAGE_LOAD_EVENT_TYPE,
++            new WebviewPageLoadEvent(payload.id, nativeTag, url, started) as ESObject,
++          );
++        } catch (error) {
++          console.error("WebView page-load notification failed: " + String(error));
++        }
++      },
+       onDownloadStart: (url: string, tempPath: string | null): WebviewDownloadStartResponse => {
+         return downloadStartDecision(this.pluginContext, payload.id, nativeTag, url, tempPath);
+       },

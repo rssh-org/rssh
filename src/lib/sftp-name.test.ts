@@ -21,6 +21,24 @@ describe("remoteUploadName", () => {
     expect(remoteUploadName("C:\\Users\\me\\key.pem")).toBe("key.pem");
   });
 
+  it.each([
+    ["/tmp/a%2Fb.txt", "a%2Fb.txt"],
+    ["/tmp/report%20one.txt", "report%20one.txt"],
+    ["C:\\Downloads\\report%20one.txt", "report%20one.txt"],
+  ])("preserves literal percent escapes in a host filesystem path: %s", (path, name) => {
+    expect(remoteUploadName(path)).toBe(name);
+  });
+
+  it("decodes Chinese and spaces in an OHOS document URI", () => {
+    expect(remoteUploadName("file://docs/storage/Users/currentUser/Download/%E6%8A%A5%E5%91%8A%20one.txt"))
+      .toBe("报告 one.txt");
+  });
+
+  it("still decodes Android document path separators before finding the name", () => {
+    expect(remoteUploadName("content://com.android.externalstorage.documents/document/primary%3ADownload%2F%E6%8A%A5%E5%91%8A%20one.txt"))
+      .toBe("报告 one.txt");
+  });
+
   it("recovers a decoded basename from an iOS security-scoped file URL", () => {
     expect(remoteUploadName("file:///private/var/mobile/Containers/Shared/AppGroup/report%20x.pdf"))
       .toBe("report x.pdf");

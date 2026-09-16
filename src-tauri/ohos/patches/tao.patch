@@ -1,0 +1,200 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 971c89c..a249377 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -110,8 +110,10 @@ percent-encoding = "2.3"
+ tao-macros = { version = "0.1.4", path = "./tao-macros" }
+ 
+ [target."cfg(target_env = \"ohos\")".dependencies]
+-openharmony-ability = { git = "https://github.com/harmony-contrib/openharmony-ability.git" }
+-openharmony-ability-derive = { git = "https://github.com/harmony-contrib/openharmony-ability.git" }
++openharmony-ability = { path = "../ability/crates/ability" }
++openharmony-ability-derive = { path = "../ability/crates/derive" }
++openharmony-ability-plugin-app-control = { path = "../ability/crates/plugin-app-control" }
++futures-executor = "0.3"
+ 
+ [target."cfg(any(target_os = \"ios\", target_os = \"macos\"))".dependencies]
+ objc2 = "0.6"
+diff --git a/src/platform_impl/ohos/mod.rs b/src/platform_impl/ohos/mod.rs
+index 09eb639..e32a34b 100644
+--- a/src/platform_impl/ohos/mod.rs
++++ b/src/platform_impl/ohos/mod.rs
+@@ -10,7 +10,11 @@ use openharmony_ability::xcomponent::{Action, TouchEvent};
+ 
+ use openharmony_ability::{
+   ime::KeyboardStatus, Configuration, Event as MainEvent, ImeEvent, InputEvent, OpenHarmonyApp,
+-  OpenHarmonyWaker, Rect,
++  OpenHarmonyWaker, Rect, XComponentInputEvent,
++};
++
++use openharmony_ability_plugin_app_control::{
++  AppControlBridgePlugin, TerminateRequest, TerminateResponse,
+ };
+ 
+ use crate::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
+@@ -51,7 +55,7 @@ pub struct KeyEventExtra {}
+ pub struct EventLoop<T: 'static> {
+   pub(crate) openharmony_app: OpenHarmonyApp,
+   window_target: event_loop::EventLoopWindowTarget<T>,
+-  cause: StartCause,
++  initialized: Cell<bool>,
+   user_events_sender: mpsc::Sender<T>,
+   user_events_receiver: PeekableReceiver<T>,
+   event_handler: RefCell<Option<Box<dyn FnMut(event::Event<T>)>>>,
+@@ -85,12 +89,11 @@ impl<T: 'static> EventLoop<T> {
+         p: EventLoopWindowTarget {
+           app: openharmony_app.clone(),
+           control_flow: Cell::new(ControlFlow::default()),
+-          exit: Cell::new(false),
+           _marker: PhantomData,
+         },
+         _marker: PhantomData,
+       },
+-      cause: StartCause::Init,
++      initialized: Cell::new(false),
+       user_events_sender,
+       user_events_receiver: PeekableReceiver::from_recv(user_events_receiver),
+       event_handler: RefCell::new(None),
+@@ -104,7 +107,7 @@ impl<T: 'static> EventLoop<T> {
+   // TODO: For input event, we need some real examples to test it
+   fn handle_input_event(&self, event: &InputEvent) {
+     match event {
+-      InputEvent::TouchEvent(motion_event) => {
++      InputEvent::XComponent(XComponentInputEvent::Touch(motion_event)) => {
+         let window_id = window::WindowId(WindowId);
+         let device_id = event::DeviceId(DeviceId(motion_event.device_id as _));
+         let action = motion_event.event_type;
+@@ -146,7 +149,7 @@ impl<T: 'static> EventLoop<T> {
+           }
+         }
+       }
+-      InputEvent::KeyEvent(key) => {
++      InputEvent::XComponent(XComponentInputEvent::Key(key)) => {
+         match key.code {
+           keycode => {
+             let state = match key.action {
+@@ -182,7 +185,7 @@ impl<T: 'static> EventLoop<T> {
+           }
+         }
+       }
+-      InputEvent::ImeEvent(data) => match data {
++      InputEvent::Ime(data) => match data {
+         ImeEvent::TextInputEvent(s) => {
+           if let Some(ref mut h) = *self.event_handler.borrow_mut() {
+             h(event::Event::WindowEvent {
+@@ -295,6 +298,7 @@ impl<T: 'static> EventLoop<T> {
+             event_handler(e, &target, &mut control_flow);
+             // We need to dispatch it after every event callbacks.
+             event_handler(event::Event::MainEventsCleared, &target, &mut control_flow);
++            target.p.control_flow.set(control_flow);
+           }),
+         )
+       };
+@@ -305,7 +309,9 @@ impl<T: 'static> EventLoop<T> {
+       match event {
+         MainEvent::SurfaceCreate { .. } => {
+           if let Some(ref mut h) = *self.event_handler.borrow_mut() {
+-            h(event::Event::NewEvents(StartCause::Init));
++            if !self.initialized.replace(true) {
++              h(event::Event::NewEvents(StartCause::Init));
++            }
+             h(event::Event::WindowEvent {
+               window_id: window::WindowId(WindowId),
+               event: event::WindowEvent::Resumed,
+@@ -357,7 +363,7 @@ impl<T: 'static> EventLoop<T> {
+           if let Some(ref mut h) = *self.event_handler.borrow_mut() {
+             h(event::Event::WindowEvent {
+               window_id: window::WindowId(WindowId),
+-              event: event::WindowEvent::Focused(true),
++              event: event::WindowEvent::Focused(false),
+             });
+           }
+         }
+@@ -400,12 +406,13 @@ impl<T: 'static> EventLoop<T> {
+           // self.running = false;
+         }
+         MainEvent::WindowDestroy => {
++          // A WindowStage can be recreated while this native module and its
++          // Tauri windows remain alive. It is not a user-requested app exit.
+           if let Some(ref mut h) = *self.event_handler.borrow_mut() {
+-            let e = event::Event::WindowEvent {
++            h(event::Event::WindowEvent {
+               window_id: window::WindowId(WindowId),
+-              event: event::WindowEvent::CloseRequested,
+-            };
+-            h(e);
++              event: event::WindowEvent::Suspended,
++            });
+           }
+         }
+         MainEvent::Destroy => {
+@@ -429,16 +436,47 @@ impl<T: 'static> EventLoop<T> {
+         }
+       };
+ 
+-      if self.window_target.p.exit.get() {
+-        if let Some(ref mut h) = *self.event_handler.borrow_mut() {
+-          h(event::Event::LoopDestroyed);
+-          self.openharmony_app.exit(0);
++      if let ControlFlow::ExitWithCode(code) = self.window_target.p.control_flow.get() {
++        if let Some(mut handler) = self.event_handler.take() {
++          handler(event::Event::LoopDestroyed);
++          self.request_exit(code);
+         }
+       }
+     });
+     0
+   }
+ 
++  fn request_exit(&self, code: i32) {
++    let bridge = match self.openharmony_app.bridge() {
++      Ok(bridge) => bridge,
++      Err(error) => {
++        error!("Cannot terminate OpenHarmony ability: {error}");
++        return;
++      }
++    };
++    // Event callbacks run on the N-API thread. The framework's worker API
++    // dispatches the synchronous capability there without blocking that thread.
++    if let Err(error) = std::thread::Builder::new()
++      .name("tao-ohos-exit".into())
++      .spawn(move || {
++        let response = futures_executor::block_on(
++          bridge
++            .call_sync_from_worker::<AppControlBridgePlugin, TerminateRequest, TerminateResponse>(
++              "terminate",
++              TerminateRequest { code },
++            ),
++        );
++        match response {
++          Ok(response) if response.accepted => {}
++          Ok(_) => error!("OpenHarmony ability rejected termination"),
++          Err(error) => error!("Cannot terminate OpenHarmony ability: {error}"),
++        }
++      })
++    {
++      error!("Cannot schedule OpenHarmony ability termination: {error}");
++    }
++  }
++
+   pub fn create_proxy(&self) -> EventLoopProxy<T> {
+     EventLoopProxy {
+       user_events_sender: self.user_events_sender.clone(),
+@@ -476,7 +514,6 @@ impl<T: 'static> Clone for EventLoopProxy<T> {
+ pub struct EventLoopWindowTarget<T: 'static> {
+   pub(crate) app: OpenHarmonyApp,
+   control_flow: Cell<ControlFlow>,
+-  exit: Cell<bool>,
+   _marker: std::marker::PhantomData<T>,
+ }
+ 
+@@ -634,8 +671,7 @@ impl Window {
+   }
+ 
+   pub fn is_focused(&self) -> bool {
+-    log::warn!("`Window::is_focused` is ignored on OpenHarmony");
+-    false
++    HAS_FOCUS.load(Ordering::Relaxed)
+   }
+ 
+   pub fn is_always_on_top(&self) -> bool {

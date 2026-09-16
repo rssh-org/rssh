@@ -1,8 +1,10 @@
 #[cfg(desktop)]
 pub mod cli;
+pub mod clipboard;
 pub mod command_block;
 pub mod discovery;
 pub mod external;
+pub mod files;
 pub mod forward;
 pub mod group;
 pub mod lifecycle;
@@ -17,7 +19,6 @@ pub mod settings;
 pub mod sftp;
 pub mod sync;
 pub mod telnet;
-pub mod ui_state;
 pub mod update;
 #[cfg(desktop)]
 pub mod window;

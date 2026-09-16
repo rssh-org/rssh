@@ -15,13 +15,14 @@ describe("detectPlatform", () => {
   ])("recognizes %s as iOS mobile", (_name, userAgent, maxTouchPoints) => {
     expect(detectPlatform({ userAgent, maxTouchPoints })).toEqual({
       isIOS: true,
+      isHarmony: false,
       isMobile: true,
     });
   });
 
   it("recognizes Android as mobile but not iOS", () => {
     expect(detectPlatform({ userAgent: "Mozilla/5.0 (Linux; Android 16)", maxTouchPoints: 5 }))
-      .toEqual({ isIOS: false, isMobile: true });
+      .toEqual({ isIOS: false, isHarmony: false, isMobile: true });
   });
 
   it("recognizes HarmonyOS ArkWeb as mobile but not iOS", () => {
@@ -31,22 +32,32 @@ describe("detectPlatform", () => {
           "Mozilla/5.0 (Phone; OpenHarmony 5.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36 ArkWeb/4.1.6.1 Mobile",
         maxTouchPoints: 5,
       }),
-    ).toEqual({ isIOS: false, isMobile: true });
+    ).toEqual({ isIOS: false, isHarmony: true, isMobile: true });
   });
 
-  it("isMobile is true for a plain Linux desktop UA", () => {
+  it("recognizes HarmonyOS without an Android runtime", () => {
+    expect(detectPlatform({ userAgent: "Mozilla/5.0 (Phone; HarmonyOS 5.0)" }))
+      .toEqual({ isIOS: false, isHarmony: true, isMobile: true });
+  });
+
+  it("keeps Android-compatible HarmonyOS on the Android path", () => {
+    expect(detectPlatform({ userAgent: "Mozilla/5.0 (Linux; Android 12; HarmonyOS 4.0)" }))
+      .toEqual({ isIOS: false, isHarmony: false, isMobile: true });
+  });
+
+  it("recognizes a plain Linux desktop UA as desktop", () => {
     expect(detectPlatform({ userAgent: "Mozilla/5.0 (X11; Linux x86_64)" }))
-      .toEqual({ isIOS: false, isMobile: false });
+      .toEqual({ isIOS: false, isHarmony: false, isMobile: false });
   });
 
   it("does not misclassify a touch-capable Mac or ordinary desktop", () => {
     expect(detectPlatform({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15)", maxTouchPoints: 1 }))
-      .toEqual({ isIOS: false, isMobile: false });
+      .toEqual({ isIOS: false, isHarmony: false, isMobile: false });
     expect(detectPlatform({ userAgent: "Mozilla/5.0 (X11; Linux x86_64)", maxTouchPoints: 0 }))
-      .toEqual({ isIOS: false, isMobile: false });
+      .toEqual({ isIOS: false, isHarmony: false, isMobile: false });
   });
 
   it("defaults safely outside a browser", () => {
-    expect(detectPlatform(undefined)).toEqual({ isIOS: false, isMobile: false });
+    expect(detectPlatform(undefined)).toEqual({ isIOS: false, isHarmony: false, isMobile: false });
   });
 });

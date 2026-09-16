@@ -17,7 +17,7 @@
     ],
     "buildModeSet": [
       {
-        "name": "debug",
+        "name": "debug"
       },
       {
         "name": "release"
@@ -36,6 +36,34 @@
           ]
         }
       ]
+    },
+    {
+      "name": "native_ability",
+      "srcPath": "./vendor/ability/native_ability"
+    },
+    {
+      "name": "plugin_app_control",
+      "srcPath": "./vendor/ability/plugins/app-control"
+    },
+    {
+      "name": "plugin_files",
+      "srcPath": "./vendor/ability/plugins/files"
+    },
+    {
+      "name": "plugin_permission",
+      "srcPath": "./vendor/ability/plugins/permission"
+    },
+    {
+      "name": "plugin_url",
+      "srcPath": "./vendor/ability/plugins/url"
+    },
+    {
+      "name": "plugin_webview",
+      "srcPath": "./vendor/ability/plugins/webview"
+    },
+    {
+      "name": "plugin_window",
+      "srcPath": "./vendor/ability/plugins/window"
     }
   ]
 }

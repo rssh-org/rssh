@@ -1,7 +1,10 @@
+# Dependencies and local SDK/IDE state.
 /node_modules
 /oh_modules
 /local.properties
 /.idea
+
+# Hvigor and native build output.
 **/build
 /.hvigor
 .cxx
@@ -9,6 +12,24 @@
 /.clang-format
 /.clang-tidy
 **/.test
-/.appanalyzer# Build artifacts, same convention as gen/android — restaged by build-ohos.sh
+/.appanalyzer
+*.log
+*.hap
+*.hsp
+*.har
+
+# Local signing credentials and provisioning profiles.
+*.p12
+*.pfx
+*.p7b
+*.cer
+*.csr
+*.jks
+*.keystore
+
+# Build artifacts, same convention as gen/android — restaged by build-ohos.sh
 /entry/src/main/resources/rawfile
 /assets/bin
+
+# Framework HAR sources are staged from the pinned checkout by prepare-ohos.
+/vendor/ability/

@@ -1,5 +1,7 @@
 mod ai;
 mod commands;
+#[cfg(any(target_env = "ohos", test))]
+mod ohos;
 #[cfg(desktop)]
 pub use commands::cli::CLI_VERSION;
 pub mod crypto;
@@ -59,7 +61,7 @@ fn apply_linux_wayland_compat() {
 #[cfg(not(target_os = "linux"))]
 fn apply_linux_wayland_compat() {}
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg_attr(all(mobile, not(target_env = "ohos")), tauri::mobile_entry_point)]
 pub fn run() {
     apply_linux_wayland_compat();
 
@@ -80,7 +82,8 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init());
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_clipboard_manager::init());
     builder
         // `_window`: only the desktop Destroyed branch below uses it; on ohos
         // (mobile alias) the whole match arm is cfg'd out.
@@ -100,12 +103,9 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            // OHOS: app_data_dir() aborts at startup — no HOME, the linux
-            // path resolver returns UnknownPath and the panic hook kills the
-            // process before any UI. The sandbox files dir is stable; it is
-            // the same storage as /data/app/el2/100/base/<bundle>/files.
+            // The UIAbility registers its sandbox path before Tauri starts.
             #[cfg(target_env = "ohos")]
-            let data_dir = std::path::PathBuf::from("/data/storage/el2/base/files");
+            let data_dir = ohos::data_dir()?;
             // fork defines mobile = ios|android|ohos, desktop = !mobile
             #[cfg(all(mobile, not(target_env = "ohos")))]
             let data_dir = app.path().app_data_dir()?;
@@ -208,10 +208,6 @@ pub fn run() {
             commands::settings::read_recording,
             commands::settings::secret_backend,
             commands::settings::list_fonts,
-            // localStorage persistence for the OHOS ArkWeb polyfill (no-op
-            // target elsewhere: real localStorage exists there).
-            commands::ui_state::ui_state_load,
-            commands::ui_state::ui_state_save,
             // plugins
             commands::plugin::plugins_root,
             commands::plugin::install_plugin,
@@ -301,25 +297,14 @@ pub fn run() {
             // Stream transfer to/from a path (desktop) or content:// URI (mobile).
             commands::sftp::sftp_download_to,
             commands::sftp::sftp_upload_from,
-            // SFTP native file transfer (desktop only)
-            #[cfg(desktop)]
-            commands::sftp::sftp_save_file,
-            #[cfg(desktop)]
-            commands::sftp::sftp_pick_and_upload,
-            // pick_save_path/open_files/folder also have ohos impls staging
-            // under Downloads/rssh — the cfg here must cover BOTH, otherwise
-            // the function compiles in but never registers (Command not found).
-            #[cfg(any(desktop, target_env = "ohos"))]
             commands::sftp::sftp_pick_save_path,
-            #[cfg(desktop)]
             commands::sftp::sftp_pick_open_path,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(desktop)]
             commands::sftp::sftp_pick_folder,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(desktop)]
             commands::sftp::sftp_pick_open_files,
             commands::sftp::sftp_cancel_transfer,
-            // Plain file write for text exports where plugin-fs is absent (ohos).
-            commands::sftp::write_text_file,
+            commands::files::save_text_file,
             commands::sftp::sftp_remove,
             commands::sftp::sftp_rename,
             commands::sftp::sftp_stat,
@@ -331,10 +316,8 @@ pub fn run() {
             // multi-window (desktop only)
             #[cfg(desktop)]
             commands::window::open_tab_in_new_window,
-            #[cfg(desktop)]
-            commands::window::clipboard_read,
-            #[cfg(desktop)]
-            commands::window::clipboard_write,
+            commands::clipboard::clipboard_read,
+            commands::clipboard::clipboard_write,
             // external URL opener — cross-platform via tauri-plugin-opener
             commands::external::open_external_url,
             // update check (cross-platform — separate mod from window)

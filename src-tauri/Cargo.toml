@@ -9,13 +9,10 @@ name = "rssh_lib"
 crate-type = ["staticlib", "cdylib", "lib"]
 
 [build-dependencies]
-# Pinned exact: [patch.crates-io] below swaps this precise version for the
-# OHOS fork build. A loose "2" would let a newer crates.io release bypass it.
-tauri-build = { version = "=2.6.3", features = [] }
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# Same pinning rule as tauri-build (fork base is 2.11.5).
-tauri = { version = "=2.11.5", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -91,7 +88,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc = "0.2"
 
-# PTY, serial and clipboard — the three desktop targets RSSH actually ships.
+# PTY and serial — the three desktop targets RSSH actually ships.
 # Cargo target tables cannot use Tauri's `desktop` cfg alias, so keep this as a
 # positive OS list instead of treating every non-mobile target as a desktop.
 # OHOS is target_os = "linux" but links none of this (libudev/PTY have no
@@ -103,7 +100,6 @@ portable-pty = "0.8"
 # libudev for port enumeration, so Linux CI/packaging needs `libudev-dev` at
 # build time (see build-linux.sh).
 serialport = "4.9.0"
-arboard = "3"
 
 # Keychain — Apple platforms share the native Security.framework backend.
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
@@ -113,20 +109,15 @@ keyring = { version = "3", features = ["windows-native"] }
 [target.'cfg(all(target_os = "linux", not(target_env = "ohos")))'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
-# ── OHOS (HarmonyOS) ──
-# napi bridge: the fork's mobile_entry_point expansion needs it on ohos.
-[target.'cfg(target_env = "ohos")'.dependencies]
-napi-derive-ohos = "1.1"
-napi-ohos = { version = "1.1", features = ["napi8"] }
-
-# Official plugins (opener/dialog/fs) have no OHOS implementation upstream or
+# Official plugins (opener/dialog/fs/clipboard) have no OHOS implementation upstream or
 # in the fork — compiling their desktop Linux backends (rfd etc.) against the
 # OHOS sysroot would not link. Everything but ohos keeps them; the ohos build
-# registers no plugins and frontend save/pick paths degrade until phase D.
+# registers no official plugins; native OHOS integrations live in its adapter.
 [target.'cfg(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos")), target_os = "android", target_os = "ios"))'.dependencies]
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
+tauri-plugin-clipboard-manager = "2"
 
 [features]
 default = []
@@ -157,28 +148,3 @@ required-features = ["cli"]
 name = "rssh-server"
 path = "src/server_main.rs"
 required-features = ["server"]
-
-# ── OHOS fork replacement (feat/ohos-port) ──
-# HarmonyOS is not an official Tauri platform. This swaps the whole tauri
-# stack for the `feat/open-harmony` branches (tauri fork based on 2.11.5,
-# wry/tao branches upstream). Exact revs, not branches — PoC builds must be
-# reproducible. Affects every target of this branch's builds (desktop
-# included); the fork differs from 2.11.5 only by ohos support.
-[patch.crates-io]
-tauri = { git = "https://github.com/yangyongzhen/tauri", rev = "e3bf6eb168bacc7bb5c8c32d923bb8beaf77c92b" }
-tauri-build = { git = "https://github.com/yangyongzhen/tauri", rev = "e3bf6eb168bacc7bb5c8c32d923bb8beaf77c92b" }
-tauri-macros = { git = "https://github.com/yangyongzhen/tauri", rev = "e3bf6eb168bacc7bb5c8c32d923bb8beaf77c92b" }
-tauri-codegen = { git = "https://github.com/yangyongzhen/tauri", rev = "e3bf6eb168bacc7bb5c8c32d923bb8beaf77c92b" }
-tauri-utils = { git = "https://github.com/yangyongzhen/tauri", rev = "e3bf6eb168bacc7bb5c8c32d923bb8beaf77c92b" }
-tauri-runtime = { git = "https://github.com/yangyongzhen/tauri", rev = "e3bf6eb168bacc7bb5c8c32d923bb8beaf77c92b" }
-tauri-runtime-wry = { git = "https://github.com/yangyongzhen/tauri", rev = "e3bf6eb168bacc7bb5c8c32d923bb8beaf77c92b" }
-wry = { git = "https://github.com/tauri-apps/wry", rev = "6aaf4b84b6e420015c6a14f264f1c7399f150392" }
-tao = { git = "https://github.com/tauri-apps/tao", rev = "813572fbe582005e2fb513458bc212842745ceab" }
-
-# wry/tao's ohos branches depend on openharmony-ability via this git URL
-# (default branch = refactored 1.0 beta, incompatible). Pin it to the
-# 0.3-compatible fork. Cargo forbids same-URL-different-rev patches, hence
-# the different git URL.
-[patch."https://github.com/harmony-contrib/openharmony-ability.git"]
-openharmony-ability = { git = "https://github.com/yangyongzhen/openharmony-ability", rev = "295a276a699ba2352addc69b8cacb6acd3be6ab1" }
-openharmony-ability-derive = { git = "https://github.com/yangyongzhen/openharmony-ability", rev = "295a276a699ba2352addc69b8cacb6acd3be6ab1" }

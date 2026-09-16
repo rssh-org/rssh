@@ -13,8 +13,8 @@
       "value": "label"
     },
     {
-      "name": "download_perm_reason",
-      "value": "SFTP transfers stage files in the public Downloads folder"
+      "name": "pasteboard_perm_reason",
+      "value": "Paste text into the terminal when you choose Paste"
     }
   ]
 }

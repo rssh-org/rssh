@@ -12,8 +12,6 @@ use crate::ssh::sftp::{FileStat, RemoteEntry, SftpHandle, WalkEntry};
 use crate::state::AppState;
 use crate::state::{SessionKind, SessionOwner};
 
-// The plugin crates exist everywhere except ohos (Cargo.toml target table);
-// bare FilePath is only used by the desktop-only dialogs below.
 #[cfg(desktop)]
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
@@ -278,116 +276,18 @@ fn dialog_join_err(e: tokio::task::JoinError) -> AppError {
     AppError::other("dialog_task_failed", json!({ "err": e.to_string() }))
 }
 
-/// Download a remote file via native Save As dialog with streaming + progress.
-#[cfg(desktop)]
-#[tauri::command]
-pub async fn sftp_save_file(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    sftp_id: String,
-    remote_path: String,
-    default_name: String,
-) -> AppResult<Option<String>> {
-    let dialog_app = app.clone();
-    let picked = tokio::task::spawn_blocking(move || {
-        dialog_app
-            .dialog()
-            .file()
-            .set_file_name(&default_name)
-            .blocking_save_file()
-    })
-    .await
-    .map_err(dialog_join_err)?;
-    let Some(fp) = picked else { return Ok(None) };
-    let local = dialog_to_path(fp)?;
-
-    let sftp = get_sftp(&state, &sftp_id)?;
-    let transfer_id = uuid::Uuid::new_v4().to_string();
-    let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
-    let host = crate::emitter::Host::Tauri(app);
-    sftp.download_streaming(&remote_path, &local, &host, &transfer_id, cancel)
-        .await?;
-    Ok(Some(local.display().to_string()))
-}
-
-/// Pick a local file via native Open dialog and upload with streaming + progress.
-#[cfg(desktop)]
-#[tauri::command]
-pub async fn sftp_pick_and_upload(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    sftp_id: String,
-    remote_dir: String,
-) -> AppResult<Option<String>> {
-    let dialog_app = app.clone();
-    let picked =
-        tokio::task::spawn_blocking(move || dialog_app.dialog().file().blocking_pick_file())
-            .await
-            .map_err(dialog_join_err)?;
-    let Some(fp) = picked else { return Ok(None) };
-    let local = dialog_to_path(fp)?;
-
-    let name = local
-        .file_name()
-        .ok_or_else(|| AppError::other("sftp_invalid_filename", json!({})))?
-        .to_string_lossy()
-        .into_owned();
-    let remote_path = if remote_dir == "/" {
-        format!("/{}", name)
-    } else {
-        format!("{}/{}", remote_dir.trim_end_matches('/'), name)
-    };
-
-    let sftp = get_sftp(&state, &sftp_id)?;
-    let transfer_id = uuid::Uuid::new_v4().to_string();
-    let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
-    let host = crate::emitter::Host::Tauri(app);
-    let mut reader = tokio::fs::File::open(&local).await?;
-    let total = reader.metadata().await?.len();
-    sftp.upload_streaming(
-        &mut reader,
-        total,
-        &remote_path,
-        &host,
-        &transfer_id,
-        cancel,
-    )
-    .await?;
-    Ok(Some(name))
-}
-
-/// Open native Save-As dialog and return the chosen path. No transfer happens here.
-#[cfg(desktop)]
+/// Pick a destination or source using the native host; keep authorization URIs intact.
 #[tauri::command]
 pub async fn sftp_pick_save_path(
     app: tauri::AppHandle,
     default_name: String,
 ) -> AppResult<Option<String>> {
-    let picked = tokio::task::spawn_blocking(move || {
-        app.dialog()
-            .file()
-            .set_file_name(&default_name)
-            .blocking_save_file()
-    })
-    .await
-    .map_err(dialog_join_err)?;
-    match picked {
-        Some(fp) => Ok(Some(dialog_to_path(fp)?.display().to_string())),
-        None => Ok(None),
-    }
+    super::files::pick_save(&app, default_name, Vec::new()).await
 }
 
-/// Open native Open dialog and return the chosen path. No transfer happens here.
-#[cfg(desktop)]
 #[tauri::command]
 pub async fn sftp_pick_open_path(app: tauri::AppHandle) -> AppResult<Option<String>> {
-    let picked = tokio::task::spawn_blocking(move || app.dialog().file().blocking_pick_file())
-        .await
-        .map_err(dialog_join_err)?;
-    match picked {
-        Some(fp) => Ok(Some(dialog_to_path(fp)?.display().to_string())),
-        None => Ok(None),
-    }
+    super::files::pick_open(&app).await
 }
 
 /// Pick a folder via the native dialog. Used both as the destination root
@@ -421,95 +321,9 @@ pub async fn sftp_pick_open_files(app: tauri::AppHandle) -> AppResult<Option<Vec
     Ok(Some(paths))
 }
 
-/// `sftp_io_failed` for a local open failure — same code/i18n as other SFTP IO.
-fn open_err(e: std::io::Error) -> AppError {
-    AppError::sftp(
-        "sftp_io_failed",
-        json!({ "op": "open", "err": e.to_string() }),
-    )
-}
-
-/// Keeps an iOS security-scoped file URL active for exactly as long as the
-/// transfer owns its file handle. Other platforms need no matching release.
-// plugin-fs types in the signatures — compiled wherever the plugin table
-// covers (everywhere but ohos).
-#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
-struct FileAccessGuard {
-    #[cfg(target_os = "ios")]
-    app: tauri::AppHandle,
-    #[cfg(target_os = "ios")]
-    path: Option<tauri_plugin_fs::FilePath>,
-}
-
-#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
-impl FileAccessGuard {
-    fn new(app: &tauri::AppHandle, path: &tauri_plugin_fs::FilePath) -> Self {
-        #[cfg(target_os = "ios")]
-        {
-            let path = match path {
-                tauri_plugin_fs::FilePath::Url(url) if url.scheme() == "file" => Some(path.clone()),
-                _ => None,
-            };
-            Self {
-                app: app.clone(),
-                path,
-            }
-        }
-        #[cfg(not(target_os = "ios"))]
-        {
-            let _ = (app, path);
-            Self {}
-        }
-    }
-}
-
-#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
-impl Drop for FileAccessGuard {
-    fn drop(&mut self) {
-        #[cfg(target_os = "ios")]
-        if let Some(path) = self.path.take() {
-            use tauri_plugin_fs::FsExt;
-            if let Err(e) = self.app.fs().stop_accessing_security_scoped_resource(path) {
-                log::warn!("failed to release iOS security-scoped file: {e}");
-            }
-        }
-    }
-}
-
-/// Resolve a desktop path, Android content URI, or iOS security-scoped file URL
-/// to a real file. The guard must live until the file handle is dropped.
-#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
-fn fs_open_read(
-    app: &tauri::AppHandle,
-    fp: tauri_plugin_fs::FilePath,
-) -> AppResult<(std::fs::File, FileAccessGuard)> {
-    use tauri_plugin_fs::{FsExt, OpenOptions};
-    let mut opts = OpenOptions::new();
-    opts.read(true);
-    let access = FileAccessGuard::new(app, &fp);
-    let file = app.fs().open(fp, opts).map_err(open_err)?;
-    Ok((file, access))
-}
-
-/// Same as [`fs_open_read`] but opens (create + truncate) for writing — the
-/// mobile download target.
-#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
-fn fs_open_write(
-    app: &tauri::AppHandle,
-    fp: tauri_plugin_fs::FilePath,
-) -> AppResult<(std::fs::File, FileAccessGuard)> {
-    use tauri_plugin_fs::{FsExt, OpenOptions};
-    let mut opts = OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    let access = FileAccessGuard::new(app, &fp);
-    let file = app.fs().open(fp, opts).map_err(open_err)?;
-    Ok((file, access))
-}
-
 /// Stream-download to a caller-supplied local target. transfer_id is used as the
 /// `sftp:progress:{transfer_id}` event suffix (R1) so the frontend listens
 /// per-transfer instead of multiplexing one global stream.
-#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
 #[tauri::command]
 pub async fn sftp_download_to(
     app: tauri::AppHandle,
@@ -522,30 +336,26 @@ pub async fn sftp_download_to(
     let sftp = get_sftp(&state, &sftp_id)?;
     let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
     let host = crate::emitter::Host::Tauri(app.clone());
-    // Desktop sends a filesystem path → keep the atomic `.part` + rename.
-    // Mobile sends a SAF `content://` URI → open it through plugin-fs (which
-    // resolves the URI to a real fd) and stream straight in. There's no path to
-    // rename through on mobile, so that download has no local atomicity (agreed).
-    match local_path
+    // Filesystem destinations keep atomic .part + rename. Authorized URIs
+    // stream to an owned descriptor because the provider has no rename path.
+    #[cfg(not(target_env = "ohos"))]
+    if let tauri_plugin_fs::FilePath::Path(path) = local_path
         .parse::<tauri_plugin_fs::FilePath>()
         .expect("FilePath::from_str is infallible")
     {
-        tauri_plugin_fs::FilePath::Path(p) => sftp
-            .download_streaming(&remote_path, &p, &host, &transfer_id, cancel)
+        return sftp
+            .download_streaming(&remote_path, &path, &host, &transfer_id, cancel)
             .await
-            .map(|_| ()),
-        fp @ tauri_plugin_fs::FilePath::Url(_) => {
-            let (dst, _access) = fs_open_write(&app, fp)?;
-            let mut dst = tokio::fs::File::from_std(dst);
-            sftp.download_streaming_to_writer(&remote_path, &mut dst, &host, &transfer_id, cancel)
-                .await
-                .map(|_| ())
-        }
+            .map(|_| ());
     }
+    let (file, _access) = super::files::open_file(&app, local_path, true).await?;
+    let mut writer = tokio::fs::File::from_std(file);
+    sftp.download_streaming_to_writer(&remote_path, &mut writer, &host, &transfer_id, cancel)
+        .await
+        .map(|_| ())
 }
 
 /// Stream-upload from a caller-supplied local source. transfer_id mirrors above.
-#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
 #[tauri::command]
 pub async fn sftp_upload_from(
     app: tauri::AppHandle,
@@ -558,12 +368,7 @@ pub async fn sftp_upload_from(
     let sftp = get_sftp(&state, &sftp_id)?;
     let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
     let host = crate::emitter::Host::Tauri(app.clone());
-    // Local end is just a reader, so desktop (path) and mobile (content:// URI)
-    // share one path — plugin-fs resolves either to a real fd.
-    let fp = local_path
-        .parse::<tauri_plugin_fs::FilePath>()
-        .expect("FilePath::from_str is infallible");
-    let (reader, _access) = fs_open_read(&app, fp)?;
+    let (reader, _access) = super::files::open_file(&app, local_path, false).await?;
     let mut reader = tokio::fs::File::from_std(reader);
     // content:// fds may not support fstat; fall back to 0 (indeterminate bar).
     let total = reader.metadata().await.map(|m| m.len()).unwrap_or(0);
@@ -577,167 +382,6 @@ pub async fn sftp_upload_from(
     )
     .await
     .map(|_| ())
-}
-
-// ── OHOS local-file bridge ──
-// PoC design: no system picker yet (the plugin-dialog/fs backends are the
-// bigger ArkTS piece). Transfers go through the PUBLIC Downloads directory —
-// the app holds READ_WRITE_DOWNLOAD_DIRECTORY (requested by EntryAbility at
-// startup) and stages everything under Downloads/rssh. Huawei shifted the
-// public layout across API versions, so resolve by probing known candidates.
-#[cfg(target_env = "ohos")]
-fn ohos_downloads_dir() -> AppResult<PathBuf> {
-    const CANDIDATES: [&str; 2] = [
-        "/storage/Users/currentUser/Download",
-        "/storage/media/100/local/files/Download",
-    ];
-    for c in CANDIDATES {
-        let p = PathBuf::from(c);
-        if p.is_dir() {
-            return Ok(p);
-        }
-    }
-    Err(AppError::other(
-        "ohos_no_downloads_dir",
-        json!({
-            "hint": "public Download dir not visible — grant storage permission or the device layout changed"
-        }),
-    ))
-}
-
-#[cfg(target_env = "ohos")]
-fn ohos_rssh_dir() -> AppResult<PathBuf> {
-    let dir = ohos_downloads_dir()?.join("rssh");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| AppError::other("ohos_mkdir_failed", json!({ "err": e.to_string() })))?;
-    // create_dir_all is a no-op when the dir exists, so it can succeed on a
-    // mere stat. The public Downloads dir is permission-gated at WRITE time
-    // (grants reset on app updates/reinstalls) — probe once so the failure
-    // surfaces here as an actionable message instead of a bare EACCES deep
-    // inside a transfer.
-    let probe = dir.join(".write-probe");
-    std::fs::write(&probe, b"").map_err(|_| {
-        AppError::other(
-            "ohos_downloads_denied",
-            json!({
-                "hint": "No write access to the public Downloads folder — grant storage permission in system settings, then retry"
-            }),
-        )
-    })?;
-    let _ = std::fs::remove_file(&probe);
-    Ok(dir)
-}
-
-#[cfg(target_env = "ohos")]
-#[tauri::command]
-pub async fn sftp_download_to(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    sftp_id: String,
-    remote_path: String,
-    local_path: String,
-    transfer_id: String,
-) -> AppResult<()> {
-    let sftp = get_sftp(&state, &sftp_id)?;
-    let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
-    let host = crate::emitter::Host::Tauri(app);
-    // Plain sandbox/public paths only — no content:// URIs on ohos.
-    let target = PathBuf::from(local_path);
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| AppError::other("ohos_mkdir_failed", json!({ "err": e.to_string() })))?;
-    }
-    sftp.download_streaming(&remote_path, &target, &host, &transfer_id, cancel)
-        .await
-        .map(|_| ())
-}
-
-#[cfg(target_env = "ohos")]
-#[tauri::command]
-pub async fn sftp_upload_from(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    sftp_id: String,
-    local_path: String,
-    remote_path: String,
-    transfer_id: String,
-) -> AppResult<()> {
-    let sftp = get_sftp(&state, &sftp_id)?;
-    let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
-    let host = crate::emitter::Host::Tauri(app);
-    let mut reader = tokio::fs::File::open(&local_path).await?;
-    let total = reader.metadata().await.map(|m| m.len()).unwrap_or(0);
-    sftp.upload_streaming(
-        &mut reader,
-        total,
-        &remote_path,
-        &host,
-        &transfer_id,
-        cancel,
-    )
-    .await
-    .map(|_| ())
-}
-
-/// Returns a save target under Downloads/rssh. Named like the desktop pickers
-/// so the frontend flows are shared; there is just no dialog on ohos (yet).
-#[cfg(target_env = "ohos")]
-#[tauri::command]
-pub async fn sftp_pick_save_path(default_name: String) -> AppResult<Option<String>> {
-    let dir = ohos_rssh_dir()?;
-    Ok(Some(dir.join(default_name).display().to_string()))
-}
-
-/// Directory-download target on ohos: a fresh subdir under Downloads/rssh
-/// (frontend queues each walked file into it).
-#[cfg(target_env = "ohos")]
-#[tauri::command]
-pub async fn sftp_pick_folder() -> AppResult<Option<String>> {
-    let dir = ohos_rssh_dir()?.join(format!("folder-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| AppError::other("ohos_mkdir_failed", json!({ "err": e.to_string() })))?;
-    Ok(Some(dir.display().to_string()))
-}
-
-/// "Picks" every file staged under Downloads/rssh — the upload source on
-/// ohos. Empty dir → None (frontend shows "nothing to upload").
-#[cfg(target_env = "ohos")]
-#[tauri::command]
-pub async fn sftp_pick_open_files() -> AppResult<Option<Vec<String>>> {
-    let dir = ohos_downloads_dir()?.join("rssh");
-    let mut files = Vec::new();
-    if dir.is_dir() {
-        for entry in std::fs::read_dir(&dir)
-            .map_err(|e| AppError::other("ohos_readdir_failed", json!({ "err": e.to_string() })))?
-        {
-            let Ok(entry) = entry else { continue };
-            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                files.push(entry.path().display().to_string());
-            }
-        }
-    }
-    if files.is_empty() {
-        return Ok(None);
-    }
-    files.sort();
-    Ok(Some(files))
-}
-
-/// Plain text-file write used by save-file.ts where plugin-fs does not exist
-/// (ohos). Registered on every target — desktop already exposes equivalent
-/// writes through plugin-fs, so this adds no new surface.
-#[tauri::command]
-pub fn write_text_file(path: String, contents: String) -> AppResult<()> {
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            AppError::other(
-                "write_text_file_mkdir_failed",
-                json!({ "err": e.to_string() }),
-            )
-        })?;
-    }
-    std::fs::write(&path, contents)
-        .map_err(|e| AppError::other("write_text_file_failed", json!({ "err": e.to_string() })))
 }
 
 #[tauri::command]

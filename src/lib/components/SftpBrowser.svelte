@@ -66,9 +66,6 @@
 
     /** Delete confirm state. */
     let deleteEntry = $state<RemoteEntry | null>(null);
-    /** ohos upload picker: files staged under Downloads/rssh, resolved by
-     *  tapping one row (or null on close). */
-    let ohosPicker = $state<{ files: string[]; resolve: (f: string | null) => void } | null>(null);
 
     /** Renames the input after mount so it can receive focus. */
     let renameInputEl: HTMLInputElement | undefined;
@@ -372,22 +369,6 @@
                 const { queued, walkErrors } = await queueDownloads([entry], dir);
                 if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
                 if (queued > 0) notice = t("sftp.queued_n", { n: queued });
-            } else if (app.isMobile && !app.isHarmony) {
-                // Mobile (Android/iOS): pick a SAF save target via the dialog
-                // plugin and stream to its content:// URI through the shared
-                // transfer queue. HarmonyOS has no plugin backends and falls
-                // through to the invoke-based desktop branch below, whose
-                // ohos pick command stages under Downloads/rssh.
-                const { save } = await import("@tauri-apps/plugin-dialog");
-                const target = await save({ defaultPath: entry.name });
-                if (!target) return;
-                await transfers.startDownload({
-                    sessionId: meta.sessionId,
-                    remotePath: entryPath(entry),
-                    localPath:  target,
-                    sizeHint:   entry.size,
-                });
-                notice = t("sftp.queued_n", { n: 1 });
             } else {
                 const localPath = await invoke<string | null>("sftp_pick_save_path", {
                     defaultName: entry.name,
@@ -523,39 +504,14 @@
         }
     }
 
-    /** Mobile single-file upload: pick a source via the dialog plugin and stream
-     *  its content:// URI through the shared queue. The remote filename is
-     *  recovered from the URI (SAF encodes the display name for user-visible
-     *  providers); opaque providers fall back to a timestamped name. */
+    /** Mobile single-file upload: pick an authorized source and stream its URI
+     *  through the shared queue. Recover the filename from the URI where possible. */
     async function uploadFile() {
         error = "";
         notice = "";
         if (!meta.sessionId) { error = "Missing SSH session"; return; }
         try {
-            if (app.isHarmony) {
-                // No dialog plugin on ohos: the pick command lists files
-                // staged under Downloads/rssh (landed from other apps or from
-                // rssh downloads); one file uploads straight away, several
-                // open the picker list.
-                const files = await invoke<string[] | null>("sftp_pick_open_files");
-                if (!files) { error = t("sftp.ohos_stage_empty"); return; }
-                const picked = files.length === 1
-                    ? files[0]
-                    : await new Promise<string | null>((resolve) => {
-                        ohosPicker = { files, resolve };
-                    });
-                if (!picked) return;
-                const name = picked.split("/").pop() || `upload-${fileStamp()}`;
-                await transfers.startUpload({
-                    sessionId: meta.sessionId,
-                    localPath:  picked,
-                    remotePath: joinRemote(cwd, name),
-                });
-                notice = t("sftp.queued_n", { n: 1 });
-                return;
-            }
-            const { open } = await import("@tauri-apps/plugin-dialog");
-            const src = await open({ multiple: false, directory: false });
+            const src = await invoke<string | null>("sftp_pick_open_path");
             if (!src || Array.isArray(src)) return;
             const name = remoteUploadName(src) || `upload-${fileStamp()}`;
             await transfers.startUpload({
@@ -702,21 +658,6 @@
         <div class="modal-actions">
             <button class="btn btn-sm" onclick={() => { deleteEntry = null; }}>{t("common.cancel")}</button>
             <button class="btn btn-sm btn-danger" onclick={doDelete}>{t("common.delete")}</button>
-        </div>
-    </Modal>
-{/if}
-
-{#if ohosPicker}
-    <Modal onClose={() => { ohosPicker?.resolve(null); ohosPicker = null; }}>
-        <p class="modal-title">{t("sftp.ohos_pick_file")}</p>
-        <div class="ohos-file-list">
-            {#each ohosPicker.files as f (f)}
-                <button
-                    type="button"
-                    class="ohos-file-row"
-                    onclick={() => { ohosPicker?.resolve(f); ohosPicker = null; }}
-                >{f.split("/").pop()}</button>
-            {/each}
         </div>
     </Modal>
 {/if}
@@ -1089,25 +1030,6 @@
         font-size: 13px;
         font-weight: 600;
         margin: 0 0 12px;
-    }
-
-    .ohos-file-list {
-        max-height: 260px;
-        overflow-y: auto;
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-        margin: 0 0 12px;
-    }
-
-    .ohos-file-row {
-        text-align: left;
-        padding: 8px 10px;
-        border: 1px solid var(--divider);
-        background: transparent;
-        border-radius: 6px;
-        font-size: 13px;
-        cursor: pointer;
     }
 
     .modal-input {
