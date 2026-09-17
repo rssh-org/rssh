@@ -21,22 +21,24 @@ pub struct RuntimeCapabilities {
 impl RuntimeCapabilities {
     fn native() -> Self {
         Self {
-            local_pty: cfg!(desktop),
-            serial: cfg!(desktop),
-            local_discovery: cfg!(desktop),
-            ssh_agent: cfg!(desktop),
-            default_key_files: cfg!(desktop),
-            cli_install: cfg!(desktop),
-            multi_window: cfg!(desktop),
-            window_controls: cfg!(desktop),
-            window_pin: cfg!(desktop),
-            file_multi_select: cfg!(desktop),
-            directory_transfer: cfg!(desktop),
+            local_pty: cfg!(any(windows, macos, linux)),
+            serial: cfg!(any(windows, macos, linux)),
+            local_discovery: cfg!(any(windows, macos, linux)),
+            ssh_agent: cfg!(any(windows, macos, linux)),
+            default_key_files: cfg!(any(windows, macos, linux)),
+            cli_install: cfg!(any(windows, macos, linux)),
+            multi_window: cfg!(any(windows, macos, linux)),
+            window_controls: cfg!(any(windows, macos, linux)),
+            window_pin: cfg!(any(windows, macos, linux)),
+            // Native file pickers support multiple sources on desktop and mobile.
+            // Directory authorization remains a separate host capability.
+            file_multi_select: true,
+            directory_transfer: cfg!(any(windows, macos, linux)),
             plugins: true,
         }
     }
 
-    #[cfg(all(feature = "server", desktop))]
+    #[cfg(all(feature = "server", any(windows, macos, linux)))]
     pub(crate) fn headless() -> Self {
         Self {
             cli_install: false,
@@ -51,11 +53,14 @@ impl RuntimeCapabilities {
 #[tauri::command]
 pub async fn get_runtime_capabilities(window: tauri::Window) -> AppResult<RuntimeCapabilities> {
     let capabilities = RuntimeCapabilities::native();
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     {
         let mut capabilities = capabilities;
         let device = crate::ohos::device::query().await?;
-        let pc = device.device_type == "2in1";
+        // Native adapter support follows the HarmonyOS API device scope:
+        // folder selection, serial services and desktop window controls target
+        // PC/2in1. This is independent of the frontend's viewport layout.
+        let pc = device.class() == crate::ohos::device::DeviceClass::Desktop;
         capabilities.serial = pc && device.serial;
         capabilities.local_pty = pc && crate::ohos::device::local_pty_available().await;
         // Discovery commands retain their own executable/version checks.
@@ -63,11 +68,10 @@ pub async fn get_runtime_capabilities(window: tauri::Window) -> AppResult<Runtim
         capabilities.multi_window = pc && device.multi_window;
         capabilities.window_controls = pc && device.multi_window;
         capabilities.window_pin = capabilities.window_controls && window.label() == "main";
-        capabilities.file_multi_select = true;
         capabilities.directory_transfer = pc && device.folder_selection;
         return Ok(capabilities);
     }
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     {
         let _ = window;
         Ok(capabilities)
@@ -98,10 +102,11 @@ mod tests {
             assert!(value[key].is_boolean(), "missing boolean capability {key}");
         }
         assert_eq!(value.as_object().unwrap().len(), 12);
+        assert_eq!(value["fileMultiSelect"], true);
     }
 
     #[test]
-    #[cfg(all(feature = "server", desktop))]
+    #[cfg(all(feature = "server", any(windows, macos, linux)))]
     fn headless_uses_browser_windows_and_host_managed_cli() {
         let capabilities = RuntimeCapabilities::headless();
         assert!(capabilities.multi_window);

@@ -72,8 +72,8 @@
     let renameInputEl: HTMLInputElement | undefined;
 
     const selectedCount = $derived(selected.size);
-    const canTransferDirectories = $derived(!app.isMobile && app.capabilities().directoryTransfer);
-    const canUploadMultiple = $derived(!app.isMobile && app.capabilities().fileMultiSelect);
+    const canTransferDirectories = $derived(app.capabilities().directoryTransfer);
+    const canUploadMultiple = $derived(app.capabilities().fileMultiSelect);
     const allSelected = $derived(entries.length > 0 && selected.size === entries.length);
     const someSelected = $derived(selected.size > 0 && selected.size < entries.length);
 
@@ -504,7 +504,7 @@
         }
     }
 
-    /** Mobile single-file upload: pick an authorized source and stream its URI
+    /** Single-file picker fallback: pick an authorized source and stream its URI
      *  through the shared queue. Recover the filename from the URI where possible. */
     async function uploadFile() {
         error = "";
@@ -581,7 +581,7 @@
     {#if loading}
         <p class="loading">{t("sftp.loading")}</p>
     {:else}
-        <div class="file-list" class:mobile={app.isMobile} class:no-selection={!canTransferDirectories} oncontextmenu={onSftpContextMenu}>
+        <div class="file-list" class:no-selection={!canTransferDirectories} oncontextmenu={onSftpContextMenu}>
             <div class="file-row file-header">
                 <span class="cell-check">
                     <input
@@ -899,7 +899,7 @@
     }
 
     /* No explicit grid-column: auto-placement keeps name/size in DOM order so
-       mobile (checkbox column hidden) lands name in col 1, not the size slot. */
+       hosts without directory selection (checkbox column hidden) lands name in col 1, not the size slot. */
     .file-name {
         border: none;
         background: none;
@@ -951,16 +951,14 @@
         .cell-mtime { display: none; }
     }
 
-    /* Selection needs an authorized directory destination. Touch layouts also
-       omit mtime; a desktop host without directories retains that column. */
+    /* Selection needs an authorized directory destination. Column visibility
+       follows this panel's width on every host. */
     .file-list.no-selection .file-row {
         grid-template-columns: 1fr 60px 110px;
     }
-    .file-list.no-selection .cell-check,
-    .file-list.mobile .cell-mtime {
+    .file-list.no-selection .cell-check {
         display: none;
     }
-    .file-list.mobile .file-row { grid-template-columns: 1fr 60px; }
     @container (max-width: 360px) {
         .file-list.no-selection .file-row { grid-template-columns: 1fr 60px; }
     }

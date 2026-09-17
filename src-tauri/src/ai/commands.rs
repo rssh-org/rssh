@@ -476,7 +476,7 @@ pub async fn ai_session_start_impl(
             }
             Some(handle)
         }
-        #[cfg(any(desktop, target_env = "ohos"))]
+        #[cfg(any(windows, macos, linux, ohos))]
         AiTarget::Local(target_id) => {
             let shell_path = match crate::commands::lifecycle::owned_ready_ai_target(
                 state,
@@ -490,9 +490,9 @@ pub async fn ai_session_start_impl(
             initial_shell = super::shell::ShellKind::from_local_path(&shell_path);
             None
         }
-        #[cfg(all(mobile, not(target_env = "ohos")))]
+        #[cfg(any(android, ios))]
         AiTarget::Local(_) => return Err(AppError::not_found("local_pty_not_found", json!({}))),
-        #[cfg(any(desktop, target_env = "ohos"))]
+        #[cfg(any(windows, macos, linux, ohos))]
         AiTarget::Serial(target_id) => {
             // No shell to probe — a serial port is raw bytes. Validate it exists,
             // then run with ShellKind::Serial (no sentinel, no exit code) and no
@@ -506,7 +506,7 @@ pub async fn ai_session_start_impl(
             initial_shell = super::shell::ShellKind::Serial;
             None
         }
-        #[cfg(all(mobile, not(target_env = "ohos")))]
+        #[cfg(any(android, ios))]
         AiTarget::Serial(_) => {
             return Err(AppError::not_found("serial_session_not_found", json!({})))
         }
@@ -535,8 +535,8 @@ pub async fn ai_session_start_impl(
     // 用户写多个 skill 也不会让启动 prompt 爆炸。
     let _ = skill; // 前端不再选；保留参数兼容
     let locale_lbl = locale_label(locale.as_deref().unwrap_or("en"));
-    // Use the same host check as analyze_locally: OHOS PC shares the mobile
-    // compile target but may provide both native windows and a local terminal.
+    // Use the same host check as analyze_locally: OHOS phone and PC share one
+    // library, but native windows and a local terminal depend on the device.
     let local_analysis_unavailable = host.ensure_local_analysis_available().await.err();
     let system_prompt =
         skills::build_catalog_prompt(&state.db, locale_lbl, local_analysis_unavailable.as_deref())?;
@@ -1156,7 +1156,7 @@ pub(crate) fn ai_session_rebind_target_impl(
             crate::commands::lifecycle::OwnedAiTarget::Ssh { handle, .. } => Some(handle),
             _ => unreachable!("SSH lifecycle kind returned a non-SSH target"),
         },
-        #[cfg(any(desktop, target_env = "ohos"))]
+        #[cfg(any(windows, macos, linux, ohos))]
         AiTarget::Local(target_id) => {
             let _ = crate::commands::lifecycle::owned_ready_ai_target(
                 state,
@@ -1166,9 +1166,9 @@ pub(crate) fn ai_session_rebind_target_impl(
             )?;
             None
         }
-        #[cfg(all(mobile, not(target_env = "ohos")))]
+        #[cfg(any(android, ios))]
         AiTarget::Local(_) => return Err(AppError::not_found("local_pty_not_found", json!({}))),
-        #[cfg(any(desktop, target_env = "ohos"))]
+        #[cfg(any(windows, macos, linux, ohos))]
         AiTarget::Serial(target_id) => {
             let _ = crate::commands::lifecycle::owned_ready_ai_target(
                 state,
@@ -1178,7 +1178,7 @@ pub(crate) fn ai_session_rebind_target_impl(
             )?;
             None
         }
-        #[cfg(all(mobile, not(target_env = "ohos")))]
+        #[cfg(any(android, ios))]
         AiTarget::Serial(_) => {
             return Err(AppError::not_found("serial_session_not_found", json!({})))
         }
@@ -1344,7 +1344,7 @@ pub(crate) fn conversation_target_key(state: &AppState, target: &AiTarget) -> Ap
             crate::db::ai_conversation::ssh_target_key(h.profile_id())
         }
         AiTarget::Local(_) => "local".to_string(),
-        #[cfg(any(desktop, target_env = "ohos"))]
+        #[cfg(any(windows, macos, linux, ohos))]
         AiTarget::Serial(id) => {
             let g = locked(&state.serial_sessions)?;
             let h = g
@@ -1352,7 +1352,7 @@ pub(crate) fn conversation_target_key(state: &AppState, target: &AiTarget) -> Ap
                 .ok_or_else(|| AppError::not_found("serial_session_not_found", json!({})))?;
             format!("serial:{}", h.port_name())
         }
-        #[cfg(all(mobile, not(target_env = "ohos")))]
+        #[cfg(any(android, ios))]
         AiTarget::Serial(_) => {
             return Err(AppError::not_found("serial_session_not_found", json!({})))
         }

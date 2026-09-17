@@ -36,7 +36,7 @@ impl SerialCapabilities {
         Ok(())
     }
 
-    #[cfg(any(target_env = "ohos", test))]
+    #[cfg(any(ohos, test))]
     pub fn require_signals(&self) -> AppResult<()> {
         if self.signals {
             Ok(())
@@ -49,7 +49,7 @@ impl SerialCapabilities {
     }
 }
 
-#[cfg(not(target_env = "ohos"))]
+#[cfg(not(ohos))]
 pub fn capabilities() -> SerialCapabilities {
     SerialCapabilities {
         flow_control: true,
@@ -100,12 +100,12 @@ fn default_stop_bits() -> u8 {
     1
 }
 
-#[cfg(not(target_env = "ohos"))]
+#[cfg(not(ohos))]
 #[path = "serial/desktop.rs"]
 mod desktop;
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 pub use crate::ohos::serial::{available_ports, capabilities, open, SerialHandle};
-#[cfg(not(target_env = "ohos"))]
+#[cfg(not(ohos))]
 pub use desktop::{available_ports, open, SerialHandle};
 
 #[cfg(test)]

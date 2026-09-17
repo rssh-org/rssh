@@ -5,16 +5,16 @@ mod file_descriptor;
 mod file_grants;
 mod file_name;
 
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 pub mod clipboard;
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 pub mod device;
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 pub mod files;
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 mod runtime;
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 pub use runtime::*;
 
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 pub mod serial;

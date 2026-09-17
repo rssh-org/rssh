@@ -9,7 +9,7 @@ pub(crate) enum AppWindowPurpose {
     LocalAnalysis,
 }
 
-#[cfg(any(test, target_env = "ohos"))]
+#[cfg(any(test, ohos))]
 fn check_window_capabilities(
     desktop_device: bool,
     multi_window: bool,
@@ -26,20 +26,20 @@ fn check_window_capabilities(
 }
 
 pub(crate) async fn ensure_app_window_available(purpose: AppWindowPurpose) -> Result<(), String> {
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     {
         let device = crate::ohos::device::query().await.map_err(|error| {
             log::warn!("Cannot query native window capabilities: {error}");
             "HarmonyOS system services are unavailable; restart RSSH and try again".to_string()
         })?;
-        let desktop_device = device.device_type == "2in1";
+        let desktop_device = device.class() == crate::ohos::device::DeviceClass::Desktop;
         let local_pty = desktop_device
             && device.multi_window
             && matches!(purpose, AppWindowPurpose::LocalAnalysis)
             && crate::ohos::device::local_pty_available().await;
         check_window_capabilities(desktop_device, device.multi_window, local_pty, purpose)
     }
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     {
         let _ = purpose;
         Ok(())
@@ -105,7 +105,7 @@ pub async fn open_tab_in_new_window(app: AppHandle, clone: String) -> AppResult<
     Ok(())
 }
 
-#[cfg(all(test, desktop))]
+#[cfg(all(test, any(windows, macos, linux)))]
 mod tests {
     use super::*;
 

@@ -1,4 +1,4 @@
-#[cfg(not(target_env = "ohos"))]
+#[cfg(not(ohos))]
 use tauri::AppHandle;
 
 use crate::error::{AppError, AppResult};
@@ -10,7 +10,7 @@ use crate::error::{AppError, AppResult};
 /// route had no implementation and the invoke silently failed for users.
 ///
 /// Refuses non-http(s) schemes to prevent abuse (file://, javascript:, …).
-#[cfg(any(desktop, all(mobile, not(target_env = "ohos"))))]
+#[cfg(not(ohos))]
 #[tauri::command]
 pub fn open_external_url(app: AppHandle, url: String) -> AppResult<()> {
     use tauri_plugin_opener::OpenerExt;
@@ -30,7 +30,7 @@ pub fn open_external_url(app: AppHandle, url: String) -> AppResult<()> {
 }
 
 /// HarmonyOS invokes UIAbilityContext.openLink on its owning UI thread.
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 #[tauri::command]
 pub async fn open_external_url(url: String) -> AppResult<()> {
     let parsed = url::Url::parse(&url)

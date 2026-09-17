@@ -4,6 +4,7 @@
     import {getCurrentWindow} from "@tauri-apps/api/window";
     import type {Profile, Tab, Group} from "../stores/app.svelte.ts";
     import * as app from "../stores/app.svelte.ts";
+    import * as layout from "../stores/layout.svelte.ts";
     import * as updates from "../stores/updates.svelte.ts";
     import * as syncStatus from "../stores/sync.svelte.ts";
     import * as serial from "../stores/serial.svelte.ts";
@@ -34,6 +35,7 @@
     import {toast} from "../stores/toast.svelte.ts";
     import {readText as readClipboard, writeText as writeClipboard} from "../clipboard.ts";
     import {initializePrimarySessionWindow} from "./primary-session-window.ts";
+    import {isTouchContextMenu} from "../input.ts";
     import {
         defaultPanelWidth,
         fitPanelWidths,
@@ -501,8 +503,7 @@
     let aiPanelWidth = $derived(ai.panelWidth(aiTabId));
     let sftpPanelWidth = $derived(app.sftpPanelWidthForTab(app.activePaneId()));
     let contentEl = $state<HTMLDivElement | null>(null);
-    let contentWidth = $state(window.innerWidth);
-    let viewportWidth = $state(window.innerWidth);
+    let contentWidth = $state(layout.viewportWidth());
     let panelFitPriorityByTab = $state<Record<string, PanelFitPriority>>({});
 
     $effect(() => {
@@ -510,7 +511,6 @@
         if (!el) return;
         const sync = () => {
             contentWidth = el.getBoundingClientRect().width;
-            viewportWidth = window.innerWidth;
         };
         sync();
         const observer = new ResizeObserver(sync);
@@ -530,7 +530,7 @@
         containerWidth: contentWidth,
         mainMinWidth: mainPanelMinWidth,
         panelMinWidth,
-        defaultWidth: defaultPanelWidth(viewportWidth),
+        defaultWidth: defaultPanelWidth(layout.viewportWidth()),
         pluginVisible: pluginSideVisible,
         pluginWidth: plugins.sideWidth(app.activePaneId()),
         aiVisible,
@@ -540,7 +540,7 @@
         containerWidth: pluginSideFitted.remainingContainerWidth,
         mainMinWidth: mainPanelMinWidth,
         panelMinWidth,
-        defaultWidth: defaultPanelWidth(viewportWidth),
+        defaultWidth: defaultPanelWidth(layout.viewportWidth()),
         aiVisible,
         sftpVisible,
         aiWidth: aiPanelWidth,
@@ -707,7 +707,7 @@
         header: [
             {kind: "tab" as const, tab: {id: "home", type: "home", label: app.tabLabel(app.tabs().find((tab) => tab.id === "home")!)} },
             ...(app.capabilities().localPty ? [{kind: "new-tab" as const}] : []),
-            ...(app.isMobile ? [] : [{kind: "new-edit" as const}]),
+            {kind: "new-edit" as const},
             // Horizontal strip would burst sideways with N pinned profiles — collapse
             // them into one star button that pops a menu. Vertical sidebar keeps the list.
             ...(isHorizontal
@@ -881,11 +881,11 @@
     }
 
     function canOpenTabInNewWindow(tab: Tab): boolean {
-        return app.capabilities().multiWindow && canSplitTab(tab);
+        return app.capabilities().multiWindow && app.isTerminalTabType(tab.type) && tab.type !== "serial";
     }
 
     function canSplitTab(tab: Tab): boolean {
-        return !app.isMobile && app.isTerminalTabType(tab.type) && tab.type !== "serial";
+        return !layout.compact() && app.isTerminalTabType(tab.type) && tab.type !== "serial";
     }
     type SplitSide = "left" | "right" | "top" | "bottom";
 
@@ -1002,16 +1002,12 @@
                     onClick: () => { app.setActivePane(tab.id); app.openSnippetPicker(); },
                 },
             ];
-            // Tab context menu is a desktop right-click affordance; on mobile
-            // SFTP opens from the keybar instead.
-            if (!app.isMobile) {
-                items.push({
-                    label: t("tab.context.sftp"),
-                    shortcut: keymap.format("term.sftp"),
-                    disabled: !isSsh,
-                    onClick: () => { app.setActivePane(tab.id); app.openSftp(); },
-                });
-            }
+            items.push({
+                label: t("tab.context.sftp"),
+                shortcut: keymap.format("term.sftp"),
+                disabled: !isSsh,
+                onClick: () => { app.setActivePane(tab.id); app.openSftp(); },
+            });
             sections.push(items);
         }
 
@@ -1084,11 +1080,15 @@
                         {label: t("tab.context.split.right"), onClick: () => splitCurrentPane(tab, "right")},
                     ],
                 },
-                ...(canOpenTabInNewWindow(tab) ? [{
+            ]);
+        }
+        if (canOpenTabInNewWindow(tab)) {
+            sections.push([
+                {
                     label: t("tab.context.open_new_window"),
                     shortcut: keymap.format("tab.openNewWindow"),
                     onClick: () => openInNewWindow(tab),
-                }] : []),
+                },
             ]);
         }
 
@@ -1096,12 +1096,12 @@
         return sections;
     }
     function openPaneContextMenu(e: MouseEvent, tabId: string) {
-        if (app.isMobile) return;
+        if (isTouchContextMenu(e)) return;
         const tab = app.tabs().find((candidate) => candidate.id === tabId);
         if (tab) openCtxMenu(e, tab);
     }
     function openRouteContextMenu(e: MouseEvent, tab: Tab | undefined) {
-        if (app.isMobile || !tab) return;
+        if (!tab) return;
         openCtxMenu(e, tab);
     }
 
@@ -1375,6 +1375,7 @@
                     activeTabId={app.activePaneId()}
                     onResizeStart={startPluginSideResize}
                     onResetWidth={resetPluginSideWidth}
+                    onClose={() => plugins.closeSide(app.activePaneId())}
                 />
             {/if}
         {:else if kind === "ai"}
@@ -1434,6 +1435,7 @@
                     plugins={pluginStripPlugins}
                     tabs={pluginStripTabs}
                     activeTabId={app.activePaneId()}
+                    onClose={() => plugins.closeStrip(app.activePaneId())}
                 />
             {/if}
             <div class="terminal-region">
@@ -1505,6 +1507,7 @@
                     plugins={pluginStripPlugins}
                     tabs={pluginStripTabs}
                     activeTabId={app.activePaneId()}
+                    onClose={() => plugins.closeStrip(app.activePaneId())}
                 />
             {/if}
         </div>

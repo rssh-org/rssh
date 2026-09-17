@@ -1,8 +1,8 @@
-#[cfg(not(target_env = "ohos"))]
+#[cfg(not(ohos))]
 use crate::error::AppError;
 use crate::error::AppResult;
 
-#[cfg(not(target_env = "ohos"))]
+#[cfg(not(ohos))]
 fn clipboard_error(op: &str, error: impl std::fmt::Display) -> AppError {
     AppError::other(
         "window_clipboard_failed",
@@ -12,12 +12,12 @@ fn clipboard_error(op: &str, error: impl std::fmt::Display) -> AppError {
 
 #[tauri::command]
 pub async fn clipboard_read(app: tauri::AppHandle) -> AppResult<String> {
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     {
         let _ = app;
         crate::ohos::clipboard::read_text().await
     }
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     {
         use tauri_plugin_clipboard_manager::ClipboardExt;
         // Native clipboard reads can wait for another application's response.
@@ -34,12 +34,12 @@ pub async fn clipboard_read(app: tauri::AppHandle) -> AppResult<String> {
 
 #[tauri::command]
 pub async fn clipboard_write(app: tauri::AppHandle, text: String) -> AppResult<()> {
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     {
         let _ = app;
         crate::ohos::clipboard::write_text(text).await
     }
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     {
         use tauri_plugin_clipboard_manager::ClipboardExt;
         tokio::task::spawn_blocking(move || {

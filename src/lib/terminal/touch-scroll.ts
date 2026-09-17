@@ -3,7 +3,7 @@ import type { Terminal } from "@xterm/xterm";
 import { terminalRowHeight } from "./row-height.ts";
 
 /**
- * Mobile touch-scroll for an xterm terminal. xterm 6.0.0 vendors a VS Code
+ * Touch-scroll for an xterm terminal. xterm 6.0.0 vendors a VS Code
  * touch-gesture service (with inertia!) but never calls addTarget(), so
  * touch-drag is wired to nothing — desktop has the wheel, touch had no scroll
  * path at all. This adds drag-to-scroll plus the fling momentum that every
@@ -53,7 +53,8 @@ const PAUSE_MS = 60;      // finger paused longer than this before release → n
  * tap (focus / soft keyboard) and a stationary long-press (native text
  * selection) still pass through untouched; only a real drag scrolls. A new
  * touch cancels any in-flight fling (grab-to-stop, like native lists).
- * Caller decides when to install it (e.g. mobile only).
+ * Install on every host: only touch events enter this path. Gestures starting
+ * on xterm's scrollbar stay with its native slider handler, avoiding two owners.
  */
 export function setupTouchScroll(host: HTMLElement, terminal: Terminal): () => void {
   let startY = 0;
@@ -104,7 +105,7 @@ export function setupTouchScroll(host: HTMLElement, terminal: Terminal): () => v
     // Only a clean single-finger start tracks. A finger added mid-gesture (pinch)
     // disqualifies the gesture until ALL fingers lift and a fresh single touch
     // begins — never scroll from stale coordinates.
-    ignore = e.touches.length !== 1;
+    ignore = e.touches.length !== 1 || (e.target instanceof Element && !!e.target.closest(".scrollbar"));
     if (ignore) return;
     startY = lastY = e.touches[0].clientY;
     lastMoveTime = performance.now();

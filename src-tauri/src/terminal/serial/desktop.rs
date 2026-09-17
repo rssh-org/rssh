@@ -129,7 +129,7 @@ pub fn available_ports() -> Vec<String> {
 /// always want `cu.*` — opening `tty.*` blocks waiting for carrier-detect (DCD).
 /// Drop the `tty.*` twins so the picker shows one usable entry per device
 /// instead of a doubled list with a hang-trap in it.
-#[cfg(target_os = "macos")]
+#[cfg(macos)]
 fn prefer_callout_ports(mut ports: Vec<String>) -> Vec<String> {
     // Drop a dial-in node only when its call-out twin was also enumerated:
     // `/dev/tty.foo` is dropped iff `/dev/cu.foo` exists. A device that exposes
@@ -146,7 +146,7 @@ fn prefer_callout_ports(mut ports: Vec<String>) -> Vec<String> {
 }
 
 /// Non-macOS: device nodes aren't duplicated this way, so pass through.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(macos))]
 fn prefer_callout_ports(ports: Vec<String>) -> Vec<String> {
     ports
 }
@@ -297,7 +297,7 @@ mod tests {
         assert!(matches!(map_flow_control("xyz"), FlowControl::None));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(macos)]
     #[test]
     fn macos_drops_tty_only_when_cu_twin_exists() {
         let got = prefer_callout_ports(vec![

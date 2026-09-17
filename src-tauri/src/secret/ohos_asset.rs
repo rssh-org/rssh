@@ -7,7 +7,7 @@
 
 use crate::error::{AppError, AppResult};
 
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 use super::SecretStore;
 
 const SUCCESS: i32 = 0;
@@ -17,13 +17,13 @@ const TAG_ALIAS: u32 = 0x3000_0002;
 const TAG_ACCESSIBILITY: u32 = 0x2000_0003;
 const TAG_AUTH_TYPE: u32 = 0x2000_0005;
 const TAG_SYNC_TYPE: u32 = 0x2000_0010;
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 const TAG_RETURN_TYPE: u32 = 0x2000_0040;
 const TAG_CONFLICT_RESOLUTION: u32 = 0x2000_0044;
 const DEVICE_FIRST_UNLOCKED: u32 = 1;
 const AUTH_NONE: u32 = 0;
 const SYNC_THIS_DEVICE: u32 = 1;
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 const RETURN_ALL: u32 = 0;
 const CONFLICT_OVERWRITE: u32 = 0;
 const MAX_ALIAS_BYTES: usize = 256;
@@ -87,7 +87,7 @@ struct ResultSet {
     results: *mut ResultEntry,
 }
 
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 #[link(name = "asset_ndk.z")]
 extern "C" {
     fn OH_Asset_Add(attributes: *const Attr, attr_cnt: u32) -> i32;
@@ -174,10 +174,10 @@ unsafe fn read_secret(result: &ResultSet) -> AppResult<String> {
         .map_err(|_| error("get", "stored value is not UTF-8"))
 }
 
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 struct OwnedResult(ResultSet);
 
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 impl Drop for OwnedResult {
     fn drop(&mut self) {
         // SAFETY: This zero-initialized result was passed to OH_Asset_Query.
@@ -187,10 +187,10 @@ impl Drop for OwnedResult {
     }
 }
 
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 pub struct AssetStore;
 
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 pub fn try_open() -> Option<AssetStore> {
     let store = AssetStore;
     // Separate concurrent probes so one process cannot delete another's entry.
@@ -204,7 +204,7 @@ pub fn try_open() -> Option<AssetStore> {
     }
 }
 
-#[cfg(target_env = "ohos")]
+#[cfg(ohos)]
 impl SecretStore for AssetStore {
     fn get(&self, key: &str) -> AppResult<Option<String>> {
         let mut alias = alias(key)?;

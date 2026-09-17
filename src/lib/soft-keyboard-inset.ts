@@ -4,7 +4,7 @@
  * WKWebView does NOT resize the webview when the soft keyboard opens — the
  * keyboard overlays it. The layout viewport (the `100%` heights everything is
  * built on) stays full-size while only `visualViewport` shrinks, so content
- * laid out at the bottom (the MobileKeybar, the chat input row) ends up
+ * laid out at the bottom (the TerminalKeybar, the chat input row) ends up
  * behind the keyboard, untappable. Android needs no help: `adjustResize`
  * shrinks the webview itself and the layout follows.
  *
@@ -36,7 +36,7 @@ export function softKeyboardInset(paneBottom: number, viewport: ViewportRect): n
  * callers use the return to detect "keyboard fully gone" (0). Panel position
  * is measured, not assumed, so whatever chrome sits below the pane (safe-area
  * padding, tab bars) is automatically accounted for. Valid while the document
- * is pinned to scroll 0 — which setupMobileSoftKeyboard already enforces —
+ * is pinned to scroll 0 — which setupTerminalSoftKeyboard already enforces —
  * because client coords and visualViewport offsets only agree there.
  */
 export function applySoftKeyboardInset(pane: HTMLElement): number {

@@ -1,8 +1,8 @@
 mod ai;
 mod commands;
-#[cfg(any(target_env = "ohos", test))]
+#[cfg(any(ohos, test))]
 mod ohos;
-#[cfg(desktop)]
+#[cfg(any(windows, macos, linux))]
 pub use commands::cli::CLI_VERSION;
 pub mod crypto;
 pub mod db;
@@ -14,7 +14,7 @@ mod redaction;
 pub mod secret;
 mod ssh;
 pub use ssh::bastion;
-#[cfg(all(feature = "server", desktop))]
+#[cfg(all(feature = "server", any(windows, macos, linux)))]
 pub mod server;
 mod state;
 pub mod sync;
@@ -28,7 +28,8 @@ use tauri::Manager;
 
 use state::AppState;
 
-#[cfg(target_os = "linux")]
+// OHOS uses ArkWeb, not the Linux desktop WebKitGTK/Wayland backend.
+#[cfg(linux)]
 fn apply_linux_wayland_compat() {
     if std::env::var_os("RSSH_DISABLE_WAYLAND_COMPAT").is_some() {
         return;
@@ -58,10 +59,10 @@ fn apply_linux_wayland_compat() {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(linux))]
 fn apply_linux_wayland_compat() {}
 
-#[cfg_attr(all(mobile, not(target_env = "ohos")), tauri::mobile_entry_point)]
+#[cfg_attr(any(android, ios), tauri::mobile_entry_point)]
 pub fn run() {
     apply_linux_wayland_compat();
 
@@ -72,13 +73,7 @@ pub fn run() {
     let builder = tauri::Builder::default();
     // Official plugins ship no OHOS backend (see the Cargo.toml target table
     // that gates them); every other target registers them exactly as before.
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "windows",
-        all(target_os = "linux", not(target_env = "ohos")),
-        target_os = "android",
-        target_os = "ios"
-    ))]
+    #[cfg(any(macos, windows, linux, android, ios))]
     let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -93,7 +88,7 @@ pub fn run() {
                 // WindowEvent::Destroyed when the app merely goes to background
                 // (e.g. a fullscreen file picker opens). Closing sessions there
                 // would silently disconnect every SSH tab.
-                #[cfg(any(desktop, target_env = "ohos"))]
+                #[cfg(any(windows, macos, linux, ohos))]
                 tauri::WindowEvent::Destroyed => {
                     let state = _window.state::<AppState>();
                     // Close only sessions belonging to this window.
@@ -104,18 +99,18 @@ pub fn run() {
         })
         .setup(|app| {
             // The UIAbility registers its sandbox path before Tauri starts.
-            #[cfg(target_env = "ohos")]
+            #[cfg(ohos)]
             let data_dir = ohos::data_dir()?;
-            // fork defines mobile = ios|android|ohos, desktop = !mobile
-            #[cfg(all(mobile, not(target_env = "ohos")))]
+            // Android/iOS use Tauri's sandbox path; OHOS registers its own above.
+            #[cfg(any(android, ios))]
             let data_dir = app.path().app_data_dir()?;
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux))]
             let data_dir = db::data_dir()?;
 
             // 启动时扫一次本机可用 shell，结果缓存到进程退出。
             // 用户在 Shell 设置页打开时直接读缓存，没冷启动开销。
             // HarmonyOS also compiles PTY, but probes sandbox support before use.
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             terminal::pty::init_available_shells();
             let db = Arc::new(db::Db::open(&data_dir)?);
             // The plugin store follows the actual host data directory (including
@@ -142,9 +137,9 @@ pub fn run() {
                 secret_store: secret_system.store,
                 lifecycle_sessions: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
-                #[cfg(any(desktop, target_env = "ohos"))]
+                #[cfg(any(windows, macos, linux, ohos))]
                 pty_sessions: Mutex::new(HashMap::new()),
-                #[cfg(any(desktop, target_env = "ohos"))]
+                #[cfg(any(windows, macos, linux, ohos))]
                 serial_sessions: Mutex::new(HashMap::new()),
                 telnet_sessions: Mutex::new(HashMap::new()),
                 sftp_sessions: Mutex::new(HashMap::new()),
@@ -239,46 +234,46 @@ pub fn run() {
             // session lifecycle
             commands::lifecycle::reconcile_sessions,
             // PTY (desktop hosts and capability-probed HarmonyOS PC)
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::list_shells,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::refresh_shells,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::pty_spawn,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::pty_spawn_connector,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::pty_write,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::pty_resize,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::pty_close,
             // Serial (desktop hosts and capability-probed HarmonyOS PC)
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_get_capabilities,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_list_ports,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_open,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_write,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_close,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_set_dtr,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_set_rts,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_send_break,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::list_serial_profiles,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::get_serial_profile,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::create_serial_profile,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::update_serial_profile,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::delete_serial_profile,
             // Telnet (all platforms — plain TCP)
             commands::telnet::telnet_open,
@@ -307,9 +302,8 @@ pub fn run() {
             commands::sftp::sftp_upload_from,
             commands::sftp::sftp_pick_save_path,
             commands::sftp::sftp_pick_open_path,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::sftp::sftp_pick_folder,
-            #[cfg(any(desktop, target_env = "ohos"))]
             commands::sftp::sftp_pick_open_files,
             commands::sftp::sftp_cancel_transfer,
             commands::files::save_text_file,
@@ -317,12 +311,12 @@ pub fn run() {
             commands::sftp::sftp_rename,
             commands::sftp::sftp_stat,
             // CLI install
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux))]
             commands::cli::cli_status,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux))]
             commands::cli::cli_install,
             // Native multi-window hosts
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::window::open_tab_in_new_window,
             commands::clipboard::clipboard_read,
             commands::clipboard::clipboard_write,

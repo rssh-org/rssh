@@ -7,7 +7,7 @@ use tauri::State;
 
 use crate::error::{locked, AppError, AppResult};
 use crate::state::AppState;
-#[cfg(any(target_env = "ohos", test))]
+#[cfg(any(ohos, test))]
 use crate::state::PendingOperationState;
 use crate::state::{AiSessionRecord, SessionKind, SessionOwner, SessionPhase, SessionRecord};
 
@@ -55,13 +55,13 @@ pub struct ResourceReservation<'a> {
 /// The opening task owns this guard through activation or final native cleanup.
 /// The lifecycle registry owns cancellation and observes completion, including
 /// when a cancelled authorization dialog returns after the close request.
-#[cfg(any(target_env = "ohos", test))]
+#[cfg(any(ohos, test))]
 pub struct PendingOperation {
     cancelled: tokio::sync::watch::Receiver<bool>,
     finished: tokio::sync::watch::Sender<Option<AppResult<()>>>,
 }
 
-#[cfg(any(target_env = "ohos", test))]
+#[cfg(any(ohos, test))]
 impl PendingOperation {
     pub async fn cancelled(&self) {
         let mut cancelled = self.cancelled.clone();
@@ -79,7 +79,7 @@ impl PendingOperation {
     }
 }
 
-#[cfg(any(target_env = "ohos", test))]
+#[cfg(any(ohos, test))]
 impl Drop for PendingOperation {
     fn drop(&mut self) {
         let completed = self.finished.borrow().is_some();
@@ -544,9 +544,9 @@ pub(crate) fn register_prompt_waiter<T>(
 
 pub enum ReadySession {
     Ssh(crate::ssh::client::SessionHandle),
-    #[cfg(any(desktop, target_env = "ohos"))]
+    #[cfg(any(windows, macos, linux, ohos))]
     Pty(crate::terminal::pty::PtyHandle),
-    #[cfg(any(desktop, target_env = "ohos"))]
+    #[cfg(any(windows, macos, linux, ohos))]
     Serial(crate::terminal::serial::SerialHandle),
     Telnet(crate::terminal::telnet::TelnetHandle),
     Sftp(std::sync::Arc<crate::ssh::sftp::SftpHandle>),
@@ -562,9 +562,9 @@ impl ReadySession {
     fn kind(&self) -> SessionKind {
         match self {
             Self::Ssh(_) => SessionKind::Ssh,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             Self::Pty(_) => SessionKind::Pty,
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             Self::Serial(_) => SessionKind::Serial,
             Self::Telnet(_) => SessionKind::Telnet,
             Self::Sftp(_) => SessionKind::Sftp,
@@ -582,9 +582,9 @@ impl ReadySession {
             Self::CleanupProbe { cleaned, .. } => {
                 cleaned.store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             Self::Pty(_) => {}
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             Self::Serial(_) => {}
             Self::Telnet(_) | Self::Sftp(_) => {}
         }
@@ -598,7 +598,7 @@ impl ResourceReservation<'_> {
 
     /// Register cancellation before beginning an asynchronous native open. The
     /// same registry lock orders registration against close and activation.
-    #[cfg(any(target_env = "ohos", test))]
+    #[cfg(any(ohos, test))]
     pub fn pending_operation(&self) -> AppResult<PendingOperation> {
         let mut registry = locked(&self.state.lifecycle_sessions)?;
         let record = registry.get_mut(&self.session_id).ok_or_else(|| {
@@ -744,9 +744,9 @@ fn insert_ready_handle(state: &AppState, session_id: &str, handle: ReadySession)
             sessions.insert(session_id.to_owned(), handle);
             Ok(())
         }
-        #[cfg(any(desktop, target_env = "ohos"))]
+        #[cfg(any(windows, macos, linux, ohos))]
         ReadySession::Pty(handle) => insert_unique(&state.pty_sessions, session_id, handle),
-        #[cfg(any(desktop, target_env = "ohos"))]
+        #[cfg(any(windows, macos, linux, ohos))]
         ReadySession::Serial(handle) => insert_unique(&state.serial_sessions, session_id, handle),
         ReadySession::Telnet(handle) => insert_unique(&state.telnet_sessions, session_id, handle),
         ReadySession::Sftp(handle) => insert_unique(&state.sftp_sessions, session_id, handle),
@@ -900,9 +900,9 @@ pub enum OwnedAiTarget {
         handle: crate::ssh::client::SshHandle,
         profile_id: String,
     },
-    #[cfg(any(desktop, target_env = "ohos"))]
+    #[cfg(any(windows, macos, linux, ohos))]
     PtyShellPath(String),
-    #[cfg(any(desktop, target_env = "ohos"))]
+    #[cfg(any(windows, macos, linux, ohos))]
     Serial,
     Telnet,
 }
@@ -946,7 +946,7 @@ pub fn owned_ready_ai_target(
                     serde_json::json!({ "id": id }),
                 )
             }),
-        #[cfg(any(desktop, target_env = "ohos"))]
+        #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Pty => locked(&state.pty_sessions)?
             .get(id)
             .map(|session| OwnedAiTarget::PtyShellPath(session.shell_path().to_owned()))
@@ -956,7 +956,7 @@ pub fn owned_ready_ai_target(
                     serde_json::json!({ "id": id }),
                 )
             }),
-        #[cfg(any(desktop, target_env = "ohos"))]
+        #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Serial => locked(&state.serial_sessions)?
             .contains_key(id)
             .then_some(OwnedAiTarget::Serial)
@@ -991,11 +991,11 @@ fn take_ready_handle(
         SessionKind::Ssh => locked(&state.sessions)?
             .remove(session_id)
             .map(ReadySession::Ssh),
-        #[cfg(any(desktop, target_env = "ohos"))]
+        #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Pty => locked(&state.pty_sessions)?
             .remove(session_id)
             .map(ReadySession::Pty),
-        #[cfg(any(desktop, target_env = "ohos"))]
+        #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Serial => locked(&state.serial_sessions)?
             .remove(session_id)
             .map(ReadySession::Serial),
@@ -1042,7 +1042,7 @@ pub fn close_resource(
 /// Close an exclusive transport and wait until its native port is released.
 /// Pending opens acknowledge completion only after their own cancellation
 /// cleanup; Ready handles are taken under the same lock that validates owner.
-#[cfg(any(target_env = "ohos", test))]
+#[cfg(any(ohos, test))]
 pub async fn close_resource_and_wait(
     state: &AppState,
     session_id: &str,
@@ -1057,7 +1057,7 @@ pub async fn close_resource_and_wait(
     let waiter_result = close_waiters_for_resource(state, session_id, expected_owner);
     if let Some(handle) = removed {
         match handle {
-            #[cfg(target_env = "ohos")]
+            #[cfg(ohos)]
             ReadySession::Serial(serial) => serial.close().await?,
             handle => handle.close(),
         }
@@ -1414,9 +1414,9 @@ mod tests {
             secret_store,
             lifecycle_sessions: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             pty_sessions: Mutex::new(HashMap::new()),
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             serial_sessions: Mutex::new(HashMap::new()),
             telnet_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),

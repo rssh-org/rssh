@@ -9,18 +9,18 @@ use crate::secret::SecretStore;
 use crate::ssh::client::SessionHandle;
 use crate::ssh::forward::ForwardHandle;
 use crate::ssh::sftp::SftpHandle;
-#[cfg(any(desktop, target_env = "ohos"))]
+#[cfg(any(windows, macos, linux, ohos))]
 use crate::terminal::pty::PtyHandle;
-#[cfg(any(desktop, target_env = "ohos"))]
+#[cfg(any(windows, macos, linux, ohos))]
 use crate::terminal::serial::SerialHandle;
 use crate::terminal::telnet::TelnetHandle;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionKind {
     Ssh,
-    #[cfg(any(desktop, target_env = "ohos"))]
+    #[cfg(any(windows, macos, linux, ohos))]
     Pty,
-    #[cfg(any(desktop, target_env = "ohos"))]
+    #[cfg(any(windows, macos, linux, ohos))]
     Serial,
     Telnet,
     Sftp,
@@ -80,9 +80,9 @@ pub struct AppState {
     /// Typed handle maps below contain Ready handles only.
     pub lifecycle_sessions: Mutex<HashMap<String, SessionRecord>>,
     pub sessions: Mutex<HashMap<String, SessionHandle>>,
-    #[cfg(any(desktop, target_env = "ohos"))]
+    #[cfg(any(windows, macos, linux, ohos))]
     pub pty_sessions: Mutex<HashMap<String, PtyHandle>>,
-    #[cfg(any(desktop, target_env = "ohos"))]
+    #[cfg(any(windows, macos, linux, ohos))]
     pub serial_sessions: Mutex<HashMap<String, SerialHandle>>,
     /// Telnet is plain TCP — available on every platform, no mobile gate.
     pub telnet_sessions: Mutex<HashMap<String, TelnetHandle>>,

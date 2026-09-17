@@ -9,6 +9,7 @@
   import * as cli from "./lib/stores/cli.svelte.ts";
   import * as ai from "./lib/ai/store.svelte.ts";
   import * as runtime from "./lib/stores/runtime.svelte.ts";
+  import * as layout from "./lib/stores/layout.svelte.ts";
   import { errMsg, t } from "./lib/i18n/index.svelte.ts";
 
   // First-launch auto-show: when there are no profiles and no forwards,
@@ -33,7 +34,11 @@
     );
   });
 
-  onMount(() => { void initialize(); });
+  onMount(() => {
+    const stopObservingViewport = layout.observeViewport();
+    void initialize();
+    return stopObservingViewport;
+  });
 
   async function initialize() {
     startupError = "";

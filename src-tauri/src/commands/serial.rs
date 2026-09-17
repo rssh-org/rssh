@@ -7,11 +7,11 @@ use crate::terminal::serial;
 
 #[tauri::command]
 pub async fn serial_get_capabilities() -> AppResult<serial::SerialCapabilities> {
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     {
         serial::capabilities().await
     }
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     {
         Ok(serial::capabilities())
     }
@@ -19,11 +19,11 @@ pub async fn serial_get_capabilities() -> AppResult<serial::SerialCapabilities> 
 
 #[tauri::command]
 pub async fn serial_list_ports() -> AppResult<Vec<String>> {
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     {
         serial::available_ports().await
     }
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     {
         Ok(serial::available_ports())
     }
@@ -45,7 +45,7 @@ pub async fn serial_open(
         SessionKind::Serial,
         SessionOwner::Window(window.label().to_owned()),
     )?;
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     let operation = reservation.pending_operation()?;
     // Turn transport-agnostic serial output into Tauri events. The headless ws
     // server builds a different sink over the same `serial::open`.
@@ -58,7 +58,7 @@ pub async fn serial_open(
                 let _ = app.emit(&format!("serial:close:{id}"), ());
             }
         });
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     let (id, handle) =
         match serial::open(session_id, &port, config, sink, operation.cancelled()).await {
             Ok(opened) => opened,
@@ -67,9 +67,9 @@ pub async fn serial_open(
                 return Err(failure.error);
             }
         };
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     let (id, handle) = serial::open(session_id, &port, config, sink)?;
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     let cleanup = handle.clone();
     let activated = reservation.activate_returned(
         &id,
@@ -78,11 +78,11 @@ pub async fn serial_open(
     if let Err(error) = activated {
         // Cancellation can win after native open completed but before Ready
         // activation. Keep the pending guard alive until cleanup also finishes.
-        #[cfg(target_env = "ohos")]
+        #[cfg(ohos)]
         operation.complete(cleanup.close().await);
         return Err(error);
     }
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     operation.complete(Ok(()));
     Ok(id)
 }
@@ -102,11 +102,11 @@ pub async fn serial_write(
     data: Vec<u8>,
 ) -> AppResult<()> {
     let handle = serial_handle(&state, &session_id)?;
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     {
         handle.write(&data).await
     }
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     {
         handle.write(&data)
     }
@@ -121,11 +121,11 @@ pub async fn serial_set_dtr(
     level: bool,
 ) -> AppResult<()> {
     let handle = serial_handle(&state, &session_id)?;
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     {
         handle.set_dtr(level).await
     }
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     {
         handle.set_dtr(level)
     }
@@ -139,11 +139,11 @@ pub async fn serial_set_rts(
     level: bool,
 ) -> AppResult<()> {
     let handle = serial_handle(&state, &session_id)?;
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     {
         handle.set_rts(level).await
     }
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     {
         handle.set_rts(level)
     }
@@ -155,11 +155,11 @@ pub async fn serial_set_rts(
 #[tauri::command]
 pub async fn serial_send_break(state: State<'_, AppState>, session_id: String) -> AppResult<()> {
     let handle = serial_handle(&state, &session_id)?;
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     {
         handle.send_break().await
     }
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     {
         handle.send_break()
     }
@@ -174,7 +174,7 @@ pub async fn serial_close(
     state: State<'_, AppState>,
     session_id: String,
 ) -> AppResult<()> {
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     {
         crate::commands::lifecycle::close_resource_and_wait(
             &state,
@@ -184,7 +184,7 @@ pub async fn serial_close(
         )
         .await
     }
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     {
         crate::commands::lifecycle::close_resource(
             &state,

@@ -1,6 +1,6 @@
-#[cfg(not(target_env = "ohos"))]
+#[cfg(not(ohos))]
 use std::collections::VecDeque;
-#[cfg(not(target_env = "ohos"))]
+#[cfg(not(ohos))]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use crate::state::AppState;
 use crate::state::{SessionKind, SessionOwner};
 
 /// Maximum recursion depth for the local walker. Mirrors the remote-side cap.
-#[cfg(not(target_env = "ohos"))]
+#[cfg(not(ohos))]
 const LOCAL_WALK_DEPTH_CAP: u32 = 32;
 
 /// RAII：注册 cancel flag 并在 drop 时自动 unregister，无论 streaming 正常返回、
@@ -156,17 +156,17 @@ pub async fn sftp_walk_remote_dir(
 /// only rel_path is used to construct the destination on the remote server.
 #[tauri::command]
 pub async fn walk_local_dir(local_root: String) -> AppResult<Vec<super::files::LocalWalkEntry>> {
-    #[cfg(target_env = "ohos")]
+    #[cfg(ohos)]
     {
         crate::ohos::files::walk_directory(local_root).await
     }
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     {
         walk_filesystem_directory(local_root).await
     }
 }
 
-#[cfg(not(target_env = "ohos"))]
+#[cfg(not(ohos))]
 async fn walk_filesystem_directory(
     local_root: String,
 ) -> AppResult<Vec<super::files::LocalWalkEntry>> {
@@ -223,7 +223,7 @@ async fn walk_filesystem_directory(
 /// Convert the portion of `full` relative to `root` into a '/'-separated string.
 /// On Windows std::path::Component uses '\'; we normalise here and the frontend
 /// converts back to the platform separator when joining.
-#[cfg(not(target_env = "ohos"))]
+#[cfg(not(ohos))]
 fn rel_unix(full: &Path, root: &Path) -> String {
     let stripped = full.strip_prefix(root).unwrap_or(full);
     stripped
@@ -233,7 +233,7 @@ fn rel_unix(full: &Path, root: &Path) -> String {
         .join("/")
 }
 
-#[cfg(all(test, not(target_env = "ohos")))]
+#[cfg(all(test, not(ohos)))]
 mod local_walk_tests {
     use super::*;
 
@@ -327,13 +327,12 @@ pub async fn sftp_pick_open_path(app: tauri::AppHandle) -> AppResult<Option<Stri
 }
 
 /// Select a source or destination directory and retain its platform grant.
-#[cfg(any(desktop, target_env = "ohos"))]
+#[cfg(any(windows, macos, linux, ohos))]
 #[tauri::command]
 pub async fn sftp_pick_folder(app: tauri::AppHandle, write: bool) -> AppResult<Option<String>> {
     super::files::pick_folder(&app, write).await
 }
 
-#[cfg(any(desktop, target_env = "ohos"))]
 #[tauri::command]
 pub async fn sftp_pick_open_files(app: tauri::AppHandle) -> AppResult<Option<Vec<String>>> {
     super::files::pick_open_files(&app).await
@@ -356,7 +355,7 @@ pub async fn sftp_download_to(
     let host = crate::emitter::Host::Tauri(app.clone());
     // Filesystem destinations keep atomic .part + rename. Authorized URIs
     // stream to an owned descriptor because the provider has no rename path.
-    #[cfg(not(target_env = "ohos"))]
+    #[cfg(not(ohos))]
     if let tauri_plugin_fs::FilePath::Path(path) = local_path
         .parse::<tauri_plugin_fs::FilePath>()
         .expect("FilePath::from_str is infallible")

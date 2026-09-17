@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 declare global {
     interface Window {
         /** Installed only by the browser / JetBrains host adapter. */

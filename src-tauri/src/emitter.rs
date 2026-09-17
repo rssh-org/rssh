@@ -86,14 +86,14 @@ impl Host {
     /// useless approval card waiting for user input.
     pub async fn ensure_local_analysis_available(&self) -> Result<(), String> {
         match self {
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             Host::Tauri(_) => {
                 crate::commands::window::ensure_app_window_available(
                     crate::commands::window::AppWindowPurpose::LocalAnalysis,
                 )
                 .await
             }
-            #[cfg(not(any(desktop, target_env = "ohos")))]
+            #[cfg(not(any(windows, macos, linux, ohos)))]
             Host::Tauri(_) => Err("Additional windows are unavailable on this device".into()),
             Host::Headless { .. } => {
                 Err("Local analysis windows are unavailable in headless mode".into())
@@ -111,7 +111,7 @@ impl Host {
         init_script: &str,
     ) -> Result<(), String> {
         match self {
-            #[cfg(any(desktop, target_env = "ohos"))]
+            #[cfg(any(windows, macos, linux, ohos))]
             Host::Tauri(app) => {
                 crate::commands::window::open_app_window(
                     app,
@@ -122,7 +122,7 @@ impl Host {
                 )
                 .await
             }
-            #[cfg(not(any(desktop, target_env = "ohos")))]
+            #[cfg(not(any(windows, macos, linux, ohos)))]
             Host::Tauri(_) => {
                 let _ = (label, title, init_script);
                 Err("Additional windows are unavailable on this device".into())

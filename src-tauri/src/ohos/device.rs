@@ -25,6 +25,25 @@ pub struct DeviceResponse {
 }
 impl_bridge_napi_type!(DeviceResponse, "rssh.runtime.DeviceResponse");
 
+/// Both HAPs share one Rust library. Product device classes are runtime values,
+/// never compile-time OS aliases or frontend layout breakpoints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceClass {
+    Mobile,
+    Desktop,
+    Other,
+}
+
+impl DeviceResponse {
+    pub fn class(&self) -> DeviceClass {
+        match self.device_type.as_str() {
+            "phone" | "tablet" => DeviceClass::Mobile,
+            "2in1" => DeviceClass::Desktop,
+            _ => DeviceClass::Other,
+        }
+    }
+}
+
 pub async fn query() -> AppResult<DeviceResponse> {
     super::app()?
         .bridge()
