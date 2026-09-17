@@ -3,7 +3,6 @@ import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { setImmediate as nextTurn } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -427,7 +426,7 @@ describe("HarmonyOS public serial service", () => {
     let closed = false;
     if (action === "close") {
       closing = h.close().then((result) => { closed = true; return result; });
-      await nextTurn();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
       expect(closed).toBe(false);
     } else if (action === "dispose") await h.plugin.onDispose!();
     else h.context.onCancel.mock.calls[0][0]();
@@ -585,7 +584,7 @@ describe("HarmonyOS API 19 USB serial backend", () => {
     let closed = false;
     if (action === "close") {
       closing = h.close().then((result) => { closed = true; return result; });
-      await nextTurn();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
       expect(closed).toBe(false);
     } else if (action === "dispose") await h.plugin.onDispose!();
     else h.context.onCancel.mock.calls[0][0]();
