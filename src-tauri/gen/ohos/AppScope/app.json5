@@ -2,7 +2,7 @@
   "app": {
     "bundleName": "com.rssh.app",
     "vendor": "",
-    "versionCode": 1,
+    "versionCode": 2,
     "versionName": "0.0.1",
     "icon": "$media:rssh_icon",
     "label": "$string:app_name"

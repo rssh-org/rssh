@@ -23,6 +23,7 @@ export function createReservedSessionAttempt(
   let generation = 0;
   let current: CurrentAttempt | null = null;
   let destroyed = false;
+  let closing: Promise<void> | undefined;
 
   async function closeAndIgnore(sessionId: string): Promise<void> {
     try {
@@ -33,7 +34,12 @@ export function createReservedSessionAttempt(
   }
 
   function requestClose(sessionId: string): void {
-    void closeAndIgnore(sessionId);
+    const task = closeAndIgnore(sessionId);
+    const barrier = closing ? Promise.all([closing, task]).then(() => {}) : task;
+    closing = barrier;
+    void barrier.then(() => {
+      if (closing === barrier) closing = undefined;
+    });
   }
 
   function cancel(): void {
@@ -58,6 +64,16 @@ export function createReservedSessionAttempt(
         pending: true,
       };
       current = attempt;
+
+      // Cancellation invalidates ownership immediately; opening the replacement
+      // waits until the old native handle has released its exclusive resource.
+      // A late result may enqueue another close while this barrier is pending.
+      while (closing) {
+        await closing;
+        if (current !== attempt || generation !== attemptGeneration) {
+          return { kind: "cancelled" };
+        }
+      }
 
       let disposeEvents: () => void;
       try {

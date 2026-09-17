@@ -10,7 +10,7 @@ use openharmony_ability::{
 };
 
 use crate::error::{locked, AppError, AppResult};
-use crate::terminal::serial::{SerialConfig, SerialOut, SerialSink};
+use crate::terminal::serial::{SerialCapabilities, SerialConfig, SerialOut, SerialSink};
 
 #[derive(Clone)]
 struct OutputTarget {
@@ -92,6 +92,14 @@ pub struct PortsResponse {
 }
 impl_bridge_napi_type!(PortsResponse, "rssh.serial.PortsResponse");
 #[napi(object)]
+pub struct CapabilitiesResponse {
+    pub flow_control: bool,
+    pub xany: bool,
+    pub signals: bool,
+    pub baud_rates: Vec<u32>,
+}
+impl_bridge_napi_type!(CapabilitiesResponse, "rssh.serial.CapabilitiesResponse");
+#[napi(object)]
 pub struct OpenRequest {
     pub id: String,
     pub port: String,
@@ -140,6 +148,7 @@ struct SerialSession {
     port: String,
     bridge: BridgeRuntime,
     operations: tokio::sync::Mutex<()>,
+    capabilities: SerialCapabilities,
 }
 
 impl Drop for SerialSession {
@@ -186,6 +195,26 @@ impl SerialHandle {
         Ok(())
     }
 
+    /// Explicit close must finish releasing the native port before the caller
+    /// reconnects. Drop remains the idempotent fallback for window teardown.
+    pub async fn close(&self) -> AppResult<()> {
+        let _operation = self.0.operations.lock().await;
+        self.0
+            .bridge
+            .call_async::<SerialPlugin, PortRequest, EmptyResponse>(
+                "close",
+                PortRequest {
+                    id: self.0.id.clone(),
+                },
+                // A pending system authorization must resolve before its late
+                // native handle can be released. Human decisions have no deadline.
+                BridgeCallOptions::default().without_timeout(),
+            )
+            .await
+            .map_err(operation_error)?;
+        Ok(())
+    }
+
     pub async fn write(&self, data: &[u8]) -> AppResult<()> {
         self.call(
             "write",
@@ -197,6 +226,7 @@ impl SerialHandle {
         .await
     }
     pub async fn set_dtr(&self, level: bool) -> AppResult<()> {
+        self.0.capabilities.require_signals()?;
         self.call(
             "set-dtr",
             LevelRequest {
@@ -207,6 +237,7 @@ impl SerialHandle {
         .await
     }
     pub async fn set_rts(&self, level: bool) -> AppResult<()> {
+        self.0.capabilities.require_signals()?;
         self.call(
             "set-rts",
             LevelRequest {
@@ -217,6 +248,7 @@ impl SerialHandle {
         .await
     }
     pub async fn send_break(&self) -> AppResult<()> {
+        self.0.capabilities.require_signals()?;
         self.call(
             "send-break",
             PortRequest {
@@ -228,6 +260,25 @@ impl SerialHandle {
     pub fn port_name(&self) -> &str {
         &self.0.port
     }
+}
+
+pub async fn capabilities() -> AppResult<SerialCapabilities> {
+    let response = super::app()?
+        .bridge()
+        .map_err(operation_error)?
+        .call_async::<SerialPlugin, EmptyRequest, CapabilitiesResponse>(
+            "capabilities",
+            EmptyRequest {},
+            BridgeCallOptions::default(),
+        )
+        .await
+        .map_err(operation_error)?;
+    Ok(SerialCapabilities {
+        flow_control: response.flow_control,
+        xany: response.xany,
+        signals: response.signals,
+        baud_rates: response.baud_rates,
+    })
 }
 
 pub async fn available_ports() -> AppResult<Vec<String>> {
@@ -244,12 +295,42 @@ pub async fn available_ports() -> AppResult<Vec<String>> {
     Ok(response.ports)
 }
 
+/// An open error and the independent result of releasing any partial native
+/// resource. The lifecycle owner must acknowledge cleanup before retrying.
+pub struct OpenFailure {
+    pub error: AppError,
+    pub cleanup: AppResult<()>,
+}
+
+impl From<AppError> for OpenFailure {
+    fn from(error: AppError) -> Self {
+        Self {
+            error,
+            cleanup: Ok(()),
+        }
+    }
+}
+
 pub async fn open(
     session_id: String,
     port: &str,
     config: SerialConfig,
     sink: SerialSink,
-) -> AppResult<(String, SerialHandle)> {
+    cancellation: impl std::future::Future<Output = ()>,
+) -> Result<(String, SerialHandle), OpenFailure> {
+    tokio::pin!(cancellation);
+    let cancelled = || {
+        AppError::not_found(
+            "session_reservation_lost",
+            serde_json::json!({ "id": session_id }),
+        )
+    };
+    let capabilities = tokio::select! {
+        biased;
+        _ = &mut cancellation => return Err(cancelled().into()),
+        result = capabilities() => result?,
+    };
+    capabilities.validate(&config)?;
     let bridge = super::app()?.bridge().map_err(operation_error)?;
     let id = uuid::Uuid::new_v4().to_string();
     locked(&OUTPUTS)?.insert(
@@ -266,9 +347,12 @@ pub async fn open(
         port: port.to_owned(),
         bridge: bridge.clone(),
         operations: tokio::sync::Mutex::new(()),
+        capabilities,
     }));
-    bridge
-        .call_async::<SerialPlugin, OpenRequest, EmptyResponse>(
+    let opened = tokio::select! {
+        biased;
+        _ = &mut cancellation => Err(cancelled()),
+        result = bridge.call_async::<SerialPlugin, OpenRequest, EmptyResponse>(
             "open",
             OpenRequest {
                 id,
@@ -281,13 +365,18 @@ pub async fn open(
                 xany: config.xany,
             },
             BridgeCallOptions::default().without_timeout(),
-        )
-        .await
-        .map_err(|error| {
+        ) => result.map_err(|error| {
             AppError::pty(
                 "serial_open_failed",
                 serde_json::json!({"port": port, "err": error.to_string()}),
             )
-        })?;
+        }),
+    };
+    if let Err(error) = opened {
+        // If open was dispatched, closing the same attempt cancels its
+        // authorization and joins late cleanup; otherwise close is a no-op.
+        let cleanup = handle.close().await;
+        return Err(OpenFailure { error, cleanup });
+    }
     Ok((session_id, handle))
 }

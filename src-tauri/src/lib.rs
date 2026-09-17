@@ -253,7 +253,9 @@ pub fn run() {
             commands::pty::pty_resize,
             #[cfg(any(desktop, target_env = "ohos"))]
             commands::pty::pty_close,
-            // Serial (desktop only)
+            // Serial (desktop hosts and capability-probed HarmonyOS PC)
+            #[cfg(any(desktop, target_env = "ohos"))]
+            commands::serial::serial_get_capabilities,
             #[cfg(any(desktop, target_env = "ohos"))]
             commands::serial::serial_list_ports,
             #[cfg(any(desktop, target_env = "ohos"))]

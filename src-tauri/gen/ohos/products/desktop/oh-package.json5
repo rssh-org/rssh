@@ -1,0 +1,9 @@
+{
+  "name": "desktop",
+  "version": "1.0.0",
+  "description": "RSSH desktop application entry",
+  "main": "",
+  "dependencies": {
+    "@rssh/runtime": "file:../../common/runtime"
+  }
+}

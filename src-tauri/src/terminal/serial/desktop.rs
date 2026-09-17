@@ -184,8 +184,7 @@ fn open_with_xany(
     Ok(Box::new(tty))
 }
 
-/// Windows: IXANY has no DCB equivalent exposed by the serialport crate, so the
-/// `xany` flag is a no-op. Documented limitation.
+/// Windows has no IXANY equivalent; open() rejects it before reaching here.
 #[cfg(not(unix))]
 fn open_with_xany(
     builder: serialport::SerialPortBuilder,
@@ -201,6 +200,7 @@ pub fn open(
     cfg: SerialConfig,
     sink: SerialSink,
 ) -> AppResult<(String, SerialHandle)> {
+    super::capabilities().validate(&cfg)?;
     let builder = serialport::new(port, cfg.baud_rate)
         .data_bits(map_data_bits(cfg.data_bits))
         .parity(map_parity(&cfg.parity))

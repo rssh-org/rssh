@@ -101,13 +101,13 @@ pub fn delete_user(db: &Db, id: &str) -> AppResult<()> {
 /// `user_locale_label` 是给 LLM 的回复语言提示（如 "English"、"Chinese (Simplified)"），
 /// 由 commands 层根据前端 UI locale 解析后传入。
 ///
-/// `is_mobile` = true 时追加一段移动端能力声明：`analyze_locally` 真·阻断（Tauri 2
-/// mobile 不能 spawn 分析窗口），`download_file` 则是劝退（技术上能跑，但没了
-/// analyze_locally，下到私有目录的文件也用不上），让 LLM 引导用户改用桌面端。
+/// Local analysis availability comes from the same host check used by the tool,
+/// not the build's mobile/desktop classification. SFTP downloads are independent
+/// of window support and always write to the application's diagnosis directory.
 pub fn build_catalog_prompt(
     db: &Db,
     user_locale_label: &str,
-    is_mobile: bool,
+    local_analysis_unavailable: Option<&str>,
 ) -> AppResult<String> {
     let mut s = String::new();
     s.push_str(super::prompts::GENERAL);
@@ -136,15 +136,15 @@ pub fn build_catalog_prompt(
         "\n---\n\n# Response language\n\nRespond to the user in {user_locale_label}. Keep tool-call arguments (cmd, explain, side_effect, etc.) consistent with the user's language too — those are also user-facing.\n"
     ));
 
-    if is_mobile {
-        s.push_str(
-            "\n---\n\n# Runtime: mobile device\n\n\
-             The user is running rssh on a **mobile build** (Android / iOS). On this build the following tools are **unavailable** and MUST NOT be invoked:\n\
-             - `analyze_locally` — the mobile app cannot spawn additional windows.\n\
-             - `download_file` — the mobile app has no native file-save dialog.\n\n\
-             If the diagnosis would normally require either tool (e.g. dump heap to local for MAT, save flamegraph SVG, run pprof locally), **do not attempt them on the remote host as a workaround** — heap dumps and similar long-running probes can cause STW pauses or fill remote disk. \
-             Instead, tell the user plainly that this step needs the desktop build of rssh, and continue the diagnosis with whatever in-session tooling remains useful.\n",
-        );
+    if let Some(reason) = local_analysis_unavailable {
+        s.push_str(&format!(
+            "\n---\n\n# Runtime capabilities\n\n\
+             `analyze_locally` is unavailable on the current host: {reason}. Do not invoke it.\n\
+             `download_file` remains available for an SSH target and saves into the app's diagnosis directory; it does not open a file-save dialog. \
+             Do not download an artifact solely for unavailable local analysis, or assume its returned path is accessible from another app.\n\n\
+             If the diagnosis requires local analysis, explain the missing capability and continue with useful in-session tooling. \
+             Do not move heavy analysis or long-running probes to the remote host as a workaround — they can exhaust its resources or interrupt the diagnosed service.\n"
+        ));
     }
 
     Ok(s)
@@ -187,7 +187,7 @@ mod tests {
     fn catalog_omitted_when_no_user_skills() {
         let db = Db::open_in_memory().unwrap();
 
-        let prompt = build_catalog_prompt(&db, "English", false).unwrap();
+        let prompt = build_catalog_prompt(&db, "English", None).unwrap();
 
         // The catalog section appears only when user skills exist. The
         // `load_skill` tool itself is always listed in general.md regardless.
@@ -208,10 +208,41 @@ mod tests {
         )
         .unwrap();
 
-        let prompt = build_catalog_prompt(&db, "English", false).unwrap();
+        let prompt = build_catalog_prompt(&db, "English", None).unwrap();
 
         assert!(prompt.contains("`user-mine`"));
         assert!(prompt.contains("My workflow"));
         assert!(prompt.contains("load_skill"));
+    }
+
+    #[test]
+    fn local_analysis_capable_hosts_keep_the_analysis_workflow() {
+        let db = Db::open_in_memory().unwrap();
+
+        let prompt = build_catalog_prompt(&db, "English", None).unwrap();
+
+        assert!(prompt.contains("analyze_locally"));
+        assert!(!prompt.contains("# Runtime capabilities"));
+        assert!(!prompt.contains("mobile build"));
+    }
+
+    #[test]
+    fn unavailable_local_analysis_does_not_disable_sftp_downloads() {
+        let db = Db::open_in_memory().unwrap();
+        for reason in [
+            "Additional windows are unavailable on this device",
+            "Local analysis requires a working local terminal",
+            "Local analysis windows are unavailable in headless mode",
+        ] {
+            let prompt = build_catalog_prompt(&db, "English", Some(reason)).unwrap();
+
+            assert!(prompt.contains(&format!(
+                "`analyze_locally` is unavailable on the current host: {reason}"
+            )));
+            assert!(prompt.contains("`download_file` remains available for an SSH target"));
+            assert!(prompt.contains("app's diagnosis directory"));
+            assert!(!prompt.contains("mobile build"));
+            assert!(!prompt.contains("no native file-save dialog"));
+        }
     }
 }

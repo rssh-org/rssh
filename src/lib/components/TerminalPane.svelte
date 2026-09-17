@@ -1130,7 +1130,7 @@
                 }
             } catch (e: any) {
                 if (!isCurrent()) return false;
-                terminal.write(`\x1b[31mSerial open failed: ${e}\x1b[0m\r\n`);
+                terminal.write(`\x1b[31m${errMsg(e)}\x1b[0m\r\n`);
                 terminal.write("\x1b[90mPress any key to retry.\x1b[0m\r\n");
                 disconnected = true;
                 reportInitialConnectionFailure(e);

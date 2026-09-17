@@ -41,12 +41,19 @@ pub enum SessionPhase {
 }
 
 #[derive(Clone, Debug)]
+pub struct PendingOperationState {
+    pub(crate) cancel: tokio::sync::watch::Sender<bool>,
+    pub(crate) finished: tokio::sync::watch::Receiver<Option<crate::error::AppResult<()>>>,
+}
+
+#[derive(Clone, Debug)]
 pub struct SessionRecord {
     pub nonce: uuid::Uuid,
     pub kind: SessionKind,
     pub owner: SessionOwner,
     pub phase: SessionPhase,
     pub parent: Option<String>,
+    pub pending_operation: Option<PendingOperationState>,
 }
 
 #[derive(Clone, Debug)]

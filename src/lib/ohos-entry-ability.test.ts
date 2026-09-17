@@ -5,7 +5,7 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 
 const sourcePath = fileURLToPath(new URL(
-  "../../src-tauri/gen/ohos/entry/src/main/ets/entryability/EntryAbility.ets", import.meta.url,
+  "../../src-tauri/gen/ohos/common/runtime/src/main/ets/ability/RsshAbility.ets", import.meta.url,
 ));
 const code = ts.transpileModule(readFileSync(sourcePath, "utf8"), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
@@ -41,12 +41,12 @@ function harness() {
   modules["../plugins/ClipboardPlugin"] = { ClipboardPlugin: class { id = "rssh.clipboard"; } };
   modules["../plugins/RuntimePlugin"] = { RuntimePlugin: class { id = "rssh.runtime"; } };
   modules["../plugins/SerialPlugin"] = { SerialPlugin: class { id = "rssh.serial"; } };
-  const exports = {} as { default: new () => NativeAbility & { moduleName: string; bridgePlugins: { create: () => { id: string } }[] } };
+  const exports = {} as { RsshAbility: new () => NativeAbility & { moduleName: string; bridgePlugins: { create: () => { id: string } }[] } };
   runInNewContext(code, { exports, require: (name: string) => {
     if (!(name in modules)) throw new Error(`Unexpected native dependency: ${name}`);
     return modules[name];
   } }, { filename: sourcePath });
-  return { ability: new exports.default(), NativeAbility, initContext, createInitContext, applicationContext };
+  return { ability: new exports.RsshAbility(), NativeAbility, initContext, createInitContext, applicationContext };
 }
 
 describe("HarmonyOS framework host", () => {

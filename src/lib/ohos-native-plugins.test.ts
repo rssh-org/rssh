@@ -19,7 +19,7 @@ interface Plugin {
 
 function loadPlugin(name: string, modules: Record<string, unknown>, globals: Record<string, unknown> = {}): Plugin {
   const path = fileURLToPath(new URL(
-    `../../src-tauri/gen/ohos/entry/src/main/ets/plugins/${name}.ets`, import.meta.url,
+    `../../src-tauri/gen/ohos/common/runtime/src/main/ets/plugins/${name}.ets`, import.meta.url,
   ));
   const code = ts.transpileModule(readFileSync(path, "utf8"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },

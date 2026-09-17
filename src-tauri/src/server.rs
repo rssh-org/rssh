@@ -511,6 +511,7 @@ fn dispatch(
         }
 
         // ---- serial console ----
+        "serial_get_capabilities" => Ok(json!(serial::capabilities())),
         "serial_list_ports" => Ok(json!(serial::available_ports())),
         "serial_open" => {
             let port: String = arg(&args, "port")?;

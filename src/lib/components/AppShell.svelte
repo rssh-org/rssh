@@ -6,6 +6,7 @@
     import * as app from "../stores/app.svelte.ts";
     import * as updates from "../stores/updates.svelte.ts";
     import * as syncStatus from "../stores/sync.svelte.ts";
+    import * as serial from "../stores/serial.svelte.ts";
     import HomeScreen from "./HomeScreen.svelte";
     import TerminalSplitLayout from "./TerminalSplitLayout.svelte";
     import ForwardPane from "./ForwardPane.svelte";
@@ -842,6 +843,15 @@
     function openCtxMenu(e: MouseEvent, tab: Tab) {
         e.preventDefault();
         menuCtx = {x: e.clientX, y: e.clientY, tab};
+        if (tab.type === "serial") void loadSerialCapabilities();
+    }
+
+    async function loadSerialCapabilities() {
+        await serial.load();
+        const state = serial.state();
+        if (state.kind === "error") {
+            toast.error(t("serial.capabilities_failed", {error: errMsg(state.error)}));
+        }
     }
 
     /** Detect 10-digit Unix seconds or 13-digit Unix ms timestamp. */
@@ -1005,24 +1015,33 @@
             sections.push(items);
         }
 
-        // Serial control lines: DTR/RTS assert/deassert + break. Runtime ops on
-        // the open port (MCU reset, bootloader entry, break-to-debugger). Greyed
-        // out until the session exists (briefly during connect / after unplug).
+        // Control lines require both an open session and native signal support.
         if (tab.type === "serial") {
             const sid = app.sessionIdForTab(tab.id);
+            const capabilities = serial.capabilities();
+            const state = serial.state();
+            const disabled = !sid || !capabilities?.signals;
             const ctl = (cmd: string, extra: Record<string, unknown> = {}) => () =>
                 void invoke(cmd, {sessionId: sid, ...extra}).catch((e) => toast.error(errMsg(e)));
+            const status: CtxMenuItem[] = [];
+            if (state.kind === "error") {
+                status.push({label: t("serial.capabilities_retry"), onClick: () => void loadSerialCapabilities()});
+            } else if (!capabilities) {
+                status.push({label: t("serial.capabilities_loading"), disabled: true, onClick: () => {}});
+            } else if (!capabilities.signals) {
+                status.push({label: t("serial.signals_unsupported"), disabled: true, onClick: () => {}});
+            }
             sections.push([
                 {
                     label: t("serial.ctl"),
-                    disabled: !sid,
                     onClick: () => {},
                     submenu: [
-                        {label: t("serial.ctl.dtr_assert"), disabled: !sid, onClick: ctl("serial_set_dtr", {level: true})},
-                        {label: t("serial.ctl.dtr_deassert"), disabled: !sid, onClick: ctl("serial_set_dtr", {level: false})},
-                        {label: t("serial.ctl.rts_assert"), disabled: !sid, onClick: ctl("serial_set_rts", {level: true})},
-                        {label: t("serial.ctl.rts_deassert"), disabled: !sid, onClick: ctl("serial_set_rts", {level: false})},
-                        {label: t("serial.ctl.break"), disabled: !sid, onClick: ctl("serial_send_break")},
+                        ...status,
+                        {label: t("serial.ctl.dtr_assert"), disabled, onClick: ctl("serial_set_dtr", {level: true})},
+                        {label: t("serial.ctl.dtr_deassert"), disabled, onClick: ctl("serial_set_dtr", {level: false})},
+                        {label: t("serial.ctl.rts_assert"), disabled, onClick: ctl("serial_set_rts", {level: true})},
+                        {label: t("serial.ctl.rts_deassert"), disabled, onClick: ctl("serial_set_rts", {level: false})},
+                        {label: t("serial.ctl.break"), disabled, onClick: ctl("serial_send_break")},
                     ],
                 },
             ]);

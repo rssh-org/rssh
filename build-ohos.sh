@@ -8,7 +8,31 @@ OHOS_PROJECT="$ROOT/src-tauri/gen/ohos"
 WORKSPACE="$ROOT/src-tauri/target/ohos-workspace"
 STAGING="$ROOT/src-tauri/target/ohos-staging"
 FRONTEND="$ROOT/src-tauri/target/ohos-frontend"
-HAP_DIR="$OHOS_PROJECT/entry/build/default/outputs/default"
+RUNTIME="$OHOS_PROJECT/common/runtime"
+PHONE_HAP_DIR="$OHOS_PROJECT/products/phone/build/default/outputs/default"
+DESKTOP_HAP_DIR="$OHOS_PROJECT/products/desktop/build/default/outputs/default"
+APP_DIR="$OHOS_PROJECT/build/outputs/default"
+SIGN_PACKAGES=true
+PACKAGE_SUFFIX=signed
+APP_NAME=RSSH.app
+
+case "${1:-}" in
+    "") ;;
+    --unsigned)
+        SIGN_PACKAGES=false
+        PACKAGE_SUFFIX=unsigned
+        APP_NAME=RSSH-unsigned.app
+        shift
+        ;;
+    --help|-h)
+        echo "Usage: $0 [--unsigned]"
+        echo "Build separate phone/tablet and desktop HAPs plus one AppGallery .app."
+        echo "Signing is required by default; --unsigned produces emulator acceptance artifacts."
+        exit 0
+        ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+esac
+[ "$#" -eq 0 ] || { echo "Usage: $0 [--unsigned]" >&2; exit 1; }
 
 for cmd in git rustup cargo npm node ohrs; do
     command -v "$cmd" >/dev/null || { echo "Missing: $cmd" >&2; exit 1; }
@@ -65,11 +89,12 @@ export CC_SHELL_ESCAPED_FLAGS=1
 export CFLAGS_aarch64_unknown_linux_ohos="--target=aarch64-linux-ohos --sysroot=\"$NDK/sysroot\""
 export CXXFLAGS_aarch64_unknown_linux_ohos="$CFLAGS_aarch64_unknown_linux_ohos"
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
-export CARGO_TARGET_DIR="$ROOT/src-tauri/target/ohos"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/src-tauri/target/ohos}"
 
 # Discard stale package/staging outputs before doing any build. Every command
 # below must succeed; a Rust/frontend failure must never package an older .so.
-rm -rf "$STAGING" "$FRONTEND" "$HAP_DIR"
+rm -rf "$STAGING" "$FRONTEND" "$PHONE_HAP_DIR" "$DESKTOP_HAP_DIR" "$APP_DIR" \
+    "$OHOS_PROJECT/entry/build/default/outputs/default"
 mkdir -p "$STAGING"
 echo "Building OHOS frontend"
 npm run build -- --outDir "$FRONTEND"
@@ -90,10 +115,10 @@ echo "Building OHOS Rust library (isolated Cargo workspace)"
 [ -s "$FRONTEND/index.html" ] || { echo "Build produced no frontend index.html." >&2; exit 1; }
 
 # ohrs also stages required C++ runtime libraries. Replace the entire ABI set.
-rm -rf "$OHOS_PROJECT/entry/libs/arm64-v8a" "$OHOS_PROJECT/entry/src/main/resources/rawfile"
-mkdir -p "$OHOS_PROJECT/entry/libs" "$OHOS_PROJECT/entry/src/main/resources/rawfile"
-cp -R "$STAGING/arm64-v8a" "$OHOS_PROJECT/entry/libs/"
-cp -R "$FRONTEND/." "$OHOS_PROJECT/entry/src/main/resources/rawfile/"
+rm -rf "$RUNTIME/libs/arm64-v8a" "$RUNTIME/src/main/resources/rawfile"
+mkdir -p "$RUNTIME/libs" "$RUNTIME/src/main/resources/rawfile"
+cp -R "$STAGING/arm64-v8a" "$RUNTIME/libs/"
+cp -R "$FRONTEND/." "$RUNTIME/src/main/resources/rawfile/"
 # HAP metadata follows Tauri's version without dirtying the source manifest.
 # An explicit OHOS_VERSION_CODE overrides the configured monotonic build code.
 APP_CONFIG="$OHOS_PROJECT/AppScope/app.json5"
@@ -107,14 +132,27 @@ trap restore_app_config EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 cp "$WORKSPACE/app.json5" "$APP_CONFIG"
-echo "Assembling OHOS HAP"
+echo "Assembling OHOS phone/tablet and desktop HAPs and App Pack"
 (
     cd "$OHOS_PROJECT"
     "$OHPM_BIN" install
-    node "$HVIGOR_BIN" assembleHap --mode module -p product=default --no-daemon
+    node "$HVIGOR_BIN" assembleApp --mode project -p product=default -p buildMode=release \
+        -p "enableSignTask=$SIGN_PACKAGES" --no-daemon
 )
 
-HAP="$HAP_DIR/entry-default-signed.hap"
-[ -s "$HAP" ] || { echo "No signed HAP produced; configure signing in DevEco Studio." >&2; exit 1; }
-echo "Built: $HAP"
-ls -lh "$HAP"
+PHONE_HAP="$PHONE_HAP_DIR/entry-default-$PACKAGE_SUFFIX.hap"
+DESKTOP_HAP="$DESKTOP_HAP_DIR/desktop-default-$PACKAGE_SUFFIX.hap"
+APP="$APP_DIR/$APP_NAME"
+for package in "$PHONE_HAP" "$DESKTOP_HAP" "$APP"; do
+    if [ ! -s "$package" ]; then
+        echo "Missing $PACKAGE_SUFFIX package: $package" >&2
+        if [ "$SIGN_PACKAGES" = true ]; then
+            echo "Configure signing in DevEco Studio; unsigned packages are accepted only with --unsigned." >&2
+        fi
+        exit 1
+    fi
+done
+echo "Built phone/tablet HAP: $PHONE_HAP"
+echo "Built desktop HAP: $DESKTOP_HAP"
+echo "Built App Pack: $APP"
+ls -lh "$PHONE_HAP" "$DESKTOP_HAP" "$APP"

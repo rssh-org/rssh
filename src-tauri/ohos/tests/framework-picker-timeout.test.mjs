@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import test from 'node:test';
@@ -11,24 +12,32 @@ import ts from 'typescript';
 const ability = fileURLToPath(new URL('../../target/ohos-sources/ability/', import.meta.url));
 const ets = path.join(ability, 'native_ability/src/main/ets');
 
-async function runtime(useSerial = false) {
+async function runtime(useSerial = false, serialApi = 26) {
   let now = 0;
   let nextTimer = 0;
   const timers = new Map();
   const globals = {
     console,
-    canIUse: () => true,
+    canIUse: (capability) => capability === (serialApi >= 26
+      ? 'SystemCapability.BusManager.Serial' : 'SystemCapability.USB.USBManager.Serial'),
     setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, { callback, at: now + delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
   };
   function compile(file, dependencies = {}, suffix = '') {
-    const source = readFileSync(path.isAbsolute(file) ? file : path.join(ets, file), 'utf8') + suffix;
+    const filename = path.isAbsolute(file) ? file : path.join(ets, file);
+    const source = readFileSync(filename, 'utf8') + suffix;
     const output = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
     const exports = {};
-    vm.runInNewContext(output, { ...globals, exports, require: (name) => dependencies[name] });
+    vm.runInNewContext(output, { ...globals, exports, require: (name) => {
+      if (Object.hasOwn(dependencies, name)) return dependencies[name];
+      if (name.startsWith('.')) return compile(path.resolve(path.dirname(filename), `${name}.ets`), dependencies);
+      throw new Error(`Unexpected native dependency: ${name}`);
+    } }, { filename });
     return exports;
   }
   const { BridgeHost } = compile('bridge/BridgeHost.ets', {
+    '@ohos.arkui.node': {},
+    '@ohos.window': { default: {} },
     '../runtime/SerialTaskQueue': compile('runtime/SerialTaskQueue.ets'),
     '../runtime/CancellableTaskScope': compile('runtime/CancellableTaskScope.ets'),
   }, '\nexport { BridgeHost };');
@@ -49,18 +58,58 @@ async function runtime(useSerial = false) {
   };
   let closed = 0;
   let listeners = 0;
+  let opened = 0;
+  let configured;
+  let finishRead;
+  let readEntered;
+  let readCompletions = 0;
+  const reading = new Promise((resolve) => { readEntered = resolve; });
+  let closeEntered;
+  const nativeClosing = new Promise((resolve) => { closeEntered = resolve; });
+  let closeGate;
+  let releaseClose;
+  const writeSizes = [];
+  const writeChunks = [];
+  const acceptedBytes = [];
   if (useSerial) {
     const port = {
       portInfo: { portName: '/dev/ttyACM0' },
-      async open() { entered(); await selection; },
-      async close() { closed++; },
+      async open() { entered(); await selection; opened++; },
+      async close() { closed++; closeEntered(); if (closeGate) await closeGate; },
       onDataRead() { listeners++; },
       onDisconnect() { listeners++; },
     };
-    const source = fileURLToPath(new URL('../../gen/ohos/entry/src/main/ets/plugins/SerialPlugin.ets', import.meta.url));
-    const { SerialPlugin } = compile(source, {
-      '@ohos.deviceInfo': { default: { sdkApiVersion: 26 } },
+    const nativeModules = serialApi >= 26 ? {
       '@ohos.busManager.serial': { default: { getSerialPortList: async () => [port] } },
+    } : {
+      '@ohos.usbManager.serial': { default: {
+        getPortList: () => [{ portId: 7, deviceName: '/dev/ttyACM0' }],
+        hasSerialRight: () => false,
+        async requestSerialRight() { entered(); return await selection; },
+        open() { opened++; },
+        close() { closed++; },
+        setAttribute(_id, attribute) { configured = attribute; },
+        read(_id, _buffer, timeout) {
+          assert.equal(timeout, 250);
+          return new Promise((resolve) => {
+            finishRead = (length) => { readCompletions++; resolve(length); };
+            readEntered();
+          });
+        },
+        async write(_id, bytes, timeout) {
+          assert.equal(timeout, 1000);
+          assert.ok(bytes.length <= 4096);
+          writeChunks.push(Array.from(bytes));
+          const length = Math.min(writeSizes.shift() ?? bytes.length, bytes.length);
+          acceptedBytes.push(...Array.from(bytes.slice(0, length)));
+          return length;
+        },
+      } },
+    };
+    const source = fileURLToPath(new URL('../../gen/ohos/common/runtime/src/main/ets/plugins/SerialPlugin.ets', import.meta.url));
+    const { SerialPlugin } = compile(source, {
+      ...nativeModules,
+      '@ohos.deviceInfo': { default: { sdkApiVersion: serialApi } },
       '@ohos-rs/ability': { AsyncPluginBase: class {
         execution = 'async';
         attachContext(value) { this.context = value; }
@@ -82,24 +131,38 @@ async function runtime(useSerial = false) {
   host.attachEventSink(() => ({}), () => {});
   await host.activateAbility({ kind: 'ability-create', payload: {} });
   return {
-    host, started, complete,
+    host, started, complete, reading, nativeClosing,
     context: () => context,
     cancellations: () => cancellations,
     closed: () => closed,
+    opened: () => opened,
+    configured: () => configured,
+    readCompletions: () => readCompletions,
+    completeRead: (length = 0) => { assert.ok(finishRead, 'a native read must be pending'); finishRead(length); },
+    holdNativeClose: () => { closeGate = new Promise((resolve) => { releaseClose = resolve; }); },
+    completeNativeClose: () => { assert.ok(releaseClose, 'a native close must be held'); releaseClose(); },
+    writeSizes: (...sizes) => writeSizes.push(...sizes),
+    writeChunks: () => writeChunks,
+    acceptedBytes: () => acceptedBytes,
     listeners: () => listeners,
-    invoke: (timeout) => useSerial
+    invoke: (timeout, settings = {}) => useSerial
       ? host.invokeAsync(plugin.id, 'open', 'rssh.serial.OpenRequest', 'rssh.serial.EmptyResponse', {
         id: 'attempt-1', port: '/dev/ttyACM0', baudRate: 115200, dataBits: 8,
         parity: 'none', stopBits: 1, flowControl: 'none', xany: false,
+        ...settings,
       }, timeout)
       : host.invokeAsync(plugin.id, 'file-dialog', 'ohos.files.DialogOptions', 'ohos.files.DialogResponse', {}, timeout),
-    closeSerial: () => host.invokeAsync(plugin.id, 'close', 'rssh.serial.PortRequest', 'rssh.serial.EmptyResponse', { id: 'attempt-1' }, 15_000),
+    closeSerial: (id = 'attempt-1') => host.invokeAsync(plugin.id, 'close', 'rssh.serial.PortRequest', 'rssh.serial.EmptyResponse', { id }, 0),
+    writeSerial: (data) => host.invokeAsync(plugin.id, 'write', 'rssh.serial.WriteRequest', 'rssh.serial.EmptyResponse', { id: 'attempt-1', data }, 15_000),
+    serialCapabilities: () => host.invokeAsync(plugin.id, 'capabilities', 'rssh.serial.EmptyRequest', 'rssh.serial.CapabilitiesResponse', {}, 15_000),
     async advance(milliseconds) {
       now += milliseconds;
       for (const [id, timer] of Array.from(timers)) {
         if (timer.at <= now) { timers.delete(id); timer.callback(); }
       }
-      for (let i = 0; i < 10; i++) await Promise.resolve();
+      // Drain the current microtask queue without advancing the native mocks'
+      // clock. A fixed number of Promise ticks depends on bridge await depth.
+      await nextTurn();
     },
   };
 }
@@ -158,9 +221,25 @@ for (const close of ['native-close', 'ability-close']) {
     const rejected = assert.rejects(pending, /cancelled|closing/);
     await r.started;
     await r.advance(120_000);
-    if (close === 'native-close') await r.closeSerial();
-    else r.host.beginClosing();
+    let closing;
+    let closeSettled = false;
+    if (close === 'native-close') {
+      r.holdNativeClose();
+      closing = r.closeSerial();
+      closing.then(() => { closeSettled = true; }, () => { closeSettled = true; });
+      await r.advance(120_000);
+      assert.equal(closeSettled, false, 'close must wait while authorization is pending');
+    } else r.host.beginClosing();
     r.complete();
+    if (closing) {
+      await r.nativeClosing;
+      await r.advance(0);
+      assert.equal(r.opened(), 1);
+      assert.equal(r.listeners(), 0);
+      assert.equal(closeSettled, false, 'late-open cleanup must finish before close resolves');
+      r.completeNativeClose();
+      await closing;
+    }
     await rejected;
     // The bridge can reject on cancellation before the system authorization
     // resolves. Let the native plugin finish its late-result cleanup as well.
@@ -170,6 +249,125 @@ for (const close of ['native-close', 'ability-close']) {
     await r.host.dispose();
   });
 }
+
+for (const close of ['native-close', 'ability-close']) {
+  test(`API 19 authorization cancelled by ${close} never opens the port after a late grant`, async () => {
+    const r = await runtime(true, 19);
+    const pending = r.invoke(0);
+    const rejected = assert.rejects(pending, /cancelled|closing/);
+    await r.started;
+    await r.advance(120_000);
+    assert.equal(r.context().isCancelled(), false);
+    let closing;
+    let closeSettled = false;
+    if (close === 'native-close') {
+      closing = r.closeSerial();
+      closing.then(() => { closeSettled = true; }, () => { closeSettled = true; });
+      await r.advance(120_000);
+      assert.equal(closeSettled, false, 'close must wait while authorization is pending');
+    } else r.host.beginClosing();
+    r.complete(true);
+    if (closing) await closing;
+    await rejected;
+    await r.advance(0);
+    assert.equal(r.opened(), 0);
+    assert.equal(r.closed(), 0);
+    assert.equal(r.readCompletions(), 0);
+    await r.host.dispose();
+  });
+}
+
+for (const api of [19, 26]) {
+  test(`API ${api} Ability disposal finishes before authorization and cleans up a late grant`, async () => {
+    const r = await runtime(true, api);
+    const pending = r.invoke(0);
+    const rejected = assert.rejects(pending, /cancelled|closing/);
+    await r.started;
+    await r.host.dispose();
+    await rejected;
+    assert.equal(r.opened(), 0);
+    assert.equal(r.closed(), 0);
+
+    r.complete(true);
+    await r.advance(0);
+    assert.equal(r.opened(), api >= 26 ? 1 : 0);
+    assert.equal(r.closed(), api >= 26 ? 1 : 0);
+    assert.equal(r.listeners(), 0);
+  });
+}
+
+test('API 19 long authorization preserves stop-bit encoding and short writes without dropping or repeating bytes', async () => {
+  const r = await runtime(true, 19);
+  const capabilities = await r.serialCapabilities();
+  assert.equal(capabilities.flowControl, false);
+  assert.equal(capabilities.xany, false);
+  assert.equal(capabilities.signals, false);
+  assert.equal(capabilities.baudRates.includes(115200), true);
+  assert.equal(capabilities.baudRates.includes(4000000), true);
+  assert.equal(capabilities.baudRates.every((rate) => rate > 0), true);
+  const pending = r.invoke(0, { stopBits: 2 });
+  let settled = false;
+  pending.then(() => { settled = true; }, () => { settled = true; });
+  await r.started;
+  await r.advance(120_000);
+  assert.equal(settled, false);
+  r.complete(true);
+  await pending;
+  await r.reading;
+  assert.equal(r.configured().stopBits, 1);
+  const bytes = Array.from({ length: 5000 }, (_, index) => index % 256);
+  r.writeSizes(3, 1024);
+  await r.writeSerial(bytes);
+  assert.deepEqual(r.acceptedBytes(), bytes);
+  assert.equal(r.writeChunks().length, 3);
+  assert.equal(r.writeChunks().every((chunk) => chunk.length <= 4096), true);
+  const closing = r.closeSerial();
+  await r.advance(0);
+  r.completeRead();
+  await closing;
+  assert.equal(r.closed(), 1);
+  await r.host.dispose();
+});
+
+test('API 19 close keeps the device reserved until the old asynchronous read finishes', async () => {
+  const r = await runtime(true, 19);
+  const pending = r.invoke(0);
+  await r.started;
+  r.complete(true);
+  await pending;
+  await r.reading;
+  const closing = r.closeSerial();
+  let closed = false;
+  closing.then(() => { closed = true; }, () => { closed = true; });
+  await r.advance(0);
+  assert.equal(closed, false);
+  assert.equal(r.closed(), 0);
+  await assert.rejects(r.invoke(0, { id: 'attempt-2' }), /already in use/);
+  r.completeRead();
+  await closing;
+  assert.equal(r.readCompletions(), 1);
+  assert.equal(r.closed(), 1);
+
+  // A later attempt can now own the numeric native port. Closing the old
+  // attempt must not close that new owner or consume its pending read.
+  await r.invoke(0, { id: 'attempt-2' });
+  assert.equal(r.opened(), 2);
+  await r.closeSerial('attempt-1');
+  assert.equal(r.closed(), 1);
+  const closingAgain = r.closeSerial('attempt-2');
+  await r.advance(0);
+  r.completeRead();
+  await closingAgain;
+  assert.equal(r.closed(), 2);
+  await r.host.dispose();
+});
+
+test('API 19 rejects unsupported flow control before asking for authorization', async () => {
+  const r = await runtime(true, 19);
+  await assert.rejects(r.invoke(0, { flowControl: 'hardware' }), /does not support flow control/);
+  assert.equal(r.opened(), 0);
+  await r.host.dispose();
+});
 
 test('ordinary bridge operations retain their bounded deadline and cancellation signal', async () => {
   const r = await runtime();
@@ -206,4 +404,6 @@ test('Rust human authorization calls opt into no deadline while bounded policy s
   assert.match(facade, /"file-dialog",\s*options,\s*BridgeCallOptions::default\(\)\.without_timeout\(\)/);
   const serial = readFileSync(new URL('../../src/ohos/serial.rs', import.meta.url), 'utf8');
   assert.match(serial.slice(serial.indexOf('pub async fn open(')), /BridgeCallOptions::default\(\)\.without_timeout\(\)/);
+  const serialClose = serial.slice(serial.indexOf('pub async fn close('), serial.indexOf('pub async fn write('));
+  assert.match(serialClose, /BridgeCallOptions::default\(\)\.without_timeout\(\)/);
 });

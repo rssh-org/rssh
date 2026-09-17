@@ -1,6 +1,6 @@
 # Dependencies and local SDK/IDE state.
-/node_modules
-/oh_modules
+**/node_modules
+**/oh_modules
 /local.properties
 /.idea
 
@@ -13,7 +13,10 @@
 /.clang-tidy
 **/.test
 /.appanalyzer
+.preview
+/common/runtime/BuildProfile.ets
 *.log
+*.app
 *.hap
 *.hsp
 *.har
@@ -28,7 +31,10 @@
 *.keystore
 
 # Build artifacts, same convention as gen/android — restaged by build-ohos.sh
-/entry/src/main/resources/rawfile
+/common/runtime/src/main/resources/rawfile
+/common/runtime/libs
+# Obsolete local output from the former single-HAP project.
+/entry/
 /assets/bin
 
 # Framework HAR sources are staged from the pinned checkout by prepare-ohos.

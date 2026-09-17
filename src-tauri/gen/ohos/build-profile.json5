@@ -12,6 +12,9 @@
             "caseSensitiveCheck": true,
             "useNormalizedOHMUrl": true
           }
+        },
+        "output": {
+          "artifactName": "RSSH"
         }
       }
     ],
@@ -27,7 +30,7 @@
   "modules": [
     {
       "name": "entry",
-      "srcPath": "./entry",
+      "srcPath": "./products/phone",
       "targets": [
         {
           "name": "default",
@@ -36,6 +39,22 @@
           ]
         }
       ]
+    },
+    {
+      "name": "desktop",
+      "srcPath": "./products/desktop",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "rssh_runtime",
+      "srcPath": "./common/runtime"
     },
     {
       "name": "native_ability",
