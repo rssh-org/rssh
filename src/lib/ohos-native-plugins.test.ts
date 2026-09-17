@@ -3,6 +3,7 @@ import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -18,27 +19,37 @@ interface Plugin {
 }
 
 function loadPlugin(name: string, modules: Record<string, unknown>, globals: Record<string, unknown> = {}): Plugin {
-  const path = fileURLToPath(new URL(
+  const entry = fileURLToPath(new URL(
     `../../src-tauri/gen/ohos/common/runtime/src/main/ets/plugins/${name}.ets`, import.meta.url,
   ));
-  const code = ts.transpileModule(readFileSync(path, "utf8"), {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  }).outputText;
-  const exports = {} as Record<string, new () => Plugin>;
-  runInNewContext(code, {
-    ...globals,
-    exports,
-    require: (id: string) => {
-      if (id === "@ohos-rs/ability") return { AsyncPluginBase: class {
-        private context?: ReturnType<typeof callContext>;
-        attachContext(context: ReturnType<typeof callContext>) { this.context = context; }
-        getContext() { return this.context; }
-      } };
-      if (!(id in modules)) throw new Error(`Unexpected platform dependency: ${id}`);
-      return modules[id];
-    },
-  }, { filename: path });
-  return new exports[name]();
+  const cache = new Map<string, Record<string, unknown>>();
+  function loadModule(filename: string): Record<string, unknown> {
+    const cached = cache.get(filename);
+    if (cached) return cached;
+    const exports: Record<string, unknown> = {};
+    cache.set(filename, exports);
+    const code = ts.transpileModule(readFileSync(filename, "utf8"), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+    }).outputText;
+    runInNewContext(code, {
+      ...globals,
+      exports,
+      require: (id: string) => {
+        // Execute the real plugin/backend graph; only system APIs are mocked.
+        if (id.startsWith(".")) return loadModule(path.resolve(path.dirname(filename), `${id}.ets`));
+        if (id === "@ohos-rs/ability") return { AsyncPluginBase: class {
+          private context?: ReturnType<typeof callContext>;
+          attachContext(context: ReturnType<typeof callContext>) { this.context = context; }
+          getContext() { return this.context; }
+        } };
+        if (!(id in modules)) throw new Error(`Unexpected platform dependency: ${id}`);
+        return modules[id];
+      },
+    }, { filename });
+    return exports;
+  }
+  const Constructor = loadModule(entry)[name] as new () => Plugin;
+  return new Constructor();
 }
 
 function callContext() {
@@ -343,7 +354,9 @@ function serialHarness(apiVersion = 26, capability = true) {
     moduleLoads++;
     return { default: { getSerialPortList: async () => [port] } };
   } });
-  const plugin = loadPlugin("SerialPlugin", modules, { canIUse: () => capability });
+  const plugin = loadPlugin("SerialPlugin", modules, {
+    canIUse: (name: string) => capability && name === "SystemCapability.BusManager.Serial",
+  });
   plugin.attachContext!(context);
   const invoke = (action: string, type: string, value: unknown) => plugin.invokeAsync(action, { typeName: `rssh.serial.${type}`, value }, context);
   const config = { id: "attempt-1", port: "/dev/ttyACM0", baudRate: 115200, dataBits: 8, stopBits: 1, parity: "none", flowControl: "hardware", xany: true };
@@ -353,7 +366,7 @@ function serialHarness(apiVersion = 26, capability = true) {
 }
 
 describe("HarmonyOS public serial service", () => {
-  it.each([[25, true], [26, false]])("never loads the API 26 module on unsupported devices (%s,%s)", async (version, capability) => {
+  it.each([[25, true], [26, false]])("never loads the API 26 module without both its API level and syscap (%s,%s)", async (version, capability) => {
     const h = serialHarness(version as number, capability as boolean);
     expect(h.moduleLoads()).toBe(0);
     await expect(h.invoke("list", "EmptyRequest", {})).rejects.toThrow("not supported");
@@ -410,11 +423,17 @@ describe("HarmonyOS public serial service", () => {
     const opening = h.open();
     const rejected = expect(opening).rejects.toThrow("cancelled");
     await vi.waitFor(() => expect(h.port.open).toHaveBeenCalledOnce());
-    if (action === "close") await h.close();
-    else if (action === "dispose") await h.plugin.onDispose!();
+    let closing: Promise<TypedValue> | undefined;
+    let closed = false;
+    if (action === "close") {
+      closing = h.close().then((result) => { closed = true; return result; });
+      await nextTurn();
+      expect(closed).toBe(false);
+    } else if (action === "dispose") await h.plugin.onDispose!();
     else h.context.onCancel.mock.calls[0][0]();
     authorize();
     await rejected;
+    await closing;
     expect(h.port.close).toHaveBeenCalledOnce();
     expect(h.port.onDataRead).not.toHaveBeenCalled();
   });
@@ -454,11 +473,177 @@ describe("HarmonyOS public serial service", () => {
     const closing = h.close();
     let disposed = false;
     const disposing = h.plugin.onDispose!().then(() => { disposed = true; });
-    await Promise.resolve();
+    await vi.waitFor(() => expect(h.port.close).toHaveBeenCalledOnce());
     expect(disposed).toBe(false);
-    expect(h.port.close).toHaveBeenCalledOnce();
     finishClose();
     await Promise.all([closing, disposing]);
     expect(disposed).toBe(true);
+  });
+});
+
+function usbSerialHarness(apiVersion = 19, capability = true) {
+  const context = callContext();
+  const pendingReads: { buffer: Uint8Array; resolve: (length: number) => void }[] = [];
+  const api = {
+    getPortList: vi.fn(() => [{ portId: 7, deviceName: "/dev/ttyACM0" }]),
+    hasSerialRight: vi.fn((_id: number) => false),
+    requestSerialRight: vi.fn(async (_id: number) => true),
+    open: vi.fn((_id: number) => {}),
+    close: vi.fn((_id: number) => {}),
+    setAttribute: vi.fn((_id: number, _config: unknown) => {}),
+    read: vi.fn((_id: number, buffer: Uint8Array, _timeout: number) => new Promise<number>((resolve) => {
+      pendingReads.push({ buffer, resolve });
+    })),
+    write: vi.fn(async (_id: number, bytes: Uint8Array, _timeout: number) => bytes.length),
+  };
+  const moduleLoads: string[] = [];
+  const modules: Record<string, unknown> = {
+    "@ohos.deviceInfo": { default: { sdkApiVersion: apiVersion } },
+  };
+  Object.defineProperty(modules, "@ohos.usbManager.serial", { get: () => {
+    moduleLoads.push("usb");
+    return { default: api };
+  } });
+  const plugin = loadPlugin("SerialPlugin", modules, {
+    canIUse: (name: string) => capability && name === "SystemCapability.USB.USBManager.Serial",
+    setTimeout,
+  });
+  plugin.attachContext!(context);
+  const invoke = (action: string, type: string, value: unknown) => plugin.invokeAsync(action, { typeName: `rssh.serial.${type}`, value }, context);
+  const config = { id: "usb-attempt-1", port: "/dev/ttyACM0", baudRate: 115200, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none", xany: false };
+  const open = () => invoke("open", "OpenRequest", config);
+  const close = () => invoke("close", "PortRequest", { id: config.id });
+  const completeRead = (data: number[]) => {
+    const pending = pendingReads.shift();
+    expect(pending, "a native USB read must be in flight").toBeDefined();
+    pending!.buffer.set(data);
+    pending!.resolve(data.length);
+  };
+  onTestFinished(async () => {
+    const disposing = plugin.onDispose!();
+    for (const pending of pendingReads.splice(0)) pending.resolve(0);
+    await disposing;
+  });
+  return { api, context, plugin, moduleLoads, config, invoke, open, close, completeRead };
+}
+
+describe("HarmonyOS API 19 USB serial backend", () => {
+  it.each([[18, true], [19, false]])("does not load the native module without its API level and syscap (%s,%s)", async (version, capability) => {
+    const h = usbSerialHarness(version as number, capability as boolean);
+    await expect(h.invoke("list", "EmptyRequest", {})).rejects.toThrow("not supported");
+    expect(h.moduleLoads).toEqual([]);
+  });
+
+  it.each([19, 25, 26])("selects USB serial on API %s when BusManager is unavailable", async (version) => {
+    const h = usbSerialHarness(version);
+    expect(h.moduleLoads).toEqual([]);
+    await expect(h.invoke("list", "EmptyRequest", {})).resolves.toEqual({
+      typeName: "rssh.serial.PortsResponse", value: { ports: ["/dev/ttyACM0"] },
+    });
+    const result = await h.invoke("capabilities", "EmptyRequest", {});
+    expect(result.value).toMatchObject({ flowControl: false, xany: false, signals: false, baudRates: expect.arrayContaining([115200, 4000000]) });
+    expect(h.moduleLoads).toEqual(["usb"]);
+  });
+
+  it.each([
+    { stopBits: 1, parity: "none", nativeStopBits: 0, nativeParity: 0 },
+    { stopBits: 2, parity: "odd", nativeStopBits: 1, nativeParity: 1 },
+    { stopBits: 1, parity: "even", nativeStopBits: 0, nativeParity: 2 },
+  ])("authorizes and maps API 19 enum values ($stopBits stop bits, $parity parity)", async (settings) => {
+    const h = usbSerialHarness();
+    h.config.stopBits = settings.stopBits;
+    h.config.parity = settings.parity;
+    await h.open();
+    expect(h.api.requestSerialRight).toHaveBeenCalledExactlyOnceWith(7);
+    expect(h.api.open).toHaveBeenCalledExactlyOnceWith(7);
+    expect(h.api.setAttribute).toHaveBeenCalledExactlyOnceWith(7, {
+      baudRate: 115200, dataBits: 8, stopBits: settings.nativeStopBits, parity: settings.nativeParity,
+    });
+    expect(h.api.read).toHaveBeenCalledWith(7, expect.anything(), 250);
+    expect(h.api.read.mock.calls[0][1].length).toBe(8192);
+  });
+
+  it.each([
+    { field: "flowControl", value: "hardware", error: "flow control" },
+    { field: "xany", value: true, error: "XANY" },
+    { field: "baudRate", value: 12345, error: "baud rate" },
+  ])("rejects unsupported $field before native authorization", async ({ field, value, error }) => {
+    const h = usbSerialHarness();
+    await expect(h.invoke("open", "OpenRequest", { ...h.config, [field]: value })).rejects.toThrow(error);
+    expect(h.moduleLoads).toEqual([]);
+    expect(h.api.requestSerialRight).not.toHaveBeenCalled();
+    expect(h.api.open).not.toHaveBeenCalled();
+  });
+
+  it.each(["close", "dispose", "cancel"])("never opens a port granted after %s during authorization", async (action) => {
+    const h = usbSerialHarness();
+    let authorize!: (granted: boolean) => void;
+    h.api.requestSerialRight.mockImplementation(() => new Promise<boolean>((resolve) => { authorize = resolve; }));
+    const rejected = expect(h.open()).rejects.toThrow("cancelled");
+    await vi.waitFor(() => expect(h.api.requestSerialRight).toHaveBeenCalledOnce());
+    let closing: Promise<TypedValue> | undefined;
+    let closed = false;
+    if (action === "close") {
+      closing = h.close().then((result) => { closed = true; return result; });
+      await nextTurn();
+      expect(closed).toBe(false);
+    } else if (action === "dispose") await h.plugin.onDispose!();
+    else h.context.onCancel.mock.calls[0][0]();
+    authorize(true);
+    await rejected;
+    await closing;
+    expect(h.api.open).not.toHaveBeenCalled();
+    expect(h.api.close).not.toHaveBeenCalled();
+    expect(h.api.read).not.toHaveBeenCalled();
+  });
+
+  it("closes a partially opened port when configuring its attributes fails", async () => {
+    const h = usbSerialHarness();
+    h.api.setAttribute.mockImplementation(() => { throw new Error("unsupported device settings"); });
+    await expect(h.open()).rejects.toThrow("unsupported device settings");
+    expect(h.api.open).toHaveBeenCalledExactlyOnceWith(7);
+    expect(h.api.close).toHaveBeenCalledExactlyOnceWith(7);
+    expect(h.api.read).not.toHaveBeenCalled();
+  });
+
+  it("forwards binary reads and waits for an old read before releasing the device reservation", async () => {
+    const h = usbSerialHarness();
+    await h.open();
+    h.completeRead([0, 27, 255]);
+    await vi.waitFor(() => expect(h.context.invokeNativeSync).toHaveBeenCalledExactlyOnceWith(
+      "serial-output", "rssh.serial.OutputEvent", "rssh.serial.EmptyResponse", { id: h.config.id, data: [0, 27, 255], closed: false },
+    ));
+    const closing = h.close();
+    await expect(h.invoke("open", "OpenRequest", { ...h.config, id: "usb-attempt-2" })).rejects.toThrow("already in use");
+    expect(h.api.close).not.toHaveBeenCalled();
+    h.completeRead([99]);
+    await closing;
+    expect(h.context.invokeNativeSync).toHaveBeenCalledOnce();
+    expect(h.api.close).toHaveBeenCalledExactlyOnceWith(7);
+    await h.invoke("open", "OpenRequest", { ...h.config, id: "usb-attempt-2" });
+    await h.close(); // The old attempt must not close the new owner.
+    expect(h.api.close).toHaveBeenCalledOnce();
+    expect(h.api.open).toHaveBeenCalledTimes(2);
+  });
+
+  it("writes every byte through the API 19 numeric port with bounded chunks and timeout", async () => {
+    const h = usbSerialHarness();
+    await h.open();
+    const accepted: number[] = [];
+    h.api.write.mockImplementation(async (id, bytes, timeout) => {
+      expect(id).toBe(7);
+      expect(timeout).toBe(1000);
+      expect(bytes.length).toBeLessThanOrEqual(4096);
+      const written = Math.min(bytes.length, 1234);
+      accepted.push(...bytes.slice(0, written));
+      return written;
+    });
+    const data = Array.from({ length: 10000 }, (_, index) => index % 256);
+    await h.invoke("write", "WriteRequest", { id: h.config.id, data });
+    expect(accepted).toEqual(data);
+    for (const action of ["set-dtr", "set-rts"]) {
+      await expect(h.invoke(action, "LevelRequest", { id: h.config.id, level: true })).rejects.toThrow("does not support");
+    }
+    await expect(h.invoke("send-break", "PortRequest", { id: h.config.id })).rejects.toThrow("does not support");
   });
 });

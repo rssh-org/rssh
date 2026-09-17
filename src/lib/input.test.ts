@@ -46,4 +46,24 @@ describe("context menu source", () => {
     target.dispatchEvent(Object.assign(new Event("pointerdown"), { pointerType: "touch" }));
     expect(isTouchContextMenu(menu)).toBe(false);
   });
+
+  it("detaches both listeners before tracking input on a new target", () => {
+    const oldTarget = new EventTarget();
+    const cleanupOld = installInputTracking(oldTarget as Document);
+    oldTarget.dispatchEvent(Object.assign(new Event("pointerdown"), { pointerType: "touch" }));
+    cleanupOld();
+
+    const target = new EventTarget();
+    const cleanup = installInputTracking(target as Document);
+    const menu = {} as MouseEvent;
+    try {
+      target.dispatchEvent(Object.assign(new Event("pointerdown"), { pointerType: "pen" }));
+      oldTarget.dispatchEvent(new Event("keydown"));
+      expect(isTouchContextMenu(menu)).toBe(true);
+      oldTarget.dispatchEvent(Object.assign(new Event("pointerdown"), { pointerType: "mouse" }));
+      expect(isTouchContextMenu(menu)).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
 });

@@ -10,11 +10,12 @@ let lastPointerType = "";
 export function installInputTracking(target: Document = document): () => void {
   const onPointerDown = (event: PointerEvent) => { lastPointerType = event.pointerType; };
   const onKeyDown = () => { lastPointerType = ""; };
-  target.addEventListener("pointerdown", onPointerDown, true);
-  target.addEventListener("keydown", onKeyDown, true);
+  const options = { capture: true };
+  target.addEventListener("pointerdown", onPointerDown, options);
+  target.addEventListener("keydown", onKeyDown, options);
   return () => {
-    target.removeEventListener("pointerdown", onPointerDown, true);
-    target.removeEventListener("keydown", onKeyDown, true);
+    target.removeEventListener("pointerdown", onPointerDown, options);
+    target.removeEventListener("keydown", onKeyDown, options);
     lastPointerType = "";
   };
 }
