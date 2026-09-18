@@ -11,14 +11,19 @@
  * stripped; ordinary filenames retain their spaces and colons.
  */
 export function remoteUploadName(ref: string): string {
-  let decoded = ref;
+  // Extract the encoded document/tree id before decoding its path separators.
+  const documentId = ref.match(
+    /^content:\/\/[^/]+\/(?:tree\/[^/]+\/)?(?:document|tree)\/([^/?#]+)(?:[?#].*)?$/i,
+  )?.[1];
+  let decoded = documentId ?? ref;
   if (/^(?:file|content):\/\//i.test(ref)) {
     try {
-      decoded = decodeURIComponent(ref);
+      decoded = decodeURIComponent(decoded);
     } catch {
       /* malformed %-escape — fall back to the raw string */
     }
   }
-  const separators = /^content:\/\//i.test(ref) ? /[\\/:]/ : /[\\/]/;
-  return decoded.split(separators).pop() || "";
+  // Only the first colon in a SAF id separates the root; later colons are names.
+  if (documentId !== undefined) decoded = decoded.replace(/^[^:\\/]*:/, "");
+  return decoded.split(/[\\/]/).pop() || "";
 }

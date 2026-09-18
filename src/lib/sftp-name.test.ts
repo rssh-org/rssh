@@ -16,6 +16,27 @@ describe("remoteUploadName", () => {
     expect(remoteUploadName(uri)).toBe("1234");
   });
 
+  it.each([
+    "document/primary%3ADownload%2Freport%3Afinal.txt",
+    "document/primary%3Areport%3Afinal.txt",
+    "tree/primary%3ADownload/document/primary%3ADownload%2Freport%3Afinal.txt",
+    "tree/primary%3ADownload%2Freport%3Afinal.txt",
+  ])("preserves filename colons after a SAF root prefix: %s", (path) => {
+    expect(remoteUploadName(`content://com.android.externalstorage.documents/${path}`))
+      .toBe("report:final.txt");
+  });
+
+  it("does not strip a root prefix from a non-SAF content URI", () => {
+    expect(remoteUploadName("content://example.provider/files/report%3Afinal.txt"))
+      .toBe("report:final.txt");
+  });
+
+  it("keeps distinct SAF filenames that share a colon suffix", () => {
+    const prefix = "content://com.android.externalstorage.documents/document/primary%3ADownload%2F";
+    expect(["report%3Afinal.txt", "notes%3Afinal.txt"].map((name) => remoteUploadName(prefix + name)))
+      .toEqual(["report:final.txt", "notes:final.txt"]);
+  });
+
   it("returns the basename for a plain filesystem path", () => {
     expect(remoteUploadName("/sdcard/Documents/notes.txt")).toBe("notes.txt");
     expect(remoteUploadName("C:\\Users\\me\\key.pem")).toBe("key.pem");
