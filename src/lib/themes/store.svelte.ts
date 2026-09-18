@@ -31,7 +31,7 @@ import {
   type TermPaletteRef,
 } from "./term-palettes.ts";
 import { composeTermFontStack } from "./term-font.ts";
-import { isMobile } from "../platform.ts";
+import { supportsTouch } from "../input.ts";
 
 const SETTING_KEY_PALETTE        = "theme.palette";
 const SETTING_KEY_SHAPE          = "theme.shape";
@@ -285,14 +285,13 @@ function notifyXtermFonts(): void {
 
 /* ───────────────────────────────────────────────────────────────
    Terminal GPU rendering — whether xterm uses the WebGL addon or
-   the DOM renderer. Desktop default on (paint throughput); mobile
-   default off (WebGL paints glyphs into a canvas, leaving no DOM
-   text for iOS's native long-press selection). The user toggle is
-   the single authority — including on mobile. Applies live: panes
+   the DOM renderer. Touch input defaults to DOM so native long-press
+   selection has text to select; other input defaults to WebGL for
+   paint throughput. The saved user setting takes precedence. Applies live: panes
    register a listener that loads/disposes the addon.
    ─────────────────────────────────────────────────────────────── */
 
-let _termGpuRender = $state<boolean>(!isMobile);
+let _termGpuRender = $state<boolean>(!supportsTouch());
 
 export function termGpuRender(): boolean { return _termGpuRender; }
 
@@ -456,8 +455,7 @@ export async function init(): Promise<void> {
   if (termBgFollow === "false") _termBgFollowsTheme = false;
   if (termFontRaw) _termFont = termFontRaw;
   if (termFontSizeRaw) _termFontSize = clampFontSize(parseInt(termFontSizeRaw, 10));
-  // Explicit persisted value wins; absence keeps the platform default
-  // (desktop on / mobile off).
+  // Explicit persisted value wins; absence keeps the input-hardware default.
   if (termGpuRaw === "true") _termGpuRender = true;
   else if (termGpuRaw === "false") _termGpuRender = false;
   apply(paletteById(_paletteId));
@@ -470,6 +468,6 @@ export async function init(): Promise<void> {
   // Mirrors apply()'s notifyXterms() for the palette.
   notifyXtermFonts();
   // Same late-mount race for the GPU toggle: a pane that mounted with the
-  // platform default may need to (un)load its WebGL addon.
+  // input-hardware default may need to (un)load its WebGL addon.
   notifyXtermGpu();
 }

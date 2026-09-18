@@ -6,6 +6,6 @@ export function connectionCopyName(sourceName: string): string {
   return `${sourceName}_copy`;
 }
 
-export function availableConnectionKinds(isMobile: boolean): ConnectionKind[] {
-  return CONNECTION_KINDS.filter((kind) => !isMobile || kind !== "serial");
+export function availableConnectionKinds(serialSupported: boolean): ConnectionKind[] {
+  return CONNECTION_KINDS.filter((kind) => serialSupported || kind !== "serial");
 }

@@ -84,6 +84,7 @@ describe("installTauriShim", () => {
         const { internals, ws } = installWithServer();
         expect(typeof internals.invoke).toBe("function");
         expect(typeof internals.transformCallback).toBe("function");
+        expect(fakeWindow.__RSSH_IPC_SHIM__).toBe(true);
         expect(ws.url).toBe("ws://127.0.0.1:5555/?token=tok-123");
     });
 
@@ -93,17 +94,42 @@ describe("installTauriShim", () => {
         fakeWindow.__RSSH_SERVER__ = { port: 5555, token: "tok" };
         installTauriShim();
         expect(fakeWindow.__TAURI_INTERNALS__).toBe(native); // untouched
+        expect(fakeWindow.__RSSH_IPC_SHIM__).toBeUndefined();
         expect(FakeWS.instances).toHaveLength(0); // never dialed
     });
 
     it("does not install when no server coordinates are present", () => {
         installTauriShim(); // no __RSSH_SERVER__, no URL params
         expect(fakeWindow.__TAURI_INTERNALS__).toBeUndefined();
+        expect(fakeWindow.__RSSH_IPC_SHIM__).toBeUndefined();
         expect(FakeWS.instances).toHaveLength(0);
     });
 });
 
 describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
+    it.each([
+        [false, true, false],
+        [true, true, true],
+        [true, false, false],
+    ])("intersects file capabilities with the host picker (%s, %s)", async (hasPicker, serverSupport, expected) => {
+        if (hasPicker) fakeWindow.__RSSH_PICK__ = vi.fn();
+        const { internals, ws } = installWithServer();
+        ws.open();
+        const result = internals.invoke("get_runtime_capabilities");
+        const request = ws.sentFrames()[0];
+        expect(request.cmd).toBe("get_runtime_capabilities");
+        ws.deliver({ type: "response", id: request.id, ok: true, result: {
+            localPty: true,
+            fileMultiSelect: serverSupport,
+            directoryTransfer: serverSupport,
+        } });
+        await expect(result).resolves.toEqual({
+            localPty: true,
+            fileMultiSelect: expected,
+            directoryTransfer: expected,
+        });
+    });
+
     it("provides metadata so getCurrentWindow()/getCurrentWebview() don't throw", () => {
         const { internals } = installWithServer();
         // @tauri-apps/api reads these labels SYNCHRONOUSLY in the getters; a
@@ -239,6 +265,36 @@ describe("browser-environment commands (served locally, never over ws)", () => {
             "/tmp/b.txt",
         ]);
         expect(fakeWindow.__RSSH_PICK__).toHaveBeenCalledWith("files");
+    });
+
+    it("sftp_pick_open_path returns one explicitly selected host file without using the server", async () => {
+        const { internals, ws } = installWithServer();
+        ws.open();
+        fakeWindow.__RSSH_PICK__ = vi.fn(async () => ["/tmp/report.txt", "/tmp/other.txt"]);
+
+        const picked = internals.invoke("sftp_pick_open_path");
+        expect(ws.sent).toHaveLength(0);
+        await expect(picked).resolves.toBe("/tmp/report.txt");
+        expect(fakeWindow.__RSSH_PICK__).toHaveBeenCalledExactlyOnceWith("files");
+    });
+
+    it.each([{ files: null }, { files: [] }])("sftp_pick_open_path preserves host cancellation: $files", async ({ files }) => {
+        const { internals, ws } = installWithServer();
+        ws.open();
+        fakeWindow.__RSSH_PICK__ = vi.fn(async () => files);
+
+        const picked = internals.invoke("sftp_pick_open_path");
+        expect(ws.sent).toHaveLength(0);
+        await expect(picked).resolves.toBeNull();
+    });
+
+    it("sftp_pick_open_path rejects locally when a browser has no host chooser", async () => {
+        const { internals, ws } = installWithServer();
+        ws.open();
+
+        const picked = internals.invoke("sftp_pick_open_path");
+        expect(ws.sent).toHaveLength(0);
+        await expect(picked).rejects.toMatch(/file_dialog_unavailable/);
     });
 
     it("builds an SFTP save path from the host folder picker", async () => {

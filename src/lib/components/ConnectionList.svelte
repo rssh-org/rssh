@@ -47,7 +47,7 @@
     [profiles, forwards, serialProfiles, telnetProfiles, groups] = await Promise.all([
       loadOrEmpty(app.loadProfiles),
       loadOrEmpty(app.loadForwards),
-      app.isMobile ? Promise.resolve([]) : loadOrEmpty(app.loadSerialProfiles),
+      app.capabilities().serial ? loadOrEmpty(app.loadSerialProfiles) : Promise.resolve([]),
       loadOrEmpty(app.loadTelnetProfiles),
       loadOrEmpty(app.loadGroups),
     ]);

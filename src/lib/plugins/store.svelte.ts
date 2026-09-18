@@ -12,6 +12,7 @@
 
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { createSidePanelState } from "../stores/panel-state.svelte.ts";
+import { capabilities } from "../stores/runtime.svelte.ts";
 
 export type PluginArea = "side" | "strip";
 export type SidePosition = "left" | "right";
@@ -144,13 +145,9 @@ export async function movePluginTo(id: string, targetId: string): Promise<void> 
   await load();
 }
 
-/**
- * Whether this host can serve plugin files at all. In the real Tauri webview
- * convertFileSrc maps to the asset protocol; the JCEF/browser shim returns
- * the path unchanged (no scheme), where an iframe could never load it.
- */
+/** Whether this host implements the plugin asset and execution adapters. */
 export function hostSupported(): boolean {
-  return /^(asset|https?):/i.test(convertFileSrc("/probe"));
+  return capabilities().plugins;
 }
 
 // ── Per-tab panel state (kept alive across tab switches) ─────────────────

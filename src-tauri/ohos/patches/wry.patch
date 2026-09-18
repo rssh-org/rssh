@@ -1,0 +1,1140 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 4006cd1..bbdb1ff 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -201,11 +201,10 @@ libc = "0.2"
+ dom_query = { version = "0.28.0", default-features = false }
+ 
+ [target.'cfg(target_env = "ohos")'.dependencies]
+-# openharmony-ability = { version = "0.3.0", features = ["webview"] }
+-# openharmony-ability-derive = { version = "0.3.0" }
+-openharmony-ability = { git = "https://github.com/harmony-contrib/openharmony-ability.git", features = ["webview"] }
+-openharmony-ability-derive = { git = "https://github.com/harmony-contrib/openharmony-ability.git" }
+-
++openharmony-ability = { path = "../ability/crates/ability" }
++openharmony-ability-plugin-webview = { path = "../ability/crates/plugin-webview" }
++futures-executor = "0.3"
++log = "0.4"
+ 
+ [dev-dependencies]
+ pollster = "1.0.0"
+diff --git a/src/lib.rs b/src/lib.rs
+index 0b68434..91a4fee 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2028,13 +2028,23 @@ impl WebViewBuilderExtAndroid for WebViewBuilder<'_> {
+ 
+ #[cfg(target_env = "ohos")]
+ #[derive(Default)]
+-pub struct PlatformSpecificWebViewAttributes {}
++pub struct PlatformSpecificWebViewAttributes {
++  pub window_id: u64,
++}
+ 
+ #[cfg(target_env = "ohos")]
+-pub trait WebViewBuilderExtOhos {}
++pub trait WebViewBuilderExtOhos {
++  /// Mount this WebView in the logical window created by the native windowing runtime.
++  fn with_ohos_window(self, window_id: u64) -> Self;
++}
+ 
+ #[cfg(target_env = "ohos")]
+-impl WebViewBuilderExtOhos for WebViewBuilder<'_> {}
++impl WebViewBuilderExtOhos for WebViewBuilder<'_> {
++  fn with_ohos_window(mut self, window_id: u64) -> Self {
++    self.platform_specific.window_id = window_id;
++    self
++  }
++}
+ 
+ #[cfg(all(
+   any(
+diff --git a/src/ohos/initialization.rs b/src/ohos/initialization.rs
+new file mode 100644
+index 0000000..5b5e554
+--- /dev/null
++++ b/src/ohos/initialization.rs
+@@ -0,0 +1,19 @@
++/// API 11's ArkWeb document-start hook sorts ScriptItems by source text, not insertion
++/// order. Submit one script so framework bootstrap, metadata and plugin setup retain
++/// Wry's order on the API 12 baseline. Keep each script's runtime failures independent.
++pub fn ordered_script(scripts: impl IntoIterator<Item = (String, bool)>) -> String {
++  let mut source = String::new();
++  for (script, main_frame_only) in scripts {
++    source.push_str("try {\n");
++    if main_frame_only {
++      source.push_str("if (window === window.top) {\n");
++    }
++    source.push_str(&script);
++    source.push('\n');
++    if main_frame_only {
++      source.push_str("}\n");
++    }
++    source.push_str("} catch (__wryInitError) { console.error('WebView initialization script failed', __wryInitError); }\n");
++  }
++  source
++}
+diff --git a/src/ohos/mod.rs b/src/ohos/mod.rs
+index 2f37a5a..d0bb1ca 100644
+--- a/src/ohos/mod.rs
++++ b/src/ohos/mod.rs
+@@ -1,35 +1,407 @@
+-use std::borrow::Cow;
++use std::{
++  borrow::Cow,
++  cell::RefCell,
++  collections::{BTreeMap, HashMap},
++  path::PathBuf,
++  rc::{Rc, Weak},
++  sync::{
++    atomic::{AtomicBool, Ordering},
++    Arc, RwLock,
++  },
++};
+ 
+ use super::WebViewAttributes;
+-use crate::{Error, Rect, RequestAsyncResponder, Result, RGBA};
++use crate::{Error, PageLoadEvent, Rect, RequestAsyncResponder, Result, RGBA};
+ use cookie::Cookie;
++use futures_executor::block_on;
+ use http::{Request, Response, Uri};
+-use openharmony_ability::{native_web::WebProxyBuilder, WebViewBuilder, WebViewStyle, Webview};
++use openharmony_ability::{OpenHarmonyApp, PluginLifecycleEvent};
++use openharmony_ability_plugin_webview::{
++  release_webview_bindings, WebviewCallbacksBuilder, WebviewCreateRequest,
++  WebviewDownloadStartResponse, WebviewExt, WebviewHandle, WebviewInitializationScript,
++  WebviewJavascriptProxyBuilder, WebviewStyle,
++};
+ use raw_window_handle::HasWindowHandle;
+ 
+ use crate::util::Counter;
++mod initialization;
++mod queue;
++use queue::Queue;
+ 
+ static COUNTER: Counter = Counter::new();
++type Protocols = HashMap<
++  String,
++  Box<dyn Fn(crate::WebViewId, Request<Vec<u8>>, RequestAsyncResponder) + Send + Sync>,
++>;
++
++// Wry closures are !Send. Workers carry IDs, plugin facades and owned data; native callbacks
++// resolve the application closures on the N-API/UI thread instead of moving them to a worker.
++struct Callbacks {
++  owner: RefCell<Weak<WebviewState>>,
++  ipc: Option<Box<dyn Fn(Request<String>)>>,
++  navigation: Option<Box<dyn Fn(String) -> bool>>,
++  title: Option<Box<dyn Fn(String)>>,
++  page_load: Option<Box<dyn Fn(PageLoadEvent, String)>>,
++  download_started: RefCell<Option<Box<dyn FnMut(String, &mut PathBuf) -> bool>>>,
++  download_completed: Option<Rc<dyn Fn(String, Option<PathBuf>, bool)>>,
++}
+ 
+-pub(crate) struct InnerWebView {
++struct Binding {
++  callbacks: Rc<Callbacks>,
++  active: Arc<AtomicBool>,
++}
++
++thread_local! {
++  static APP: RefCell<Option<OpenHarmonyApp>> = const { RefCell::new(None) };
++  static CALLBACKS: RefCell<HashMap<String, Binding>> = RefCell::new(HashMap::new());
++}
++
++/// Associates the active Ability with Wry on the N-API/UI thread, before creating WebViews.
++/// The Ability initializer must also register `WebviewBridgePlugin` and custom schemes.
++pub fn setup_ohos(app: OpenHarmonyApp) -> Result<()> {
++  app.webview().map_err(init_error)?;
++  APP.with(|current| *current.borrow_mut() = Some(app));
++  Ok(())
++}
++
++fn callbacks(id: &str) -> Option<Rc<Callbacks>> {
++  CALLBACKS.with(|callbacks| {
++    callbacks
++      .borrow()
++      .get(id)
++      .filter(|binding| binding.active.load(Ordering::Acquire))
++      .map(|binding| binding.callbacks.clone())
++  })
++}
++
++fn init_error(error: impl std::fmt::Display) -> Error {
++  Error::OpenHarmonyInitError(error.to_string())
++}
++fn webview_error(error: impl std::fmt::Display) -> Error {
++  Error::OpenHarmonyWebviewError(error.to_string())
++}
++fn color(color: RGBA) -> String {
++  // ArkUI eight-digit colors use alpha first.
++  format!(
++    "#{:02X}{:02X}{:02X}{:02X}",
++    color.3, color.0, color.1, color.2
++  )
++}
++fn headers(headers: http::HeaderMap) -> Result<BTreeMap<String, String>> {
++  headers
++    .iter()
++    .map(|(name, value)| {
++      value
++        .to_str()
++        .map(|value| (name.to_string(), value.to_owned()))
++        .map_err(webview_error)
++    })
++    .collect()
++}
++
++// One controller generation. A new UIContext always gets a fresh ID: delayed cleanup from an
++// old session or a pending create can never remove a replacement controller.
++struct Generation {
++  id: String,
++  active: Arc<AtomicBool>,
++  queue: Option<Queue<WebviewHandle>>,
++}
++
++impl Drop for Generation {
++  fn drop(&mut self) {
++    self.active.store(false, Ordering::Release);
++    self.queue.take();
++    CALLBACKS.with(|callbacks| callbacks.borrow_mut().remove(&self.id));
++    if let Err(error) = release_webview_bindings(&self.id) {
++      log::error!("Failed to release WebView {} bindings: {error}", self.id);
++    }
++  }
++}
++
++struct WebviewState {
+   id: String,
+-  webview: Webview,
++  app: OpenHarmonyApp,
++  request: RefCell<WebviewCreateRequest>,
++  url: Arc<RwLock<String>>,
++  callbacks: Rc<Callbacks>,
++  protocols: Arc<Protocols>,
++  generation: RefCell<Option<Generation>>,
++}
++
++impl WebviewState {
++  fn start(self: &Rc<Self>) -> Result<()> {
++    if self
++      .generation
++      .borrow()
++      .as_ref()
++      .and_then(|generation| generation.queue.as_ref())
++      .is_some_and(|queue| queue.check().is_ok())
++    {
++      return Ok(());
++    }
++    // Reacquire the facade: BridgeRuntime belongs to an Ability session and must not survive it.
++    let client = self.app.webview().map_err(init_error)?;
++    let native_id = format!("wry-{}", COUNTER.next());
++    let active = Arc::new(AtomicBool::new(true));
++    let mut generation = Generation {
++      id: native_id.clone(),
++      active: active.clone(),
++      queue: None,
++    };
++    CALLBACKS.with(|callbacks| {
++      callbacks.borrow_mut().insert(
++        native_id.clone(),
++        Binding {
++          callbacks: self.callbacks.clone(),
++          active: active.clone(),
++        },
++      )
++    });
++    self.install_bindings(&native_id, active.clone())?;
++    let mut request = self.request.borrow().clone();
++    request.id = native_id.clone();
++    let failed_id = native_id.clone();
++    generation.queue = Some(
++      Queue::start(
++        move || {
++          block_on(client.create(request))
++            .map_err(|error| format!("Failed to create WebView: {error}"))
++        },
++        move |handle| {
++          block_on(handle.remove()).map_err(|error| format!("Failed to remove WebView: {error}"))
++        },
++        move |error, fatal| {
++          if fatal {
++            active.store(false, Ordering::Release);
++          }
++          log::error!("OpenHarmony WebView {failed_id}: {error}");
++        },
++      )
++      .map_err(init_error)?,
++    );
++    // Drop the old generation only after the replacement has installed its lifecycle observer.
++    self.generation.replace(Some(generation));
++    Ok(())
++  }
++
++  fn suspend(&self) {
++    if let Some(generation) = self.generation.borrow_mut().as_mut() {
++      generation.active.store(false, Ordering::Release);
++      generation.queue.take();
++      // Keep declarations until UiContextReady can recreate the controller. Drop removes them.
++    }
++  }
++
++  fn with_queue<T>(
++    &self,
++    f: impl FnOnce(&Queue<WebviewHandle>) -> std::result::Result<T, String>,
++  ) -> std::result::Result<T, String> {
++    let generation = self.generation.borrow();
++    let queue = generation
++      .as_ref()
++      .and_then(|generation| generation.queue.as_ref())
++      .ok_or_else(|| "WebView UI context is unavailable".to_owned())?;
++    f(queue)
++  }
++  fn check(&self) -> std::result::Result<(), String> {
++    self.with_queue(Queue::check)
++  }
++  fn active_generation(&self) -> Result<Arc<AtomicBool>> {
++    self.check().map_err(webview_error)?;
++    Ok(self.generation.borrow().as_ref().unwrap().active.clone())
++  }
++  fn send(
++    &self,
++    task: impl FnOnce(&WebviewHandle) -> std::result::Result<(), String> + Send + 'static,
++  ) -> std::result::Result<(), String> {
++    self.with_queue(|queue| queue.send(task))
++  }
++
++  fn install_bindings(&self, native_id: &str, active: Arc<AtomicBool>) -> Result<()> {
++    let lifecycle_id = native_id.to_owned();
++    WebviewCallbacksBuilder::new(native_id)
++      .on_lifecycle(move |event| {
++        // A suspended binding must still receive the next context-ready event.
++        let owner = CALLBACKS.with(|callbacks| {
++          callbacks
++            .borrow()
++            .get(&lifecycle_id)
++            .and_then(|binding| binding.callbacks.owner.borrow().upgrade())
++        });
++        let Some(owner) = owner else {
++          return;
++        };
++        match event {
++          PluginLifecycleEvent::UiContextDestroyed | PluginLifecycleEvent::AbilityDestroyed => {
++            owner.suspend()
++          }
++          PluginLifecycleEvent::UiContextReady => {
++            if let Err(error) = owner.start() {
++              log::error!("Failed to restore WebView {}: {error}", owner.id);
++            }
++          }
++          _ => {}
++        }
++      })
++      .on_navigation_request(|event| {
++        let Some(callbacks) = callbacks(&event.id) else {
++          return true;
++        };
++        let allowed = callbacks
++          .navigation
++          .as_ref()
++          .map(|handler| handler(event.url.clone()))
++          .unwrap_or(true);
++        !allowed
++      })
++      .on_page_load(|event| {
++        let Some(callbacks) = callbacks(&event.id) else {
++          return;
++        };
++        let Some(owner) = callbacks.owner.borrow().upgrade() else {
++          return;
++        };
++        let mut url = event.url;
++        // loadData has no navigable URL to replay; retain its original HTML source.
++        let html_load = owner.request.borrow().html.is_some()
++          && (url.starts_with("data:") || url == "about:blank" || url.trim().is_empty());
++        if html_load {
++          url = "about:blank".into();
++        }
++        if event.started {
++          let mut request = owner.request.borrow_mut();
++          if !html_load {
++            if request.url.as_deref() != Some(url.as_str()) {
++              request.headers = None;
++            }
++            request.html = None;
++            request.url = Some(url.clone());
++          }
++          *owner.url.write().unwrap() = url.clone();
++        }
++        if let Some(handler) = &callbacks.page_load {
++          handler(
++            if event.started {
++              PageLoadEvent::Started
++            } else {
++              PageLoadEvent::Finished
++            },
++            url,
++          );
++        }
++      })
++      .on_title_change(|event| {
++        if let Some(callbacks) = callbacks(&event.id) {
++          if let Some(handler) = &callbacks.title {
++            handler(event.title);
++          }
++        }
++      })
++      .on_download_start(|event| {
++        let Some(callbacks) = callbacks(&event.id) else {
++          return WebviewDownloadStartResponse::cancel();
++        };
++        let mut path = event.temp_path.map(PathBuf::from).unwrap_or_default();
++        let allowed = callbacks
++          .download_started
++          .borrow_mut()
++          .as_mut()
++          .map(|handler| handler(event.url, &mut path))
++          .unwrap_or(false);
++        if allowed {
++          WebviewDownloadStartResponse::allow(if path.as_os_str().is_empty() {
++            None
++          } else {
++            Some(path.to_string_lossy().into_owned())
++          })
++        } else {
++          WebviewDownloadStartResponse::cancel()
++        }
++      })
++      .on_download_end(|event| {
++        if let Some(callbacks) = callbacks(&event.id) {
++          if let Some(handler) = &callbacks.download_completed {
++            handler(event.url, event.temp_path.map(PathBuf::from), event.success);
++          }
++        }
++      })
++      .build()
++      .map_err(init_error)?;
++    WebviewJavascriptProxyBuilder::new(native_id, "ipc")
++      .add_method("postMessage", |id, arguments| {
++        let Some(callbacks) = callbacks(&id) else {
++          return;
++        };
++        let Some(owner) = callbacks.owner.borrow().upgrade() else {
++          return;
++        };
++        if let Some(handler) = &callbacks.ipc {
++          let uri = owner
++            .url
++            .read()
++            .unwrap()
++            .parse::<Uri>()
++            .unwrap_or(Uri::from_static("about:blank"));
++          handler(
++            Request::builder()
++              .uri(uri)
++              .body(arguments.into_iter().next().unwrap_or_default())
++              .unwrap(),
++          );
++        }
++      })
++      .build()
++      .map_err(init_error)?;
++    let client = self.app.webview().map_err(init_error)?;
++    for scheme in self.protocols.keys() {
++      let weak = Arc::downgrade(&self.protocols);
++      let scheme_name = scheme.clone();
++      let public_id = self.id.clone();
++      let active = active.clone();
++      client
++        .custom_protocol_async(native_id, scheme, move |_, request, _, responder| {
++          let protocols = weak.upgrade().filter(|_| active.load(Ordering::Acquire));
++          let Some(protocols) = protocols else {
++            responder.respond(
++              Response::builder()
++                .status(410)
++                .body(Cow::Borrowed(&b""[..]))
++                .unwrap(),
++            );
++            return;
++          };
++          let responder = RequestAsyncResponder {
++            responder: Box::new(move |response| responder.respond(response)),
++          };
++          protocols[&scheme_name](&public_id, request, responder);
++        })
++        .map_err(init_error)?;
++    }
++    Ok(())
++  }
++}
++
++pub(crate) struct InnerWebView {
++  state: Rc<WebviewState>,
+ }
+ 
+ impl InnerWebView {
+   pub fn new_as_child(
+-    _window: &impl HasWindowHandle,
++    window: &impl HasWindowHandle,
+     attributes: WebViewAttributes,
+     pl_attrs: super::PlatformSpecificWebViewAttributes,
+   ) -> Result<Self> {
+-    Self::new(_window, attributes, pl_attrs)
++    Self::new(window, attributes, pl_attrs)
+   }
+ 
+   pub fn new(
+     _window: &impl HasWindowHandle,
+     attributes: WebViewAttributes,
+-    _pl_attrs: super::PlatformSpecificWebViewAttributes,
++    pl_attrs: super::PlatformSpecificWebViewAttributes,
+   ) -> Result<Self> {
++    let app = APP
++      .with(|app| app.borrow().clone())
++      .ok_or_else(|| init_error("Call setup_ohos on the UI thread before creating a WebView"))?;
+     let WebViewAttributes {
+       id,
+       url,
+@@ -41,133 +413,116 @@ impl InnerWebView {
+       custom_protocols,
+       background_color,
+       transparent,
+-      headers,
++      headers: initial_headers,
+       autoplay,
+       user_agent,
+       javascript_disabled,
++      visible,
++      navigation_handler,
++      document_title_changed_handler,
++      on_page_load_handler,
++      download_started_handler,
++      download_completed_handler,
+       ..
+     } = attributes;
+-
+-    let initial_url = url;
+-    let initial_headers = headers;
+-
+     let id = id
+-      .map(|id| id.to_string())
++      .map(str::to_owned)
+       .unwrap_or_else(|| COUNTER.next().to_string());
+-
+-    let background_color =
+-      background_color.map(|c| format!("#{:02X}{:02X}{:02X}{:02X}", c.0, c.1, c.2, c.3));
+-
+-    let mut webview_builder = WebViewBuilder::new()
+-      .id(id.clone())
+-      .style(WebViewStyle {
+-        x: None,
+-        y: None,
+-        visible: None,
+-        background_color,
++    let current_url = Arc::new(RwLock::new(if html.is_some() {
++      "about:blank".into()
++    } else {
++      url.clone().unwrap_or_else(|| "about:blank".into())
++    }));
++    let mut request = WebviewCreateRequest::new("")
++      .style(WebviewStyle {
++        visible: Some(visible),
++        background_color: background_color.map(color),
++        ..Default::default()
+       })
+-      .javascript_enabled(!javascript_disabled)
+-      .autoplay(autoplay)
+-      .initialization_scripts(vec![initialization_scripts
+-        .iter()
+-        .map(|s| s.script.clone())
+-        .collect::<Vec<_>>()
+-        .join("\n")])
+-      .transparent(transparent);
+-
++      .transparent(transparent)
++      .dom_storage_access(true)
++      .initialization_scripts([WebviewInitializationScript {
++        script: initialization::ordered_script(
++          initialization_scripts
++            .into_iter()
++            .map(|script| (script.script, script.for_main_frame_only)),
++        ),
++        script_rules: vec!["*".into()],
++      }]);
++    request.javascript_enabled = Some(!javascript_disabled);
++    request.autoplay = Some(autoplay);
++    request.user_agent = user_agent;
+     #[cfg(any(debug_assertions, feature = "devtools"))]
+     {
+-      webview_builder = webview_builder.devtools(devtools);
++      request.devtools = Some(devtools);
+     }
+-
++    request.window_id = Some(pl_attrs.window_id as i64);
+     if let Some(html) = html {
+-      webview_builder = webview_builder.html(html);
+-    } else if let Some(url) = initial_url {
+-      webview_builder = webview_builder.url(url);
+-      if let Some(headers) = initial_headers {
+-        webview_builder = webview_builder.headers(headers);
+-      }
+-    }
+-
+-    if let Some(user_agent) = user_agent {
+-      webview_builder = webview_builder.user_agent(user_agent);
++      request.html = Some(html);
++    } else {
++      request.url = Some(url.unwrap_or_else(|| "about:blank".into()));
++      request.headers = initial_headers.map(headers).transpose()?;
+     }
+-
+-    let webview = webview_builder
+-      .build()
+-      .map_err(|e| Error::OpenHarmonyInitError(e.to_string()))?;
+-
+-    let current_id = id.clone();
+-    let ipc_webview = webview.clone();
+-    webview
+-      .on_controller_attach(move || {
+-        let _builder = WebProxyBuilder::new(current_id.clone(), "ipc".to_string())
+-          .add_method("postMessage", |_frame, params| {
+-            if let Some(ipc_handler) = &ipc_handler {
+-              let message = params.get(0).unwrap_or(&"".to_string()).to_owned();
+-              // when load html, url will be base64 and uri parse will failed, so we use about:blank avoid panic
+-              let url = ipc_webview.url().unwrap_or("about:blank".to_string());
+-              let uri = url
+-                .parse::<Uri>()
+-                .unwrap_or(Uri::from_static("about:blank"));
+-
+-              ipc_handler(Request::builder().uri(uri).body(message).unwrap());
+-            }
+-          })
+-          .build()
+-          .expect("Failed to build web proxy");
+-      })
+-      .map_err(|e| {
+-        Error::OpenHarmonyInitError(format!("Failed to add controller attach listener: {}", e))
+-      })?;
+-
+-    for (protocol, callback) in custom_protocols {
+-      let webview_id = id.clone();
+-      webview
+-        .custom_protocol_async(protocol, move |_web, req, _is_on_main_frame, responder| {
+-          let responder: Box<dyn FnOnce(Response<Cow<'static, [u8]>>)> = Box::new(move |resp| {
+-            responder.respond(resp);
+-          });
+-
+-          (callback)(&webview_id, req, RequestAsyncResponder { responder });
+-        })
+-        .unwrap();
+-    }
+-
+-    Ok(Self { id, webview })
++    let callbacks = Rc::new(Callbacks {
++      owner: RefCell::new(Weak::new()),
++      ipc: ipc_handler,
++      navigation: navigation_handler,
++      title: document_title_changed_handler,
++      page_load: on_page_load_handler,
++      download_started: RefCell::new(download_started_handler),
++      download_completed: download_completed_handler,
++    });
++    let state = Rc::new(WebviewState {
++      id,
++      app,
++      request: RefCell::new(request),
++      url: current_url,
++      callbacks: callbacks.clone(),
++      protocols: Arc::new(custom_protocols),
++      generation: RefCell::new(None),
++    });
++    *callbacks.owner.borrow_mut() = Rc::downgrade(&state);
++    state.start()?;
++    Ok(Self { state })
+   }
+-
+-  pub fn print(&self) -> crate::Result<()> {
++  pub fn print(&self) -> Result<()> {
+     Ok(())
+   }
+-
+   pub fn id(&self) -> crate::WebViewId<'_> {
+-    &self.id
++    &self.state.id
+   }
+ 
+-  pub fn url(&self) -> crate::Result<String> {
+-    self
+-      .webview
+-      .url()
+-      .map_err(|e| Error::OpenHarmonyWebviewError(format!("Failed to get url: {}", e)))
++  pub fn url(&self) -> Result<String> {
++    self.state.check().map_err(webview_error)?;
++    Ok(self.state.url.read().unwrap().clone())
+   }
+ 
+   pub fn eval(&self, js: &str, callback: Option<impl Fn(String) + Send + 'static>) -> Result<()> {
++    let js = js.to_owned();
++    let active = self.state.active_generation()?;
++    let scheduler = self.state.app.main_thread().map_err(webview_error)?;
+     self
+-      .webview
+-      .evaluate_script_with_callback(
+-        js,
+-        callback.map(|c| Box::new(c) as Box<dyn Fn(String) + Send + 'static>),
+-      )
+-      .map_err(|e| Error::OpenHarmonyWebviewError(format!("Failed to evaluate script: {}", e)))
++      .state
++      .send(move |webview| {
++        let result = block_on(webview.evaluate_script(js)).map_err(|error| error.to_string())?;
++        if let Some(callback) = callback {
++          scheduler
++            .dispatch(move || {
++              if active.load(Ordering::Acquire) {
++                callback(result.unwrap_or_default());
++              }
++            })
++            .map_err(|error| error.to_string())?;
++        }
++        Ok(())
++      })
++      .map_err(webview_error)
+   }
+ 
+   #[cfg(any(debug_assertions, feature = "devtools"))]
+   pub fn open_devtools(&self) {}
+-
+   #[cfg(any(debug_assertions, feature = "devtools"))]
+   pub fn close_devtools(&self) {}
+-
+   #[cfg(any(debug_assertions, feature = "devtools"))]
+   pub fn is_devtools_open(&self) -> bool {
+     false
+@@ -175,121 +530,144 @@ impl InnerWebView {
+ 
+   pub fn zoom(&self, scale_factor: f64) -> Result<()> {
+     self
+-      .webview
+-      .set_zoom(scale_factor)
+-      .map_err(|e| Error::OpenHarmonyWebviewError(format!("Failed to set zoom: {}", e)))
++      .state
++      .send(move |webview| {
++        block_on(webview.set_zoom(scale_factor)).map_err(|error| error.to_string())
++      })
++      .map_err(webview_error)
+   }
+ 
+-  pub fn set_background_color(&self, _background_color: RGBA) -> Result<()> {
++  pub fn set_background_color(&self, background_color: RGBA) -> Result<()> {
++    let background_color = color(background_color);
++    let queued_color = background_color.clone();
++    self
++      .state
++      .send(move |webview| {
++        block_on(webview.set_background_color(queued_color)).map_err(|error| error.to_string())
++      })
++      .map_err(webview_error)?;
++    self.state.request.borrow_mut().style.background_color = Some(background_color);
+     Ok(())
+   }
+ 
+   pub fn cookies(&self) -> Result<Vec<Cookie<'static>>> {
+-    Ok(vec![])
++    Err(webview_error(
++      "Synchronous cookie reads are unsupported on OpenHarmony",
++    ))
+   }
+-
+   pub fn set_cookie(&self, _cookie: &Cookie<'_>) -> Result<()> {
+-    Ok(())
++    Err(webview_error(
++      "Setting cookies is unsupported on OpenHarmony",
++    ))
+   }
+-
+   pub fn delete_cookie(&self, _cookie: &Cookie<'_>) -> Result<()> {
+-    Ok(())
++    Err(webview_error(
++      "Deleting cookies is unsupported on OpenHarmony",
++    ))
+   }
+-
+-  pub fn cookies_for_url(&self, url: &str) -> Result<Vec<Cookie<'static>>> {
+-    self
+-      .webview
+-      .cookies_with_url(url)
+-      .and_then(|cookie| {
+-        let cookies_data: Vec<Cookie<'static>> = cookie
+-          .split(';')
+-          .filter_map(|s| {
+-            let s = s.trim();
+-            if s.is_empty() {
+-              return None;
+-            }
+-            Cookie::parse(s.to_string()).map(|c| c.into_owned()).ok()
+-          })
+-          .collect();
+-
+-        Ok(cookies_data)
+-      })
+-      .map_err(|e| Error::OpenHarmonyWebviewError(format!("Failed to get cookies: {}", e)))
++  pub fn cookies_for_url(&self, _url: &str) -> Result<Vec<Cookie<'static>>> {
++    self.cookies()
+   }
+ 
+   pub fn reload(&self) -> Result<()> {
+     self
+-      .webview
+-      .reload()
+-      .map_err(|e| Error::OpenHarmonyWebviewError(format!("Failed to reload: {}", e)))
++      .state
++      .send(|webview| block_on(webview.reload()).map_err(|error| error.to_string()))
++      .map_err(webview_error)
+   }
+ 
+   pub fn load_url(&self, url: &str) -> Result<()> {
+-    self
+-      .webview
+-      .load_url(url)
+-      .map_err(|e| Error::OpenHarmonyWebviewError(format!("Failed to load url: {}", e)))
++    self.load_url_with_headers(url, http::HeaderMap::new())
+   }
+ 
+-  pub fn load_url_with_headers(&self, url: &str, headers: http::HeaderMap) -> Result<()> {
++  pub fn load_url_with_headers(&self, url: &str, request_headers: http::HeaderMap) -> Result<()> {
++    let request_headers = headers(request_headers)?;
++    let queued_url = url.to_owned();
++    let queued_headers = request_headers.clone();
+     self
+-      .webview
+-      .load_url_with_headers(url, headers)
+-      .map_err(|e| {
+-        Error::OpenHarmonyWebviewError(format!("Failed to load url with headers: {}", e))
++      .state
++      .send(move |webview| {
++        block_on(webview.load_url_with_headers(queued_url, queued_headers))
++          .map_err(|error| error.to_string())
+       })
++      .map_err(webview_error)?;
++    let mut request = self.state.request.borrow_mut();
++    request.url = Some(url.to_owned());
++    request.html = None;
++    request.headers = Some(request_headers);
++    Ok(())
+   }
+ 
+   pub fn load_html(&self, html: &str) -> Result<()> {
++    let queued_html = html.to_owned();
+     self
+-      .webview
+-      .load_html(html)
+-      .map_err(|e| Error::OpenHarmonyWebviewError(format!("Failed to load html: {}", e)))
++      .state
++      .send(move |webview| {
++        block_on(webview.load_html(queued_html)).map_err(|error| error.to_string())
++      })
++      .map_err(webview_error)?;
++    let mut request = self.state.request.borrow_mut();
++    request.html = Some(html.to_owned());
++    request.url = None;
++    request.headers = None;
++    Ok(())
+   }
+ 
+   pub fn clear_all_browsing_data(&self) -> Result<()> {
+-    self.webview.clear_all_browsing_data().map_err(|e| {
+-      Error::OpenHarmonyWebviewError(format!("Failed to clear all browsing data: {}", e))
+-    })
++    self
++      .state
++      .send(|webview| {
++        block_on(webview.clear_all_browsing_data()).map_err(|error| error.to_string())
++      })
++      .map_err(webview_error)
+   }
+ 
+   pub fn bounds(&self) -> Result<Rect> {
+     Ok(Rect::default())
+   }
+-
+   pub fn set_bounds(&self, _bounds: Rect) -> Result<()> {
+     Ok(())
+   }
+ 
+-  pub fn set_visible(&self, _visible: bool) -> Result<()> {
++  pub fn set_visible(&self, visible: bool) -> Result<()> {
++    self
++      .state
++      .send(move |webview| {
++        block_on(webview.set_visible(visible)).map_err(|error| error.to_string())
++      })
++      .map_err(webview_error)?;
++    self.state.request.borrow_mut().style.visible = Some(visible);
+     Ok(())
+   }
+ 
+   pub fn focus(&self) -> Result<()> {
+-    self.webview.focus().map_err(|_e| Error::NotMainThread)
++    self
++      .state
++      .send(|webview| block_on(webview.focus()).map_err(|error| error.to_string()))
++      .map_err(webview_error)
+   }
+ 
+   pub fn focus_parent(&self) -> Result<()> {
+     Ok(())
+   }
+-
+   pub fn go_forward(&self) -> Result<()> {
+-    Ok(())
++    Err(webview_error(
++      "History navigation is unsupported on OpenHarmony",
++    ))
+   }
+-
+   pub fn go_back(&self) -> Result<()> {
+-    Ok(())
++    self.go_forward()
+   }
+-
+   pub fn can_go_forward(&self) -> Result<bool> {
+-    Ok(true)
++    Err(webview_error(
++      "History navigation is unsupported on OpenHarmony",
++    ))
+   }
+-
+   pub fn can_go_back(&self) -> Result<bool> {
+-    Ok(true)
++    self.can_go_forward()
+   }
+ }
+ 
+ pub fn platform_webview_version() -> Result<String> {
+-  Ok("1.0.0".to_string())
++  Ok("1.0.0".to_owned())
+ }
+diff --git a/src/ohos/queue.rs b/src/ohos/queue.rs
+new file mode 100644
+index 0000000..3cdfbda
+--- /dev/null
++++ b/src/ohos/queue.rs
+@@ -0,0 +1,219 @@
++//! Ordered WebView work. Only the worker waits for ArkTS; the UI thread never waits for it.
++
++use std::sync::{mpsc, Arc, Mutex};
++
++type Task<T> = Box<dyn FnOnce(&T) -> Result<(), String> + Send>;
++
++#[derive(Default)]
++struct State {
++  closed: bool,
++  error: Option<String>,
++}
++
++impl State {
++  fn check(&self) -> Result<(), String> {
++    if let Some(error) = &self.error {
++      Err(error.clone())
++    } else if self.closed {
++      Err("WebView has been destroyed".into())
++    } else {
++      Ok(())
++    }
++  }
++}
++
++pub(super) struct Queue<T> {
++  sender: mpsc::Sender<Option<Task<T>>>,
++  state: Arc<Mutex<State>>,
++}
++
++impl<T: 'static> Queue<T> {
++  pub fn start(
++    create: impl FnOnce() -> Result<T, String> + Send + 'static,
++    destroy: impl FnOnce(T) -> Result<(), String> + Send + 'static,
++    report: impl Fn(String, bool) + Send + 'static,
++  ) -> Result<Self, String> {
++    let (sender, receiver) = mpsc::channel::<Option<Task<T>>>();
++    let state = Arc::new(Mutex::new(State::default()));
++    let worker_state = state.clone();
++    std::thread::Builder::new()
++      .name("wry-ohos-webview".into())
++      .spawn(move || {
++        let fail = |error: String| {
++          worker_state.lock().unwrap().error = Some(error.clone());
++          report(error, true);
++        };
++        let controller = match create() {
++          Ok(controller) => controller,
++          Err(error) => {
++            fail(error);
++            return;
++          }
++        };
++        while worker_state.lock().unwrap().check().is_ok() {
++          let Ok(Some(task)) = receiver.recv() else {
++            break;
++          };
++          if worker_state.lock().unwrap().check().is_err() {
++            break;
++          }
++          if let Err(error) = task(&controller) {
++            report(error, false);
++          }
++        }
++        if let Err(error) = destroy(controller) {
++          report(error, false);
++        }
++      })
++      .map_err(|error| error.to_string())?;
++    Ok(Self { sender, state })
++  }
++
++  pub fn check(&self) -> Result<(), String> {
++    self.state.lock().unwrap().check()
++  }
++
++  pub fn send(
++    &self,
++    task: impl FnOnce(&T) -> Result<(), String> + Send + 'static,
++  ) -> Result<(), String> {
++    self.check()?;
++    self.sender.send(Some(Box::new(task))).map_err(|_| {
++      self
++        .check()
++        .err()
++        .unwrap_or_else(|| "WebView worker is unavailable".into())
++    })
++  }
++}
++
++impl<T> Drop for Queue<T> {
++  fn drop(&mut self) {
++    self.state.lock().unwrap().closed = true;
++    // Wake an idle worker; a pending create is disposed as soon as it completes.
++    let _ = self.sender.send(None);
++  }
++}
++
++#[cfg(test)]
++mod tests {
++  use super::Queue;
++  use std::sync::mpsc;
++
++  #[test]
++  fn operations_wait_for_creation_and_keep_submission_order() {
++    let (create_tx, create_rx) = mpsc::channel();
++    let (event_tx, event_rx) = mpsc::channel();
++    let destroyed = event_tx.clone();
++    let queue = Queue::start(
++      move || create_rx.recv().map_err(|error| error.to_string()),
++      move |()| destroyed.send(3).map_err(|error| error.to_string()),
++      |error, _| panic!("unexpected error: {error}"),
++    )
++    .unwrap();
++    for value in [1, 2] {
++      let tx = event_tx.clone();
++      queue
++        .send(move |()| tx.send(value).map_err(|error| error.to_string()))
++        .unwrap();
++    }
++    assert!(event_rx.try_recv().is_err());
++    create_tx.send(()).unwrap();
++    assert_eq!(event_rx.recv().unwrap(), 1);
++    assert_eq!(event_rx.recv().unwrap(), 2);
++    drop(queue);
++    assert_eq!(event_rx.recv().unwrap(), 3);
++  }
++
++  #[test]
++  fn creation_failure_is_retained_and_pending_operations_are_dropped() {
++    let (create_tx, create_rx) = mpsc::channel();
++    let (error_tx, error_rx) = mpsc::channel();
++    let queue = Queue::<()>::start(
++      move || {
++        create_rx.recv().unwrap();
++        Err("create rejected".into())
++      },
++      |_| panic!("failed creation must not be destroyed twice"),
++      move |error, _| error_tx.send(error).unwrap(),
++    )
++    .unwrap();
++    queue
++      .send(|_| panic!("must not run before successful creation"))
++      .unwrap();
++    create_tx.send(()).unwrap();
++    assert_eq!(error_rx.recv().unwrap(), "create rejected");
++    assert_eq!(queue.check().unwrap_err(), "create rejected");
++    assert_eq!(queue.send(|_| Ok(())).unwrap_err(), "create rejected");
++  }
++
++  #[test]
++  fn destroying_during_creation_discards_work_and_removes_the_late_controller() {
++    let (create_tx, create_rx) = mpsc::channel();
++    let (destroy_tx, destroy_rx) = mpsc::channel();
++    let queue = Queue::start(
++      move || create_rx.recv().map_err(|error| error.to_string()),
++      move |value| destroy_tx.send(value).map_err(|error| error.to_string()),
++      |error, _| panic!("unexpected error: {error}"),
++    )
++    .unwrap();
++    queue
++      .send(|_| panic!("destroyed WebView must not execute pending work"))
++      .unwrap();
++    drop(queue);
++    create_tx.send(42).unwrap();
++    assert_eq!(destroy_rx.recv().unwrap(), 42);
++  }
++
++  #[test]
++  fn operation_failure_is_reported_without_destroying_the_webview() {
++    let (error_tx, error_rx) = mpsc::channel();
++    let (destroy_tx, destroy_rx) = mpsc::channel();
++    let queue = Queue::start(
++      || Ok(()),
++      move |_| destroy_tx.send(()).map_err(|error| error.to_string()),
++      move |error, _| error_tx.send(error).unwrap(),
++    )
++    .unwrap();
++    queue.send(|_| Err("controller closed".into())).unwrap();
++    assert_eq!(error_rx.recv().unwrap(), "controller closed");
++    let (done_tx, done_rx) = mpsc::channel();
++    queue
++      .send(move |_| done_tx.send(()).map_err(|error| error.to_string()))
++      .unwrap();
++    done_rx.recv().unwrap();
++    assert!(queue.check().is_ok());
++    assert!(destroy_rx.try_recv().is_err());
++    drop(queue);
++    destroy_rx.recv().unwrap();
++  }
++
++  #[test]
++  fn late_cleanup_from_a_suspended_generation_does_not_touch_its_replacement() {
++    let (create_tx, create_rx) = mpsc::channel();
++    let (removed_tx, removed_rx) = mpsc::channel();
++    let old_removed = removed_tx.clone();
++    let old = Queue::start(
++      move || create_rx.recv().map_err(|error| error.to_string()),
++      move |id| old_removed.send(id).map_err(|error| error.to_string()),
++      |error, _| panic!("unexpected error: {error}"),
++    )
++    .unwrap();
++    drop(old);
++    let current = Queue::start(
++      || Ok("generation-2"),
++      move |id| removed_tx.send(id).map_err(|error| error.to_string()),
++      |error, _| panic!("unexpected error: {error}"),
++    )
++    .unwrap();
++    create_tx.send("generation-1").unwrap();
++    assert_eq!(removed_rx.recv().unwrap(), "generation-1");
++    let (result_tx, result_rx) = mpsc::channel();
++    current
++      .send(move |id| result_tx.send(*id).map_err(|error| error.to_string()))
++      .unwrap();
++    assert_eq!(result_rx.recv().unwrap(), "generation-2");
++    drop(current);
++    assert_eq!(removed_rx.recv().unwrap(), "generation-2");
++  }
++}

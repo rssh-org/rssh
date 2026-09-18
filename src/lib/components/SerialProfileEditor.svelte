@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import * as app from "../stores/app.svelte.ts";
+  import * as serial from "../stores/serial.svelte.ts";
   import type { Group } from "../stores/app.svelte.ts";
   import { toast } from "../stores/toast.svelte.ts";
   import { t, errMsg } from "../i18n/index.svelte.ts";
@@ -33,10 +34,27 @@
   let saving = $state(false);
   // Detected ports populate a <datalist> for the free-form port input.
   let ports = $state<string[]>([]);
+  let portsLoading = $state(false);
+  let portsError = $state<string | null>(null);
   let groups = $state<Group[]>([]);
   let groupId = $state<string | null>(null);
   let loading = $state(true);
   let loadError = $state<string | null>(null);
+  let capabilities = $derived(serial.capabilities());
+  let capabilityState = $derived(serial.state());
+  let unsupportedBaud = $derived(
+    !!capabilities?.baudRates.length && !capabilities.baudRates.includes(Number(baudRate)),
+  );
+  let unsupportedFlow = $derived(!!capabilities && !capabilities.flowControl && flowControl !== "none");
+  let unsupportedXany = $derived(!!capabilities && !capabilities.xany && xany);
+  let invalidBaud = $derived(!Number.isInteger(baudRate) || baudRate < 1 || baudRate > 4294967295);
+  let invalidSettings = $derived(
+    !capabilities || unsupportedBaud || unsupportedFlow || unsupportedXany || invalidBaud,
+  );
+  let baudOptions = $derived([
+    ...(unsupportedBaud ? [{ value: baudRate, label: String(baudRate), disabled: true }] : []),
+    ...(capabilities?.baudRates ?? []).map((value) => ({ value, label: String(value) })),
+  ]);
   let groupOptions = $derived([
     { value: null, label: t("profile.none") },
     ...groups.map((g) => ({ value: g.id, label: g.name })),
@@ -59,8 +77,8 @@
   ]);
   let flowOptions = $derived([
     { value: "none", label: t("serial.flow.none") },
-    { value: "software", label: t("serial.flow.software") },
-    { value: "hardware", label: t("serial.flow.hardware") },
+    { value: "software", label: t("serial.flow.software"), disabled: !capabilities?.flowControl },
+    { value: "hardware", label: t("serial.flow.hardware"), disabled: !capabilities?.flowControl },
   ]);
   let newlineOutOptions = $derived([
     { value: "raw", label: t("serial.nl.raw") },
@@ -83,8 +101,23 @@
     { value: "hex", label: t("serial.mode.hex") },
   ]);
 
+  async function refreshPorts() {
+    if (portsLoading) return;
+    portsLoading = true;
+    portsError = null;
+    try {
+      ports = await invoke<string[]>("serial_list_ports");
+    } catch (error) {
+      ports = [];
+      portsError = errMsg(error);
+    } finally {
+      portsLoading = false;
+    }
+  }
+
   onMount(async () => {
-    invoke<string[]>("serial_list_ports").then((p) => (ports = p)).catch(() => {});
+    void serial.load();
+    void refreshPorts();
     try {
       groups = await app.loadGroups();
     } catch (error) {
@@ -110,7 +143,7 @@
   });
 
   async function save() {
-    if (loading || loadError || saving) return;
+    if (loading || loadError || saving || invalidSettings) return;
     saving = true;
     try {
       const profile = {
@@ -141,20 +174,53 @@
     <Select id="serial-group" bind:value={groupId} options={groupOptions} />
 
     <div class="section-label">{t("serial.sec.line")}</div>
+    {#if capabilityState.kind === "error"}
+      <div class="form-error" role="alert">
+        {t("serial.capabilities_failed", { error: errMsg(capabilityState.error) })}
+        <button type="button" class="btn btn-sm" onclick={() => serial.load()}>{t("common.retry")}</button>
+      </div>
+    {:else if !capabilities}
+      <p class="hint" role="status">{t("serial.capabilities_loading")}</p>
+    {/if}
     <label for="serial-port">{t("serial.port")}</label>
-    <input id="serial-port" type="text" bind:value={port} placeholder="/dev/cu.usbserial-…" list="serial-ports-list" aria-describedby="serial-port-hint" />
+    <div class="port-picker">
+      <input id="serial-port" type="text" bind:value={port} placeholder={t("serial.port_placeholder")} list="serial-ports-list" aria-describedby="serial-port-hint" />
+      <button type="button" class="btn btn-sm" onclick={refreshPorts} disabled={portsLoading}>
+        {portsLoading ? t("common.loading") : t("serial.refresh_ports")}
+      </button>
+    </div>
     <datalist id="serial-ports-list">{#each ports as p}<option value={p}></option>{/each}</datalist>
-    <p id="serial-port-hint" class="port-hint">{t("serial.port_device_hint")}</p>
+    <p id="serial-port-hint" class="hint">{t("serial.port_device_hint")}</p>
+    {#if portsError}
+      <div class="form-error" role="alert">{t("serial.ports_failed", { error: portsError })}</div>
+    {:else if !portsLoading && ports.length === 0}
+      <p class="hint" role="status">{t("serial.ports_empty")}</p>
+    {/if}
     <label for="serial-baud">{t("serial.baud")}</label>
-    <input id="serial-baud" type="number" bind:value={baudRate} min="1" />
+    {#if capabilities?.baudRates.length}
+      <Select id="serial-baud" bind:value={baudRate} options={baudOptions} />
+    {:else}
+      <input id="serial-baud" type="number" bind:value={baudRate} min="1" max="4294967295" step="1" disabled={!capabilities} />
+    {/if}
+    {#if unsupportedBaud}
+      <p class="form-error" role="alert">{t("serial.baud_unsupported", { baud: baudRate })}</p>
+    {:else if invalidBaud}
+      <p class="form-error" role="alert">{t("serial.baud_invalid")}</p>
+    {/if}
     <div class="row3">
       <div class="field"><label for="serial-data-bits">{t("serial.data_bits")}</label><Select id="serial-data-bits" bind:value={dataBits} options={dataBitsOptions} /></div>
       <div class="field"><label for="serial-parity">{t("serial.parity")}</label><Select id="serial-parity" bind:value={parity} options={parityOptions} /></div>
       <div class="field"><label for="serial-stop-bits">{t("serial.stop_bits")}</label><Select id="serial-stop-bits" bind:value={stopBits} options={stopBitsOptions} /></div>
     </div>
     <label for="serial-flow">{t("serial.flow")}</label>
-    <Select id="serial-flow" bind:value={flowControl} options={flowOptions} />
-    <label class="check"><input type="checkbox" bind:checked={xany} /> {t("serial.xany")}</label>
+    <Select id="serial-flow" bind:value={flowControl} options={flowOptions} disabled={!capabilities} />
+    {#if capabilities && !capabilities.flowControl}
+      <p class:form-error={unsupportedFlow} class="hint">{t("serial.flow_unsupported")}</p>
+    {/if}
+    <label class="check"><input type="checkbox" bind:checked={xany} disabled={!capabilities || (!capabilities.xany && !xany)} /> {t("serial.xany")}</label>
+    {#if capabilities && !capabilities.xany}
+      <p class:form-error={unsupportedXany} class="hint">{t("serial.xany_unsupported")}</p>
+    {/if}
 
     <div class="section-label">{t("serial.sec.term")}</div>
     <div class="row2">
@@ -175,7 +241,7 @@
     <textarea id="serial-login-script" bind:value={loginScript} rows="4" placeholder={t("serial.login_script.ph")}></textarea>
 
     <div class="form-actions">
-      <button type="button" class="btn btn-accent btn-sm" onclick={save} disabled={loading || !!loadError || saving || !name || !port}>
+      <button type="button" class="btn btn-accent btn-sm" onclick={save} disabled={loading || !!loadError || saving || invalidSettings || !name || !port}>
         {loading ? t("common.loading") : saving ? t("common.saving") : t("common.save")}
       </button>
       <button type="button" class="btn btn-sm" onclick={() => app.navigate("connections")}>{t("common.cancel")}</button>
@@ -190,7 +256,10 @@
   .check { display: flex; align-items: center; gap: 8px; }
   textarea { font-family: var(--term-font); resize: vertical; }
   .form :global(.section-label) { margin-top: 10px; }
-  .port-hint { margin: -4px 0 2px; font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+  .port-picker { display: flex; align-items: center; gap: 8px; }
+  .port-picker input { flex: 1; min-width: 0; }
+  .port-picker button { flex-shrink: 0; }
+  .hint { margin: -4px 0 2px; font-size: 11px; color: var(--text-dim); line-height: 1.4; }
   .form-error {
     padding: 6px 10px;
     border-radius: 4px;

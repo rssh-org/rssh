@@ -8,6 +8,9 @@
   import * as sync from "./lib/stores/sync.svelte.ts";
   import * as cli from "./lib/stores/cli.svelte.ts";
   import * as ai from "./lib/ai/store.svelte.ts";
+  import * as runtime from "./lib/stores/runtime.svelte.ts";
+  import * as layout from "./lib/stores/layout.svelte.ts";
+  import { errMsg, t } from "./lib/i18n/index.svelte.ts";
 
   // First-launch auto-show: when there are no profiles and no forwards,
   // surface the cinematic welcome once. After the user dismisses it
@@ -16,8 +19,12 @@
   // boot. Settings → About → "Preview welcome screen" is the manual
   // replay path; it deliberately bypasses this flag.
   const DISMISSED_KEY = "rssh.welcome.dismissed";
+  // Capture before the capability await: AppShell consumes these handoffs
+  // when it mounts, before startup's remaining asynchronous work settles.
+  const auxiliaryWindow = !!window.__rssh_clone || !!window.__rssh_ai_handoff;
 
   let showWelcome = $state(false);
+  let startupError = $state("");
 
   $effect(() => {
     const revision = sync.configurationRevision();
@@ -27,7 +34,20 @@
     );
   });
 
-  onMount(async () => {
+  onMount(() => {
+    const stopObservingViewport = layout.observeViewport();
+    void initialize();
+    return stopObservingViewport;
+  });
+
+  async function initialize() {
+    startupError = "";
+    try {
+      await runtime.load();
+    } catch (error) {
+      startupError = errMsg(error);
+      return;
+    }
     // 预热 AI 设置：色条"发送到 AI"等入口靠 ai.settings()?.has_api_key 同步判断是否
     // 可用，过去只有打开 AI 面板才加载它。在 app 启动时拉一次，保证任何菜单打开前
     // _settings 已就位（fire-and-forget；失败不阻塞 UI，开面板时还会重试）。
@@ -42,13 +62,16 @@
 
     // Skip background update polling on clone / AI-handoff windows —
     // they're transient and the main window already owns the timer.
-    if (!window.__rssh_clone && !window.__rssh_ai_handoff) {
+    if (!auxiliaryWindow) {
       // App Store/TestFlight owns updates on iOS; never direct those users to a
       // GitHub desktop/Android artifact.
       if (!isIOS) updates.startBackgroundChecks();
       sync.startBackgroundChecks();
-      cli.startBackgroundChecks();
+      if (runtime.capabilities().cliInstall) cli.startBackgroundChecks();
     }
+
+    // A clone or analysis handoff should open directly into its requested task.
+    if (auxiliaryWindow) return;
 
     // localStorage / Tauri may not be available in non-app hosts
     // (e.g. vitest, browser preview) — defensively swallow errors so a
@@ -70,7 +93,7 @@
     } catch (e) {
       console.debug("welcome auto-check skipped:", e);
     }
-  });
+  }
 
   function dismissWelcome() {
     showWelcome = false;
@@ -80,9 +103,27 @@
   }
 </script>
 
-<AppShell />
+{#if runtime.loaded()}
+  <AppShell />
+{:else}
+  <main class="startup" aria-busy={!startupError}>
+    {#if startupError}
+      <h1>{t("startup.failed")}</h1>
+      <p role="alert">{startupError}</p>
+      <button class="btn btn-accent" onclick={() => void initialize()}>{t("common.retry")}</button>
+    {:else}
+      <p role="status">{t("common.loading")}</p>
+    {/if}
+  </main>
+{/if}
 <ToastStack />
 
 {#if showWelcome}
   <WelcomeScreen onDismiss={dismissWelcome} />
 {/if}
+
+<style>
+  .startup { height: 100%; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center; }
+  .startup h1 { font-size: 18px; }
+  .startup p { max-width: 640px; overflow-wrap: anywhere; color: var(--text-sub); }
+</style>

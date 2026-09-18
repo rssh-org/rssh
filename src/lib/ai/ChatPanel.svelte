@@ -791,15 +791,17 @@
     }
     .message-action.rollback:hover { color: var(--error); }
     .message-action:disabled { opacity: 0.4; cursor: default; }
-    @media (hover: none), (any-pointer: coarse) {
+    @media (max-width: 639px) {
         .user-message {
             flex-direction: column;
             align-items: flex-end;
         }
-        .message-actions { opacity: 1; pointer-events: auto; }
-        .message-action { width: 44px; height: 44px; }
         .message-actions { order: 2; }
         .bubble.user { order: 1; }
+    }
+    @media (hover: none), (any-pointer: coarse) {
+        .message-actions { opacity: 1; pointer-events: auto; }
+        .message-action { width: 44px; height: 44px; }
     }
     .ts {
         font-size: 10px; color: var(--text-dim);

@@ -1,6 +1,8 @@
 mod ai;
 mod commands;
-#[cfg(desktop)]
+#[cfg(any(ohos, test))]
+mod ohos;
+#[cfg(any(windows, macos, linux))]
 pub use commands::cli::CLI_VERSION;
 pub mod crypto;
 pub mod db;
@@ -12,7 +14,7 @@ mod redaction;
 pub mod secret;
 mod ssh;
 pub use ssh::bastion;
-#[cfg(all(feature = "server", desktop))]
+#[cfg(all(feature = "server", any(windows, macos, linux)))]
 pub mod server;
 mod state;
 pub mod sync;
@@ -26,7 +28,8 @@ use tauri::Manager;
 
 use state::AppState;
 
-#[cfg(target_os = "linux")]
+// OHOS uses ArkWeb, not the Linux desktop WebKitGTK/Wayland backend.
+#[cfg(linux)]
 fn apply_linux_wayland_compat() {
     if std::env::var_os("RSSH_DISABLE_WAYLAND_COMPAT").is_some() {
         return;
@@ -56,10 +59,10 @@ fn apply_linux_wayland_compat() {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(linux))]
 fn apply_linux_wayland_compat() {}
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg_attr(any(android, ios), tauri::mobile_entry_point)]
 pub fn run() {
     apply_linux_wayland_compat();
 
@@ -67,37 +70,53 @@ pub fn run() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Official plugins ship no OHOS backend (see the Cargo.toml target table
+    // that gates them); every other target registers them exactly as before.
+    #[cfg(any(macos, windows, linux, android, ios))]
+    let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .on_window_event(|window, event| {
+        .plugin(tauri_plugin_clipboard_manager::init());
+    builder
+        // Android/iOS Activity recreation is not a logical window close.
+        // The OHOS adapter emits Destroyed only for a real native window close.
+        .on_window_event(|_window, event| {
             match event {
                 // Mobile (Android/iOS): Activity lifecycle changes can fire
                 // WindowEvent::Destroyed when the app merely goes to background
                 // (e.g. a fullscreen file picker opens). Closing sessions there
-                // would silently disconnect every SSH tab. Desktop only.
-                #[cfg(desktop)]
+                // would silently disconnect every SSH tab.
+                #[cfg(any(windows, macos, linux, ohos))]
                 tauri::WindowEvent::Destroyed => {
-                    let state = window.state::<AppState>();
+                    let state = _window.state::<AppState>();
                     // Close only sessions belonging to this window.
-                    commands::lifecycle::close_window_sessions(&state, window.label());
+                    commands::lifecycle::close_window_sessions(&state, _window.label());
                 }
                 _ => {}
             }
         })
         .setup(|app| {
-            #[cfg(mobile)]
+            // The UIAbility registers its sandbox path before Tauri starts.
+            #[cfg(ohos)]
+            let data_dir = ohos::data_dir()?;
+            // Android/iOS use Tauri's sandbox path; OHOS registers its own above.
+            #[cfg(any(android, ios))]
             let data_dir = app.path().app_data_dir()?;
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux))]
             let data_dir = db::data_dir()?;
 
             // 启动时扫一次本机可用 shell，结果缓存到进程退出。
             // 用户在 Shell 设置页打开时直接读缓存，没冷启动开销。
-            // PTY 模块本身就是桌面端独占（移动端没有 portable_pty）。
-            #[cfg(desktop)]
+            // HarmonyOS also compiles PTY, but probes sandbox support before use.
+            #[cfg(any(windows, macos, linux, ohos))]
             terminal::pty::init_available_shells();
             let db = Arc::new(db::Db::open(&data_dir)?);
+            // The plugin store follows the actual host data directory (including
+            // application sandboxes), rather than a desktop-only path template.
+            app.asset_protocol_scope()
+                .allow_directory(data_dir.join("plugins"), true)?;
             // secret::open 可能失败：sticky backend 标记 keyring 但 keychain 现在
             // 拿不到（系统 keychain 损坏 / D-Bus 挂等）→ 硬 fail 启动。silently
             // fallback file 会用新主密钥让旧密文全部解不开，比启动失败更危险。
@@ -118,9 +137,9 @@ pub fn run() {
                 secret_store: secret_system.store,
                 lifecycle_sessions: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
-                #[cfg(desktop)]
+                #[cfg(any(windows, macos, linux, ohos))]
                 pty_sessions: Mutex::new(HashMap::new()),
-                #[cfg(desktop)]
+                #[cfg(any(windows, macos, linux, ohos))]
                 serial_sessions: Mutex::new(HashMap::new()),
                 telnet_sessions: Mutex::new(HashMap::new()),
                 sftp_sessions: Mutex::new(HashMap::new()),
@@ -138,6 +157,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::runtime::get_runtime_capabilities,
+            commands::files::resolve_local_paths,
             // profile & credential
             commands::profile::list_profiles,
             commands::profile::get_profile,
@@ -212,45 +233,47 @@ pub fn run() {
             commands::session::ssh_host_key_cancel,
             // session lifecycle
             commands::lifecycle::reconcile_sessions,
-            // PTY (desktop only)
-            #[cfg(desktop)]
+            // PTY (desktop hosts and capability-probed HarmonyOS PC)
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::list_shells,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::refresh_shells,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::pty_spawn,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::pty_spawn_connector,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::pty_write,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::pty_resize,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::pty_close,
-            // Serial (desktop only)
-            #[cfg(desktop)]
+            // Serial (desktop hosts and capability-probed HarmonyOS PC)
+            #[cfg(any(windows, macos, linux, ohos))]
+            commands::serial::serial_get_capabilities,
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_list_ports,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_open,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_write,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_close,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_set_dtr,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_set_rts,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::serial_send_break,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::list_serial_profiles,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::get_serial_profile,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::create_serial_profile,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::update_serial_profile,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::serial::delete_serial_profile,
             // Telnet (all platforms — plain TCP)
             commands::telnet::telnet_open,
@@ -277,35 +300,26 @@ pub fn run() {
             // Stream transfer to/from a path (desktop) or content:// URI (mobile).
             commands::sftp::sftp_download_to,
             commands::sftp::sftp_upload_from,
-            // SFTP native file transfer (desktop only)
-            #[cfg(desktop)]
-            commands::sftp::sftp_save_file,
-            #[cfg(desktop)]
-            commands::sftp::sftp_pick_and_upload,
-            #[cfg(desktop)]
             commands::sftp::sftp_pick_save_path,
-            #[cfg(desktop)]
             commands::sftp::sftp_pick_open_path,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::sftp::sftp_pick_folder,
-            #[cfg(desktop)]
             commands::sftp::sftp_pick_open_files,
             commands::sftp::sftp_cancel_transfer,
+            commands::files::save_text_file,
             commands::sftp::sftp_remove,
             commands::sftp::sftp_rename,
             commands::sftp::sftp_stat,
             // CLI install
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux))]
             commands::cli::cli_status,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux))]
             commands::cli::cli_install,
-            // multi-window (desktop only)
-            #[cfg(desktop)]
+            // Native multi-window hosts
+            #[cfg(any(windows, macos, linux, ohos))]
             commands::window::open_tab_in_new_window,
-            #[cfg(desktop)]
-            commands::window::clipboard_read,
-            #[cfg(desktop)]
-            commands::window::clipboard_write,
+            commands::clipboard::clipboard_read,
+            commands::clipboard::clipboard_write,
             // external URL opener — cross-platform via tauri-plugin-opener
             commands::external::open_external_url,
             // update check (cross-platform — separate mod from window)

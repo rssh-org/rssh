@@ -1,0 +1,88 @@
+{
+  "app": {
+    "signingConfigs": [],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "compatibleSdkVersion": "5.0.0(12)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        },
+        "output": {
+          "artifactName": "RSSH"
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./products/phone",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "desktop",
+      "srcPath": "./products/desktop",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "rssh_runtime",
+      "srcPath": "./common/runtime"
+    },
+    {
+      "name": "native_ability",
+      "srcPath": "./vendor/ability/native_ability"
+    },
+    {
+      "name": "plugin_app_control",
+      "srcPath": "./vendor/ability/plugins/app-control"
+    },
+    {
+      "name": "plugin_files",
+      "srcPath": "./vendor/ability/plugins/files"
+    },
+    {
+      "name": "plugin_permission",
+      "srcPath": "./vendor/ability/plugins/permission"
+    },
+    {
+      "name": "plugin_url",
+      "srcPath": "./vendor/ability/plugins/url"
+    },
+    {
+      "name": "plugin_webview",
+      "srcPath": "./vendor/ability/plugins/webview"
+    },
+    {
+      "name": "plugin_window",
+      "srcPath": "./vendor/ability/plugins/window"
+    }
+  ]
+}

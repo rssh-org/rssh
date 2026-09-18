@@ -15,6 +15,7 @@
 - 移动端增加自定义键盘
 - profile/forward 自定义icon
 - iOS快捷键盘，随着软键盘升起
+- 滚动到上一屏，按cmd会回到光标处，不好复制
 
 
 ![Stars](https://img.shields.io/github/stars/rssh-org/rssh)

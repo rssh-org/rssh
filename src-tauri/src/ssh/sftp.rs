@@ -812,7 +812,9 @@ impl SftpHandle {
 /// `cancel` between chunks. No Tauri/Host dependency — progress is injected — so
 /// it's unit-testable over in-memory `Cursor`/`Vec`. `read` errors are the
 /// remote side (`sftp_io_failed` op:read); `write` errors are the local side
-/// (bare IO error, e.g. disk full or a SAF `content://` write fault).
+/// (bare IO error, e.g. disk full or a SAF `content://` write fault). Success
+/// includes flushing the destination, so buffered writes and their errors
+/// cannot outlive the transfer's completion or the atomic rename.
 async fn stream_download<R, W>(
     src: &mut R,
     dst: &mut W,
@@ -842,6 +844,7 @@ where
         transferred += n as u64;
         on_progress(transferred);
     }
+    dst.flush().await?;
     Ok(transferred)
 }
 
@@ -931,6 +934,36 @@ mod tests {
         assert_eq!(dst, data);
         assert_eq!(*ticks.last().unwrap(), data.len() as u64);
         assert!(ticks.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[tokio::test]
+    async fn stream_download_finishes_buffered_writes_before_success() {
+        let data = b"the last chunk must reach the destination";
+        let mut src = Cursor::new(data);
+        let mut dst = tokio::io::BufWriter::with_capacity(128, Vec::new());
+        let cancel = AtomicBool::new(false);
+
+        let transferred = stream_download(&mut src, &mut dst, |_| {}, &cancel)
+            .await
+            .unwrap();
+
+        assert_eq!(transferred, data.len() as u64);
+        assert_eq!(dst.get_ref().as_slice(), data);
+    }
+
+    #[tokio::test]
+    async fn stream_download_propagates_errors_from_the_final_buffered_write() {
+        let (output, input) = tokio::io::duplex(64);
+        drop(input);
+        let mut src = Cursor::new(b"buffered until flush");
+        let mut dst = tokio::io::BufWriter::with_capacity(128, output);
+        let cancel = AtomicBool::new(false);
+
+        let error = stream_download(&mut src, &mut dst, |_| {}, &cancel)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "io_error");
     }
 
     #[tokio::test]

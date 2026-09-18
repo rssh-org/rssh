@@ -348,7 +348,7 @@ fn entry_exists(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &st
 /// neither — the plugin capability contract covers SSH + local only.
 enum ExecTransport {
     Ssh(SshHandle),
-    #[cfg(desktop)]
+    #[cfg(any(windows, macos, linux, ohos))]
     Local,
 }
 
@@ -385,7 +385,7 @@ fn exec_transport(
         }
         // Local shell tab: run on this machine. The PTY handle itself is not
         // needed — a fresh child process per call, same one-shot contract.
-        #[cfg(desktop)]
+        #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Pty => Ok(ExecTransport::Local),
         kind => Err(AppError::not_found(
             "plugin_no_exec",
@@ -398,13 +398,16 @@ fn exec_transport(
 /// (timeout, 256 KB per stream). The timeout path kills the WHOLE process
 /// group: `kill_on_drop` takes out the shell and a group sweep takes out its
 /// children — no orphaned `sh -c "cat /dev/zero & wait"` burners.
-#[cfg(desktop)]
+#[cfg(any(windows, macos, linux, ohos))]
 async fn local_exec(command: &str, timeout: std::time::Duration) -> AppResult<PluginExecResult> {
     const CAP: u64 = 256 * 1024;
 
     #[cfg(unix)]
     let mut cmd = {
+        #[cfg(not(ohos))]
         let mut c = tokio::process::Command::new("/bin/sh");
+        #[cfg(ohos)]
+        let mut c = tokio::process::Command::new("sh");
         c.arg("-c");
         c
     };
@@ -515,7 +518,7 @@ pub async fn plugin_exec_impl(
             )
             .await
         }
-        #[cfg(desktop)]
+        #[cfg(any(windows, macos, linux, ohos))]
         ExecTransport::Local => local_exec(&command, timeout).await,
     }
 }
@@ -705,7 +708,7 @@ mod tests {
         assert!(ensure_zip_b64_within_cap(&encoded).is_err());
     }
 
-    #[cfg(desktop)]
+    #[cfg(any(windows, macos, linux))]
     #[tokio::test]
     async fn local_exec_runs_command_and_captures_output() {
         // Both shells must chain stdout, stderr and a nonzero exit code.
@@ -722,7 +725,7 @@ mod tests {
         assert_eq!(result.exit_code, Some(7));
     }
 
-    #[cfg(desktop)]
+    #[cfg(any(windows, macos, linux))]
     #[tokio::test]
     async fn local_exec_times_out_and_kills() {
         // `sleep` doesn't exist on Windows; ping-to-localhost is the standard
@@ -741,7 +744,7 @@ mod tests {
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }
 
-    #[cfg(all(desktop, unix))]
+    #[cfg(all(any(windows, macos, linux), unix))]
     #[tokio::test]
     async fn local_exec_timeout_kills_the_process_group() {
         // `sh -c "sleep N & wait"` parks the shell behind a background child;
@@ -762,7 +765,7 @@ mod tests {
         assert!(!text.contains("sleep 9876"), "orphan survived:\n{text}");
     }
 
-    #[cfg(desktop)]
+    #[cfg(any(windows, macos, linux))]
     #[tokio::test]
     async fn local_exec_caps_output_without_breaking_the_pipe() {
         // >256 KB of stdout: the retained buffer is capped, but the pipe keeps
@@ -958,9 +961,9 @@ mod tests {
             secret_store,
             lifecycle_sessions: Default::default(),
             sessions: Default::default(),
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             pty_sessions: Default::default(),
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             serial_sessions: Default::default(),
             telnet_sessions: Default::default(),
             sftp_sessions: Default::default(),

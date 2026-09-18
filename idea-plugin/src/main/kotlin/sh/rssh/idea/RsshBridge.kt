@@ -64,6 +64,7 @@ object RsshBridge {
                     )}
                 });
             };
+            window.dispatchEvent(new Event('rssh:host-ready'));
         """.trimIndent()
 
         browser.jbCefClient.addLoadHandler(

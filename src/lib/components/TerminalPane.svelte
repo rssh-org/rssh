@@ -11,10 +11,13 @@
     import {listen, type UnlistenFn} from "@tauri-apps/api/event";
     import type {ConnectorSpec, HighlightRule, TelnetProfile} from "../stores/app.svelte.ts";
     import * as app from "../stores/app.svelte.ts";
+    import * as layout from "../stores/layout.svelte.ts";
+    import { isIOS } from "../platform.ts";
+    import { supportsTouch, isTouchContextMenu } from "../input.ts";
     import * as syncStatus from "../stores/sync.svelte.ts";
     import * as ai from "../ai/store.svelte.ts";
     import * as theme from "../themes/store.svelte.ts";
-    import MobileKeybar from "./MobileKeybar.svelte";
+    import TerminalKeybar from "./TerminalKeybar.svelte";
     import {registerRsshOscHandlers} from "../osc/handler.ts";
     import {registerClipboardOscHandler} from "../osc/clipboard.ts";
     import {createCommandBlockTracker, type CommandBlock, type CommandBlockTracker} from "../terminal/command-blocks.ts";
@@ -26,7 +29,6 @@
         BACKLOG_DROP_TRIGGER_BYTES,
         BACKLOG_INDICATOR_BYTES,
         BACKLOG_MAX_PENDING_BYTES,
-        BACKLOG_MAX_PENDING_BYTES_MOBILE,
         BACKLOG_QUIESCENCE_MS,
     } from "../terminal/limits.ts";
     import {createPaintScheduler, type PaintScheduler} from "../terminal/paint-scheduler.ts";
@@ -36,7 +38,7 @@
     import {extractBlockTexts, extractBlocksText} from "../terminal/block-content.ts";
     import {redactCommandBlockTexts} from "../terminal/command-block-redaction.ts";
     import {setupTouchScroll} from "../terminal/touch-scroll.ts";
-    import {setupSoftKeyboardInset} from "../soft-keyboard-inset.ts";
+    import {setupTerminalSoftKeyboard} from "../terminal/soft-keyboard.ts";
     import {registerBracketedPasteProvider, unregisterBracketedPasteProvider} from "../terminal/bracketed-paste.ts";
     import {setupXtermIme229Workaround} from "../terminal/xterm-ime-229-workaround.ts";
     import {createReservedSessionAttempt} from "../terminal/reserved-session-attempt.ts";
@@ -617,11 +619,9 @@
     let reconnectDisposable: IDisposable | undefined;
     let resizeObs: ResizeObserver;
     let ime229WorkaroundCleanup: (() => void) | undefined;
-    let mobileKeyboardCleanup: (() => void) | undefined;
-    // The active pane's keyboard toggle, built by setupMobileSoftKeyboard and
-    // registered in the activation effect (see below for why not at mount).
-    let softKbToggle: (() => void) | null = null;
-    let mobileTouchScrollCleanup: (() => void) | undefined;
+    let softKeyboard = $state.raw<ReturnType<typeof setupTerminalSoftKeyboard>>();
+    let softKeyboardRequested = $state(false);
+    let touchScrollCleanup: (() => void) | undefined;
 
     const isLocal = $derived(tabType === "local");
     const isPtyConnector = $derived(tabType === "docker_exec" || tabType === "kubectl_exec");
@@ -923,7 +923,7 @@
      *  after preventDefault. Stopping it first lets preventDefault actually
      *  suppress the menu. */
     function onTerminalContextMenu(e: MouseEvent) {
-        if (app.isMobile) return; // mobile keeps the native long-press menu
+        if (isTouchContextMenu(e)) return; // Preserve the native touch/pen long-press menu.
         // Cmd on macOS, Ctrl elsewhere + right-click falls back to the native menu
         // even in paste/copyPaste modes — an opt-in escape hatch toggled in Shell
         // settings. Returns without preventDefault/stopPropagation so xterm's own
@@ -1130,7 +1130,7 @@
                 }
             } catch (e: any) {
                 if (!isCurrent()) return false;
-                terminal.write(`\x1b[31mSerial open failed: ${e}\x1b[0m\r\n`);
+                terminal.write(`\x1b[31m${errMsg(e)}\x1b[0m\r\n`);
                 terminal.write("\x1b[90mPress any key to retry.\x1b[0m\r\n");
                 disconnected = true;
                 reportInitialConnectionFailure(e);
@@ -1325,6 +1325,28 @@
         return data;
     }
 
+    function writeControl(text: string) {
+        maybeReleaseBacklog(text);
+        if (sessionId && !disconnected) {
+            if (streamOpts) {
+                streamSendText(text);
+            } else {
+                invoke(writeCmd, {sessionId, data: Array.from(new TextEncoder().encode(text))})
+                    .catch((e) => console.warn(`[${tabType}] control write failed:`, e));
+            }
+        }
+    }
+
+    function sendControlArrow(dir: app.ArrowDir, mod: number) {
+        // DECCKM: bare arrows use SS3 in app-cursor mode, CSI otherwise.
+        // Modified arrows always use CSI with params; SS3 has no param form.
+        const appMode = terminal.modes.applicationCursorKeysMode;
+        const seq = mod === 0
+            ? (appMode ? `\x1bO${dir}` : `\x1b[${dir}`)
+            : `\x1b[1;${mod}${dir}`;
+        writeControl(seq);
+    }
+
     function setupReconnect() {
         reconnectDisposable?.dispose();
         reconnectDisposable = terminal.onData(() => {
@@ -1347,176 +1369,6 @@
         }
     }
 
-    function setupMobileSoftKeyboard(helper: HTMLTextAreaElement) {
-        const originalHelperStyle = helper.getAttribute("style");
-        let scrollResetRaf = 0;
-        let helperPinRaf = 0;
-
-        function resetDocumentScroll() {
-            if (scrollResetRaf) return;
-            scrollResetRaf = requestAnimationFrame(() => {
-                scrollResetRaf = 0;
-                if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
-                document.documentElement.scrollTop = 0;
-                document.documentElement.scrollLeft = 0;
-                document.body.scrollTop = 0;
-                document.body.scrollLeft = 0;
-            });
-        }
-
-        function pinKeyboardHelper() {
-            const viewport = window.visualViewport;
-            const minTop = (viewport?.offsetTop ?? 0) + 1;
-            const maxTop = minTop + (viewport?.height ?? window.innerHeight) - 2;
-            const containerTop = containerEl.getBoundingClientRect().top + 8;
-            const top = Math.max(minTop, Math.min(maxTop, containerTop));
-
-            // xterm keeps this textarea far off-screen by default. On mobile
-            // WebView, focusing it makes the page pan to reveal it, and the IME
-            // composition/candidate UI anchors to its position — so off-screen
-            // means a yanked page and a misplaced input popup. Keep it invisible
-            // but in-view. (Layout-independent: not about any fixed chrome.)
-            helper.style.position = "fixed";
-            helper.style.left = "1px";
-            helper.style.top = `${Math.round(top)}px`;
-            helper.style.width = "1px";
-            helper.style.height = "1px";
-            helper.style.opacity = "0";
-            helper.style.zIndex = "-1";
-            helper.style.pointerEvents = "none";
-            helper.style.caretColor = "transparent";
-            helper.style.background = "transparent";
-            helper.style.color = "transparent";
-            helper.style.border = "0";
-            helper.style.padding = "0";
-            helper.style.margin = "0";
-            helper.style.outline = "0";
-            helper.style.resize = "none";
-            helper.style.overflow = "hidden";
-        }
-
-        function onViewportChange() {
-            if (document.activeElement !== helper) return;
-            pinKeyboardHelper();
-            resetDocumentScroll();
-        }
-
-        function onWindowScroll() {
-            if (document.activeElement === helper) resetDocumentScroll();
-        }
-
-        function keepKeyboardHelperInView() {
-            pinKeyboardHelper();
-            resetDocumentScroll();
-            if (helperPinRaf) cancelAnimationFrame(helperPinRaf);
-            helperPinRaf = requestAnimationFrame(() => {
-                helperPinRaf = 0;
-                pinKeyboardHelper();
-                resetDocumentScroll();
-            });
-        }
-
-        function lockKeyboard() {
-            helper.readOnly = true;
-            helper.setAttribute("readonly", "true");
-            helper.setAttribute("inputmode", "none");
-            helper.tabIndex = -1;
-            helper.inert = true;
-        }
-
-        function unlockKeyboard() {
-            helper.inert = false;
-            helper.readOnly = false;
-            helper.removeAttribute("readonly");
-            helper.setAttribute("inputmode", "text");
-            helper.tabIndex = 0;
-        }
-
-        function showKeyboard() {
-            pinKeyboardHelper();
-            unlockKeyboard();
-            helper.focus({ preventScroll: true });
-            resetDocumentScroll();
-        }
-
-        function hideKeyboard() {
-            helper.blur();
-            lockKeyboard();
-            resetDocumentScroll();
-        }
-
-        // The keyboard opens ONLY from the keybar button, so terminal touches
-        // need no tap/drag/long-press classification — that state machine
-        // existed to decide whether a tap should OPEN it. Any touch on the
-        // terminal just dismisses a keyboard that is open, at pointerdown:
-        // sooner than the old drag-slop / long-press-timer paths ever did.
-        // No preventDefault anywhere: long-press must still reach the native
-        // copy/paste menu.
-        function onTerminalTouchDown(ev: PointerEvent) {
-            if (ev.pointerType !== "touch" && ev.pointerType !== "pen") return;
-            if (document.activeElement === helper) hideKeyboard();
-        }
-
-        function onFocus() {
-            app.setSoftKeyboardOpen(true);
-        }
-
-        function onBlur() {
-            app.setSoftKeyboardOpen(false);
-            lockKeyboard();
-        }
-
-        // The keybar's keyboard button is the ONLY way to pop the keyboard.
-        // Only STORE the toggle here — registering at mount would let a hidden
-        // pane steal the store's single slot (panes stay mounted per tab); the
-        // activation effect registers it when THIS pane becomes the active tab.
-        softKbToggle = () => {
-            if (document.activeElement === helper) hideKeyboard();
-            else showKeyboard();
-        };
-        pinKeyboardHelper();
-        lockKeyboard();
-        helper.blur();
-        helper.addEventListener("focus", onFocus);
-        helper.addEventListener("blur", onBlur);
-        helper.addEventListener("input", keepKeyboardHelperInView);
-        helper.addEventListener("keydown", keepKeyboardHelperInView);
-        helper.addEventListener("compositionstart", keepKeyboardHelperInView);
-        helper.addEventListener("compositionupdate", keepKeyboardHelperInView);
-        window.addEventListener("scroll", onWindowScroll, { passive: true });
-        window.visualViewport?.addEventListener("scroll", onViewportChange, { passive: true });
-        window.visualViewport?.addEventListener("resize", onViewportChange, { passive: true });
-        containerEl.addEventListener("pointerdown", onTerminalTouchDown, { capture: true, passive: true });
-        // iOS overlays the keyboard instead of resizing the webview: pad the
-        // pane up onto the visible viewport so the keybar rides on top of the
-        // keyboard — up with the open animation, down with the close (settle
-        // mode inside setupSoftKeyboardInset). Registered after our own
-        // listeners so the helper pin runs before the padding write. No-op on
-        // Android, where the webview already resized; the pane's
-        // ResizeObserver refits the terminal as the pane shrinks.
-        const insetCleanup = setupSoftKeyboardInset(paneEl, helper);
-
-        return () => {
-            if (scrollResetRaf) cancelAnimationFrame(scrollResetRaf);
-            if (helperPinRaf) cancelAnimationFrame(helperPinRaf);
-            insetCleanup();
-            if (originalHelperStyle === null) helper.removeAttribute("style");
-            else helper.setAttribute("style", originalHelperStyle);
-            helper.removeEventListener("focus", onFocus);
-            helper.removeEventListener("blur", onBlur);
-            if (softKbToggle) app.unregisterSoftKeyboardToggle(softKbToggle);
-            softKbToggle = null;
-            helper.removeEventListener("input", keepKeyboardHelperInView);
-            helper.removeEventListener("keydown", keepKeyboardHelperInView);
-            helper.removeEventListener("compositionstart", keepKeyboardHelperInView);
-            helper.removeEventListener("compositionupdate", keepKeyboardHelperInView);
-            window.removeEventListener("scroll", onWindowScroll);
-            window.visualViewport?.removeEventListener("scroll", onViewportChange);
-            window.visualViewport?.removeEventListener("resize", onViewportChange);
-            containerEl.removeEventListener("pointerdown", onTerminalTouchDown, { capture: true });
-        };
-    }
-
     let unsubscribeTheme: (() => void) | null = null;
     let unsubscribeFont: (() => void) | null = null;
     let unsubscribeGpu: (() => void) | null = null;
@@ -1530,8 +1382,8 @@
     }
 
     onMount(async () => {
-        const IMAGE_STORAGE_LIMIT_MB = app.isMobile ? 32 : 128;
-        const IMAGE_PIXEL_LIMIT = app.isMobile ? 4_000_000 : 16_000_000;
+        const IMAGE_STORAGE_LIMIT_MB = 128;
+        const IMAGE_PIXEL_LIMIT = 16_000_000;
 
         terminal = new Terminal({
             cursorBlink: true,
@@ -1562,7 +1414,7 @@
         terminal.loadAddon(fitAddon);
         terminal.loadAddon(searchAddon);
         terminal.loadAddon(new Unicode11Addon());
-        // SIXEL / iTerm IIP 图片协议。移动端把内存上限压一半。
+        // Bound image-protocol memory consistently across hosts.
         terminal.loadAddon(new ImageAddon({
             sixelSupport: true,
             sixelScrolling: true,
@@ -1575,10 +1427,8 @@
         // and drowns on flood output. WebGL draws from a texture atlas — the
         // "GPU acceleration" every modern terminal ships. Any failure (old
         // GPU, RDP, WebView without WebGL2) falls back to the DomRenderer.
-        // The user toggle decides (theme.termGpuRender, live): it defaults
-        // off on mobile because WebGL paints glyphs into a canvas, leaving
-        // no DOM text — iOS's native long-press selection (the blue handles)
-        // has nothing to grab. Toggling mid-session swaps renderers in place.
+        // The user's live renderer preference is shared across hosts.
+        // Toggling mid-session swaps renderers in place.
         unsubscribeGpu = theme.registerXtermGpuListener(on => {
             if (!on) {
                 disposeWebgl();
@@ -1600,16 +1450,14 @@
         ime229WorkaroundCleanup = setupXtermIme229Workaround({
             terminal,
             host: containerEl,
-            enabled: keymap.isMac && !app.isMobile,
+            enabled: keymap.isMac && !isIOS,
         });
         terminal.unicode.activeVersion = "11";
         // Flood control: all data-event writes go through the feeder (see
         // output-feeder.ts). Synthetic UI writes (prompts, banners) bypass it.
         outputFeeder = createOutputFeeder({
             write: (data, cb) => terminal.write(data, cb),
-            maxPendingBytes: app.isMobile
-                ? BACKLOG_MAX_PENDING_BYTES_MOBILE
-                : BACKLOG_MAX_PENDING_BYTES,
+            maxPendingBytes: BACKLOG_MAX_PENDING_BYTES,
         });
         // Keyword highlighting lives here: a decoration layer over the parsed
         // cell grid. The reactive $effect above feeds it the compiled rules.
@@ -1627,22 +1475,26 @@
             fitTerminal();
         });
 
-        // 移动端：键盘只从 keybar 的 ⌨ 按钮弹出（issue #225）。终端上任何
-        // 触摸只负责收起已打开的键盘；helper 常态锁定，长按选择不受影响。
-        if (app.isMobile) {
-            const helper = terminal.textarea ?? containerEl.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
-            if (helper) {
-                mobileKeyboardCleanup = setupMobileSoftKeyboard(helper);
-            }
-            // 与上面的 pointer 键盘状态机正交：靠"位移超阈值才接管"避开点按(弹键盘)和
-            // 长按(选字)。代价：长按选中后再拖动会变成滚动而非扩展选区——移动端有
-            // 块复制 / 发 AI 取文，这个取舍可接受。
-            mobileTouchScrollCleanup = setupTouchScroll(containerEl, terminal);
+        const helper = terminal.textarea ?? containerEl.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
+        if (helper) {
+            softKeyboard = setupTerminalSoftKeyboard({
+                helper, host: containerEl, pane: paneEl, touchAvailable: supportsTouch(),
+                onRequestedChange: (requested) => {
+                    softKeyboardRequested = requested;
+                    if (app.activeTabId() === tabId && !app.settingsActive()) {
+                        app.setSoftKeyboardOpen(requested);
+                    }
+                },
+            });
         }
+        // The handler consumes touch events only; mouse/wheel input keeps xterm's path.
+        touchScrollCleanup = setupTouchScroll(containerEl, terminal);
 
         app.registerTerminalControls(tabId, {
             getSelection: () => terminal.getSelection(),
             paste: pasteText,
+            writeControl,
+            sendArrow: sendControlArrow,
             sendText,
             focus: () => terminal.focus(),
             readViewport: () => readViewportSnapshot(terminal),
@@ -1681,8 +1533,8 @@
             for (const a of ACTIONS) {
                 if (a.surface !== "terminal") continue;
                 if (!matchBinding(e, keymap.binding(a.id))) continue;
-                // SFTP only applies to remote sessions on desktop; elsewhere let the shell have the key.
-                if (a.id === "term.sftp" && (!isSsh || app.isMobile)) return true;
+                // SFTP only applies to SSH sessions; other transports keep the key.
+                if (a.id === "term.sftp" && !isSsh) return true;
                 e.preventDefault();
                 runTerminalShortcut(a.id);
                 return false;
@@ -1853,7 +1705,7 @@
         if (visible) foldStore?.enforceAutoFold();
     });
 
-    // Focus terminal + register writer when this tab becomes active.
+    // Focus the terminal and expose its keyboard controller when it becomes active.
     // Double-rAF: the first frame lets the browser apply layout after
     // the pane switches from display:none → flex; the second frame
     // ensures the computed dimensions are stable before we fit.
@@ -1861,32 +1713,15 @@
         if (app.activeTabId() === tabId && !app.settingsActive()) {
             requestAnimationFrame(() => requestAnimationFrame(fitTerminal));
             terminal?.focus();
-            const writePty = (text: string) => {
-                maybeReleaseBacklog(text);
-                if (sessionId && !disconnected) {
-                    if (streamOpts) {
-                        streamSendText(text);
-                    } else {
-                        invoke(writeCmd, {sessionId, data: Array.from(new TextEncoder().encode(text))})
-                            .catch((e) => console.warn(`[${tabType}] control write failed:`, e));
-                    }
-                }
-            };
-            app.registerTerminalWriter(writePty);
-            // DECCKM: bare arrows use SS3 (ESC O x) in app-cursor mode, CSI (ESC [ x)
-            // in normal mode. Modified arrows always use CSI with params — SS3 has
-            // no param form. That's the protocol, not a design choice.
-            app.registerTerminalArrowSender((dir, mod) => {
-                const appMode = terminal.modes.applicationCursorKeysMode;
-                const seq = mod === 0
-                    ? (appMode ? `\x1bO${dir}` : `\x1b[${dir}`)
-                    : `\x1b[1;${mod}${dir}`;
-                writePty(seq);
-            });
-            // Same re-own-on-activation as the writer above: the visible tab's
-            // ⌨ button must always control this pane's helper, never a hidden
-            // pane that happened to mount later.
-            if (softKbToggle) app.registerSoftKeyboardToggle(softKbToggle);
+            // The keyboard button must control this pane's helper, never a
+            // hidden pane that happened to mount later.
+            if (softKeyboard) {
+                app.registerSoftKeyboardToggle(softKeyboard.toggle);
+                untrack(() => app.setSoftKeyboardOpen(softKeyboardRequested));
+            }
+        } else if (softKeyboard) {
+            untrack(() => softKeyboard?.hide());
+            app.unregisterSoftKeyboardToggle(softKeyboard.toggle);
         }
     });
 
@@ -1930,8 +1765,11 @@
         resizeObs?.disconnect();
         ime229WorkaroundCleanup?.();
         ime229WorkaroundCleanup = undefined;
-        mobileKeyboardCleanup?.();
-        mobileTouchScrollCleanup?.();
+        if (softKeyboard) {
+            app.unregisterSoftKeyboardToggle(softKeyboard.toggle);
+            softKeyboard.dispose();
+        }
+        touchScrollCleanup?.();
         paintScheduler?.dispose();
         outputFeeder?.dispose();
         outputFeeder = undefined;
@@ -1939,8 +1777,6 @@
         backlogRaf = null;
         foldStore?.dispose();
         blockTracker?.dispose();
-        app.unregisterTerminalWriter();
-        app.unregisterTerminalArrowSender();
         app.unregisterTerminalControls(tabId);
         unregisterBracketedPasteProvider(tabId);
         app.unregisterSession(tabId);
@@ -1988,8 +1824,18 @@
             </div>
         </div>
     {/if}
-    <div class="term-wrap" class:is-mobile={app.isMobile} class:no-block-bar={!app.commandBlockBar()}>
+    <div class="term-wrap" class:soft-keyboard={softKeyboardRequested} class:no-block-bar={!app.commandBlockBar()}>
         <div class="xterm-host" bind:this={containerEl}></div>
+        {#if !layout.compact()}
+            <button class="keyboard-toggle" class:active={softKeyboardRequested}
+                    title={t("terminal.keyboard")} aria-label={t("terminal.keyboard")} aria-pressed={softKeyboardRequested}
+                    onpointerdown={(event) => event.preventDefault()} onclick={() => { app.setActivePane(tabId); softKeyboard?.toggle(); }}>
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                    <rect x="2" y="5" width="20" height="14" rx="2" />
+                    <path d="M5 9h2m2 0h2m2 0h2m2 0h2M5 12h2m2 0h2m2 0h2m2 0h2M7 15h10" />
+                </svg>
+            </button>
+        {/if}
         {#if backlogBytes > BACKLOG_INDICATOR_BYTES}
             <div class="backlog-badge">
                 <span>{formatBacklogBytes(backlogBytes)}</span>
@@ -2056,13 +1902,14 @@
             onClose={() => (ctxMenu = null)}
         />
     {/if}
-    {#if app.isMobile}
-        <MobileKeybar />
+    {#if layout.compact() && app.activeTabId() === tabId}
+        <TerminalKeybar />
     {/if}
 </div>
 
 <style>
     .term-outer {
+        position: relative;
         display: flex;
         flex-direction: column;
         width: 100%;
@@ -2107,25 +1954,35 @@
         padding: 4px;
     }
 
-    /* Mobile: hide xterm's inline .composition-view (the black box pinned at
-       the cursor) — the soft keyboard's own candidate bar already shows the
-       IME composing text, so it's redundant (Sogou flashes it on backspace).
+    /* An explicitly opened soft keyboard provides its own candidate bar; hide
+       xterm's duplicate inline composition text only while that request is active.
+       Sogou otherwise flashes the duplicate text on backspace.
        MUST be visibility:hidden, NOT display:none: xterm sizes the hidden input
        textarea from this element's getBoundingClientRect() (updateComposition-
        Elements), so display:none zeroes that rect, collapses the textarea, and
        breaks IME input entirely (Sogou can't type). visibility:hidden keeps the
        layout box (real rect, input works) while hiding the paint. */
-    .term-wrap.is-mobile :global(.composition-view) {
+    .term-wrap.soft-keyboard :global(.composition-view) {
         visibility: hidden !important;
     }
 
-    /* Mobile: xterm 6's scrollbar slider has its own pointer-drag, which raced our
-       touch-scroll handler (drag "sometimes" worked, sometimes not). Make it a pure
-       position indicator on mobile so touches fall through to the content drag/fling;
-       desktop keeps the draggable scrollbar. */
-    .term-wrap.is-mobile :global(.xterm-scrollable-element > .scrollbar) {
-        pointer-events: none;
+    .keyboard-toggle {
+        position: absolute;
+        right: 18px;
+        bottom: 10px;
+        display: grid;
+        place-items: center;
+        width: 34px;
+        height: 30px;
+        padding: 0;
+        border: 1px solid var(--divider);
+        border-radius: 6px;
+        background: var(--surface);
+        color: var(--text-sub);
+        cursor: pointer;
+        z-index: 2;
     }
+    .keyboard-toggle.active { background: var(--accent); color: var(--white); }
 
     /* Overlay painted inside the enlarged left padding. SVG itself ignores
        pointer events so text selection still works; only the per-block

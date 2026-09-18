@@ -2,6 +2,7 @@
     import * as transfers from "../stores/transfers.svelte.ts";
     import * as app from "../stores/app.svelte.ts";
     import { t } from "../i18n/index.svelte.ts";
+    import { remoteUploadName } from "../sftp-name.ts";
 
     let popEl: HTMLDivElement | undefined;
     let list = $derived(transfers.list());
@@ -91,7 +92,9 @@
                     <span class="kind" title={item.kind}>{item.kind === "download" ? "↓" : "↑"}</span>
 
                     <div class="name" title={item.kind === "download" ? item.remotePath : item.localPath}>
-                        {basename(item.kind === "download" ? item.remotePath : item.localPath)}
+                        {item.kind === "download"
+                            ? basename(item.remotePath)
+                            : remoteUploadName(item.localPath) || item.localPath}
                     </div>
                     <div class="path" title={item.kind === "download" ? item.localPath : item.remotePath}>
                         → {item.kind === "download" ? item.localPath : item.remotePath}

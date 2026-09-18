@@ -162,6 +162,15 @@ export function installTauriShim(): void {
     // web APIs (or the host bridge) so they never hit the ws. Keeps INV-1 — the
     // frontend call sites are unchanged; this one seam absorbs the difference.
     const LOCAL: Record<string, (a: any) => Promise<unknown>> = {
+        get_runtime_capabilities: async () => {
+            const capabilities = await wsInvoke("get_runtime_capabilities") as Record<string, boolean>;
+            const hasPicker = typeof (window as any).__RSSH_PICK__ === "function";
+            return {
+                ...capabilities,
+                fileMultiSelect: capabilities.fileMultiSelect && hasPicker,
+                directoryTransfer: capabilities.directoryTransfer && hasPicker,
+            };
+        },
         clipboard_read: () => navigator.clipboard.readText(),
         clipboard_write: (a) => navigator.clipboard.writeText(String(a.text ?? "")),
         open_external_url: async (a) => {
@@ -198,6 +207,10 @@ export function installTauriShim(): void {
             }
         },
         sftp_pick_save_path: (a) => hostSavePath(a.defaultName),
+        sftp_pick_open_path: async () => {
+            const paths = await hostPick("files");
+            return Array.isArray(paths) ? paths[0] ?? null : paths;
+        },
         sftp_pick_folder: () => hostPick("folder"),
         sftp_pick_open_files: () => hostPick("files"),
         // Window-plugin commands: off-Tauri the app lives in an IDE tool window
@@ -246,6 +259,8 @@ export function installTauriShim(): void {
         return id;
     }
 
+    // Native-only adapters must distinguish this shim from Tauri's runtime.
+    (window as any).__RSSH_IPC_SHIM__ = true;
     (window as any).__TAURI_INTERNALS__ = {
         invoke,
         transformCallback,

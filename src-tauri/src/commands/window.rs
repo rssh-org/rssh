@@ -3,6 +3,68 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 
+#[derive(Clone, Copy)]
+pub(crate) enum AppWindowPurpose {
+    Tab,
+    LocalAnalysis,
+}
+
+#[cfg(any(test, ohos))]
+fn check_window_capabilities(
+    desktop_device: bool,
+    multi_window: bool,
+    local_pty: bool,
+    purpose: AppWindowPurpose,
+) -> Result<(), String> {
+    if !desktop_device || !multi_window {
+        return Err("Additional windows are unavailable on this device".into());
+    }
+    if matches!(purpose, AppWindowPurpose::LocalAnalysis) && !local_pty {
+        return Err("Local analysis requires a working local terminal".into());
+    }
+    Ok(())
+}
+
+pub(crate) async fn ensure_app_window_available(purpose: AppWindowPurpose) -> Result<(), String> {
+    #[cfg(ohos)]
+    {
+        let device = crate::ohos::device::query().await.map_err(|error| {
+            log::warn!("Cannot query native window capabilities: {error}");
+            "HarmonyOS system services are unavailable; restart RSSH and try again".to_string()
+        })?;
+        let desktop_device = device.class() == crate::ohos::device::DeviceClass::Desktop;
+        let local_pty = desktop_device
+            && device.multi_window
+            && matches!(purpose, AppWindowPurpose::LocalAnalysis)
+            && crate::ohos::device::local_pty_available().await;
+        check_window_capabilities(desktop_device, device.multi_window, local_pty, purpose)
+    }
+    #[cfg(not(ohos))]
+    {
+        let _ = purpose;
+        Ok(())
+    }
+}
+
+/// Both IPC tab cloning and AI handoff use this boundary. The window's unique
+/// label becomes its session owner when the frontend creates its resources.
+pub(crate) async fn open_app_window(
+    app: &AppHandle,
+    label: &str,
+    title: &str,
+    init_script: &str,
+    purpose: AppWindowPurpose,
+) -> Result<(), String> {
+    ensure_app_window_available(purpose).await?;
+    WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
+        .title(title)
+        .inner_size(1200.0, 800.0)
+        .initialization_script(init_script)
+        .build()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// Encode the frontend clone payload as a JavaScript string literal.
 ///
 /// The frontend reads `window.__rssh_clone` as a string and parses it once
@@ -32,11 +94,8 @@ fn clone_init_script(clone: &str) -> AppResult<String> {
 pub async fn open_tab_in_new_window(app: AppHandle, clone: String) -> AppResult<()> {
     let init_script = clone_init_script(&clone)?;
     let label = format!("rssh-{}", Uuid::new_v4().simple());
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
-        .title("RSSH")
-        .inner_size(1200.0, 800.0)
-        .initialization_script(&init_script)
-        .build()
+    open_app_window(&app, &label, "RSSH", &init_script, AppWindowPurpose::Tab)
+        .await
         .map_err(|e| {
             AppError::other(
                 "window_open_failed",
@@ -46,9 +105,33 @@ pub async fn open_tab_in_new_window(app: AppHandle, clone: String) -> AppResult<
     Ok(())
 }
 
-#[cfg(all(test, desktop))]
+#[cfg(all(test, any(windows, macos, linux)))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phone_tablet_and_unavailable_window_service_reject_both_entry_points() {
+        for (desktop, multi_window) in [(false, false), (false, true), (true, false)] {
+            for purpose in [AppWindowPurpose::Tab, AppWindowPurpose::LocalAnalysis] {
+                assert_eq!(
+                    check_window_capabilities(desktop, multi_window, true, purpose),
+                    Err("Additional windows are unavailable on this device".into()),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pty_restrictions_block_analysis_but_not_remote_tab_windows() {
+        assert!(check_window_capabilities(true, true, false, AppWindowPurpose::Tab).is_ok());
+        assert_eq!(
+            check_window_capabilities(true, true, false, AppWindowPurpose::LocalAnalysis),
+            Err("Local analysis requires a working local terminal".into()),
+        );
+        assert!(
+            check_window_capabilities(true, true, true, AppWindowPurpose::LocalAnalysis).is_ok()
+        );
+    }
 
     #[test]
     fn clone_payload_becomes_quoted_init_script() {
@@ -70,68 +153,4 @@ mod tests {
             .unwrap();
         assert_eq!(serde_json::from_str::<String>(literal).unwrap(), clone);
     }
-}
-
-/// One `arboard::Clipboard` for the whole process, created lazily.
-///
-/// On X11 the clipboard is a *selection ownership* protocol, not a store: the
-/// process that wrote the text must stay alive to serve other apps' (and our
-/// own paste's) `SelectionRequest`s. arboard owns the CLIPBOARD selection only
-/// while at least one `Clipboard` instance is alive; the last one to drop tears
-/// down its X11 window and hands the data off to a clipboard manager on a
-/// best-effort basis — a race it usually loses ("Clipboard was dropped very
-/// quickly after writing"). Creating a fresh `Clipboard` per call therefore
-/// relinquished the selection the instant the call returned, so the next paste
-/// read an empty clipboard.
-///
-/// Keeping one instance alive for the process lifetime means we stay the
-/// selection owner: reads short-circuit to local data and external pastes are
-/// served, with no per-call teardown/handoff race. `Clipboard` is `Send + Sync`
-/// on every desktop platform, so a `static` behind a `Mutex` is sound.
-static CLIPBOARD: std::sync::OnceLock<std::sync::Mutex<Option<arboard::Clipboard>>> =
-    std::sync::OnceLock::new();
-
-/// Run `op` against the process-wide clipboard, creating it on first use.
-fn with_clipboard<R>(
-    op: &'static str,
-    f: impl FnOnce(&mut arboard::Clipboard) -> Result<R, arboard::Error>,
-) -> AppResult<R> {
-    let cell = CLIPBOARD.get_or_init(|| std::sync::Mutex::new(None));
-    // A panic while holding the lock can't leave the clipboard in an unsafe
-    // state, so recover from poisoning rather than failing the operation.
-    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
-    if guard.is_none() {
-        *guard = Some(arboard::Clipboard::new().map_err(|e| {
-            AppError::other(
-                "window_clipboard_failed",
-                serde_json::json!({ "op": "init", "err": e.to_string() }),
-            )
-        })?);
-    }
-    let cb = guard.as_mut().expect("clipboard initialized above");
-    f(cb).map_err(|e| {
-        AppError::other(
-            "window_clipboard_failed",
-            serde_json::json!({ "op": op, "err": e.to_string() }),
-        )
-    })
-}
-
-/// Read the system clipboard as text.
-/// Goes through Rust (arboard) to bypass WebKit's permission prompt on
-/// externally-sourced clipboard content — `navigator.clipboard.readText()`
-/// pops a dialog every time on macOS unless the content was written by the
-/// same page in this session.
-#[tauri::command]
-pub fn clipboard_read() -> AppResult<String> {
-    with_clipboard("read", |cb| cb.get_text())
-}
-
-/// Write text to the system clipboard.
-/// Mirrors `clipboard_read`: goes through Rust (arboard) because in the
-/// WKWebView `navigator.clipboard.writeText` is unreliable from a right-click
-/// (contextmenu) / unfocused context — it silently rejects.
-#[tauri::command]
-pub fn clipboard_write(text: String) -> AppResult<()> {
-    with_clipboard("write", |cb| cb.set_text(text))
 }

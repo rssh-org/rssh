@@ -6,8 +6,7 @@ const invokeMock = vi.hoisted(() => vi.fn(async () => null as unknown));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 // init() writes :root CSS variables — stub the minimum document surface.
-// Node has no navigator either; platform.ts guards typeof, so a desktop
-// default (isMobile=false) applies.
+// Input hardware is absent in this fixture, so GPU rendering defaults on.
 beforeEach(() => {
   invokeMock.mockReset();
   invokeMock.mockResolvedValue(null);

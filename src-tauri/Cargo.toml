@@ -13,9 +13,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-opener = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -77,10 +74,13 @@ tree-sitter-bash = "0.25.1"
 fontdb = "0.23.0"
 url = "2.5.8"
 
-[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+# Mobile reqwest carries webpki-roots so TLS works without a probeable
+# system trust store; OHOS rides the same table (ArkWeb devices have no
+# openssl-style cert probing rustls-native-certs can rely on).
+[target.'cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "rustls-tls-webpki-roots", "stream", "system-proxy"] }
 
-[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+[target.'cfg(not(any(target_os = "android", target_os = "ios", target_env = "ohos")))'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream", "system-proxy"] }
 
 # Raw termios access for the serial `xany` (IXANY) flag — the serialport crate
@@ -88,25 +88,41 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc = "0.2"
 
-# PTY, serial and clipboard — the three desktop targets RSSH actually ships.
-# Cargo target tables cannot use Tauri's `desktop` cfg alias, so keep this as a
-# positive OS list instead of treating every non-mobile target as a desktop.
+# PTY uses the native Unix API on HarmonyOS too. Availability is probed inside
+# the application sandbox before the UI exposes a local shell.
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
-portable-pty = "0.8"
+portable-pty = "0.9"
+
+# Serial — the three desktop targets RSSH actually ships.
+# Cargo target tables cannot use the application's build.rs OS aliases, so keep
+# the native target conditions here.
+# OHOS is target_os = "linux" but has no libudev serial backend.
+# Rust source uses the `linux` alias from build.rs for this condition. Cargo
+# resolves dependencies before running build.rs, so these tables keep it inline.
+[target.'cfg(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos"))))'.dependencies]
 # Serial console transport — a 3rd byte-stream alongside SSH/PTY. macOS uses
 # IOKit and Windows uses the Win32 API (no extra system dep); Linux links
 # libudev for port enumeration, so Linux CI/packaging needs `libudev-dev` at
 # build time (see build-linux.sh).
 serialport = "4.9.0"
-arboard = "3"
 
 # Keychain — Apple platforms share the native Security.framework backend.
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(all(target_os = "linux", not(target_env = "ohos")))'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+
+# Official plugins (opener/dialog/fs/clipboard) have no OHOS implementation upstream or
+# in the fork — compiling their desktop Linux backends (rfd etc.) against the
+# OHOS sysroot would not link. Everything but ohos keeps them; the ohos build
+# registers no official plugins; native OHOS integrations live in its adapter.
+[target.'cfg(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos")), target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-clipboard-manager = "2"
 
 [features]
 default = []

@@ -28,7 +28,7 @@ impl std::fmt::Display for CodedMsg {
 
 impl std::error::Error for CodedMsg {}
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum AppError {
     /// SQLite 错误 — `From<rusqlite::Error>` 自动包装为 CodedMsg。
     #[error(transparent)]

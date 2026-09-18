@@ -82,26 +82,50 @@ impl Host {
         }
     }
 
+    /// Check before proposing approval; unsupported hosts must not leave a
+    /// useless approval card waiting for user input.
+    pub async fn ensure_local_analysis_available(&self) -> Result<(), String> {
+        match self {
+            #[cfg(any(windows, macos, linux, ohos))]
+            Host::Tauri(_) => {
+                crate::commands::window::ensure_app_window_available(
+                    crate::commands::window::AppWindowPurpose::LocalAnalysis,
+                )
+                .await
+            }
+            #[cfg(not(any(windows, macos, linux, ohos)))]
+            Host::Tauri(_) => Err("Additional windows are unavailable on this device".into()),
+            Host::Headless { .. } => {
+                Err("Local analysis windows are unavailable in headless mode".into())
+            }
+        }
+    }
+
     /// Spawn a standalone analysis window (the `analyze_locally` AI tool).
-    /// Desktop-Tauri only; headless has no native windows, so it reports an
-    /// error the tool surfaces to the model (same as the mobile path).
-    #[cfg(desktop)]
-    pub fn open_app_window(
+    /// The native boundary rechecks capabilities after approval, so OHOS
+    /// phone/tablet builds cannot bypass it by invoking the tool directly.
+    pub async fn open_app_window(
         &self,
         label: &str,
         title: &str,
         init_script: &str,
     ) -> Result<(), String> {
         match self {
+            #[cfg(any(windows, macos, linux, ohos))]
             Host::Tauri(app) => {
-                use tauri::{WebviewUrl, WebviewWindowBuilder};
-                WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
-                    .title(title)
-                    .inner_size(1200.0, 800.0)
-                    .initialization_script(init_script)
-                    .build()
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
+                crate::commands::window::open_app_window(
+                    app,
+                    label,
+                    title,
+                    init_script,
+                    crate::commands::window::AppWindowPurpose::LocalAnalysis,
+                )
+                .await
+            }
+            #[cfg(not(any(windows, macos, linux, ohos)))]
+            Host::Tauri(_) => {
+                let _ = (label, title, init_script);
+                Err("Additional windows are unavailable on this device".into())
             }
             Host::Headless { .. } => Err("multi-window unavailable in headless mode".to_string()),
         }

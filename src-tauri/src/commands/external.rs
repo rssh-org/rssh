@@ -1,5 +1,5 @@
+#[cfg(not(ohos))]
 use tauri::AppHandle;
-use tauri_plugin_opener::OpenerExt;
 
 use crate::error::{AppError, AppResult};
 
@@ -10,8 +10,11 @@ use crate::error::{AppError, AppResult};
 /// route had no implementation and the invoke silently failed for users.
 ///
 /// Refuses non-http(s) schemes to prevent abuse (file://, javascript:, …).
+#[cfg(not(ohos))]
 #[tauri::command]
 pub fn open_external_url(app: AppHandle, url: String) -> AppResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(AppError::config(
             "window_non_https_url",
@@ -24,4 +27,23 @@ pub fn open_external_url(app: AppHandle, url: String) -> AppResult<()> {
             serde_json::json!({ "err": e.to_string() }),
         )
     })
+}
+
+/// HarmonyOS invokes UIAbilityContext.openLink on its owning UI thread.
+#[cfg(ohos)]
+#[tauri::command]
+pub async fn open_external_url(url: String) -> AppResult<()> {
+    let parsed = url::Url::parse(&url)
+        .map_err(|_| AppError::config("window_non_https_url", serde_json::json!({ "url": url })))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(AppError::config(
+            "window_non_https_url",
+            serde_json::json!({ "url": url }),
+        ));
+    }
+    use openharmony_ability_plugin_url::UrlExt;
+    crate::ohos::app()?
+        .open_url(url)
+        .await
+        .map_err(crate::ohos::native_error)
 }
