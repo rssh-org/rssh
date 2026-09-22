@@ -9,6 +9,15 @@ interface OpenRequest {
   createInDirectory: boolean;
 }
 
+interface NameRequest {
+  uri: string;
+}
+
+class FileName {
+  readonly name: string;
+  constructor(name: string) { this.name = name; }
+}
+
 interface DirectoryRequest {
   uri: string;
   write: boolean;
@@ -154,6 +163,12 @@ export class FilesAccessPlugin extends AsyncPluginBase {
   async invokeAsync(action: string, payload: BridgeTypedValue, context: BridgeCallContext): Promise<BridgeTypedValue> {
     ensureActive(context);
     if (!payload.value || typeof payload.value !== 'object') throw new Error('File access requires a request');
+    if (action === 'file-name') {
+      if (payload.typeName !== 'rssh.files.NameRequest') throw new Error('file-name requires rssh.files.NameRequest');
+      const request = payload.value as NameRequest;
+      if (typeof request.uri !== 'string' || !request.uri) throw new Error('File name requires a URI');
+      return { typeName: 'rssh.files.FileName', value: new FileName(new fileUri.FileUri(request.uri).name) };
+    }
     if (action === 'open-file') {
       if (payload.typeName !== 'rssh.files.OpenRequest') throw new Error('open-file requires rssh.files.OpenRequest');
       const request = payload.value as OpenRequest;

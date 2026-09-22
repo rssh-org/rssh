@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+const subscribeMock = vi.hoisted(() => vi.fn());
+vi.mock("../ipc-shim.ts", () => ({ onRuntimeCapabilitiesChanged: subscribeMock }));
+
+function notifyCapabilitiesChanged(): void {
+  subscribeMock.mock.calls[0][0]();
+}
 
 const desktop = {
   localPty: true,
@@ -16,15 +22,56 @@ const desktop = {
   fileMultiSelect: true,
   directoryTransfer: true,
   plugins: true,
+  nativeClipboard: true,
+  terminalPolicy: {
+    imageStorageLimitMb: 128,
+    imagePixelLimit: 16_000_000,
+    outputBacklogLimitBytes: 128 * 1024 * 1024,
+    gpuRenderDefault: true,
+  },
 };
 
 beforeEach(() => {
   vi.resetModules();
   invokeMock.mockReset();
+  subscribeMock.mockReset();
 });
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("runtime capabilities", () => {
+  it("keeps host terminal policy separate from feature capabilities", async () => {
+    const runtime = await import("./runtime.svelte.ts");
+    expect(() => runtime.terminalPolicy()).toThrow();
+    invokeMock.mockResolvedValue(desktop);
+    await runtime.load();
+    expect(runtime.terminalPolicy()).toEqual(desktop.terminalPolicy);
+    expect(runtime.capabilities()).not.toHaveProperty("terminalPolicy");
+    expect(runtime.capabilities().nativeClipboard).toBe(true);
+  });
+
+  it("uses the backend's resource limits without inferring a device from input or width", async () => {
+    vi.stubGlobal("window", { innerWidth: 1600 });
+    vi.stubGlobal("navigator", { maxTouchPoints: 0, userAgent: "unrecognized host" });
+    const runtime = await import("./runtime.svelte.ts");
+    const terminalPolicy = {
+      imageStorageLimitMb: 32,
+      imagePixelLimit: 4_000_000,
+      outputBacklogLimitBytes: 32 * 1024 * 1024,
+      gpuRenderDefault: false,
+    };
+    invokeMock.mockResolvedValue({ ...desktop, terminalPolicy });
+    await runtime.load();
+    expect(runtime.terminalPolicy()).toEqual(terminalPolicy);
+  });
+
+  it("keeps the resource barrier closed if the host omits its terminal policy", async () => {
+    const runtime = await import("./runtime.svelte.ts");
+    const { terminalPolicy: _policy, ...capabilities } = desktop;
+    invokeMock.mockResolvedValue(capabilities);
+    await expect(runtime.load()).rejects.toThrow("terminal runtime policy");
+    expect(runtime.loaded()).toBe(false);
+  });
+
   it("does not enable native features until the backend reports support", async () => {
     const runtime = await import("./runtime.svelte.ts");
     expect(runtime.loaded()).toBe(false);
@@ -50,7 +97,8 @@ describe("runtime capabilities", () => {
     await Promise.all([first, second]);
     await runtime.load();
     expect(invokeMock).toHaveBeenCalledTimes(1);
-    expect(runtime.capabilities()).toEqual(desktop);
+    const { terminalPolicy: _policy, ...capabilities } = desktop;
+    expect(runtime.capabilities()).toEqual(capabilities);
   });
 
   it("keeps failed initialization retryable without claiming unsupported features", async () => {
@@ -64,9 +112,7 @@ describe("runtime capabilities", () => {
     expect(invokeMock).toHaveBeenCalledTimes(2);
   });
 
-  it("refreshes an IDE picker injected after startup without closing the resource barrier", async () => {
-    const host = Object.assign(new EventTarget(), { __RSSH_IPC_SHIM__: true });
-    vi.stubGlobal("window", host);
+  it("refreshes changed capabilities without closing the resource barrier", async () => {
     const runtime = await import("./runtime.svelte.ts");
     invokeMock.mockResolvedValueOnce({ ...desktop, fileMultiSelect: false, directoryTransfer: false });
     await runtime.load();
@@ -74,7 +120,7 @@ describe("runtime capabilities", () => {
 
     let finish!: (value: typeof desktop) => void;
     invokeMock.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
-    host.dispatchEvent(new Event("rssh:host-ready"));
+    notifyCapabilitiesChanged();
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
     expect(runtime.loaded()).toBe(true);
     finish(desktop);
@@ -82,30 +128,26 @@ describe("runtime capabilities", () => {
     expect(runtime.loaded()).toBe(true);
   });
 
-  it("does not lose host-ready delivered during the first capability request", async () => {
-    const host = Object.assign(new EventTarget(), { __RSSH_IPC_SHIM__: true });
-    vi.stubGlobal("window", host);
+  it("does not lose a change notification delivered during the first capability request", async () => {
     const runtime = await import("./runtime.svelte.ts");
     let finish!: (value: typeof desktop) => void;
     invokeMock.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
     invokeMock.mockResolvedValueOnce(desktop);
     const initialization = runtime.load();
-    host.dispatchEvent(new Event("rssh:host-ready"));
+    notifyCapabilitiesChanged();
     finish({ ...desktop, fileMultiSelect: false, directoryTransfer: false });
     await initialization;
     await vi.waitFor(() => expect(runtime.capabilities().directoryTransfer).toBe(true));
     expect(invokeMock).toHaveBeenCalledTimes(2);
   });
 
-  it("leaves a failed startup to the App retry flow when the IDE host becomes ready", async () => {
-    const host = Object.assign(new EventTarget(), { __RSSH_IPC_SHIM__: true });
-    vi.stubGlobal("window", host);
+  it("leaves a failed startup to the App retry flow when capabilities change", async () => {
     const runtime = await import("./runtime.svelte.ts");
     invokeMock.mockRejectedValueOnce(new Error("backend unavailable"));
     await expect(runtime.load()).rejects.toThrow("backend unavailable");
 
     invokeMock.mockResolvedValue(desktop);
-    host.dispatchEvent(new Event("rssh:host-ready"));
+    notifyCapabilitiesChanged();
     expect(invokeMock).toHaveBeenCalledTimes(1);
     expect(runtime.loaded()).toBe(false);
 

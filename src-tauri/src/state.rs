@@ -37,13 +37,16 @@ pub enum SessionOwner {
 pub enum SessionPhase {
     Pending,
     Ready,
+    Closing,
     Closed,
 }
 
 #[derive(Clone, Debug)]
-pub struct PendingOperationState {
-    pub(crate) cancel: tokio::sync::watch::Sender<bool>,
-    pub(crate) finished: tokio::sync::watch::Receiver<Option<crate::error::AppResult<()>>>,
+pub(crate) enum ResourceState {
+    Pending(Option<crate::resource::PendingOperationState>),
+    Ready,
+    Closing(Arc<crate::resource::ResourceCleanup>),
+    Closed,
 }
 
 #[derive(Clone, Debug)]
@@ -51,9 +54,19 @@ pub struct SessionRecord {
     pub nonce: uuid::Uuid,
     pub kind: SessionKind,
     pub owner: SessionOwner,
-    pub phase: SessionPhase,
+    pub(crate) state: ResourceState,
     pub parent: Option<String>,
-    pub pending_operation: Option<PendingOperationState>,
+}
+
+impl SessionRecord {
+    pub fn phase(&self) -> SessionPhase {
+        match &self.state {
+            ResourceState::Pending(_) => SessionPhase::Pending,
+            ResourceState::Ready => SessionPhase::Ready,
+            ResourceState::Closing(cleanup) if !cleanup.is_finished() => SessionPhase::Closing,
+            ResourceState::Closing(_) | ResourceState::Closed => SessionPhase::Closed,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

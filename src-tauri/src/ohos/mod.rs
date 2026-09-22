@@ -18,3 +18,9 @@ pub use runtime::*;
 
 #[cfg(ohos)]
 pub mod serial;
+
+#[cfg(any(ohos, all(test, any(windows, macos, linux))))]
+pub mod window;
+
+#[cfg(ohos)]
+pub mod external;

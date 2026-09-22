@@ -15,7 +15,7 @@ describe("SFTP context-menu download", () => {
   it("picks a target path and queues the file through the transfer store", () => {
     const downloadEntry = functionSource("downloadEntry", "confirmDelete");
 
-    expect(downloadEntry).toContain('"sftp_pick_save_path"');
+    expect(downloadEntry).toContain("fileAccess.pickSavePath(entry.name)");
     expect(downloadEntry).toContain("transfers.startDownload");
     expect(downloadEntry).not.toContain('"sftp_save_file"');
   });

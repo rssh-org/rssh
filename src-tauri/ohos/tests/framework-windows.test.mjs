@@ -96,6 +96,68 @@ function request(id) {
   return { typeName: 'ohos.window.ManagedRequest', value: { windowId: id, title: `window-${id}`, width: 900, height: 600, x: 80, y: 80, visible: true, decorations: true, resizable: true, maximizable: true, minimizable: true, closable: true, maximized: false } };
 }
 
+test('a child surface waits for native configuration and preserves creation failure for late WebViews', async () => {
+  const r = runtime();
+  const manager = new r.ManagedWindows(r.context);
+  const child = new r.FakeWindow();
+  let configured;
+  const configuring = new Promise((resolve) => { configured = resolve; });
+  let fail;
+  child.setWindowTitle = () => { configured(); return new Promise((_, reject) => { fail = reject; }); };
+  r.context.getWindowStage = () => ({ createSubWindowWithOptions: async () => child });
+  const attaching = manager.attach(request(1), r.context);
+  const rejected = assert.rejects(attaching, /native title failure/);
+  await configuring;
+  const surface = r.WindowSurfaceRegistry.get(r.owner, 1);
+  let ready = false;
+  const waiting = surface.wait(() => () => {}).then(() => { ready = true; });
+  const waitRejected = assert.rejects(waiting, /native title failure/);
+  await Promise.resolve();
+  assert.equal(ready, false, 'mounting a route does not mean its native window is ready');
+  fail(new Error('native title failure'));
+  await rejected;
+  await waitRejected;
+  assert.equal(child.destroyed, true);
+  await assert.rejects(r.WindowSurfaceRegistry.get(r.owner, 1).wait(() => () => {}), /native title failure/);
+  assert.doesNotThrow(() => r.appearance.call({
+    surfaceKey: r.WindowSurfaceRegistry.key(r.owner, 1),
+    getUIContext: () => { throw new Error('failed surface cannot mount a late route'); },
+  }));
+  await manager.update({ typeName: 'ohos.window.ManagedCommand', value: { windowId: 1, operation: 'destroy' } });
+  assert.equal(r.WindowSurfaceRegistry.has(r.WindowSurfaceRegistry.key(r.owner, 1)), false);
+  await manager.dispose();
+});
+
+test('OS window creation failure settles both existing and late surface waiters', async () => {
+  const r = runtime();
+  const manager = new r.ManagedWindows(r.context);
+  r.context.getWindowStage = () => ({ createSubWindowWithOptions: async () => { throw new Error('OS window limit'); } });
+  const waiting = r.WindowSurfaceRegistry.get(r.owner, 1).wait(() => () => {});
+  const rejected = assert.rejects(waiting, /OS window limit/);
+  await assert.rejects(manager.attach(request(1), r.context), /OS window limit/);
+  await rejected;
+  await assert.rejects(r.WindowSurfaceRegistry.get(r.owner, 1).wait(() => () => {}), /OS window limit/);
+  await manager.dispose();
+});
+
+test('surface readiness requires both route attachment and native completion in either order', async () => {
+  const r = runtime();
+  for (const attachFirst of [true, false]) {
+    const surface = new r.WindowSurface();
+    const attach = () => surface.attach({ owner: 7 }, new r.FrameNode());
+    const complete = () => surface.markReady();
+    (attachFirst ? attach : complete)();
+    let ready = false;
+    const waiting = surface.wait(() => () => {}).then(() => { ready = true; });
+    await Promise.resolve();
+    assert.equal(ready, false);
+    (attachFirst ? complete : attach)();
+    await waiting;
+    assert.equal(ready, true);
+    surface.dispose();
+  }
+});
+
 test('closing main cancels pending sub-windows and rejects late creation before destroying the stage', async () => {
   const r = runtime();
   const manager = new r.ManagedWindows(r.context);

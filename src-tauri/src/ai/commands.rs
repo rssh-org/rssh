@@ -538,8 +538,12 @@ pub async fn ai_session_start_impl(
     // Use the same host check as analyze_locally: OHOS phone and PC share one
     // library, but native windows and a local terminal depend on the device.
     let local_analysis_unavailable = host.ensure_local_analysis_available().await.err();
-    let system_prompt =
-        skills::build_catalog_prompt(&state.db, locale_lbl, local_analysis_unavailable.as_deref())?;
+    let system_prompt = skills::build_catalog_prompt(
+        &state.db,
+        locale_lbl,
+        local_analysis_unavailable.as_deref(),
+        host.allows_diagnosis_downloads(),
+    )?;
     let user_skills_cache = skills::list_user(&state.db)?;
 
     // 3. Conversation identity. Resume revives a persisted history under its

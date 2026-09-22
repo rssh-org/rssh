@@ -37,5 +37,3 @@ export const BACKLOG_INDICATOR_BYTES = 64 * 1024;
 export const BACKLOG_DROP_TRIGGER_BYTES = 256 * 1024;
 /** Silence window that ends a quiescent drop after Ctrl+C. */
 export const BACKLOG_QUIESCENCE_MS = 150;
-/** Conservative per-terminal queue cap, shared by every host and window size. */
-export const BACKLOG_MAX_PENDING_BYTES = 32 * 1024 * 1024;

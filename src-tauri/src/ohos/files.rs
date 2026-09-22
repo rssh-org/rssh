@@ -20,6 +20,18 @@ static GRANTS: LazyLock<Mutex<FileGrants>> = LazyLock::new(|| Mutex::new(FileGra
 pub struct FilesAccessPlugin;
 
 #[napi(object)]
+pub struct NameRequest {
+    pub uri: String,
+}
+impl_bridge_napi_type!(NameRequest, "rssh.files.NameRequest");
+
+#[napi(object)]
+pub struct FileName {
+    pub name: String,
+}
+impl_bridge_napi_type!(FileName, "rssh.files.FileName");
+
+#[napi(object)]
 pub struct OpenRequest {
     pub uri: String,
     pub write: bool,
@@ -139,6 +151,19 @@ pub async fn pick_open() -> AppResult<Option<String>> {
         .next())
 }
 
+pub async fn file_name(uri: String) -> AppResult<String> {
+    let bridge = super::app()?.bridge().map_err(super::native_error)?;
+    let result = bridge
+        .call_async::<FilesAccessPlugin, NameRequest, FileName>(
+            "file-name",
+            NameRequest { uri },
+            BridgeCallOptions::default(),
+        )
+        .await
+        .map_err(super::native_error)?;
+    Ok(result.name)
+}
+
 pub async fn pick_open_files() -> AppResult<Option<Vec<String>>> {
     let files = pick(
         FileDialogOptions::new(dialog_type::OPEN_FILE).allow_many(true),
@@ -195,7 +220,7 @@ pub async fn resolve_paths(
     Ok(resolved.files)
 }
 
-pub async fn walk_directory(uri: String) -> AppResult<Vec<crate::commands::files::LocalWalkEntry>> {
+pub async fn walk_directory(uri: String) -> AppResult<Vec<crate::files::LocalWalkEntry>> {
     let bridge = super::app()?.bridge().map_err(super::native_error)?;
     let generation = directory_generation(&uri, false)?;
     let tree = bridge
@@ -215,7 +240,7 @@ pub async fn walk_directory(uri: String) -> AppResult<Vec<crate::commands::files
     Ok(tree
         .entries
         .into_iter()
-        .map(|entry| crate::commands::files::LocalWalkEntry {
+        .map(|entry| crate::files::LocalWalkEntry {
             rel_path: entry.relative_path,
             size: entry.size as u64,
             local_path: entry.uri,

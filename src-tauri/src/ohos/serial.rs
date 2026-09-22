@@ -295,29 +295,14 @@ pub async fn available_ports() -> AppResult<Vec<String>> {
     Ok(response.ports)
 }
 
-/// An open error and the independent result of releasing any partial native
-/// resource. The lifecycle owner must acknowledge cleanup before retrying.
-pub struct OpenFailure {
-    pub error: AppError,
-    pub cleanup: AppResult<()>,
-}
-
-impl From<AppError> for OpenFailure {
-    fn from(error: AppError) -> Self {
-        Self {
-            error,
-            cleanup: Ok(()),
-        }
-    }
-}
-
 pub async fn open(
     session_id: String,
     port: &str,
     config: SerialConfig,
     sink: SerialSink,
-    cancellation: impl std::future::Future<Output = ()>,
-) -> Result<(String, SerialHandle), OpenFailure> {
+    operation: &crate::resource::PendingOperation,
+) -> AppResult<(String, SerialHandle)> {
+    let cancellation = operation.cancelled();
     tokio::pin!(cancellation);
     let cancelled = || {
         AppError::not_found(
@@ -327,7 +312,7 @@ pub async fn open(
     };
     let capabilities = tokio::select! {
         biased;
-        _ = &mut cancellation => return Err(cancelled().into()),
+        _ = &mut cancellation => return Err(cancelled()),
         result = capabilities() => result?,
     };
     capabilities.validate(&config)?;
@@ -349,6 +334,11 @@ pub async fn open(
         operations: tokio::sync::Mutex::new(()),
         capabilities,
     }));
+    // The registry owns this clone before native authorization begins. Even
+    // an aborted opening task cannot discard a partially opened native port.
+    operation.retain_cleanup(crate::resource::CleanupHandle::new(Arc::new(
+        handle.clone(),
+    )))?;
     let opened = tokio::select! {
         biased;
         _ = &mut cancellation => Err(cancelled()),
@@ -372,11 +362,12 @@ pub async fn open(
             )
         }),
     };
-    if let Err(error) = opened {
-        // If open was dispatched, closing the same attempt cancels its
-        // authorization and joins late cleanup; otherwise close is a no-op.
-        let cleanup = handle.close().await;
-        return Err(OpenFailure { error, cleanup });
-    }
+    opened?;
     Ok((session_id, handle))
+}
+
+impl crate::resource::Cleanup for SerialHandle {
+    fn close(&self) -> crate::resource::CleanupFuture<'_> {
+        Box::pin(SerialHandle::close(self))
+    }
 }

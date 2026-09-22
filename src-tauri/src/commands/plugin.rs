@@ -361,7 +361,7 @@ fn exec_transport(
     let record = registry
         .get(session_id)
         .ok_or_else(|| AppError::not_found("plugin_no_exec", json!({ "id": session_id })))?;
-    if record.phase != SessionPhase::Ready {
+    if record.phase() != SessionPhase::Ready {
         return Err(AppError::not_found(
             "plugin_no_exec",
             json!({ "id": session_id, "kind": format!("{:?}", record.kind) }),

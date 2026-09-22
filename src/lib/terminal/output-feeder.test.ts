@@ -5,7 +5,6 @@ import {
     createOutputFeeder,
     formatBacklogBytes,
 } from "./output-feeder.ts";
-import { BACKLOG_MAX_PENDING_BYTES } from "./limits.ts";
 
 /** Capturing write stub: records data, hands back the drain trigger. */
 function stubWrite() {
@@ -126,34 +125,36 @@ describe("createOutputFeeder", () => {
         expect(w.written).toEqual(["aa", "cc"]);
     });
 
-    it("keeps each stalled terminal within the shared 32 MiB flood budget", () => {
+    it.each([32, 128])("keeps each stalled terminal within its host's %i MiB flood budget", (budgetMb) => {
+        const budgetBytes = budgetMb * 1024 * 1024;
         const terminals = Array.from({ length: 4 }, () => {
             const writer = stubWrite();
             const feeder = createOutputFeeder({
                 write: writer.write,
-                maxPendingBytes: BACKLOG_MAX_PENDING_BYTES,
+                maxPendingBytes: budgetBytes,
             });
             return { writer, feeder };
         });
         const first = new Uint8Array(64 * 1024);
         const chunk = new Uint8Array(64 * 1024);
         const latest = new Uint8Array(64 * 1024);
+        const budgetChunks = budgetBytes / chunk.byteLength;
         for (const { feeder } of terminals) feeder.push(first);
         // Reuse the payload: exercise byte accounting without allocating a
         // real multi-tab flood. Leave parsing stalled throughout the flood.
-        for (let i = 0; i < 1024; i++) {
+        for (let i = 0; i < budgetChunks + 8; i++) {
             for (const { feeder } of terminals) feeder.push(chunk);
         }
         for (const { writer, feeder } of terminals) {
             feeder.push(latest);
-            expect(feeder.pendingBytes()).toBe(32 * 1024 * 1024);
+            expect(feeder.pendingBytes()).toBe(budgetBytes);
             // Resume parsing: the in-flight chunk survives, old queued chunks
             // were evicted, and the newest output still reaches the terminal.
-            for (let i = 0; i < 1026 && feeder.pendingBytes() > 0; i++) writer.drain();
+            for (let i = 0; i < budgetChunks + 1 && feeder.pendingBytes() > 0; i++) writer.drain();
             expect(feeder.pendingBytes()).toBe(0);
-            expect(writer.written).toHaveLength(512);
+            expect(writer.written).toHaveLength(budgetChunks);
             expect(writer.written[0]).toBe(first);
-            expect(writer.written.at(-1)).toBe(latest);
+            expect(writer.written[writer.written.length - 1]).toBe(latest);
             feeder.dispose();
         }
     });

@@ -19,10 +19,10 @@ index 4006cd1..bbdb1ff 100644
  [dev-dependencies]
  pollster = "1.0.0"
 diff --git a/src/lib.rs b/src/lib.rs
-index 0b68434..91a4fee 100644
+index 0b68434..f17616f 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -2028,13 +2028,23 @@ impl WebViewBuilderExtAndroid for WebViewBuilder<'_> {
+@@ -2028,13 +2028,37 @@ impl WebViewBuilderExtAndroid for WebViewBuilder<'_> {
  
  #[cfg(target_env = "ohos")]
  #[derive(Default)]
@@ -30,20 +30,34 @@ index 0b68434..91a4fee 100644
 +pub struct PlatformSpecificWebViewAttributes {
 +  pub window_id: u64,
 +}
- 
- #[cfg(target_env = "ohos")]
--pub trait WebViewBuilderExtOhos {}
++
++#[cfg(target_env = "ohos")]
 +pub trait WebViewBuilderExtOhos {
 +  /// Mount this WebView in the logical window created by the native windowing runtime.
 +  fn with_ohos_window(self, window_id: u64) -> Self;
 +}
- 
- #[cfg(target_env = "ohos")]
--impl WebViewBuilderExtOhos for WebViewBuilder<'_> {}
++
++#[cfg(target_env = "ohos")]
 +impl WebViewBuilderExtOhos for WebViewBuilder<'_> {
 +  fn with_ohos_window(mut self, window_id: u64) -> Self {
 +    self.platform_specific.window_id = window_id;
 +    self
++  }
++}
+ 
+ #[cfg(target_env = "ohos")]
+-pub trait WebViewBuilderExtOhos {}
++pub trait WebViewExtOhos {
++  /// Observe native controller creation without blocking the UI thread.
++  /// The result is retained for late observers; callbacks may run on a worker.
++  fn on_created(&self, callback: impl FnOnce(std::result::Result<(), String>) + Send + 'static);
++}
+ 
+ #[cfg(target_env = "ohos")]
+-impl WebViewBuilderExtOhos for WebViewBuilder<'_> {}
++impl WebViewExtOhos for WebView {
++  fn on_created(&self, callback: impl FnOnce(std::result::Result<(), String>) + Send + 'static) {
++    self.webview.on_created(callback);
 +  }
 +}
  
@@ -75,7 +89,7 @@ index 0000000..5b5e554
 +  source
 +}
 diff --git a/src/ohos/mod.rs b/src/ohos/mod.rs
-index 2f37a5a..d0bb1ca 100644
+index 2f37a5a..991b193 100644
 --- a/src/ohos/mod.rs
 +++ b/src/ohos/mod.rs
 @@ -1,35 +1,407 @@
@@ -494,7 +508,7 @@ index 2f37a5a..d0bb1ca 100644
      let WebViewAttributes {
        id,
        url,
-@@ -41,133 +413,116 @@ impl InnerWebView {
+@@ -41,133 +413,130 @@ impl InnerWebView {
        custom_protocols,
        background_color,
        transparent,
@@ -581,11 +595,7 @@ index 2f37a5a..d0bb1ca 100644
 -
 -    if let Some(user_agent) = user_agent {
 -      webview_builder = webview_builder.user_agent(user_agent);
-+      request.html = Some(html);
-+    } else {
-+      request.url = Some(url.unwrap_or_else(|| "about:blank".into()));
-+      request.headers = initial_headers.map(headers).transpose()?;
-     }
+-    }
 -
 -    let webview = webview_builder
 -      .build()
@@ -626,7 +636,11 @@ index 2f37a5a..d0bb1ca 100644
 -          (callback)(&webview_id, req, RequestAsyncResponder { responder });
 -        })
 -        .unwrap();
--    }
++      request.html = Some(html);
++    } else {
++      request.url = Some(url.unwrap_or_else(|| "about:blank".into()));
++      request.headers = initial_headers.map(headers).transpose()?;
+     }
 -
 -    Ok(Self { id, webview })
 +    let callbacks = Rc::new(Callbacks {
@@ -667,6 +681,20 @@ index 2f37a5a..d0bb1ca 100644
 -      .webview
 -      .url()
 -      .map_err(|e| Error::OpenHarmonyWebviewError(format!("Failed to get url: {}", e)))
++  pub fn on_created(
++    &self,
++    callback: impl FnOnce(std::result::Result<(), String>) + Send + 'static,
++  ) {
++    let generation = self.state.generation.borrow();
++    match generation
++      .as_ref()
++      .and_then(|generation| generation.queue.as_ref())
++    {
++      Some(queue) => queue.on_created(callback),
++      None => callback(Err("WebView UI context is unavailable".into())),
++    }
++  }
++
 +  pub fn url(&self) -> Result<String> {
 +    self.state.check().map_err(webview_error)?;
 +    Ok(self.state.url.read().unwrap().clone())
@@ -709,7 +737,7 @@ index 2f37a5a..d0bb1ca 100644
    #[cfg(any(debug_assertions, feature = "devtools"))]
    pub fn is_devtools_open(&self) -> bool {
      false
-@@ -175,121 +530,144 @@ impl InnerWebView {
+@@ -175,121 +544,144 @@ impl InnerWebView {
  
    pub fn zoom(&self, scale_factor: f64) -> Result<()> {
      self
@@ -915,20 +943,38 @@ index 2f37a5a..d0bb1ca 100644
  }
 diff --git a/src/ohos/queue.rs b/src/ohos/queue.rs
 new file mode 100644
-index 0000000..3cdfbda
+index 0000000..145779e
 --- /dev/null
 +++ b/src/ohos/queue.rs
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,327 @@
 +//! Ordered WebView work. Only the worker waits for ArkTS; the UI thread never waits for it.
 +
 +use std::sync::{mpsc, Arc, Mutex};
 +
 +type Task<T> = Box<dyn FnOnce(&T) -> Result<(), String> + Send>;
++type CreationCallback = Box<dyn FnOnce(Result<(), String>) + Send>;
 +
 +#[derive(Default)]
 +struct State {
 +  closed: bool,
 +  error: Option<String>,
++  creation: Option<Result<(), String>>,
++  creation_callbacks: Vec<CreationCallback>,
++}
++
++fn complete_creation(state: &Mutex<State>, result: Result<(), String>) {
++  let callbacks = {
++    let mut state = state.lock().unwrap();
++    if state.creation.is_some() {
++      return;
++    }
++    state.creation = Some(result.clone());
++    std::mem::take(&mut state.creation_callbacks)
++  };
++  // Completion may wake application code that immediately closes this queue.
++  for callback in callbacks {
++    callback(result.clone());
++  }
 +}
 +
 +impl State {
@@ -962,6 +1008,7 @@ index 0000000..3cdfbda
 +      .spawn(move || {
 +        let fail = |error: String| {
 +          worker_state.lock().unwrap().error = Some(error.clone());
++          complete_creation(&worker_state, Err(error.clone()));
 +          report(error, true);
 +        };
 +        let controller = match create() {
@@ -971,6 +1018,8 @@ index 0000000..3cdfbda
 +            return;
 +          }
 +        };
++        let created = worker_state.lock().unwrap().check();
++        complete_creation(&worker_state, created);
 +        while worker_state.lock().unwrap().check().is_ok() {
 +          let Ok(Some(task)) = receiver.recv() else {
 +            break;
@@ -994,6 +1043,20 @@ index 0000000..3cdfbda
 +    self.state.lock().unwrap().check()
 +  }
 +
++  pub fn on_created(&self, callback: impl FnOnce(Result<(), String>) + Send + 'static) {
++    let result = {
++      let mut state = self.state.lock().unwrap();
++      match &state.creation {
++        Some(result) => result.clone(),
++        None => {
++          state.creation_callbacks.push(Box::new(callback));
++          return;
++        }
++      }
++    };
++    callback(result);
++  }
++
 +  pub fn send(
 +    &self,
 +    task: impl FnOnce(&T) -> Result<(), String> + Send + 'static,
@@ -1011,6 +1074,7 @@ index 0000000..3cdfbda
 +impl<T> Drop for Queue<T> {
 +  fn drop(&mut self) {
 +    self.state.lock().unwrap().closed = true;
++    complete_creation(&self.state, Err("WebView has been destroyed".into()));
 +    // Wake an idle worker; a pending create is disposed as soon as it completes.
 +    let _ = self.sender.send(None);
 +  }
@@ -1020,6 +1084,78 @@ index 0000000..3cdfbda
 +mod tests {
 +  use super::Queue;
 +  use std::sync::mpsc;
++
++  #[test]
++  fn creation_callbacks_wait_and_retain_the_exact_failure_for_late_observers() {
++    let (create_tx, create_rx) = mpsc::channel();
++    let (result_tx, result_rx) = mpsc::channel();
++    let queue = Queue::<()>::start(
++      move || {
++        create_rx.recv().unwrap();
++        Err("native window limit".into())
++      },
++      |_| panic!("failed creation has no controller"),
++      |_, _| {},
++    )
++    .unwrap();
++    let first = result_tx.clone();
++    queue.on_created(move |result| first.send(result).unwrap());
++    assert!(result_rx.try_recv().is_err());
++    create_tx.send(()).unwrap();
++    assert_eq!(result_rx.recv().unwrap(), Err("native window limit".into()));
++    queue.on_created(move |result| result_tx.send(result).unwrap());
++    assert_eq!(result_rx.recv().unwrap(), Err("native window limit".into()));
++  }
++
++  #[test]
++  fn closing_during_creation_settles_observers_without_waiting_for_native_completion() {
++    let (create_tx, create_rx) = mpsc::channel();
++    let (result_tx, result_rx) = mpsc::channel();
++    let (destroy_tx, destroy_rx) = mpsc::channel();
++    let queue = Queue::start(
++      move || create_rx.recv().map_err(|e| e.to_string()),
++      move |()| {
++        destroy_tx.send(()).unwrap();
++        Ok(())
++      },
++      |_, _| {},
++    )
++    .unwrap();
++    queue.on_created(move |result| result_tx.send(result).unwrap());
++    drop(queue);
++    assert_eq!(
++      result_rx.recv().unwrap(),
++      Err("WebView has been destroyed".into())
++    );
++    create_tx.send(()).unwrap();
++    destroy_rx.recv().unwrap();
++  }
++
++  #[test]
++  fn creation_callbacks_report_success_before_queued_work() {
++    let (create_tx, create_rx) = mpsc::channel();
++    let (event_tx, event_rx) = mpsc::channel();
++    let queue = Queue::start(
++      move || create_rx.recv().map_err(|e| e.to_string()),
++      |()| Ok(()),
++      |_, _| {},
++    )
++    .unwrap();
++    let ready = event_tx.clone();
++    queue.on_created(move |result| {
++      assert_eq!(result, Ok(()));
++      ready.send("ready").unwrap();
++    });
++    queue
++      .send(move |()| {
++        event_tx.send("task").unwrap();
++        Ok(())
++      })
++      .unwrap();
++    create_tx.send(()).unwrap();
++    assert_eq!(event_rx.recv().unwrap(), "ready");
++    assert_eq!(event_rx.recv().unwrap(), "task");
++  }
 +
 +  #[test]
 +  fn operations_wait_for_creation_and_keep_submission_order() {

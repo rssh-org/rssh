@@ -82,14 +82,22 @@ impl Host {
         }
     }
 
+    /// Preserve the host's artifact workflow policy independently of window support.
+    pub fn allows_diagnosis_downloads(&self) -> bool {
+        match self {
+            Self::Tauri(_) => crate::platform::runtime::allows_diagnosis_downloads(),
+            Self::Headless { .. } => true,
+        }
+    }
+
     /// Check before proposing approval; unsupported hosts must not leave a
     /// useless approval card waiting for user input.
     pub async fn ensure_local_analysis_available(&self) -> Result<(), String> {
         match self {
             #[cfg(any(windows, macos, linux, ohos))]
             Host::Tauri(_) => {
-                crate::commands::window::ensure_app_window_available(
-                    crate::commands::window::AppWindowPurpose::LocalAnalysis,
+                crate::platform::window::ensure_app_window_available(
+                    crate::platform::window::AppWindowPurpose::LocalAnalysis,
                 )
                 .await
             }
@@ -113,12 +121,12 @@ impl Host {
         match self {
             #[cfg(any(windows, macos, linux, ohos))]
             Host::Tauri(app) => {
-                crate::commands::window::open_app_window(
+                crate::platform::window::open_app_window(
                     app,
                     label,
                     title,
                     init_script,
-                    crate::commands::window::AppWindowPurpose::LocalAnalysis,
+                    crate::platform::window::AppWindowPurpose::LocalAnalysis,
                 )
                 .await
             }

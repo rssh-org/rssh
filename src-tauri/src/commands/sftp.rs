@@ -1,7 +1,3 @@
-#[cfg(not(ohos))]
-use std::collections::VecDeque;
-#[cfg(not(ohos))]
-use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -13,10 +9,6 @@ use crate::models::{Credential, CredentialType};
 use crate::ssh::sftp::{FileStat, RemoteEntry, SftpHandle, WalkEntry};
 use crate::state::AppState;
 use crate::state::{SessionKind, SessionOwner};
-
-/// Maximum recursion depth for the local walker. Mirrors the remote-side cap.
-#[cfg(not(ohos))]
-const LOCAL_WALK_DEPTH_CAP: u32 = 32;
 
 /// RAII：注册 cancel flag 并在 drop 时自动 unregister，无论 streaming 正常返回、
 /// 早 `?`、还是 panic。替代旧的手写 register/unregister 配对。
@@ -152,119 +144,10 @@ pub async fn sftp_walk_remote_dir(
     h.walk_files(&remote_root).await
 }
 
-/// Walk a selected source directory. Local locations stay opaque to callers;
-/// only rel_path is used to construct the destination on the remote server.
+/// The file adapter owns local filesystem and authorized URI traversal.
 #[tauri::command]
-pub async fn walk_local_dir(local_root: String) -> AppResult<Vec<super::files::LocalWalkEntry>> {
-    #[cfg(ohos)]
-    {
-        crate::ohos::files::walk_directory(local_root).await
-    }
-    #[cfg(not(ohos))]
-    {
-        walk_filesystem_directory(local_root).await
-    }
-}
-
-#[cfg(not(ohos))]
-async fn walk_filesystem_directory(
-    local_root: String,
-) -> AppResult<Vec<super::files::LocalWalkEntry>> {
-    let root = super::files::filesystem_path(local_root)?;
-    let mut queue: VecDeque<(PathBuf, u32)> = VecDeque::new();
-    queue.push_back((root.clone(), 0));
-    let mut result: Vec<super::files::LocalWalkEntry> = Vec::new();
-
-    while let Some((dir, depth)) = queue.pop_front() {
-        if depth >= LOCAL_WALK_DEPTH_CAP {
-            return Err(AppError::other(
-                "local_tree_too_deep",
-                json!({
-                    "path": dir.display().to_string(),
-                    "depth": depth,
-                    "limit": LOCAL_WALK_DEPTH_CAP,
-                }),
-            ));
-        }
-        let mut rd = tokio::fs::read_dir(&dir).await?;
-        while let Some(entry) = rd.next_entry().await? {
-            // `entry.metadata()` does not traverse symlinks — single syscall
-            // covers both type discrimination and size for regular files,
-            // replacing the previous file_type() + metadata() double-stat.
-            let path = entry.path();
-            let meta = entry.metadata().await?;
-            if meta.is_dir() {
-                queue.push_back((path, depth + 1));
-            } else if meta.is_file() {
-                result.push(super::files::LocalWalkEntry {
-                    local_path: path.to_string_lossy().into_owned(),
-                    rel_path: rel_unix(&path, &root),
-                    size: meta.len(),
-                });
-            } else if meta.is_symlink() {
-                // Follow once to learn what the target is. Skip symlink-to-dir
-                // to avoid cycles, and silently skip broken symlinks.
-                if let Ok(target_meta) = tokio::fs::metadata(&path).await {
-                    if target_meta.is_file() {
-                        result.push(super::files::LocalWalkEntry {
-                            local_path: path.to_string_lossy().into_owned(),
-                            rel_path: rel_unix(&path, &root),
-                            size: target_meta.len(),
-                        });
-                    }
-                }
-            }
-            // Anything else (block/char/fifo): skip.
-        }
-    }
-    Ok(result)
-}
-
-/// Convert the portion of `full` relative to `root` into a '/'-separated string.
-/// On Windows std::path::Component uses '\'; we normalise here and the frontend
-/// converts back to the platform separator when joining.
-#[cfg(not(ohos))]
-fn rel_unix(full: &Path, root: &Path) -> String {
-    let stripped = full.strip_prefix(root).unwrap_or(full);
-    stripped
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-#[cfg(all(test, not(ohos)))]
-mod local_walk_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn file_uri_walk_returns_openable_locations_and_preserves_symlink_policy() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("目录 #%");
-        std::fs::create_dir_all(source.join("nested")).unwrap();
-        std::fs::write(source.join("nested/file #%.txt"), b"content").unwrap();
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&source, source.join("cycle")).unwrap();
-            std::os::unix::fs::symlink(
-                source.join("nested/file #%.txt"),
-                source.join("file-alias"),
-            )
-            .unwrap();
-        }
-        let entries = walk_local_dir(tauri::Url::from_file_path(&source).unwrap().to_string())
-            .await
-            .unwrap();
-        assert_eq!(entries.len(), if cfg!(unix) { 2 } else { 1 });
-        assert!(entries
-            .iter()
-            .any(|entry| entry.rel_path == "nested/file #%.txt"));
-        for entry in entries {
-            assert_eq!(entry.size, 7);
-            assert_eq!(std::fs::read(&entry.local_path).unwrap(), b"content");
-            assert_eq!(PathBuf::from(entry.local_path), source.join(entry.rel_path));
-        }
-    }
+pub async fn walk_local_dir(local_root: String) -> AppResult<Vec<crate::files::LocalWalkEntry>> {
+    crate::files::walk_directory(local_root).await
 }
 
 #[tauri::command]
@@ -318,24 +201,43 @@ pub async fn sftp_pick_save_path(
     app: tauri::AppHandle,
     default_name: String,
 ) -> AppResult<Option<String>> {
-    super::files::pick_save(&app, default_name, Vec::new()).await
+    crate::files::pick_save(&app, default_name, Vec::new()).await
 }
 
 #[tauri::command]
-pub async fn sftp_pick_open_path(app: tauri::AppHandle) -> AppResult<Option<String>> {
-    super::files::pick_open(&app).await
+pub async fn sftp_pick_open_path(
+    app: tauri::AppHandle,
+) -> AppResult<Option<crate::files::PickedLocation>> {
+    crate::files::pick_open(&app).await
 }
 
 /// Select a source or destination directory and retain its platform grant.
 #[cfg(any(windows, macos, linux, ohos))]
 #[tauri::command]
-pub async fn sftp_pick_folder(app: tauri::AppHandle, write: bool) -> AppResult<Option<String>> {
-    super::files::pick_folder(&app, write).await
+pub async fn sftp_pick_folder(
+    app: tauri::AppHandle,
+    write: bool,
+) -> AppResult<Option<crate::files::PickedLocation>> {
+    crate::files::pick_folder(&app, write).await
 }
 
 #[tauri::command]
-pub async fn sftp_pick_open_files(app: tauri::AppHandle) -> AppResult<Option<Vec<String>>> {
-    super::files::pick_open_files(&app).await
+pub async fn sftp_pick_open_files(
+    app: tauri::AppHandle,
+) -> AppResult<Option<Vec<crate::files::PickedLocation>>> {
+    crate::files::pick_open_files(&app).await
+}
+
+// File access keeps its native errors for non-SFTP callers. Preserve SFTP's
+// existing open-error contract without nesting a coded error inside params.
+fn local_open_error(error: AppError) -> AppError {
+    match error {
+        AppError::Io(cause) => AppError::sftp(
+            "sftp_io_failed",
+            json!({ "op": "open", "err": cause.params["err"] }),
+        ),
+        other => other,
+    }
 }
 
 /// Stream-download to a caller-supplied local target. transfer_id is used as the
@@ -353,23 +255,19 @@ pub async fn sftp_download_to(
     let sftp = get_sftp(&state, &sftp_id)?;
     let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
     let host = crate::emitter::Host::Tauri(app.clone());
-    // Filesystem destinations keep atomic .part + rename. Authorized URIs
-    // stream to an owned descriptor because the provider has no rename path.
-    #[cfg(not(ohos))]
-    if let tauri_plugin_fs::FilePath::Path(path) = local_path
-        .parse::<tauri_plugin_fs::FilePath>()
-        .expect("FilePath::from_str is infallible")
+    match crate::files::download_target(&app, local_path)
+        .await
+        .map_err(local_open_error)?
     {
-        return sftp
+        crate::files::DownloadTarget::AtomicPath(path) => sftp
             .download_streaming(&remote_path, &path, &host, &transfer_id, cancel)
             .await
-            .map(|_| ());
+            .map(|_| ()),
+        crate::files::DownloadTarget::Stream(mut file) => sftp
+            .download_streaming_to_writer(&remote_path, file.stream(), &host, &transfer_id, cancel)
+            .await
+            .map(|_| ()),
     }
-    let (file, _access) = super::files::open_file(&app, local_path, true).await?;
-    let mut writer = tokio::fs::File::from_std(file);
-    sftp.download_streaming_to_writer(&remote_path, &mut writer, &host, &transfer_id, cancel)
-        .await
-        .map(|_| ())
 }
 
 /// Stream-upload from a caller-supplied local source. transfer_id mirrors above.
@@ -385,20 +283,15 @@ pub async fn sftp_upload_from(
     let sftp = get_sftp(&state, &sftp_id)?;
     let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
     let host = crate::emitter::Host::Tauri(app.clone());
-    let (reader, _access) = super::files::open_file(&app, local_path, false).await?;
-    let mut reader = tokio::fs::File::from_std(reader);
+    let mut file = crate::files::open_file(&app, local_path, false)
+        .await
+        .map_err(local_open_error)?;
     // content:// fds may not support fstat; fall back to 0 (indeterminate bar).
-    let total = reader.metadata().await.map(|m| m.len()).unwrap_or(0);
-    sftp.upload_streaming(
-        &mut reader,
-        total,
-        &remote_path,
-        &host,
-        &transfer_id,
-        cancel,
-    )
-    .await
-    .map(|_| ())
+    let total = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let reader = file.stream();
+    sftp.upload_streaming(reader, total, &remote_path, &host, &transfer_id, cancel)
+        .await
+        .map(|_| ())
 }
 
 #[tauri::command]
@@ -441,4 +334,30 @@ pub fn sftp_cancel_transfer(state: State<'_, AppState>, transfer_id: String) -> 
         flag.store(true, Ordering::SeqCst);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod file_error_tests {
+    use super::*;
+
+    #[test]
+    fn local_open_failure_preserves_sftp_wire_error_without_nested_encoding() {
+        let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let error = local_open_error(io.into());
+        let AppError::Sftp(cause) = error else {
+            panic!("expected the existing SFTP open error");
+        };
+        assert_eq!(cause.code, "sftp_io_failed");
+        assert_eq!(
+            cause.params,
+            json!({ "op": "open", "err": "access denied" })
+        );
+    }
+
+    #[test]
+    fn provider_authorization_errors_keep_their_original_contract() {
+        let error = AppError::other("ohos_native_failed", json!({"err": "not selected"}));
+        let expected = error.to_string();
+        assert_eq!(local_open_error(error).to_string(), expected);
+    }
 }

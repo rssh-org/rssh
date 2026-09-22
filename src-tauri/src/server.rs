@@ -741,7 +741,7 @@ fn dispatch(
 
         // ---- CLI: PATH-based status; install is host-managed in embedded mode ----
         "get_runtime_capabilities" => ok(Ok::<_, AppError>(
-            crate::commands::runtime::RuntimeCapabilities::headless(),
+            crate::platform::runtime::RuntimeCapabilities::headless(),
         )),
         "cli_status" => ok(Ok::<_, AppError>(
             crate::commands::cli::cli_status_headless(),

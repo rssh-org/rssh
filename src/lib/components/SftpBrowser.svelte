@@ -6,7 +6,7 @@
     import type {RemoteEntry} from "../stores/app.svelte.ts";
     import { errMsg, t } from "../i18n/index.svelte.ts";
     import { fileStamp } from "../save-file.ts";
-    import { remoteUploadName } from "../sftp-name.ts";
+    import * as fileAccess from "../file-access.ts";
     import Modal from "./Modal.svelte";
     import AppIcon from "./AppIcon.svelte";
     import {writeText as writeClipboard} from "../clipboard.ts";
@@ -14,7 +14,6 @@
 
     /** Mirrors the backend WalkEntry; rel_path is always '/'-separated. */
     interface WalkEntry { rel_path: string; size: number; }
-    interface LocalWalkEntry extends WalkEntry { local_path: string; }
 
     /** Mirrors the backend FileStat. */
     interface FileStat {
@@ -339,11 +338,7 @@
         if (files.length > 0) {
             // A picker may return a document URI. Only the host can authorize
             // children and turn them into usable file references.
-            const paths = await invoke<string[]>("resolve_local_paths", {
-                localRoot: dir,
-                relativePaths: files.map((file) => file.relativePath),
-                write: true,
-            });
+            const paths = await fileAccess.resolvePaths(dir, files.map((file) => file.relativePath), true);
             for (const [index, file] of files.entries()) {
                 await transfers.startDownload({
                     sessionId: meta.sessionId,
@@ -364,15 +359,13 @@
         if (!meta.sessionId) { error = "Missing SSH session"; return; }
         try {
             if (entry.is_dir) {
-                const dir = await invoke<string | null>("sftp_pick_folder", { write: true });
+                const dir = await fileAccess.pickDirectory(true);
                 if (!dir) return;
-                const { queued, walkErrors } = await queueDownloads([entry], dir);
+                const { queued, walkErrors } = await queueDownloads([entry], dir.location);
                 if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
                 if (queued > 0) notice = t("sftp.queued_n", { n: queued });
             } else {
-                const localPath = await invoke<string | null>("sftp_pick_save_path", {
-                    defaultName: entry.name,
-                });
+                const localPath = await fileAccess.pickSavePath(entry.name);
                 if (!localPath) return;
                 await transfers.startDownload({
                     sessionId: meta.sessionId,
@@ -449,9 +442,9 @@
         if (selected.size === 0) return;
         const items = entries.filter(e => selected.has(e.name));
         try {
-            const dir = await invoke<string | null>("sftp_pick_folder", { write: true });
+            const dir = await fileAccess.pickDirectory(true);
             if (!dir) return;
-            const { queued, walkErrors } = await queueDownloads(items, dir);
+            const { queued, walkErrors } = await queueDownloads(items, dir.location);
             if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
             if (queued > 0) notice = t("sftp.queued_n", { n: queued });
             selected = new Set();
@@ -460,22 +453,27 @@
         }
     }
 
+    function uploadName(file: fileAccess.PickedLocation): string {
+        // An opaque provider may not return metadata. Distinct selections still
+        // need distinct targets when queued in the same second.
+        return file.name ?? `upload-${fileStamp()}-${crypto.randomUUID().slice(0, 8)}`;
+    }
+
     async function uploadFiles() {
         error = "";
         notice = "";
         if (!meta.sessionId) { error = "Missing SSH session"; return; }
         try {
-            const paths = await invoke<string[] | null>("sftp_pick_open_files");
-            if (!paths || paths.length === 0) return;
-            for (const p of paths) {
-                const name = remoteUploadName(p) || `upload-${fileStamp()}`;
+            const files = await fileAccess.pickFiles();
+            if (!files || files.length === 0) return;
+            for (const file of files) {
                 await transfers.startUpload({
                     sessionId: meta.sessionId,
-                    localPath:  p,
-                    remotePath: joinRemote(cwd, name),
+                    localPath:  file.location,
+                    remotePath: joinRemote(cwd, uploadName(file)),
                 });
             }
-            notice = t("sftp.queued_n", { n: paths.length });
+            notice = t("sftp.queued_n", { n: files.length });
         } catch (err: any) {
             error = errMsg(err);
         }
@@ -486,11 +484,11 @@
         notice = "";
         if (!meta.sessionId) { error = "Missing SSH session"; return; }
         try {
-            const dir = await invoke<string | null>("sftp_pick_folder", { write: false });
+            const dir = await fileAccess.pickDirectory(false);
             if (!dir) return;
-            const walked = await invoke<LocalWalkEntry[]>("walk_local_dir", { localRoot: dir });
+            const walked = await fileAccess.walkDirectory(dir.location);
             if (walked.length === 0) { notice = t("sftp.folder_empty"); return; }
-            const folderName = remoteUploadName(dir) || `upload-${fileStamp()}`;
+            const folderName = uploadName(dir);
             for (const w of walked) {
                 await transfers.startUpload({
                     sessionId: meta.sessionId,
@@ -504,20 +502,19 @@
         }
     }
 
-    /** Single-file picker fallback: pick an authorized source and stream its URI
-     *  through the shared queue. Recover the filename from the URI where possible. */
+    /** Single-file picker fallback: stream the opaque location and use the
+     *  host-supplied name, just like the multi-file path. */
     async function uploadFile() {
         error = "";
         notice = "";
         if (!meta.sessionId) { error = "Missing SSH session"; return; }
         try {
-            const src = await invoke<string | null>("sftp_pick_open_path");
-            if (!src || Array.isArray(src)) return;
-            const name = remoteUploadName(src) || `upload-${fileStamp()}`;
+            const src = await fileAccess.pickFile();
+            if (!src) return;
             await transfers.startUpload({
                 sessionId: meta.sessionId,
-                localPath:  src,
-                remotePath: joinRemote(cwd, name),
+                localPath:  src.location,
+                remotePath: joinRemote(cwd, uploadName(src)),
             });
             notice = t("sftp.queued_n", { n: 1 });
         } catch (err: any) {

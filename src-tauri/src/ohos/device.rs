@@ -117,3 +117,27 @@ fn probe_local_pty() -> bool {
         }
     }
 }
+
+/// Native capability and policy production stays inside the HarmonyOS adapter.
+pub async fn capabilities(
+    window_label: &str,
+) -> AppResult<crate::platform::runtime::RuntimeCapabilities> {
+    use crate::platform::runtime::{RuntimeCapabilities, TerminalRuntimePolicy};
+    let device = query().await?;
+    let pc = device.class() == DeviceClass::Desktop;
+    let mut capabilities = RuntimeCapabilities::native();
+    capabilities.serial = pc && device.serial;
+    capabilities.local_pty = pc && local_pty_available().await;
+    capabilities.local_discovery = capabilities.local_pty;
+    capabilities.multi_window = pc && device.multi_window;
+    capabilities.window_controls = capabilities.multi_window;
+    capabilities.window_pin = capabilities.window_controls && window_label == "main";
+    capabilities.directory_transfer = pc && device.folder_selection;
+    capabilities.native_clipboard = true;
+    capabilities.terminal_policy = if pc {
+        TerminalRuntimePolicy::desktop()
+    } else {
+        TerminalRuntimePolicy::constrained()
+    };
+    Ok(capabilities)
+}

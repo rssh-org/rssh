@@ -139,7 +139,7 @@ fn with_ready_forward<T>(
     let record = sessions
         .get(active_id)
         .ok_or_else(|| AppError::not_found("fwd_not_found", json!({ "id": active_id })))?;
-    if record.kind != SessionKind::Forward || record.phase != SessionPhase::Ready {
+    if record.kind != SessionKind::Forward || record.phase() != SessionPhase::Ready {
         return Err(AppError::not_found(
             "fwd_not_found",
             json!({ "id": active_id }),

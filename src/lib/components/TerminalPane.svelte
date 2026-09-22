@@ -12,6 +12,7 @@
     import type {ConnectorSpec, HighlightRule, TelnetProfile} from "../stores/app.svelte.ts";
     import * as app from "../stores/app.svelte.ts";
     import * as layout from "../stores/layout.svelte.ts";
+    import { terminalPolicy } from "../stores/runtime.svelte.ts";
     import { isIOS } from "../platform.ts";
     import { supportsTouch, isTouchContextMenu } from "../input.ts";
     import * as syncStatus from "../stores/sync.svelte.ts";
@@ -28,7 +29,6 @@
         commandBlockFoldCacheLines,
         BACKLOG_DROP_TRIGGER_BYTES,
         BACKLOG_INDICATOR_BYTES,
-        BACKLOG_MAX_PENDING_BYTES,
         BACKLOG_QUIESCENCE_MS,
     } from "../terminal/limits.ts";
     import {createPaintScheduler, type PaintScheduler} from "../terminal/paint-scheduler.ts";
@@ -1382,8 +1382,7 @@
     }
 
     onMount(async () => {
-        const IMAGE_STORAGE_LIMIT_MB = 128;
-        const IMAGE_PIXEL_LIMIT = 16_000_000;
+        const policy = terminalPolicy();
 
         terminal = new Terminal({
             cursorBlink: true,
@@ -1414,13 +1413,13 @@
         terminal.loadAddon(fitAddon);
         terminal.loadAddon(searchAddon);
         terminal.loadAddon(new Unicode11Addon());
-        // Bound image-protocol memory consistently across hosts.
+        // The host owns image budgets; changing layout never changes limits.
         terminal.loadAddon(new ImageAddon({
             sixelSupport: true,
             sixelScrolling: true,
             iipSupport: true,
-            storageLimit: IMAGE_STORAGE_LIMIT_MB,
-            pixelLimit: IMAGE_PIXEL_LIMIT,
+            storageLimit: policy.imageStorageLimitMb,
+            pixelLimit: policy.imagePixelLimit,
         }));
         terminal.open(containerEl);
         // GPU renderer: the default DomRenderer rebuilds DOM spans per paint
@@ -1457,7 +1456,7 @@
         // output-feeder.ts). Synthetic UI writes (prompts, banners) bypass it.
         outputFeeder = createOutputFeeder({
             write: (data, cb) => terminal.write(data, cb),
-            maxPendingBytes: BACKLOG_MAX_PENDING_BYTES,
+            maxPendingBytes: policy.outputBacklogLimitBytes,
         });
         // Keyword highlighting lives here: a decoration layer over the parsed
         // cell grid. The reactive $effect above feeds it the compiled rules.
@@ -1826,7 +1825,7 @@
     {/if}
     <div class="term-wrap" class:soft-keyboard={softKeyboardRequested} class:no-block-bar={!app.commandBlockBar()}>
         <div class="xterm-host" bind:this={containerEl}></div>
-        {#if !layout.compact()}
+        {#if !layout.compact() && !softKeyboardRequested}
             <button class="keyboard-toggle" class:active={softKeyboardRequested}
                     title={t("terminal.keyboard")} aria-label={t("terminal.keyboard")} aria-pressed={softKeyboardRequested}
                     onpointerdown={(event) => event.preventDefault()} onclick={() => { app.setActivePane(tabId); softKeyboard?.toggle(); }}>
@@ -1902,7 +1901,9 @@
             onClose={() => (ctxMenu = null)}
         />
     {/if}
-    {#if layout.compact() && app.activeTabId() === tabId}
+    <!-- Wide layouts collapse the controls until the user requests the keyboard;
+         opening it must still expose Esc/Tab/modifiers on touch-only tablets. -->
+    {#if app.activeTabId() === tabId && (layout.compact() || softKeyboardRequested)}
         <TerminalKeybar />
     {/if}
 </div>

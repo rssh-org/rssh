@@ -108,6 +108,38 @@ pub use crate::ohos::serial::{available_ports, capabilities, open, SerialHandle}
 #[cfg(not(ohos))]
 pub use desktop::{available_ports, open, SerialHandle};
 
+/// The platform adapter only opens the resource. This shared coordinator owns
+/// failed-open cleanup and carries that ownership through activation.
+pub async fn open_resource(
+    session_id: String,
+    port: &str,
+    config: SerialConfig,
+    sink: SerialSink,
+    operation: crate::resource::PendingOperation,
+) -> AppResult<crate::resource::OpenedResource<SerialHandle>> {
+    #[cfg(ohos)]
+    let result = open(session_id, port, config, sink, &operation).await;
+    #[cfg(not(ohos))]
+    let result = open(session_id, port, config, sink);
+    operation.finish_open(result).await
+}
+
+/// Some native backends require an acknowledged release before a port can be
+/// reopened. Others retain their existing last-handle-drop cleanup behavior.
+pub(crate) fn cleanup(handle: &SerialHandle) -> Option<crate::resource::CleanupHandle> {
+    #[cfg(ohos)]
+    {
+        Some(crate::resource::CleanupHandle::new(Arc::new(
+            handle.clone(),
+        )))
+    }
+    #[cfg(not(ohos))]
+    {
+        let _ = handle;
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -20,8 +20,28 @@
  *   ←  { type:"event",     event, payload }
  */
 
+import type { PickedLocation } from "./file-access.ts";
+import type { RuntimeResponse } from "./stores/runtime.svelte.ts";
+
 type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void };
 type CallbackEntry = { cb: (payload: unknown) => void; once: boolean };
+
+/** Host-specific readiness stays in this adapter; stores observe only that
+ * capabilities may have changed. JCEF can inject its picker after startup. */
+export function onRuntimeCapabilitiesChanged(callback: () => void): () => void {
+    if (typeof window === "undefined" || !window.__RSSH_IPC_SHIM__) return () => {};
+    window.addEventListener("rssh:host-ready", callback);
+    return () => window.removeEventListener("rssh:host-ready", callback);
+}
+
+/** The IDE chooser returns real absolute filesystem paths, never content URIs.
+ * Only this host adapter knows their syntax; literal percent escapes are names. */
+function hostLocation(location: string): PickedLocation {
+    const windows = /^(?:[A-Za-z]:[\\/]|\\\\)/.test(location);
+    const parts = location.split(windows ? /[\\/]/ : /\//);
+    const name = parts[parts.length - 1] || null;
+    return { location, name };
+}
 
 /**
  * Where to reach the headless server. The host (IDEA plugin) injects
@@ -163,12 +183,13 @@ export function installTauriShim(): void {
     // frontend call sites are unchanged; this one seam absorbs the difference.
     const LOCAL: Record<string, (a: any) => Promise<unknown>> = {
         get_runtime_capabilities: async () => {
-            const capabilities = await wsInvoke("get_runtime_capabilities") as Record<string, boolean>;
+            const capabilities = await wsInvoke("get_runtime_capabilities") as RuntimeResponse;
             const hasPicker = typeof (window as any).__RSSH_PICK__ === "function";
             return {
                 ...capabilities,
                 fileMultiSelect: capabilities.fileMultiSelect && hasPicker,
                 directoryTransfer: capabilities.directoryTransfer && hasPicker,
+                nativeClipboard: false,
             };
         },
         clipboard_read: () => navigator.clipboard.readText(),
@@ -209,10 +230,17 @@ export function installTauriShim(): void {
         sftp_pick_save_path: (a) => hostSavePath(a.defaultName),
         sftp_pick_open_path: async () => {
             const paths = await hostPick("files");
-            return Array.isArray(paths) ? paths[0] ?? null : paths;
+            const path = Array.isArray(paths) ? paths[0] : paths;
+            return typeof path === "string" ? hostLocation(path) : null;
         },
-        sftp_pick_folder: () => hostPick("folder"),
-        sftp_pick_open_files: () => hostPick("files"),
+        sftp_pick_folder: async () => {
+            const path = await hostPick("folder");
+            return typeof path === "string" ? hostLocation(path) : null;
+        },
+        sftp_pick_open_files: async () => {
+            const paths = await hostPick("files");
+            return Array.isArray(paths) ? paths.map(hostLocation) : null;
+        },
         // Window-plugin commands: off-Tauri the app lives in an IDE tool window
         // (or a browser tab), with no native window to drive. getCurrentWindow()
         // works (we supply `metadata` below); these calls just succeed with no

@@ -8,9 +8,12 @@ pub mod crypto;
 pub mod db;
 pub mod emitter;
 pub mod error;
+mod files;
 pub mod migration;
 pub mod models;
+mod platform;
 mod redaction;
+mod resource;
 pub mod secret;
 mod ssh;
 pub use ssh::bastion;
@@ -77,8 +80,7 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_clipboard_manager::init());
+        .plugin(tauri_plugin_fs::init());
     builder
         // Android/iOS Activity recreation is not a logical window close.
         // The OHOS adapter emits Destroyed only for a real native window close.

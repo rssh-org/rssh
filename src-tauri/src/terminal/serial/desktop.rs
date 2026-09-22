@@ -184,7 +184,8 @@ fn open_with_xany(
     Ok(Box::new(tty))
 }
 
-/// Windows has no IXANY equivalent; open() rejects it before reaching here.
+/// Windows has no IXANY equivalent. Preserve the historical no-op for saved
+/// configurations imported from a Unix host.
 #[cfg(not(unix))]
 fn open_with_xany(
     builder: serialport::SerialPortBuilder,
@@ -200,7 +201,6 @@ pub fn open(
     cfg: SerialConfig,
     sink: SerialSink,
 ) -> AppResult<(String, SerialHandle)> {
-    super::capabilities().validate(&cfg)?;
     let builder = serialport::new(port, cfg.baud_rate)
         .data_bits(map_data_bits(cfg.data_bits))
         .parity(map_parity(&cfg.parity))
@@ -256,6 +256,28 @@ pub fn open(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_xany_setting_does_not_preempt_the_native_port_open() {
+        let config = SerialConfig {
+            baud_rate: 9600,
+            data_bits: 8,
+            parity: String::new(),
+            stop_bits: 1,
+            flow_control: String::new(),
+            xany: true,
+        };
+        let result = open(
+            "compatibility-test".into(),
+            "rssh-nonexistent-port-397ea899-0a0d-4a63-a1a5-2251102ebc26",
+            config,
+            Arc::new(|_, _| {}),
+        );
+        // Windows historically ignores IXANY. A saved Unix setting must still
+        // reach the driver, whose missing-port error proves validation did not
+        // reject the configuration first.
+        assert_eq!(result.err().unwrap().code(), "serial_open_failed");
+    }
 
     #[test]
     fn data_bits_maps_known_and_defaults_junk_to_eight() {

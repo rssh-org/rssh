@@ -88,12 +88,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc = "0.2"
 
-# PTY uses the native Unix API on HarmonyOS too. Availability is probed inside
-# the application sandbox before the UI exposes a local shell.
-[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
-portable-pty = "0.9"
-
-# Serial — the three desktop targets RSSH actually ships.
+# Native desktop PTY, serial and clipboard retain their existing backends.
 # Cargo target tables cannot use the application's build.rs OS aliases, so keep
 # the native target conditions here.
 # OHOS is target_os = "linux" but has no libudev serial backend.
@@ -105,6 +100,8 @@ portable-pty = "0.9"
 # libudev for port enumeration, so Linux CI/packaging needs `libudev-dev` at
 # build time (see build-linux.sh).
 serialport = "4.9.0"
+portable-pty = "0.8"
+arboard = "3"
 
 # Keychain — Apple platforms share the native Security.framework backend.
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
@@ -114,7 +111,7 @@ keyring = { version = "3", features = ["windows-native"] }
 [target.'cfg(all(target_os = "linux", not(target_env = "ohos")))'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
-# Official plugins (opener/dialog/fs/clipboard) have no OHOS implementation upstream or
+# Official plugins (opener/dialog/fs) have no OHOS implementation upstream or
 # in the fork — compiling their desktop Linux backends (rfd etc.) against the
 # OHOS sysroot would not link. Everything but ohos keeps them; the ohos build
 # registers no official plugins; native OHOS integrations live in its adapter.
@@ -122,7 +119,6 @@ keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
-tauri-plugin-clipboard-manager = "2"
 
 [features]
 default = []

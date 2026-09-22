@@ -31,7 +31,7 @@ import {
   type TermPaletteRef,
 } from "./term-palettes.ts";
 import { composeTermFontStack } from "./term-font.ts";
-import { supportsTouch } from "../input.ts";
+import { terminalPolicy } from "../stores/runtime.svelte.ts";
 
 const SETTING_KEY_PALETTE        = "theme.palette";
 const SETTING_KEY_SHAPE          = "theme.shape";
@@ -285,15 +285,16 @@ function notifyXtermFonts(): void {
 
 /* ───────────────────────────────────────────────────────────────
    Terminal GPU rendering — whether xterm uses the WebGL addon or
-   the DOM renderer. Touch input defaults to DOM so native long-press
-   selection has text to select; other input defaults to WebGL for
-   paint throughput. The saved user setting takes precedence. Applies live: panes
+   the DOM renderer. The native host supplies its established default;
+   input devices and window width never choose a performance policy.
+   The saved user setting takes precedence. Applies live: panes
    register a listener that loads/disposes the addon.
    ─────────────────────────────────────────────────────────────── */
 
-let _termGpuRender = $state<boolean>(!supportsTouch());
+// null means use the host policy, which loads independently of saved settings.
+let _termGpuRender = $state<boolean | null>(null);
 
-export function termGpuRender(): boolean { return _termGpuRender; }
+export function termGpuRender(): boolean { return _termGpuRender ?? terminalPolicy().gpuRenderDefault; }
 
 export async function setTermGpuRender(on: boolean): Promise<void> {
   _termGpuRender = on;
@@ -311,12 +312,12 @@ const _xtermGpuListeners = new Set<XtermGpuListener>();
 /** Mirrors registerXtermFontListener: fires immediately + on every change. */
 export function registerXtermGpuListener(fn: XtermGpuListener): () => void {
   _xtermGpuListeners.add(fn);
-  fn(_termGpuRender);
+  fn(termGpuRender());
   return () => { _xtermGpuListeners.delete(fn); };
 }
 
 function notifyXtermGpu(): void {
-  for (const fn of _xtermGpuListeners) fn(_termGpuRender);
+  for (const fn of _xtermGpuListeners) fn(termGpuRender());
 }
 
 /* ───────────────────────────────────────────────────────────────
@@ -455,9 +456,12 @@ export async function init(): Promise<void> {
   if (termBgFollow === "false") _termBgFollowsTheme = false;
   if (termFontRaw) _termFont = termFontRaw;
   if (termFontSizeRaw) _termFontSize = clampFontSize(parseInt(termFontSizeRaw, 10));
-  // Explicit persisted value wins; absence keeps the input-hardware default.
-  if (termGpuRaw === "true") _termGpuRender = true;
-  else if (termGpuRaw === "false") _termGpuRender = false;
+  // A user toggle made during startup outranks the earlier settings read.
+  // Otherwise a saved choice wins; absence continues to use the host policy.
+  if (_termGpuRender === null) {
+    if (termGpuRaw === "true") _termGpuRender = true;
+    else if (termGpuRaw === "false") _termGpuRender = false;
+  }
   apply(paletteById(_paletteId));
   applyShape(_shapeId);
   applyDensity(_densityId);
@@ -468,6 +472,6 @@ export async function init(): Promise<void> {
   // Mirrors apply()'s notifyXterms() for the palette.
   notifyXtermFonts();
   // Same late-mount race for the GPU toggle: a pane that mounted with the
-  // input-hardware default may need to (un)load its WebGL addon.
+  // host default may need to (un)load its WebGL addon.
   notifyXtermGpu();
 }

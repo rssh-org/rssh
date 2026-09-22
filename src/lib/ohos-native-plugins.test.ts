@@ -91,6 +91,22 @@ function clipboardHarness() {
 }
 
 describe("HarmonyOS typed file ownership plugin", () => {
+  it("obtains the selected name from FileUri while keeping its URI opaque", async () => {
+    const uri = "file://provider/opaque-location";
+    const names = new Map([[uri, "报告: final %.txt"]]);
+    const plugin = loadPlugin("FilesAccessPlugin", {
+      "@ohos.file.fs": { default: {} },
+      "@ohos.file.fileuri": { default: { FileUri: class {
+        readonly name: string;
+        constructor(location: string) { this.name = names.get(location)!; }
+      } } },
+    });
+    const result = await plugin.invokeAsync("file-name", {
+      typeName: "rssh.files.NameRequest", value: { uri },
+    }, callContext());
+    expect(result).toEqual({ typeName: "rssh.files.FileName", value: { name: "报告: final %.txt" } });
+  });
+
   it.each([false, true])("duplicates on the UI callback before closing the borrowed file (write=%s)", async (write) => {
     const h = filesHarness();
     const order: string[] = [];

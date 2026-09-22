@@ -1,14 +1,14 @@
 //! Session 生命周期管理：前端 reconcile + 窗口销毁清理。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tauri::State;
 
 use crate::error::{locked, AppError, AppResult};
+use crate::resource::{CleanupHandle, PendingOperation, ResourceCleanup};
 use crate::state::AppState;
-#[cfg(any(ohos, test))]
-use crate::state::PendingOperationState;
+use crate::state::ResourceState;
 use crate::state::{AiSessionRecord, SessionKind, SessionOwner, SessionPhase, SessionRecord};
 
 /// 前端启动 / 重连后调用：把不在 `active_ids` 列表里的所有 session 全部清掉。
@@ -52,53 +52,38 @@ pub struct ResourceReservation<'a> {
     armed: bool,
 }
 
-/// The opening task owns this guard through activation or final native cleanup.
-/// The lifecycle registry owns cancellation and observes completion, including
-/// when a cancelled authorization dialog returns after the close request.
-#[cfg(any(ohos, test))]
-pub struct PendingOperation {
-    cancelled: tokio::sync::watch::Receiver<bool>,
-    finished: tokio::sync::watch::Sender<Option<AppResult<()>>>,
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct AtomicCleanupProbe {
+    failures: std::sync::atomic::AtomicUsize,
+    calls: std::sync::atomic::AtomicUsize,
 }
 
-#[cfg(any(ohos, test))]
-impl PendingOperation {
-    pub async fn cancelled(&self) {
-        let mut cancelled = self.cancelled.clone();
-        while !*cancelled.borrow_and_update() {
-            if cancelled.changed().await.is_err() {
-                return;
-            }
-        }
-    }
-
-    /// Report the actual native cleanup result before releasing the guard.
-    /// Completion means the task ended; only Ok means the resource was released.
-    pub fn complete(self, result: AppResult<()>) {
-        let _ = self.finished.send_replace(Some(result));
-    }
-}
-
-#[cfg(any(ohos, test))]
-impl Drop for PendingOperation {
-    fn drop(&mut self) {
-        let completed = self.finished.borrow().is_some();
-        if !completed {
-            let _ = self.finished.send_replace(Some(Err(AppError::other(
-                "session_cleanup_interrupted",
-                serde_json::json!({}),
-            ))));
+#[cfg(test)]
+impl AtomicCleanupProbe {
+    fn close(&self) -> AppResult<()> {
+        use std::sync::atomic::Ordering;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self
+            .failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            Err(AppError::pty(
+                "serial_op_failed",
+                serde_json::json!({"err": "native close refused"}),
+            ))
+        } else {
+            Ok(())
         }
     }
 }
 
-type PendingCompletion = tokio::sync::watch::Receiver<Option<AppResult<()>>>;
-
-fn cancel_pending_operation(record: &mut SessionRecord) -> Option<PendingCompletion> {
-    record.pending_operation.take().map(|operation| {
-        operation.cancel.send_replace(true);
-        operation.finished
-    })
+#[cfg(test)]
+impl crate::resource::Cleanup for AtomicCleanupProbe {
+    fn close(&self) -> crate::resource::CleanupFuture<'_> {
+        Box::pin(async move { AtomicCleanupProbe::close(self) })
+    }
 }
 
 pub struct AiOwnerReservation<'a> {
@@ -429,7 +414,7 @@ fn close_owned_ai(
             }
             // An explicit close already owns the cleanup task. Leave its
             // tombstone alone; owner shutdown must not reopen the ABA window.
-            SessionPhase::Closed => {}
+            SessionPhase::Closing | SessionPhase::Closed => {}
         }
     }
     drop(sessions);
@@ -513,7 +498,7 @@ pub(crate) fn register_prompt_waiter<T>(
     let pending = registry.get(resource_id).is_some_and(|record| {
         record.kind == SessionKind::Ssh
             && &record.owner == owner
-            && record.phase == SessionPhase::Pending
+            && record.phase() == SessionPhase::Pending
     });
     if !pending {
         return Err(AppError::not_found(
@@ -574,6 +559,14 @@ impl ReadySession {
         }
     }
 
+    fn cleanup(&self) -> Option<CleanupHandle> {
+        match self {
+            #[cfg(any(windows, macos, linux, ohos))]
+            Self::Serial(handle) => crate::terminal::serial::cleanup(handle),
+            _ => None,
+        }
+    }
+
     fn close(self) {
         match self {
             Self::Ssh(handle) => handle.force_disconnect(),
@@ -598,7 +591,6 @@ impl ResourceReservation<'_> {
 
     /// Register cancellation before beginning an asynchronous native open. The
     /// same registry lock orders registration against close and activation.
-    #[cfg(any(ohos, test))]
     pub fn pending_operation(&self) -> AppResult<PendingOperation> {
         let mut registry = locked(&self.state.lifecycle_sessions)?;
         let record = registry.get_mut(&self.session_id).ok_or_else(|| {
@@ -609,29 +601,22 @@ impl ResourceReservation<'_> {
         })?;
         if record.nonce != self.nonce
             || record.kind != self.kind
-            || record.phase != SessionPhase::Pending
+            || record.phase() != SessionPhase::Pending
         {
             return Err(AppError::not_found(
                 "session_reservation_lost",
                 serde_json::json!({ "id": self.session_id }),
             ));
         }
-        if record.pending_operation.is_some() {
+        if matches!(record.state, ResourceState::Pending(Some(_))) {
             return Err(AppError::other(
                 "session_registry_inconsistent",
                 serde_json::json!({ "id": self.session_id }),
             ));
         }
-        let (cancel, cancelled) = tokio::sync::watch::channel(false);
-        let (finished, completion) = tokio::sync::watch::channel(None);
-        record.pending_operation = Some(PendingOperationState {
-            cancel,
-            finished: completion,
-        });
-        Ok(PendingOperation {
-            cancelled,
-            finished,
-        })
+        let (operation, pending) = PendingOperation::new();
+        record.state = ResourceState::Pending(Some(pending));
+        Ok(operation)
     }
 
     #[cfg(test)]
@@ -641,7 +626,7 @@ impl ResourceReservation<'_> {
             Some(record)
                 if record.nonce == self.nonce
                     && record.kind == self.kind
-                    && record.phase == SessionPhase::Pending =>
+                    && record.phase() == SessionPhase::Pending =>
             {
                 Ok(())
             }
@@ -677,7 +662,7 @@ impl ResourceReservation<'_> {
         };
         if record.nonce != self.nonce
             || record.kind != self.kind
-            || record.phase != SessionPhase::Pending
+            || record.phase() != SessionPhase::Pending
         {
             drop(registry);
             handle.close();
@@ -687,8 +672,7 @@ impl ResourceReservation<'_> {
             ));
         }
         insert_ready_handle(self.state, &self.session_id, handle)?;
-        record.phase = SessionPhase::Ready;
-        record.pending_operation = None;
+        record.state = ResourceState::Ready;
         self.armed = false;
         Ok(())
     }
@@ -771,9 +755,12 @@ impl Drop for ResourceReservation<'_> {
             return;
         };
         if let Some(record) = registry.get_mut(&self.session_id) {
-            if record.nonce == self.nonce && record.phase == SessionPhase::Pending {
-                drop(cancel_pending_operation(record));
-                record.phase = SessionPhase::Closed;
+            if record.nonce == self.nonce && record.phase() == SessionPhase::Pending {
+                if let Ok((_, Some(cleanup))) =
+                    begin_resource_close(self.state, &self.session_id, record)
+                {
+                    cleanup.start();
+                }
             }
         }
     }
@@ -799,9 +786,8 @@ pub fn reserve_resource<'a>(
             nonce,
             kind,
             owner,
-            phase: SessionPhase::Pending,
+            state: ResourceState::Pending(None),
             parent: None,
-            pending_operation: None,
         },
     );
     drop(registry);
@@ -838,7 +824,7 @@ pub fn reserve_sftp_child<'a>(
     let parent = registry
         .get(parent_id)
         .ok_or_else(|| AppError::not_found("ssh_session_not_found_msg", serde_json::json!({})))?;
-    if parent.kind != SessionKind::Ssh || parent.phase != SessionPhase::Ready {
+    if parent.kind != SessionKind::Ssh || parent.phase() != SessionPhase::Ready {
         return Err(AppError::not_found(
             "ssh_session_not_found_msg",
             serde_json::json!({}),
@@ -874,9 +860,8 @@ pub fn reserve_sftp_child<'a>(
             nonce,
             kind: SessionKind::Sftp,
             owner,
-            phase: SessionPhase::Pending,
+            state: ResourceState::Pending(None),
             parent: Some(parent_id.to_owned()),
-            pending_operation: None,
         },
     );
     drop(registry);
@@ -917,7 +902,7 @@ pub fn owned_ready_ai_target(
     let record = registry
         .get(id)
         .ok_or_else(|| AppError::not_found("session_not_found", serde_json::json!({ "id": id })))?;
-    if record.kind != kind || record.phase != SessionPhase::Ready {
+    if record.kind != kind || record.phase() != SessionPhase::Ready {
         return Err(AppError::not_found(
             "session_not_found",
             serde_json::json!({ "id": id }),
@@ -1031,9 +1016,13 @@ pub fn close_resource(
     if expected_kind == SessionKind::Ssh {
         return close_ssh_tree(state, session_id, expected_owner);
     }
-    let (removed, _) = take_closed_resource(state, session_id, expected_kind, expected_owner)?;
+    let (removed, cleanup) =
+        take_closed_resource(state, session_id, expected_kind, expected_owner)?;
     if let Some(handle) = removed {
         handle.close();
+    }
+    if let Some(cleanup) = cleanup {
+        cleanup.start();
     }
     close_waiters_for_resource(state, session_id, expected_owner)?;
     Ok(())
@@ -1042,7 +1031,6 @@ pub fn close_resource(
 /// Close an exclusive transport and wait until its native port is released.
 /// Pending opens acknowledge completion only after their own cancellation
 /// cleanup; Ready handles are taken under the same lock that validates owner.
-#[cfg(any(ohos, test))]
 pub async fn close_resource_and_wait(
     state: &AppState,
     session_id: &str,
@@ -1052,31 +1040,16 @@ pub async fn close_resource_and_wait(
     if expected_kind == SessionKind::Ssh {
         return close_ssh_tree(state, session_id, expected_owner);
     }
-    let (removed, pending) =
+    let (removed, cleanup) =
         take_closed_resource(state, session_id, expected_kind, expected_owner)?;
     let waiter_result = close_waiters_for_resource(state, session_id, expected_owner);
     if let Some(handle) = removed {
-        match handle {
-            #[cfg(ohos)]
-            ReadySession::Serial(serial) => serial.close().await?,
-            handle => handle.close(),
-        }
+        handle.close();
     }
-    if let Some(mut finished) = pending {
-        loop {
-            let result = finished.borrow_and_update().clone();
-            if let Some(result) = result {
-                result?;
-                break;
-            }
-            if finished.changed().await.is_err() {
-                return Err(AppError::other(
-                    "session_cleanup_interrupted",
-                    serde_json::json!({}),
-                ));
-            }
-        }
+    if let Some(cleanup) = cleanup {
+        cleanup.finish().await?;
     }
+
     waiter_result
 }
 
@@ -1085,7 +1058,7 @@ fn take_closed_resource(
     session_id: &str,
     expected_kind: SessionKind,
     expected_owner: &SessionOwner,
-) -> AppResult<(Option<ReadySession>, Option<PendingCompletion>)> {
+) -> AppResult<(Option<ReadySession>, Option<Arc<ResourceCleanup>>)> {
     let mut registry = locked(&state.lifecycle_sessions)?;
     let record = registry.get_mut(session_id).ok_or_else(|| {
         AppError::not_found("session_not_found", serde_json::json!({ "id": session_id }))
@@ -1102,27 +1075,45 @@ fn take_closed_resource(
             serde_json::json!({ "id": session_id }),
         ));
     }
-    if record.phase == SessionPhase::Closed {
+    if record.phase() == SessionPhase::Closed {
         return Err(AppError::not_found(
             "session_not_found",
             serde_json::json!({ "id": session_id }),
         ));
     }
-    let removed = if record.phase == SessionPhase::Ready {
-        Some(
-            take_ready_handle(state, session_id, record.kind)?.ok_or_else(|| {
+    begin_resource_close(state, session_id, record)
+}
+
+fn begin_resource_close(
+    state: &AppState,
+    session_id: &str,
+    record: &mut SessionRecord,
+) -> AppResult<(Option<ReadySession>, Option<Arc<ResourceCleanup>>)> {
+    let cleanup = match &mut record.state {
+        ResourceState::Closing(cleanup) => return Ok((None, Some(cleanup.clone()))),
+        ResourceState::Pending(operation) => operation.take().map(ResourceCleanup::pending),
+        ResourceState::Ready => {
+            let handle = take_ready_handle(state, session_id, record.kind)?.ok_or_else(|| {
                 AppError::other(
                     "session_registry_inconsistent",
-                    serde_json::json!({ "id": session_id }),
+                    serde_json::json!({"id": session_id}),
                 )
-            })?,
-        )
-    } else {
-        None
+            })?;
+            match handle.cleanup() {
+                Some(cleanup) => Some(ResourceCleanup::ready(cleanup)),
+                None => {
+                    record.state = ResourceState::Closed;
+                    return Ok((Some(handle), None));
+                }
+            }
+        }
+        ResourceState::Closed => None,
     };
-    let pending = cancel_pending_operation(record);
-    record.phase = SessionPhase::Closed;
-    Ok((removed, pending))
+    record.state = match &cleanup {
+        Some(cleanup) => ResourceState::Closing(cleanup.clone()),
+        None => ResourceState::Closed,
+    };
+    Ok((None, cleanup))
 }
 
 pub fn close_ssh_tree(
@@ -1146,7 +1137,7 @@ pub fn close_ssh_tree(
             serde_json::json!({ "id": session_id }),
         ));
     }
-    if parent.phase == SessionPhase::Closed {
+    if parent.phase() == SessionPhase::Closed {
         return Err(AppError::not_found(
             "session_not_found",
             serde_json::json!({ "id": session_id }),
@@ -1156,50 +1147,33 @@ pub fn close_ssh_tree(
     let child_ids: Vec<String> = registry
         .iter()
         .filter(|(_, record)| {
-            record.parent.as_deref() == Some(session_id) && record.phase != SessionPhase::Closed
+            record.parent.as_deref() == Some(session_id) && record.phase() != SessionPhase::Closed
         })
         .map(|(id, _)| id.clone())
         .collect();
     let mut removed = Vec::new();
-    for child_id in child_ids {
-        let child = registry
-            .get_mut(&child_id)
-            .expect("child came from registry");
-        if child.kind != SessionKind::Sftp {
+    let mut cleanups = Vec::new();
+    for id in child_ids
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(session_id))
+    {
+        let record = registry.get_mut(id).expect("resource was validated");
+        if id != session_id && record.kind != SessionKind::Sftp {
             return Err(AppError::other(
                 "session_registry_inconsistent",
-                serde_json::json!({ "id": child_id }),
+                serde_json::json!({"id": id}),
             ));
         }
-        if child.phase == SessionPhase::Ready {
-            removed.push(
-                take_ready_handle(state, &child_id, SessionKind::Sftp)?.ok_or_else(|| {
-                    AppError::other(
-                        "session_registry_inconsistent",
-                        serde_json::json!({ "id": child_id }),
-                    )
-                })?,
-            );
-        }
-        drop(cancel_pending_operation(child));
-        child.phase = SessionPhase::Closed;
+        let (handle, cleanup) = begin_resource_close(state, id, record)?;
+        removed.extend(handle);
+        cleanups.extend(cleanup);
     }
-
-    let parent = registry.get_mut(session_id).expect("parent was validated");
-    if parent.phase == SessionPhase::Ready {
-        removed.push(
-            take_ready_handle(state, session_id, SessionKind::Ssh)?.ok_or_else(|| {
-                AppError::other(
-                    "session_registry_inconsistent",
-                    serde_json::json!({ "id": session_id }),
-                )
-            })?,
-        );
-    }
-    drop(cancel_pending_operation(parent));
-    parent.phase = SessionPhase::Closed;
     drop(registry);
     close_removed(removed);
+    for cleanup in cleanups {
+        cleanup.start();
+    }
     close_waiters_for_resource(state, session_id, expected_owner)?;
     Ok(())
 }
@@ -1208,13 +1182,13 @@ fn remove_owned_resources(
     state: &AppState,
     owner: &SessionOwner,
     active_ids: Option<&HashSet<String>>,
-) -> AppResult<(usize, Vec<ReadySession>)> {
+) -> AppResult<(usize, Vec<ReadySession>, Vec<Arc<ResourceCleanup>>)> {
     let mut registry = locked(&state.lifecycle_sessions)?;
     let mut ids: Vec<String> = registry
         .iter()
         .filter(|(id, record)| {
             record.owner == *owner
-                && record.phase != SessionPhase::Closed
+                && record.phase() != SessionPhase::Closed
                 && active_ids.is_none_or(|active| !active.contains(*id))
         })
         .map(|(id, _)| id.clone())
@@ -1232,7 +1206,7 @@ fn remove_owned_resources(
         .iter()
         .filter(|(id, record)| {
             !ids.contains(id)
-                && record.phase != SessionPhase::Closed
+                && record.phase() != SessionPhase::Closed
                 && record
                     .parent
                     .as_ref()
@@ -1242,20 +1216,14 @@ fn remove_owned_resources(
         .collect();
     ids.extend(child_ids);
     let mut removed = Vec::new();
+    let mut cleanups = Vec::new();
     for id in &ids {
         let record = registry.get_mut(id).expect("id came from registry");
-        if record.phase == SessionPhase::Ready {
-            removed.push(take_ready_handle(state, id, record.kind)?.ok_or_else(|| {
-                AppError::other(
-                    "session_registry_inconsistent",
-                    serde_json::json!({ "id": id }),
-                )
-            })?);
-        }
-        drop(cancel_pending_operation(record));
-        record.phase = SessionPhase::Closed;
+        let (handle, cleanup) = begin_resource_close(state, id, record)?;
+        removed.extend(handle);
+        cleanups.extend(cleanup);
     }
-    Ok((ids.len(), removed))
+    Ok((ids.len(), removed, cleanups))
 }
 
 pub fn reconcile_owner(
@@ -1264,8 +1232,11 @@ pub fn reconcile_owner(
     active_ids: Vec<String>,
 ) -> AppResult<usize> {
     let active: HashSet<String> = active_ids.into_iter().collect();
-    let (closed, removed) = remove_owned_resources(state, owner, Some(&active))?;
+    let (closed, removed, cleanups) = remove_owned_resources(state, owner, Some(&active))?;
     close_removed(removed);
+    for cleanup in cleanups {
+        cleanup.start();
+    }
     Ok(closed
         + close_owned_ai(state, owner, Some(&active))?
         + close_owned_waiters(state, owner, Some(&active))?)
@@ -1273,7 +1244,12 @@ pub fn reconcile_owner(
 
 pub fn close_owner(state: &AppState, owner: &SessionOwner) {
     match remove_owned_resources(state, owner, None) {
-        Ok((_, removed)) => close_removed(removed),
+        Ok((_, removed, cleanups)) => {
+            close_removed(removed);
+            for cleanup in cleanups {
+                cleanup.start();
+            }
+        }
         Err(error) => log::warn!("close owner sessions failed: {error}"),
     }
     if let Err(error) = close_owned_ai(state, owner, None) {
@@ -1663,6 +1639,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_cleanup_retains_the_resource_for_close_and_owner_retry() {
+        use std::sync::atomic::Ordering;
+
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440110";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let probe = Arc::new(AtomicCleanupProbe::default());
+        probe.failures.store(2, Ordering::SeqCst);
+        operation
+            .retain_cleanup(CleanupHandle::new(probe.clone()))
+            .unwrap();
+        operation.complete(probe.close()); // Native open failed and its first cleanup failed too.
+
+        let error = close_resource_and_wait(&state, id, SessionKind::Telnet, &owner)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "serial_op_failed");
+        assert_eq!(
+            state.lifecycle_sessions.lock().unwrap()[id].phase(),
+            SessionPhase::Closing
+        );
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+        assert!(!state.telnet_sessions.lock().unwrap().contains_key(id));
+        assert_eq!(
+            close_resource_and_wait(
+                &state,
+                id,
+                SessionKind::Telnet,
+                &SessionOwner::Window("other".into())
+            )
+            .await
+            .unwrap_err()
+            .code(),
+            "session_owner_mismatch"
+        );
+
+        let error = close_resource_and_wait(&state, id, SessionKind::Telnet, &owner)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "serial_op_failed");
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+        close_owner(&state, &owner);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.lifecycle_sessions.lock().unwrap()[id].phase() != SessionPhase::Closed {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 3);
+        drop(reservation);
+    }
+
+    #[tokio::test]
+    async fn aborted_open_is_cleaned_by_reservation_drop_without_another_close() {
+        use std::sync::atomic::Ordering;
+
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440111";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let probe = Arc::new(AtomicCleanupProbe::default());
+        operation
+            .retain_cleanup(CleanupHandle::new(probe.clone()))
+            .unwrap();
+        drop(operation);
+        drop(reservation);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.lifecycle_sessions.lock().unwrap()[id].phase() != SessionPhase::Closed {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_pending_closes_join_the_same_cleanup() {
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440109";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let first = close_resource_and_wait(&state, id, SessionKind::Telnet, &owner);
+        tokio::pin!(first);
+        tokio::select! {
+            biased;
+            result = &mut first => panic!("first close skipped cleanup: {result:?}"),
+            _ = operation.cancelled() => {},
+        }
+        let second = close_resource_and_wait(&state, id, SessionKind::Telnet, &owner);
+        tokio::pin!(second);
+        tokio::select! {
+            biased;
+            result = &mut second => panic!("second close skipped cleanup: {result:?}"),
+            _ = std::future::ready(()) => {},
+        }
+        operation.complete(Ok(()));
+        first.await.unwrap();
+        second.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn pending_close_waits_for_cleanup_after_notifying_cancellation() {
         let state = empty_state();
         let owner = SessionOwner::Window("main".into());
@@ -1681,8 +1764,8 @@ mod tests {
             reservation.ensure_pending().unwrap_err().code(),
             "session_reservation_lost"
         );
-        // The resource is already Closed, but cleanup has not acknowledged
-        // completion. A second poll must still wait for the operation guard.
+        // The resource is Closing until cleanup acknowledges completion.
+        // A second poll must still wait for the operation guard.
         tokio::select! {
             biased;
             result = &mut close => panic!("close skipped its cleanup barrier: {result:?}"),
@@ -1719,7 +1802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn interrupted_pending_cleanup_cannot_be_reported_as_success() {
+    async fn aborted_open_before_resource_registration_needs_no_native_cleanup() {
         let state = empty_state();
         let owner = SessionOwner::Window("main".into());
         let id = "550e8400-e29b-41d4-a716-446655440108";
@@ -1732,12 +1815,13 @@ mod tests {
             result = &mut close => panic!("close completed before native cleanup: {result:?}"),
             _ = operation.cancelled() => {},
         }
-        // An opening task being aborted/unwinding drops its guard without
-        // reporting whether native cleanup actually succeeded.
+        // The contract requires registration before external effects. No
+        // registered resource means this task stopped before native dispatch.
         drop(operation);
+        close.await.unwrap();
         assert_eq!(
-            close.await.unwrap_err().code(),
-            "session_cleanup_interrupted"
+            state.lifecycle_sessions.lock().unwrap()[id].phase(),
+            SessionPhase::Closed
         );
     }
 
@@ -1878,7 +1962,7 @@ mod tests {
                 .unwrap()
                 .get(id)
                 .unwrap()
-                .phase,
+                .phase(),
             SessionPhase::Closed
         );
         operation.complete(Ok(()));
@@ -2001,7 +2085,7 @@ mod tests {
                 .unwrap()
                 .get("550e8400-e29b-41d4-a716-446655440021")
                 .unwrap()
-                .phase,
+                .phase(),
             SessionPhase::Closed
         );
     }
@@ -2537,9 +2621,8 @@ mod tests {
                 nonce: uuid::Uuid::new_v4(),
                 kind: SessionKind::Telnet,
                 owner: other.clone(),
-                phase: SessionPhase::Ready,
+                state: ResourceState::Ready,
                 parent: None,
-                pending_operation: None,
             },
         );
         let target_error = crate::ai::commands::ai_session_rebind_target_impl(

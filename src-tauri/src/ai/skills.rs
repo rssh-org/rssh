@@ -102,12 +102,13 @@ pub fn delete_user(db: &Db, id: &str) -> AppResult<()> {
 /// 由 commands 层根据前端 UI locale 解析后传入。
 ///
 /// Local analysis availability comes from the same host check used by the tool,
-/// not the build's mobile/desktop classification. SFTP downloads are independent
-/// of window support and always write to the application's diagnosis directory.
+/// not the build's mobile/desktop classification. Download guidance is a separate
+/// host policy: some sandboxed clients cannot use the resulting private artifact.
 pub fn build_catalog_prompt(
     db: &Db,
     user_locale_label: &str,
     local_analysis_unavailable: Option<&str>,
+    allow_downloads: bool,
 ) -> AppResult<String> {
     let mut s = String::new();
     s.push_str(super::prompts::GENERAL);
@@ -140,11 +141,17 @@ pub fn build_catalog_prompt(
         s.push_str(&format!(
             "\n---\n\n# Runtime capabilities\n\n\
              `analyze_locally` is unavailable on the current host: {reason}. Do not invoke it.\n\
-             `download_file` remains available for an SSH target and saves into the app's diagnosis directory; it does not open a file-save dialog. \
-             Do not download an artifact solely for unavailable local analysis, or assume its returned path is accessible from another app.\n\n\
              If the diagnosis requires local analysis, explain the missing capability and continue with useful in-session tooling. \
              Do not move heavy analysis or long-running probes to the remote host as a workaround — they can exhaust its resources or interrupt the diagnosed service.\n"
         ));
+    }
+
+    if allow_downloads {
+        if local_analysis_unavailable.is_some() {
+            s.push_str("\n`download_file` remains available for an SSH target and saves into the app's diagnosis directory. Do not download an artifact solely for unavailable local analysis, or assume its returned path is accessible from another app.\n");
+        }
+    } else {
+        s.push_str("\n---\n\n# Artifact download policy\n\n`download_file` is unavailable for this host's diagnosis workflow. Do not invoke it or generate heap dumps and similar artifacts on the remote host as a workaround. Explain that this step needs a host with an accessible artifact workflow, and continue with useful in-session tooling.\n");
     }
 
     Ok(s)
@@ -187,7 +194,7 @@ mod tests {
     fn catalog_omitted_when_no_user_skills() {
         let db = Db::open_in_memory().unwrap();
 
-        let prompt = build_catalog_prompt(&db, "English", None).unwrap();
+        let prompt = build_catalog_prompt(&db, "English", None, true).unwrap();
 
         // The catalog section appears only when user skills exist. The
         // `load_skill` tool itself is always listed in general.md regardless.
@@ -208,7 +215,7 @@ mod tests {
         )
         .unwrap();
 
-        let prompt = build_catalog_prompt(&db, "English", None).unwrap();
+        let prompt = build_catalog_prompt(&db, "English", None, true).unwrap();
 
         assert!(prompt.contains("`user-mine`"));
         assert!(prompt.contains("My workflow"));
@@ -219,7 +226,7 @@ mod tests {
     fn local_analysis_capable_hosts_keep_the_analysis_workflow() {
         let db = Db::open_in_memory().unwrap();
 
-        let prompt = build_catalog_prompt(&db, "English", None).unwrap();
+        let prompt = build_catalog_prompt(&db, "English", None, true).unwrap();
 
         assert!(prompt.contains("analyze_locally"));
         assert!(!prompt.contains("# Runtime capabilities"));
@@ -234,7 +241,7 @@ mod tests {
             "Local analysis requires a working local terminal",
             "Local analysis windows are unavailable in headless mode",
         ] {
-            let prompt = build_catalog_prompt(&db, "English", Some(reason)).unwrap();
+            let prompt = build_catalog_prompt(&db, "English", Some(reason), true).unwrap();
 
             assert!(prompt.contains(&format!(
                 "`analyze_locally` is unavailable on the current host: {reason}"
@@ -244,5 +251,14 @@ mod tests {
             assert!(!prompt.contains("mobile build"));
             assert!(!prompt.contains("no native file-save dialog"));
         }
+    }
+    #[test]
+    fn sandbox_artifact_policy_does_not_reenable_existing_download_workflows() {
+        let db = Db::open_in_memory().unwrap();
+        let prompt =
+            build_catalog_prompt(&db, "English", Some("No analysis window"), false).unwrap();
+        assert!(prompt.contains("`download_file` is unavailable"));
+        assert!(prompt.contains("Do not invoke it"));
+        assert!(!prompt.contains("`download_file` remains available"));
     }
 }

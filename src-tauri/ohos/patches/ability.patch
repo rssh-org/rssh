@@ -1049,10 +1049,10 @@ index b4e7b2c..e74acef 100644
  
 diff --git a/native_ability/src/main/ets/components/WindowSurface.ets b/native_ability/src/main/ets/components/WindowSurface.ets
 new file mode 100644
-index 0000000..a575502
+index 0000000..ae9c2ca
 --- /dev/null
 +++ b/native_ability/src/main/ets/components/WindowSurface.ets
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,177 @@
 +import { FrameNode, NodeController } from "@ohos.arkui.node";
 +import { UIContext } from "@ohos.arkui.UIContext";
 +
@@ -1067,19 +1067,34 @@ index 0000000..a575502
 +  private context?: UIContext;
 +  private root?: FrameNode;
 +  private disposed: boolean = false;
++  private ready: boolean = false;
++  private failure: Error = new Error("Window surface is closed");
 +  private readonly waiters: SurfaceWaiter[] = [];
 +  private readonly nodes: Map<string, FrameNode> = new Map();
++
++  isClosed(): boolean { return this.disposed; }
 +
 +  attach(context: UIContext, root: FrameNode): void {
 +    if (this.disposed) { throw new Error("Window surface has already been disposed"); }
 +    this.context = context;
 +    this.root = root;
++    this.resolveReady();
++  }
++
++  markReady(): void {
++    if (this.disposed) { throw this.failure; }
++    this.ready = true;
++    this.resolveReady();
++  }
++
++  private resolveReady(): void {
++    if (!this.ready || this.root === undefined) { return; }
 +    for (const waiter of this.waiters.splice(0)) { waiter.resolve(this); }
 +  }
 +
 +  wait(onCancel: (listener: () => void) => () => void): Promise<WindowSurface> {
-+    if (this.disposed) { return Promise.reject(new Error("Window surface is closed")); }
-+    if (this.root !== undefined) { return Promise.resolve(this); }
++    if (this.disposed) { return Promise.reject(this.failure); }
++    if (this.ready && this.root !== undefined) { return Promise.resolve(this); }
 +    return new Promise<WindowSurface>((resolve, reject): void => {
 +      let unsubscribe: () => void = (): void => {};
 +      const waiter: SurfaceWaiter = {
@@ -1115,10 +1130,11 @@ index 0000000..a575502
 +    try { node.dispose(); } catch {}
 +  }
 +
-+  dispose(): void {
++  dispose(reason: Error = new Error("Window surface closed before attachment")): void {
 +    if (this.disposed) { return; }
 +    this.disposed = true;
-+    for (const waiter of this.waiters.splice(0)) { waiter.reject(new Error("Window surface closed before attachment")); }
++    this.failure = reason;
++    for (const waiter of this.waiters.splice(0)) { waiter.reject(reason); }
 +    for (const key of Array.from(this.nodes.keys())) { this.remove(key); }
 +    this.context = undefined;
 +    this.root = undefined;
@@ -1198,8 +1214,10 @@ index 0000000..a575502
 +  aboutToAppear(): void {
 +    // A queued route can appear after its Ability session has already been disposed.
 +    if (!WindowSurfaceRegistry.has(this.surfaceKey)) { return; }
++    const surface = WindowSurfaceRegistry.find(this.surfaceKey);
++    if (surface.isClosed()) { return; }
 +    const context = this.getUIContext();
-+    WindowSurfaceRegistry.find(this.surfaceKey).attach(context, this.controller.makeNode(context));
++    surface.attach(context, this.controller.makeNode(context));
 +  }
 +
 +  aboutToDisappear(): void { this.controller.release(); }
@@ -1565,10 +1583,10 @@ index ef07248..a5c97f2 100644
            try {
 diff --git a/plugins/window/src/main/ets/ManagedWindows.ets b/plugins/window/src/main/ets/ManagedWindows.ets
 new file mode 100644
-index 0000000..0c951d3
+index 0000000..a05bb84
 --- /dev/null
 +++ b/plugins/window/src/main/ets/ManagedWindows.ets
-@@ -0,0 +1,288 @@
+@@ -0,0 +1,299 @@
 +import window from "@ohos.window";
 +import deviceInfo from "@ohos.deviceInfo";
 +import { BridgeCallContext, BridgePluginContext, BridgeTypedValue, WindowSurfaceRegistry } from "@ohos-rs/ability";
@@ -1692,14 +1710,16 @@ index 0000000..0c951d3
 +
 +  private async create(request: ManagedRequest, call: BridgeCallContext, generation: number): Promise<void> {
 +    const main = request.windowId === 0;
-+    const win: window.Window = main ? this.context.getWindow() : await this.context.getWindowStage().createSubWindowWithOptions(`${this.owner}:native-${request.windowId}`, {
-+      title: request.title, decorEnabled: true, maximizeSupported: request.maximizable,
-+    });
++    const surface = main ? undefined : WindowSurfaceRegistry.get(this.owner, request.windowId);
++    let nativeWindow: window.Window | undefined;
 +    let record: ManagedRecord | undefined;
 +    try {
++      const win: window.Window = main ? this.context.getWindow() : await this.context.getWindowStage().createSubWindowWithOptions(`${this.owner}:native-${request.windowId}`, {
++        title: request.title, decorEnabled: true, maximizeSupported: request.maximizable,
++      });
++      nativeWindow = win;
 +      this.assertCreationActive(call, generation);
 +      if (!main) {
-+        WindowSurfaceRegistry.get(this.owner, request.windowId);
 +        const storage = new LocalStorage();
 +        storage.setOrCreate("nativeWindowSurface", WindowSurfaceRegistry.key(this.owner, request.windowId));
 +        await win.loadContentByName("NativeAbilityWindow", storage);
@@ -1721,12 +1741,17 @@ index 0000000..0c951d3
 +      this.subscribe(record, desktop);
 +      if (request.visible) { await win.showWindow(); }
 +      this.assertCreationActive(call, generation);
++      // A mounted ArkUI route is only one step of native creation. WebViews must
++      // not report success before window configuration/show has also succeeded.
++      surface?.markReady();
 +      this.notify(record, "resized");
 +    } catch (error) {
 +      if (record !== undefined) { this.unsubscribe(record); }
 +      this.windows.delete(request.windowId);
-+      WindowSurfaceRegistry.remove(this.owner, request.windowId);
-+      if (!main) { try { await win.destroyWindow(); } catch {} }
++      // Keep the failed result until logical-window destruction so a WebView
++      // submitted after this rejection receives the same error, rather than waiting.
++      surface?.dispose(new Error(String(error)));
++      if (!main && nativeWindow !== undefined) { try { await nativeWindow.destroyWindow(); } catch {} }
 +      throw new Error(String(error));
 +    }
 +  }
@@ -1795,6 +1820,10 @@ index 0000000..0c951d3
 +    const pending = this.creating.get(command.windowId);
 +    if (pending !== undefined) { await pending; }
 +    const record = this.windows.get(command.windowId);
++    if (record === undefined && command.operation === "destroy") {
++      WindowSurfaceRegistry.remove(this.owner, command.windowId);
++      return;
++    }
 +    if (record === undefined) { throw new Error(`Unknown managed window ${command.windowId}`); }
 +    const win = record.win;
 +    switch (command.operation) {

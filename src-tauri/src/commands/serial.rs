@@ -45,7 +45,6 @@ pub async fn serial_open(
         SessionKind::Serial,
         SessionOwner::Window(window.label().to_owned()),
     )?;
-    #[cfg(ohos)]
     let operation = reservation.pending_operation()?;
     // Turn transport-agnostic serial output into Tauri events. The headless ws
     // server builds a different sink over the same `serial::open`.
@@ -58,33 +57,13 @@ pub async fn serial_open(
                 let _ = app.emit(&format!("serial:close:{id}"), ());
             }
         });
-    #[cfg(ohos)]
-    let (id, handle) =
-        match serial::open(session_id, &port, config, sink, operation.cancelled()).await {
-            Ok(opened) => opened,
-            Err(failure) => {
-                operation.complete(failure.cleanup);
-                return Err(failure.error);
-            }
-        };
-    #[cfg(not(ohos))]
-    let (id, handle) = serial::open(session_id, &port, config, sink)?;
-    #[cfg(ohos)]
-    let cleanup = handle.clone();
-    let activated = reservation.activate_returned(
-        &id,
-        crate::commands::lifecycle::ReadySession::Serial(handle),
-    );
-    if let Err(error) = activated {
-        // Cancellation can win after native open completed but before Ready
-        // activation. Keep the pending guard alive until cleanup also finishes.
-        #[cfg(ohos)]
-        operation.complete(cleanup.close().await);
-        return Err(error);
-    }
-    #[cfg(ohos)]
-    operation.complete(Ok(()));
-    Ok(id)
+    let opened = serial::open_resource(session_id, &port, config, sink, operation).await?;
+    opened
+        .activate(|id, handle| {
+            reservation
+                .activate_returned(id, crate::commands::lifecycle::ReadySession::Serial(handle))
+        })
+        .await
 }
 
 /// Look up an open serial session's handle (cloned — `SerialHandle` is Arc-backed).
@@ -174,25 +153,13 @@ pub async fn serial_close(
     state: State<'_, AppState>,
     session_id: String,
 ) -> AppResult<()> {
-    #[cfg(ohos)]
-    {
-        crate::commands::lifecycle::close_resource_and_wait(
-            &state,
-            &session_id,
-            SessionKind::Serial,
-            &SessionOwner::Window(window.label().to_owned()),
-        )
-        .await
-    }
-    #[cfg(not(ohos))]
-    {
-        crate::commands::lifecycle::close_resource(
-            &state,
-            &session_id,
-            SessionKind::Serial,
-            &SessionOwner::Window(window.label().to_owned()),
-        )
-    }
+    crate::commands::lifecycle::close_resource_and_wait(
+        &state,
+        &session_id,
+        SessionKind::Serial,
+        &SessionOwner::Window(window.label().to_owned()),
+    )
+    .await
 }
 
 // ── Saved serial profiles (peer of profile/forward; SQLite-persisted CRUD) ──
