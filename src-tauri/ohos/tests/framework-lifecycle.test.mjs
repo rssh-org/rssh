@@ -9,7 +9,7 @@ import ts from 'typescript';
 
 // Run after prepare-ohos: execute the actual pinned framework, with only SDK
 // objects and the loaded native module replaced. No device or app data is used.
-const framework = fileURLToPath(new URL('../../target/ohos-sources/ability/native_ability/src/main/ets/', import.meta.url));
+const framework = process.env.RSSH_ABILITY_ROOT ? path.join(process.env.RSSH_ABILITY_ROOT, 'native_ability/src/main/ets') : fileURLToPath(new URL('../../target/ohos-sources/ability/native_ability/src/main/ets/', import.meta.url));
 function gate() {
   let resolve;
   const promise = new Promise((done) => { resolve = done; });
@@ -22,12 +22,15 @@ function harness() {
   const initCalls = [];
   const disposeCalls = [];
   const factories = [];
+  const contexts = [];
+  const windows = new Map();
+  const lifecycles = [];
   let currentOwner;
   let nextLoad;
   const sdk = {
     '@kit.AbilityKit': { UIAbility: class {} },
     '@ohos.arkui.node': { FrameNode: class {} },
-    '@ohos.window': { default: {} },
+    '@ohos.window': { default: { findWindow: (name) => windows.get(name) } },
   };
   const nativeModule = {
     init(_bindings, owner, context) {
@@ -46,7 +49,7 @@ function harness() {
       if (currentOwner === owner) currentOwner = undefined;
     },
     disposeAllRenders() {},
-    onBridgeLifecycle() {},
+    onBridgeLifecycle(kind) { lifecycles.push(kind); },
   };
   function load(relative) {
     const filename = path.resolve(framework, relative);
@@ -88,7 +91,7 @@ function harness() {
     instance.bridgePlugins = [{ create() {
       const plugin = {
         id: 'test.slow', execution: 'async', requires: ['ability'],
-        onInstall() {}, async invokeAsync() { throw new Error('unused'); },
+        onInstall(context) { contexts.push(context); }, async invokeAsync() { throw new Error('unused'); },
         async onDispose() { disposed.resolve(); if (disposeGate) await disposeGate; },
       };
       factories.push(plugin);
@@ -99,7 +102,7 @@ function harness() {
   const drain = (instance) => instance.enqueueLifecycleOperation('test barrier', async () => {});
   const create = (instance) => instance.onCreate({ parameters: {} }, {});
   return {
-    ability, drain, create, errors, initCalls, disposeCalls, BridgeHostRegistry,
+    ability, drain, create, errors, initCalls, disposeCalls, BridgeHostRegistry, contexts, windows, lifecycles,
     currentOwner: () => currentOwner,
     delayNextLoad: (promise) => { nextLoad = promise; },
   };
@@ -193,4 +196,57 @@ test('destroy during native loading releases ownership before a replacement star
   } finally {
     await second.instance.onDestroy();
   }
+});
+
+
+test('cached application plugin contexts follow a surviving peer without disposing its bridge', async () => {
+  const h = harness();
+  const first = h.ability();
+  h.create(first.instance);
+  await h.drain(first.instance);
+  const session = h.initCalls[0].owner.replace(/:rssh_lib$/, '');
+  const cached = h.contexts[0];
+  const stage0 = {};
+  const stage1 = {};
+  h.windows.set('window0', { isFocused: () => true });
+  h.windows.set('window1', { isFocused: () => false });
+  const ui = (name) => ({ getWindowName: () => name });
+  await h.BridgeHostRegistry.setWindowStage(session, 'rssh_lib', stage0);
+  await h.BridgeHostRegistry.attachApplicationWindow(session, 'rssh_lib', 0, { owner: 0 }, stage0, ui('window0'), {});
+  await h.BridgeHostRegistry.attachApplicationWindow(session, 'rssh_lib', 1, { owner: 1 }, stage1, ui('window1'), {});
+  assert.equal(cached.getAbilityContext().owner, 0);
+  h.BridgeHostRegistry.detachApplicationWindow(session, 'rssh_lib', 0);
+  assert.equal(cached.getAbilityContext().owner, 1);
+  assert.equal(cached.getWindowStage(), stage1);
+  assert.equal(cached.getWindow(), h.windows.get('window1'));
+  assert.equal(h.disposeCalls.length, 0);
+  assert.deepEqual(h.lifecycles, ['ui-context-ready']);
+  h.BridgeHostRegistry.detachApplicationWindow(session, 'rssh_lib', 1);
+  assert.throws(() => cached.getAbilityContext(), /No live UIAbility/);
+  await first.instance.onDestroy();
+});
+
+test('native destruction of another peer cannot interrupt current window cleanup or retain its context', async () => {
+  const h = harness();
+  const first = h.ability();
+  h.create(first.instance);
+  await h.drain(first.instance);
+  const session = h.initCalls[0].owner.replace(/:rssh_lib$/, '');
+  const cached = h.contexts[0];
+  h.windows.set('window0', { isFocused: () => true });
+  h.windows.set('window1', { isFocused: () => false });
+  const ui = (name) => ({ getWindowName: () => name });
+  const root = { appendChild() {}, removeChild() {} };
+  await h.BridgeHostRegistry.setWindowStage(session, 'rssh_lib', {});
+  await h.BridgeHostRegistry.attachApplicationWindow(session, 'rssh_lib', 0, { owner: 0 }, {}, ui('window0'), root);
+  await h.BridgeHostRegistry.attachApplicationWindow(session, 'rssh_lib', 1, { owner: 1 }, {}, ui('window1'), {});
+  let cleaned = 0;
+  cached.appendChild('owned-node', {}, () => { cleaned++; });
+  h.windows.get('window1').isFocused = () => { throw new Error('window is destroyed'); };
+  assert.doesNotThrow(() => h.BridgeHostRegistry.detachApplicationWindow(session, 'rssh_lib', 0));
+  assert.equal(cleaned, 1);
+  assert.throws(() => cached.getAbilityContext(), /No live UIAbility/);
+  h.BridgeHostRegistry.detachApplicationWindow(session, 'rssh_lib', 1);
+  await first.instance.onDestroy();
+  assert.equal(cleaned, 1);
 });

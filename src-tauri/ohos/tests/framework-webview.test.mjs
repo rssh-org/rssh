@@ -31,7 +31,7 @@ function harness() {
     return chain;
   } });
   const modules = {
-    '@ohos-rs/ability': { AsyncPluginBase: class { getContext() { return context; } } },
+    '@ohos-rs/ability': { ApplicationWindows: { find: () => undefined }, AsyncPluginBase: class { getContext() { return context; } } },
     '@ohos.arkui.node': { BuilderNode: class {
       build(builder, data) { builder(data); callbacks.onControllerAttached(); }
       getFrameNode() { return { dispose() {} }; }

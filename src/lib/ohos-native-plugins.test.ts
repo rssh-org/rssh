@@ -245,11 +245,35 @@ function directoryHarness() {
 }
 
 describe("HarmonyOS selected directory access", () => {
+  it("keeps valid downloads when another destination is a directory", async () => {
+    const h = directoryHarness();
+    await fs.mkdir(path.join(h.directory, "report.txt"));
+    const result = await h.invoke("resolve-paths", ["good.txt", "report.txt", "中文 %2F.txt"], true);
+    const files = (result.value as { files: { relativePath: string; location?: string; error?: string }[] }).files;
+    expect(files.map((file) => file.relativePath)).toEqual(["good.txt", "report.txt", "中文 %2F.txt"]);
+    expect(files[0].location).toBe(h.uri + "/good.txt");
+    expect(files[1].error).toContain("regular file");
+    expect(fileURLToPath(files[2].location!)).toBe(path.join(h.directory, "中文 %2F.txt"));
+    expect(await fs.readdir(h.directory)).toEqual(["report.txt"]);
+  });
+
+  it("converts an authorized directory target without opening or truncating it", async () => {
+    const h = directoryHarness();
+    const target = path.join(h.directory, "旧 文件%2F.txt");
+    await fs.writeFile(target, "keep existing bytes");
+    const result = await h.plugin.invokeAsync("download-path", {
+      typeName: "rssh.files.NameRequest", value: { uri: pathToFileURL(target).toString() },
+    }, h.context);
+    expect(result).toEqual({ typeName: "rssh.files.DownloadPath", value: { path: target } });
+    expect(await fs.readFile(target, "utf8")).toBe("keep existing bytes");
+    expect(h.context.invokeNativeSync).not.toHaveBeenCalled();
+  });
+
   it("preserves encoded URI names and creates only nested parents before download", async () => {
     const h = directoryHarness();
     const relative = "目录 空格/report #%?.txt";
     const result = await h.invoke("resolve-paths", [relative], true);
-    const files = (result.value as { files: string[] }).files;
+    const files = (result.value as { files: { location: string }[] }).files.map((file) => file.location);
     expect(files[0]).toBe(h.uri + "/%E7%9B%AE%E5%BD%95%20%E7%A9%BA%E6%A0%BC/report%20%23%25%3F.txt");
     expect((await fs.stat(path.join(h.directory, "目录 空格"))).isDirectory()).toBe(true);
     await expect(fs.stat(path.join(h.directory, relative))).rejects.toMatchObject({ code: "ENOENT" });
@@ -266,15 +290,21 @@ describe("HarmonyOS selected directory access", () => {
   it("rejects relative traversal and symlink download destinations", async () => {
     const h = directoryHarness();
     for (const name of ["../outside", "/absolute", "./file", "x//file", "x\\file", "x\0file"]) {
-      await expect(h.invoke("resolve-paths", [name], true)).rejects.toThrow("relative file name");
+      await expect(h.invoke("resolve-paths", [name], true)).resolves.toMatchObject({
+        value: { files: [{ relativePath: name, error: expect.stringContaining("relative file name") }] },
+      });
     }
     const outside = await fs.mkdtemp(path.join(tmpdir(), "rssh-files-outside-"));
     onTestFinished(() => rmSync(outside, { recursive: true, force: true }));
     await fs.symlink(outside, path.join(h.directory, "link"));
-    await expect(h.invoke("resolve-paths", ["link/escape.txt"], true)).rejects.toThrow("symbolic link");
+    await expect(h.invoke("resolve-paths", ["link/escape.txt"], true)).resolves.toMatchObject({
+      value: { files: [{ relativePath: "link/escape.txt", error: expect.stringContaining("symbolic link") }] },
+    });
     await fs.writeFile(path.join(outside, "secret"), "unchanged");
     await fs.symlink(path.join(outside, "secret"), path.join(h.directory, "file-link"));
-    await expect(h.invoke("resolve-paths", ["file-link"], true)).rejects.toThrow("regular file");
+    await expect(h.invoke("resolve-paths", ["file-link"], true)).resolves.toMatchObject({
+      value: { files: [{ relativePath: "file-link", error: expect.stringContaining("regular file") }] },
+    });
     expect(await fs.readFile(path.join(outside, "secret"), "utf8")).toBe("unchanged");
   });
 
@@ -287,7 +317,7 @@ describe("HarmonyOS selected directory access", () => {
     const result = await h.plugin.invokeAsync("resolve-paths", {
       typeName: "rssh.files.DirectoryRequest", value: { uri, relativePaths: names, write: true },
     }, h.context);
-    const files = (result.value as { files: string[] }).files;
+    const files = (result.value as { files: { location: string }[] }).files.map((file) => file.location);
     expect(files.map((file) => fileURLToPath(file))).toEqual(names.map((name) => path.join(selected, name)));
     expect(await fs.readdir(path.join(selected, "first/second/third"))).toEqual([]);
   });
@@ -332,9 +362,13 @@ describe("HarmonyOS selected directory access", () => {
     await fs.writeFile(path.join(h.directory, "source.txt"), "source");
     await fs.symlink(path.join(h.directory, "source.txt"), path.join(h.directory, "alias"));
     const resolved = await h.invoke("resolve-paths", ["source.txt"], false);
-    expect((resolved.value as { files: string[] }).files).toEqual([h.uri + "/source.txt"]);
-    await expect(h.invoke("resolve-paths", ["alias"], false)).rejects.toThrow("symbolic link");
-    await expect(h.invoke("resolve-paths", ["missing/child"], false)).rejects.toThrow();
+    expect(resolved.value).toEqual({ files: [{ relativePath: "source.txt", location: h.uri + "/source.txt" }] });
+    await expect(h.invoke("resolve-paths", ["alias"], false)).resolves.toMatchObject({
+      value: { files: [{ relativePath: "alias", error: expect.stringContaining("symbolic link") }] },
+    });
+    await expect(h.invoke("resolve-paths", ["missing/child"], false)).resolves.toMatchObject({
+      value: { files: [{ relativePath: "missing/child", error: expect.any(String) }] },
+    });
     expect(await fs.readdir(h.directory)).toEqual(["alias", "source.txt"]);
   });
 

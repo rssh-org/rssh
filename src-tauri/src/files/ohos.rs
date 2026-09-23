@@ -74,10 +74,11 @@ pub async fn open_file(
 }
 
 pub async fn download_target(
-    app: &tauri::AppHandle,
+    _app: &tauri::AppHandle,
     location: String,
 ) -> AppResult<DownloadTarget> {
-    open_file(app, location, true)
-        .await
-        .map(DownloadTarget::Stream)
+    match crate::ohos::files::download_path(location.clone()).await? {
+        Some(path) => Ok(DownloadTarget::AtomicPath(path)),
+        None => Ok(DownloadTarget::Provider(location)),
+    }
 }

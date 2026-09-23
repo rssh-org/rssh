@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import AppShell from "./lib/components/AppShell.svelte";
   import ToastStack from "./lib/components/ToastStack.svelte";
+  import SessionCleanupNotice from "./lib/components/SessionCleanupNotice.svelte";
   import WelcomeScreen from "./lib/components/WelcomeScreen.svelte";
   import { isIOS, loadProfiles, loadForwards } from "./lib/stores/app.svelte.ts";
   import * as updates from "./lib/stores/updates.svelte.ts";
@@ -117,6 +118,7 @@
   </main>
 {/if}
 <ToastStack />
+<SessionCleanupNotice />
 
 {#if showWelcome}
   <WelcomeScreen onDismiss={dismissWelcome} />

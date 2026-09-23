@@ -42,6 +42,7 @@
     import {registerBracketedPasteProvider, unregisterBracketedPasteProvider} from "../terminal/bracketed-paste.ts";
     import {setupXtermIme229Workaround} from "../terminal/xterm-ime-229-workaround.ts";
     import {createReservedSessionAttempt} from "../terminal/reserved-session-attempt.ts";
+    import {sessionCleanupScope} from "../stores/session-cleanup.svelte.ts";
     import {renderBlocksToBlob} from "../terminal/block-to-image.ts";
     import {inputNewline, normalizeIncoming, bytesToHex, parseHexInput, parseLoginScript, remapEditingKeys, normalizeOutgoing, type LoginStep} from "../terminal/serial-transforms.ts";
     import {compileHighlightRules, type CompiledHighlightRule} from "../terminal/highlight.ts";
@@ -1049,6 +1050,12 @@
     }
 
     const reservedSessionAttempt = createReservedSessionAttempt({
+        // Serial handles are exclusive by native port identity, including when
+        // a replacement pane has a new tab ID. Other transports stay tab-local.
+        cleanup: untrack(() => sessionCleanupScope(
+            tabType === "serial" ? `serial:${meta.port}` : `tab:${tabId}`,
+            meta.host || meta.port || tabId,
+        )),
         makeId: () => crypto.randomUUID(),
         wireEvents: createSessionEventSubscription,
         close: async (sid) => {

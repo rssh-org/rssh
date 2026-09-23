@@ -41,6 +41,13 @@ function harness() {
   modules["../plugins/ClipboardPlugin"] = { ClipboardPlugin: class { id = "rssh.clipboard"; } };
   modules["../plugins/RuntimePlugin"] = { RuntimePlugin: class { id = "rssh.runtime"; } };
   modules["../plugins/SerialPlugin"] = { SerialPlugin: class { id = "rssh.serial"; } };
+  const pluginExports = {};
+  const pluginSource = sourcePath.replace('RsshAbility.ets', 'RsshPlugins.ets');
+  const pluginCode = ts.transpileModule(readFileSync(pluginSource, "utf8"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  runInNewContext(pluginCode, { exports: pluginExports, require: (name: string) => modules[name] });
+  modules["./RsshPlugins"] = pluginExports;
   const exports = {} as { RsshAbility: new () => NativeAbility & { moduleName: string; bridgePlugins: { create: () => { id: string } }[] } };
   runInNewContext(code, { exports, require: (name: string) => {
     if (!(name in modules)) throw new Error(`Unexpected native dependency: ${name}`);

@@ -16,6 +16,7 @@ const zh: Messages = {
   "common.no": "否",
   "common.loading": "加载中…",
   "common.retry": "重试",
+  "session.cleanup_failed": "连接关闭失败",
   "startup.failed": "RSSH 启动失败",
   "common.connecting": "连接中…",
   "common.connected": "已连接",

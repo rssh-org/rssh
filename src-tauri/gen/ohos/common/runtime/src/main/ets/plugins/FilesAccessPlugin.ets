@@ -18,6 +18,11 @@ class FileName {
   constructor(name: string) { this.name = name; }
 }
 
+class DownloadPath {
+  readonly path: string;
+  constructor(path: string) { this.path = path; }
+}
+
 interface DirectoryRequest {
   uri: string;
   write: boolean;
@@ -45,9 +50,20 @@ class FileTree {
   constructor(entries: FileTreeEntry[]) { this.entries = entries; }
 }
 
+class ResolvedFile {
+  readonly relativePath: string;
+  readonly location?: string;
+  readonly error?: string;
+  constructor(relativePath: string, location?: string, error?: string) {
+    this.relativePath = relativePath;
+    this.location = location;
+    this.error = error;
+  }
+}
+
 class ResolvedPaths {
-  readonly files: string[];
-  constructor(files: string[]) { this.files = files; }
+  readonly files: ResolvedFile[];
+  constructor(files: ResolvedFile[]) { this.files = files; }
 }
 
 class PendingDirectory {
@@ -95,7 +111,7 @@ async function prepareTarget(directory: string, relativePath: string, context: B
       await fs.mkdir(path);
     } catch (error) {
       const cause = error as BusinessError;
-      if (cause.code !== 13900015) throw new Error(`${cause.code}: ${cause.message}`); // EEXIST
+      if (cause.code !== 13900015) throw error as Error; // EEXIST
     }
     await requireDirectory(path);
   }
@@ -106,7 +122,7 @@ async function prepareTarget(directory: string, relativePath: string, context: B
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Download target must be a regular file');
   } catch (error) {
     const cause = error as BusinessError;
-    if (cause.code !== 13900002) throw new Error(`${cause.code}: ${cause.message}`); // ENOENT is a new file.
+    if (cause.code !== 13900002) throw error as Error; // ENOENT is a new file.
   }
   ensureActive(context);
   return target;
@@ -169,6 +185,12 @@ export class FilesAccessPlugin extends AsyncPluginBase {
       if (typeof request.uri !== 'string' || !request.uri) throw new Error('File name requires a URI');
       return { typeName: 'rssh.files.FileName', value: new FileName(new fileUri.FileUri(request.uri).name) };
     }
+    if (action === 'download-path') {
+      if (payload.typeName !== 'rssh.files.NameRequest') throw new Error('download-path requires rssh.files.NameRequest');
+      const request = payload.value as NameRequest;
+      if (typeof request.uri !== 'string' || !request.uri) throw new Error('Download path requires a URI');
+      return { typeName: 'rssh.files.DownloadPath', value: new DownloadPath(new fileUri.FileUri(request.uri).path) };
+    }
     if (action === 'open-file') {
       if (payload.typeName !== 'rssh.files.OpenRequest') throw new Error('open-file requires rssh.files.OpenRequest');
       const request = payload.value as OpenRequest;
@@ -200,12 +222,19 @@ export class FilesAccessPlugin extends AsyncPluginBase {
       return { typeName: 'rssh.files.FileTree', value: await walkDirectory(request.uri, context) };
     }
     if (action === 'resolve-paths') {
-      const files: string[] = [];
+      const files: ResolvedFile[] = [];
       for (const relativePath of request.relativePaths) {
         ensureActive(context);
-        files.push(request.write
-          ? await prepareTarget(request.uri, relativePath, context)
-          : await resolveSource(request.uri, relativePath, context));
+        try {
+          const location = request.write
+            ? await prepareTarget(request.uri, relativePath, context)
+            : await resolveSource(request.uri, relativePath, context);
+          files.push(new ResolvedFile(relativePath, location));
+        } catch (error) {
+          ensureActive(context);
+          const cause = error as BusinessError;
+          files.push(new ResolvedFile(relativePath, undefined, cause.message));
+        }
       }
       return { typeName: 'rssh.files.ResolvedPaths', value: new ResolvedPaths(files) };
     }

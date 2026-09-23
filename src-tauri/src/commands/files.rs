@@ -8,7 +8,7 @@ pub async fn resolve_local_paths(
     local_root: String,
     relative_paths: Vec<String>,
     write: bool,
-) -> AppResult<Vec<String>> {
+) -> AppResult<Vec<files::ResolvedPath>> {
     files::resolve_paths(local_root, relative_paths, write).await
 }
 

@@ -99,17 +99,20 @@ pub(super) async fn resolve_paths(
     local_root: String,
     relative_paths: Vec<String>,
     write: bool,
-) -> AppResult<Vec<String>> {
+) -> AppResult<Vec<super::ResolvedPath>> {
     let _ = write;
     let root = filesystem_path(local_root)?;
     Ok(relative_paths
         .into_iter()
         .map(|relative| {
-            relative
-                .split('/')
-                .fold(root.clone(), |path, part| path.join(part))
-                .to_string_lossy()
-                .into_owned()
+            let result = super::validate_relative_path(&relative).map(|()| {
+                relative
+                    .split('/')
+                    .fold(root.clone(), |path, part| path.join(part))
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            super::ResolvedPath::new(relative, result)
         })
         .collect())
 }
@@ -200,9 +203,8 @@ pub async fn download_target(
     {
         return Ok(DownloadTarget::AtomicPath(path));
     }
-    open_file(app, location, true)
-        .await
-        .map(DownloadTarget::Stream)
+    let _ = app;
+    Ok(DownloadTarget::Provider(location))
 }
 
 pub async fn open_file(app: &tauri::AppHandle, path: String, write: bool) -> AppResult<OpenedFile> {
@@ -379,18 +381,26 @@ mod tests {
         );
         let resolved = resolve_paths(
             root.to_string_lossy().into_owned(),
-            vec!["目录/a #%.txt".into()],
+            vec![
+                "目录/a #%.txt".into(),
+                "../invalid".into(),
+                "second.txt".into(),
+            ],
             true,
         )
         .await
         .unwrap();
-        assert_eq!(
-            resolved,
-            vec![root
-                .join("目录")
-                .join("a #%.txt")
-                .to_string_lossy()
-                .into_owned()]
+        assert!(
+            matches!(&resolved[0], super::super::ResolvedPath::Ready { relative_path, location }
+            if relative_path == "目录/a #%.txt" && location == &root.join("目录/a #%.txt").to_string_lossy())
+        );
+        assert!(
+            matches!(&resolved[1], super::super::ResolvedPath::Failed { relative_path, .. }
+            if relative_path == "../invalid")
+        );
+        assert!(
+            matches!(&resolved[2], super::super::ResolvedPath::Ready { relative_path, .. }
+            if relative_path == "second.txt")
         );
     }
 }

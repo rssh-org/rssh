@@ -3,6 +3,8 @@
 
 use crate::error::AppResult;
 
+pub(crate) mod atomic;
+
 #[cfg(not(ohos))]
 #[path = "native.rs"]
 mod backend;
@@ -32,10 +34,12 @@ pub struct FileFilter {
     extensions: Vec<String>,
 }
 
-/// Backends preserve ordinary-path atomic downloads and provider-owned streams.
+/// Backends classify locations without opening or truncating the destination.
+/// Directory authorization permits a sibling temporary file and atomic replacement;
+/// a selected provider document grants access only to that document.
 pub enum DownloadTarget {
     AtomicPath(std::path::PathBuf),
-    Stream(OpenedFile),
+    Provider(String),
 }
 
 async fn describe_location(app: &tauri::AppHandle, location: String) -> AppResult<PickedLocation> {
@@ -78,36 +82,90 @@ pub async fn pick_folder(app: &tauri::AppHandle, write: bool) -> AppResult<Optio
     }
 }
 
+/// Every selected name has an independent outcome; one bad target does not
+/// invalidate unrelated downloads in the same selection.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ResolvedPath {
+    Ready {
+        relative_path: String,
+        location: String,
+    },
+    Failed {
+        relative_path: String,
+        error: String,
+    },
+}
+
+impl ResolvedPath {
+    pub fn new(relative_path: String, result: AppResult<String>) -> Self {
+        match result {
+            Ok(location) => Self::Ready {
+                relative_path,
+                location,
+            },
+            Err(error) => Self::Failed {
+                relative_path,
+                error: error.to_string(),
+            },
+        }
+    }
+}
+
 pub async fn resolve_paths(
     local_root: String,
     relative_paths: Vec<String>,
     write: bool,
-) -> AppResult<Vec<String>> {
-    validate_relative_paths(&relative_paths)?;
+) -> AppResult<Vec<ResolvedPath>> {
     backend::resolve_paths(local_root, relative_paths, write).await
 }
 
 /// Remote names are relative names, never authority to escape a selected root.
-fn validate_relative_paths(paths: &[String]) -> AppResult<()> {
-    for path in paths {
-        let valid = !path.is_empty()
-            && path.split('/').all(|part| {
-                let mut components = std::path::Path::new(part).components();
-                !part.is_empty()
-                    && part != "."
-                    && part != ".."
-                    && !part.contains('\0')
-                    && matches!(components.next(), Some(std::path::Component::Normal(_)))
-                    && components.next().is_none()
-            });
-        if !valid {
-            return Err(crate::error::AppError::other(
-                "file_path_invalid",
-                serde_json::json!({"err": "Expected a relative file name below the selected directory"}),
-            ));
-        }
+#[cfg(any(not(ohos), test))]
+fn validate_relative_path(path: &str) -> AppResult<()> {
+    let valid = !path.is_empty()
+        && path.split('/').all(|part| {
+            let mut components = std::path::Path::new(part).components();
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && !part.contains('\0')
+                && matches!(components.next(), Some(std::path::Component::Normal(_)))
+                && components.next().is_none()
+        });
+    if !valid {
+        return Err(crate::error::AppError::other(
+            "file_path_invalid",
+            serde_json::json!({"err": "Expected a relative file name below the selected directory"}),
+        ));
     }
     Ok(())
+}
+
+// Owning the writer also owns its platform access grant. In particular iOS
+// must keep the grant until Tokio's outstanding file work has finished.
+impl tokio::io::AsyncWrite for OpenedFile {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(self.stream()).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(self.stream()).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(self.stream()).poll_shutdown(cx)
+    }
 }
 
 pub async fn save_text(
@@ -152,30 +210,28 @@ mod tests {
             "x\0y",
         ] {
             assert!(
-                validate_relative_paths(&[invalid.into()]).is_err(),
+                validate_relative_path(invalid).is_err(),
                 "accepted {invalid:?}"
             );
         }
-        assert!(validate_relative_paths(&[
-            "备份/报告 #%?.txt".into(),
-            ".config/config.json".into()
-        ])
-        .is_ok());
+        for valid in ["备份/报告 #%?.txt", ".config/config.json"] {
+            assert!(validate_relative_path(valid).is_ok());
+        }
     }
 
     #[cfg(unix)]
     #[test]
     fn preserves_posix_file_names_that_are_not_path_separators() {
-        assert!(
-            validate_relative_paths(&["dir/a\\b.txt".into(), "dir/line\nbreak".into()]).is_ok()
-        );
+        for valid in ["dir/a\\b.txt", "dir/line\nbreak"] {
+            assert!(validate_relative_path(valid).is_ok());
+        }
     }
 
     #[cfg(windows)]
     #[test]
     fn rejects_windows_path_components_in_remote_file_names() {
         for invalid in ["dir/a\\b.txt", "dir/C:relative", "dir/\\root"] {
-            assert!(validate_relative_paths(&[invalid.into()]).is_err());
+            assert!(validate_relative_path(invalid).is_err());
         }
     }
 }

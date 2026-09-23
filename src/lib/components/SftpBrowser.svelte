@@ -339,11 +339,17 @@
             // A picker may return a document URI. Only the host can authorize
             // children and turn them into usable file references.
             const paths = await fileAccess.resolvePaths(dir, files.map((file) => file.relativePath), true);
-            for (const [index, file] of files.entries()) {
+            const filesByName = new Map(files.map((file) => [file.relativePath, file]));
+            for (const path of paths) {
+                if (path.status === "failed") {
+                    walkErrors.push(`${path.relative_path}: ${errMsg(path.error)}`);
+                    continue;
+                }
+                const file = filesByName.get(path.relative_path)!;
                 await transfers.startDownload({
                     sessionId: meta.sessionId,
                     remotePath: file.remotePath,
-                    localPath: paths[index],
+                    localPath: path.location,
                     sizeHint: file.size,
                 });
                 queued++;

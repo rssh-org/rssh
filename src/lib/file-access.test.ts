@@ -57,7 +57,10 @@ describe("native file access contract", () => {
   it("uses the host to resolve children without concatenating a URI in the frontend", async () => {
     const root = "file://docs/storage/备份%20";
     const names = ["目录/a%2Fb.txt", "报告:final.txt"];
-    const locations = ["file://docs/authorized/42", "file://docs/authorized/43"];
+    const locations = [
+      { status: "ready", relative_path: names[0], location: "file://docs/authorized/42" },
+      { status: "failed", relative_path: names[1], error: "provider rejected target" },
+    ];
     invokeMock.mockResolvedValue(locations);
     await expect(files.resolvePaths(root, names, true)).resolves.toEqual(locations);
     expect(invokeMock).toHaveBeenCalledExactlyOnceWith("resolve_local_paths", {

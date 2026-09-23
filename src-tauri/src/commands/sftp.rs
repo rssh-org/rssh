@@ -263,8 +263,18 @@ pub async fn sftp_download_to(
             .download_streaming(&remote_path, &path, &host, &transfer_id, cancel)
             .await
             .map(|_| ()),
-        crate::files::DownloadTarget::Stream(mut file) => sftp
-            .download_streaming_to_writer(&remote_path, file.stream(), &host, &transfer_id, cancel)
+        crate::files::DownloadTarget::Provider(location) => sftp
+            .download_streaming_to_writer(
+                &remote_path,
+                || async {
+                    crate::files::open_file(&app, location, true)
+                        .await
+                        .map_err(local_open_error)
+                },
+                &host,
+                &transfer_id,
+                cancel,
+            )
             .await
             .map(|_| ()),
     }

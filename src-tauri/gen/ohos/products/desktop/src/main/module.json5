@@ -30,6 +30,17 @@
             ]
           }
         ]
+      },
+      {
+        "name": "WindowAbility",
+        "srcEntry": "./ets/windowability/WindowAbility.ets",
+        "description": "$string:app_description",
+        "icon": "$media:rssh_icon",
+        "label": "$string:app_name",
+        "startWindowIcon": "$media:rssh_icon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": false,
+        "launchType": "multiton"
       }
     ],
     "extensionAbilities": [
@@ -58,7 +69,8 @@
         "reason": "$string:pasteboard_perm_reason",
         "usedScene": {
           "abilities": [
-            "EntryAbility"
+            "EntryAbility",
+            "WindowAbility"
           ],
           "when": "inuse"
         }

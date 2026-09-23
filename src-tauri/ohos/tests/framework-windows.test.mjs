@@ -8,16 +8,24 @@ import vm from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
 
-const sourceRoot = fileURLToPath(new URL('../../target/ohos-sources/', import.meta.url));
-
-function compile(source, dependencies) {
+const abilityRoot = process.env.RSSH_ABILITY_ROOT ?? fileURLToPath(new URL('../../target/ohos-sources/ability/', import.meta.url));
+const read = (file) => readFileSync(path.join(abilityRoot, file), 'utf8');
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+function compile(source, dependencies, globals = {}) {
   const output = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
   const exports = {};
-  vm.runInNewContext(output, { exports, require: (name) => dependencies[name], console, Promise, Map, Set, Array, Number, Error });
+  vm.runInNewContext(output, { exports, require: (name) => {
+    if (!(name in dependencies)) throw new Error(`Unexpected dependency ${name}`);
+    return dependencies[name];
+  }, console, Promise, Map, Set, Array, Number, Error, ...globals });
   return exports;
 }
 
-function runtime() {
+async function runtime() {
   class FrameNode {
     children = new Set();
     disposed = false;
@@ -25,20 +33,18 @@ function runtime() {
     removeChild(child) { this.children.delete(child); }
     dispose() { this.disposed = true; }
   }
-  const source = readFileSync(path.join(sourceRoot, 'ability/native_ability/src/main/ets/components/WindowSurface.ets'), 'utf8');
-  const surfaces = compile(source.slice(0, source.indexOf('class WindowRootController')), {});
-  const appearance = compile(`import { WindowSurfaceRegistry } from 'surfaces';
-export function appear() { ${source.match(/aboutToAppear\(\): void \{([\s\S]*?)\n  \}/)[1]} }`, { surfaces }).appear;
-  const entryOptions = vm.runInNewContext(`(${source.match(/@Entry\(([^\n]+)\)/)[1]})`);
-  const storageBinding = source.match(/@LocalStorageProp\("([^"]+)"\)\s+surfaceKey:\s*string\s*=\s*"([^"]*)"/);
-  const native = { MaximizePresentation: { EXIT_IMMERSIVE: 1 }, WindowStatusType: { MAXIMIZE: 1, MINIMIZE: 2, FLOATING: 3 }, WindowEventType: { WINDOW_ACTIVE: 2, WINDOW_INACTIVE: 3, WINDOW_SHOWN: 1, WINDOW_HIDDEN: 4, WINDOW_DESTROYED: 7 } };
-  const events = [];
-  const windows = new Map();
-  let nextId = 40;
   class LocalStorage {
     values = new Map();
     setOrCreate(key, value) { this.values.set(key, value); }
   }
+  const source = read('native_ability/src/main/ets/components/WindowSurface.ets');
+  const surfaces = compile(source.slice(0, source.indexOf('class WindowRootController')), {});
+  const appearance = compile(`import { WindowSurfaceRegistry } from 'surfaces';\nexport function appear() { ${source.match(/aboutToAppear\(\): void \{([\s\S]*?)\n  \}/)[1]} }`, { surfaces }).appear;
+  const entryOptions = vm.runInNewContext(`(${source.match(/@Entry\(([^\n]+)\)/)[1]})`);
+  const storageBinding = source.match(/@LocalStorageProp\("([^"]+)"\)\s+surfaceKey:\s*string\s*=\s*"([^"]*)"/);
+  const native = { MaximizePresentation: { EXIT_IMMERSIVE: 1 }, WindowStatusType: { MAXIMIZE: 1, MINIMIZE: 2, FLOATING: 3 }, WindowEventType: { WINDOW_ACTIVE: 2, WINDOW_INACTIVE: 3, WINDOW_SHOWN: 1, WINDOW_HIDDEN: 4, WINDOW_DESTROYED: 7 } };
+  const events = [], launches = [], errors = [], bridgeAttachments = new Map(), detached = [];
+  let nextId = 40, emptyCount = 0, firstStageCount = 0;
   class FakeWindow {
     id = nextId++;
     rect = { left: 0, top: 0, width: 1024, height: 768 };
@@ -50,8 +56,6 @@ export function appear() { ${source.match(/aboutToAppear\(\): void \{([\s\S]*?)\
     off(name) { this.handlers.delete(name); }
     async loadContentByName(route, storage) {
       assert.equal(route, entryOptions.routeName);
-      // ArkUI does not bind a loadContentByName LocalStorage to @LocalStorageProp
-      // unless the route opts into useSharedStorage (EntryOptions, API 12).
       const boundStorage = entryOptions.useSharedStorage ? storage : new LocalStorage();
       const surfaceKey = boundStorage.values.get(storageBinding[1]) ?? storageBinding[2];
       appearance.call({ surfaceKey, getUIContext: () => this.getUIContext(), controller: { makeNode: () => this.node } });
@@ -59,7 +63,7 @@ export function appear() { ${source.match(/aboutToAppear\(\): void \{([\s\S]*?)\
     getUIContext() { return { owner: this.id, vp2px: (value) => value * 2 }; }
     getWindowProperties() { return { id: this.id, windowRect: this.rect }; }
     getWindowStatus() { return 3; }
-    isFocused() { return true; }
+    isFocused() { return !this.destroyed; }
     async resize(width, height) { this.rect = { ...this.rect, width, height }; }
     async moveWindowTo(left, top) { this.rect = { ...this.rect, left, top }; }
     setWindowDecorVisible() {}
@@ -71,77 +75,123 @@ export function appear() { ${source.match(/aboutToAppear\(\): void \{([\s\S]*?)\
     async maximize(presentation) { assert.equal(presentation, 1); this.operations.push('maximize'); }
     async recover() { this.operations.push('recover'); }
     async restore() { this.operations.push('restore'); }
+    async raiseToAppTop() { this.operations.push('focus'); }
     async destroyWindow() { this.destroyed = true; this.handlers.get('windowEvent')?.(native.WindowEventType.WINDOW_DESTROYED); }
   }
+  const bridge = {
+    attachApplicationWindow: async (_session, _module, id, context, stage, uiContext, root) => bridgeAttachments.set(id, { context, stage, uiContext, root }),
+    detachApplicationWindow: (_session, _module, id) => { detached.push(id); bridgeAttachments.delete(id); },
+  };
+  const { ApplicationWindows } = compile(read('native_ability/src/main/ets/runtime/ApplicationWindows.ets'), {
+    '../bridge/BridgeHost': { BridgeHostRegistry: bridge }, '../components/WindowSurface': surfaces,
+  }, { LocalStorage });
+  const application = new ApplicationWindows('session-a', 'rssh_lib', 'RsshWindowAbility', async () => { emptyCount++; }, async () => { firstStageCount++; });
   const main = new FakeWindow();
-  const hostRoot = new FrameNode();
+  const windows = new Map([[0, main]]);
+  const abilities = new Map();
+  const peers = new Map();
+  let startBehavior;
+  const makeStage = (win) => ({ getMainWindowSync: () => win, loadContentByName: (...args) => win.loadContentByName(...args) });
+  const makeContext = (id, nonce, win) => ({
+    applicationInfo: { name: 'com.rssh.app' }, abilityInfo: { moduleName: 'desktop' },
+    startAbility: async (want) => { launches.push({ issuer: id, want }); return await startBehavior(want); },
+    terminateSelf: async () => { await win.destroyWindow(); queueMicrotask(() => { void application.detach(id, nonce); }); },
+  });
+  const initialContext = makeContext(0, 'initial', main);
+  await application.attach(0, 'initial', initialContext, makeStage(main));
+  const { NativeApplicationAbility } = compile(read('native_ability/src/main/ets/ability/NativeApplicationAbility.ets'), {
+    '@kit.AbilityKit': { UIAbility: class {} },
+    './NativeApplication': { NativeApplication: { find: async (session, module) => {
+      assert.equal(session, 'session-a'); assert.equal(module, 'rssh_lib'); return { windows: application };
+    }, acquire: () => { throw new Error('a reserved peer must not initialize the native application'); } } },
+  }, { console: { error: (...args) => errors.push(args.join(' ')) } });
+  const createPeer = (want, win = new FakeWindow()) => {
+    const { nativeWindowId: id, nativeWindowNonce: nonce } = want.parameters;
+    const ability = new NativeApplicationAbility();
+    ability.moduleName = 'rssh_lib';
+    ability.context = makeContext(id, nonce, win);
+    peers.set(id, ability.context);
+    windows.set(id, win);
+    abilities.set(id, ability);
+    ability.onCreate(want, {});
+    return { ability, win };
+  };
+  const launch = async (want, win = new FakeWindow()) => {
+    const { ability } = createPeer(want, win);
+    ability.onWindowStageCreate(makeStage(win));
+    await ability.stageWork;
+    return { ability, win };
+  };
+  startBehavior = async (want) => { queueMicrotask(() => { void launch(want).catch((error) => errors.push(String(error))); }); };
   const context = {
-    getRootFrameNode: () => hostRoot,
-    sessionId: 'session-a', isActive: () => true,
-    getWindow: () => main,
-    getWindowStage: () => ({ createSubWindowWithOptions: async (name, options) => { assert.equal(options.decorEnabled, true); assert.equal(options.maximizeSupported, true); const win = new FakeWindow(); windows.set(name.slice(name.lastIndexOf(':native-') + 1), win); return win; } }),
+    sessionId: 'session-a', isActive: () => true, onCancel: () => () => {},
+    getRootFrameNode: () => main.node, getWindow: () => main,
+    getWindowStage: () => { throw new Error('independent windows must not create sub-windows'); },
     invokeNativeSync: (_event, _requestType, _responseType, value) => { events.push(value); return { accepted: true }; },
   };
-  const managedSource = readFileSync(path.join(sourceRoot, 'ability/plugins/window/src/main/ets/ManagedWindows.ets'), 'utf8');
-  const output = ts.transpileModule(managedSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
-  const exports = {};
-  vm.runInNewContext(output, {
-    exports, console, LocalStorage, Promise, Map, Array, Number, Error,
-    require: (name) => name === '@ohos.window' ? { default: native } : name === '@ohos.deviceInfo' ? { default: { deviceType: '2in1' } } : surfaces,
+  const { ManagedWindows } = compile(read('plugins/window/src/main/ets/ManagedWindows.ets'), {
+    '@ohos.window': { default: native }, '@ohos.deviceInfo': { default: { deviceType: '2in1' } },
+    '@ohos-rs/ability': { ...surfaces, ApplicationWindows },
   });
-  return { appearance, owner: surfaces.WindowSurfaceRegistry.owner(context.sessionId, hostRoot), ...surfaces, ManagedWindows: exports.ManagedWindows, FrameNode, FakeWindow, context, windows, main, events, native };
+  const manager = new ManagedWindows(context);
+  return { ...surfaces, ApplicationWindows, application, manager, ManagedWindows, NativeApplicationAbility, FrameNode, FakeWindow,
+    appearance, owner: 'session-a', context, windows, main, events, native, launches, errors, abilities, peers, bridgeAttachments, detached,
+    launch, createPeer, setStart: (behavior) => { startBehavior = behavior; }, makeStage,
+    emptyCount: () => emptyCount, firstStageCount: () => firstStageCount,
+    dispose: async () => { await manager.dispose(); await application.dispose(); },
+  };
 }
 
 function request(id) {
   return { typeName: 'ohos.window.ManagedRequest', value: { windowId: id, title: `window-${id}`, width: 900, height: 600, x: 80, y: 80, visible: true, decorations: true, resizable: true, maximizable: true, minimizable: true, closable: true, maximized: false } };
 }
+const command = (windowId, operation, value) => ({ typeName: 'ohos.window.ManagedCommand', value: { windowId, operation, value } });
+function cancellable() {
+  let active = true;
+  const listeners = new Set();
+  return { isActive: () => active, onCancel: (callback) => { listeners.add(callback); return () => listeners.delete(callback); }, cancel: () => { active = false; for (const listener of [...listeners]) listener(); } };
+}
 
-test('a child surface waits for native configuration and preserves creation failure for late WebViews', async () => {
-  const r = runtime();
-  const manager = new r.ManagedWindows(r.context);
+test('native configuration failure settles existing and late surface waiters and terminates only its Ability', async () => {
+  const r = await runtime();
   const child = new r.FakeWindow();
-  let configured;
-  const configuring = new Promise((resolve) => { configured = resolve; });
-  let fail;
-  child.setWindowTitle = () => { configured(); return new Promise((_, reject) => { fail = reject; }); };
-  r.context.getWindowStage = () => ({ createSubWindowWithOptions: async () => child });
-  const attaching = manager.attach(request(1), r.context);
+  const configuring = deferred(), finish = deferred();
+  child.setWindowTitle = () => { configuring.resolve(); return finish.promise; };
+  r.setStart(async (want) => { void r.launch(want, child); });
+  const attaching = r.manager.attach(request(1), r.context);
   const rejected = assert.rejects(attaching, /native title failure/);
-  await configuring;
+  await configuring.promise;
   const surface = r.WindowSurfaceRegistry.get(r.owner, 1);
   let ready = false;
   const waiting = surface.wait(() => () => {}).then(() => { ready = true; });
   const waitRejected = assert.rejects(waiting, /native title failure/);
   await Promise.resolve();
-  assert.equal(ready, false, 'mounting a route does not mean its native window is ready');
-  fail(new Error('native title failure'));
-  await rejected;
-  await waitRejected;
+  assert.equal(ready, false, 'route mounting alone is not native configuration completion');
+  finish.reject(new Error('native title failure'));
+  await rejected; await waitRejected;
   assert.equal(child.destroyed, true);
+  assert.equal(r.main.destroyed, false);
   await assert.rejects(r.WindowSurfaceRegistry.get(r.owner, 1).wait(() => () => {}), /native title failure/);
-  assert.doesNotThrow(() => r.appearance.call({
-    surfaceKey: r.WindowSurfaceRegistry.key(r.owner, 1),
-    getUIContext: () => { throw new Error('failed surface cannot mount a late route'); },
-  }));
-  await manager.update({ typeName: 'ohos.window.ManagedCommand', value: { windowId: 1, operation: 'destroy' } });
+  await r.manager.update(command(1, 'destroy'));
   assert.equal(r.WindowSurfaceRegistry.has(r.WindowSurfaceRegistry.key(r.owner, 1)), false);
-  await manager.dispose();
+  await r.dispose();
 });
 
-test('OS window creation failure settles both existing and late surface waiters', async () => {
-  const r = runtime();
-  const manager = new r.ManagedWindows(r.context);
-  r.context.getWindowStage = () => ({ createSubWindowWithOptions: async () => { throw new Error('OS window limit'); } });
+test('private multiton start failure settles surface waiters and leaves the existing window live', async () => {
+  const r = await runtime();
+  r.setStart(async () => { throw new Error('OS window limit'); });
   const waiting = r.WindowSurfaceRegistry.get(r.owner, 1).wait(() => () => {});
   const rejected = assert.rejects(waiting, /OS window limit/);
-  await assert.rejects(manager.attach(request(1), r.context), /OS window limit/);
+  await assert.rejects(r.manager.attach(request(1), r.context), /OS window limit/);
   await rejected;
   await assert.rejects(r.WindowSurfaceRegistry.get(r.owner, 1).wait(() => () => {}), /OS window limit/);
-  await manager.dispose();
+  assert.equal(r.main.destroyed, false);
+  assert.equal(r.emptyCount(), 0);
+  await r.dispose();
 });
 
-test('surface readiness requires both route attachment and native completion in either order', async () => {
-  const r = runtime();
+test('surface readiness requires route attachment and native completion in either order', async () => {
+  const r = await runtime();
   for (const attachFirst of [true, false]) {
     const surface = new r.WindowSurface();
     const attach = () => surface.attach({ owner: 7 }, new r.FrameNode());
@@ -149,179 +199,200 @@ test('surface readiness requires both route attachment and native completion in 
     (attachFirst ? attach : complete)();
     let ready = false;
     const waiting = surface.wait(() => () => {}).then(() => { ready = true; });
-    await Promise.resolve();
-    assert.equal(ready, false);
+    await Promise.resolve(); assert.equal(ready, false);
     (attachFirst ? complete : attach)();
-    await waiting;
-    assert.equal(ready, true);
-    surface.dispose();
+    await waiting; assert.equal(ready, true); surface.dispose();
   }
+  await r.dispose();
 });
 
-test('closing main cancels pending sub-windows and rejects late creation before destroying the stage', async () => {
-  const r = runtime();
-  const manager = new r.ManagedWindows(r.context);
-  await manager.attach(request(0), r.context);
-  const late = new r.FakeWindow();
-  let finish;
-  r.context.getWindowStage = () => ({ createSubWindowWithOptions: () => new Promise((resolve) => { finish = resolve; }) });
-  const pending = manager.attach(request(1), r.context);
-  const failed = assert.rejects(pending, /cancelled/);
-  const closing = manager.update({ typeName: 'ohos.window.ManagedCommand', value: { windowId: 0, operation: 'destroy' } });
-  await assert.rejects(manager.attach(request(2), r.context), /closing/);
-  assert.equal(r.main.destroyed, false, 'the stage must survive pending child cleanup');
-  finish(late);
-  await failed;
-  await closing;
-  assert.equal(late.destroyed, true);
+test('closing the first window preserves a peer whose UIAbility launch is still pending', async () => {
+  const r = await runtime();
+  await r.manager.attach(request(0), r.context);
+  const launched = deferred();
+  r.setStart(async (want) => { launched.resolve(want); });
+  const pending = r.manager.attach(request(1), r.context);
+  const want = await launched.promise;
+  await r.manager.update(command(0, 'destroy'));
   assert.equal(r.main.destroyed, true);
-  assert.deepEqual(r.events.filter((event) => event.kind === 'destroyed').map((event) => event.windowId), [1, 0]);
+  assert.equal(r.emptyCount(), 0, 'a reserved peer keeps the application alive');
+  await r.launch(want);
+  await pending;
+  assert.equal(r.windows.get(1).destroyed, false);
+  assert.equal(r.WindowSurfaceRegistry.get(r.owner, 1).getUIContext().owner, r.windows.get(1).id);
+  assert.deepEqual(r.events.filter((event) => event.kind === 'destroyed').map((event) => event.windowId), [0]);
+  assert.equal(r.firstStageCount(), 1);
+  await r.dispose();
 });
 
-test('Ability disposal while configuring a sub-window cannot register a late native owner', async () => {
-  const r = runtime();
-  const manager = new r.ManagedWindows(r.context);
-  const late = new r.FakeWindow();
-  let reached;
-  const configuring = new Promise((resolve) => { reached = resolve; });
-  let finish;
-  late.setWindowTitle = async () => { reached(); await new Promise((resolve) => { finish = resolve; }); };
-  r.context.getWindowStage = () => ({ createSubWindowWithOptions: async () => late });
-  const pending = manager.attach(request(1), r.context);
-  await configuring;
-  await manager.dispose();
-  finish();
-  await assert.rejects(pending, /cancelled/);
-  assert.equal(late.destroyed, true);
-  assert.equal(late.handlers.size, 0);
-  assert.equal(r.events.length, 0);
+test('surviving windows start another independent Ability after the first window closes', async () => {
+  const r = await runtime();
+  for (const id of [0, 1]) await r.manager.attach(request(id), r.context);
+  await r.manager.update(command(0, 'destroy'));
+  await r.manager.attach(request(2), r.context);
+  const launch = r.launches.at(-1);
+  assert.equal(launch.issuer, 1);
+  assert.equal(launch.want.bundleName, 'com.rssh.app');
+  assert.equal(launch.want.moduleName, 'desktop');
+  assert.equal(launch.want.abilityName, 'RsshWindowAbility');
+  assert.equal(launch.want.parameters.nativeWindowId, 2);
+  assert.equal(launch.want.parameters.nativeApplicationSession, 'session-a');
+  assert.ok(launch.want.parameters.nativeWindowNonce);
+  assert.equal(r.windows.get(1).destroyed, false);
+  assert.equal(r.windows.get(2).destroyed, false);
+  assert.equal(r.firstStageCount(), 1, 'another UIAbility must not initialize Tauri again');
+  await r.dispose();
 });
 
-test('managed windows mount independent UIContexts and native close targets only its owner', async () => {
-  const r = runtime();
-  const manager = new r.ManagedWindows(r.context);
-  await manager.attach(request(0), r.context);
-  await manager.attach(request(1), r.context);
-  await manager.attach(request(2), r.context);
-  const first = r.windows.get('native-1');
-  const second = r.windows.get('native-2');
-  assert.equal(r.WindowSurfaceRegistry.get(r.owner, 1).getUIContext().owner, first.id);
-  assert.equal(r.WindowSurfaceRegistry.get(r.owner, 2).getUIContext().owner, second.id);
+test('native close targets only the selected owner and every window has its own UIContext', async () => {
+  const r = await runtime();
+  for (const id of [0, 1, 2]) await r.manager.attach(request(id), r.context);
+  for (const id of [0, 1, 2]) {
+    assert.equal(r.WindowSurfaceRegistry.get(r.owner, id).getUIContext().owner, r.windows.get(id).id);
+    assert.equal(r.bridgeAttachments.get(id).root, r.windows.get(id).node);
+  }
+  const first = r.windows.get(1);
   assert.equal(await first.handlers.get('windowWillClose')(), true);
   assert.equal(r.events.at(-1).windowId, 1);
   assert.equal(r.events.at(-1).kind, 'close-requested');
-  assert.equal(first.destroyed, false, 'close interception must let Tauri decide');
-  await manager.update({ typeName: 'ohos.window.ManagedCommand', value: { windowId: 1, operation: 'destroy' } });
+  assert.equal(first.destroyed, false);
+  await r.manager.update(command(1, 'destroy'));
   assert.equal(first.destroyed, true);
-  assert.equal(second.destroyed, false);
   assert.equal(r.main.destroyed, false);
-  assert.equal(r.events.filter((event) => event.kind === 'destroyed').length, 1);
-  assert.equal(r.events.at(-1).windowId, 1);
-  await manager.dispose();
+  assert.equal(r.windows.get(2).destroyed, false);
+  assert.deepEqual(r.events.filter((event) => event.kind === 'destroyed').map((event) => event.windowId), [1]);
+  await r.manager.update(command(0, 'destroy'));
+  assert.equal(r.emptyCount(), 0);
+  await r.manager.update(command(2, 'destroy'));
+  assert.equal(r.emptyCount(), 1, 'only the last live and pending window releases the application');
+  await r.dispose();
 });
 
-test('Ability UIContext teardown does not emit user window destruction and a new context can recreate owners', async () => {
-  const r = runtime();
-  let manager = new r.ManagedWindows(r.context);
-  await manager.attach(request(0), r.context);
-  await manager.attach(request(1), r.context);
-  const original = r.windows.get('native-1');
-  await manager.dispose();
-  assert.equal(original.destroyed, true);
-  assert.equal(r.main.destroyed, false);
-  assert.equal(r.events.filter((event) => event.kind === 'destroyed').length, 0);
-  manager = new r.ManagedWindows(r.context);
-  await manager.attach(request(1), r.context);
-  const replacement = r.windows.get('native-1');
-  assert.notEqual(replacement.id, original.id);
-  assert.equal(r.WindowSurfaceRegistry.get(r.owner, 1).getUIContext().owner, replacement.id);
-  await manager.dispose();
+test('cancelling a reserved creation rejects a late Ability and its route cannot mount', async () => {
+  const r = await runtime();
+  const launched = deferred();
+  r.setStart(async (want) => { launched.resolve(want); });
+  const call = cancellable();
+  const pending = r.manager.attach(request(1), call);
+  const rejected = assert.rejects(pending, /cancelled/);
+  const want = await launched.promise;
+  call.cancel();
+  await rejected;
+  const { win } = await r.launch(want);
+  assert.equal(win.destroyed, true, 'late multiton instance terminates itself');
+  assert.equal(r.bridgeAttachments.has(1), false);
+  assert.equal(r.windows.get(0).destroyed, false);
+  assert.doesNotThrow(() => r.appearance.call({
+    surfaceKey: r.WindowSurfaceRegistry.key(r.owner, 1),
+    getUIContext: () => { throw new Error('cancelled route must not allocate a frame'); },
+  }));
+  assert.ok(r.errors.some((error) => /cancelled application window reservation/.test(error)));
+  await r.dispose();
 });
 
-test('window surface cancellation and session isolation prevent late mounting into another window', async () => {
-  const r = runtime();
+test('an incorrect creation nonce cannot claim a pending peer', async () => {
+  const r = await runtime();
+  const launched = deferred();
+  r.setStart(async (want) => { launched.resolve(want); });
+  const pending = r.manager.attach(request(1), r.context);
+  const want = await launched.promise;
+  const invalid = { ...want, parameters: { ...want.parameters, nativeWindowNonce: 'stale' } };
+  const stale = await r.launch(invalid);
+  assert.equal(stale.win.destroyed, true);
+  assert.equal(r.bridgeAttachments.has(1), false);
+  const valid = await r.launch(want);
+  await pending;
+  assert.equal(valid.win.destroyed, false);
+  assert.equal(r.bridgeAttachments.get(1).uiContext.owner, valid.win.id);
+  await r.dispose();
+});
+
+test('a peer destroyed before WindowStage creation releases its reservation and allows final shutdown', async () => {
+  for (const closeFirstWindowBeforePeer of [false, true]) {
+    const r = await runtime();
+    await r.manager.attach(request(0), r.context);
+    const launched = deferred();
+    r.setStart(async (want) => { launched.resolve(want); });
+    const pending = r.manager.attach(request(1), r.context);
+    const rejected = assert.rejects(pending, /closed before window attachment/);
+    const want = await launched.promise;
+    const { ability } = r.createPeer(want);
+    await ability.creating;
+    assert.equal(r.bridgeAttachments.has(1), false, 'no WindowStage or mounted host exists yet');
+    if (closeFirstWindowBeforePeer) {
+      await r.manager.update(command(0, 'destroy'));
+      assert.equal(r.emptyCount(), 0, 'the pending peer keeps the application alive');
+    }
+    await ability.onDestroy();
+    await rejected;
+    await assert.rejects(r.WindowSurfaceRegistry.get(r.owner, 1).wait(() => () => {}), /closed before window attachment/);
+    if (!closeFirstWindowBeforePeer) {
+      assert.equal(r.emptyCount(), 0, 'the surviving first window keeps the application alive');
+      await r.manager.update(command(0, 'destroy'));
+    }
+    assert.equal(r.emptyCount(), 1, 'no unresolved peer reservation can block application shutdown');
+    await r.dispose();
+  }
+});
+
+test('application shutdown rejects pending creation and a later Ability cannot revive it', async () => {
+  const r = await runtime();
+  const launched = deferred();
+  r.setStart(async (want) => { launched.resolve(want); });
+  const pending = r.manager.attach(request(1), r.context);
+  const rejected = assert.rejects(pending, /shutting down/);
+  const want = await launched.promise;
+  await r.dispose();
+  await rejected;
+  const late = await r.launch(want);
+  assert.equal(late.win.destroyed, true);
+  assert.equal(r.bridgeAttachments.size, 0);
+  assert.equal(r.events.length, 0);
+});
+
+test('native destruction and later Ability teardown report one closure for that owner', async () => {
+  const r = await runtime();
+  for (const id of [0, 1]) await r.manager.attach(request(id), r.context);
+  const peer = r.windows.get(1);
+  await peer.destroyWindow();
+  await r.application.detach(1, r.launches[0].want.parameters.nativeWindowNonce);
+  assert.deepEqual(r.events.filter((event) => event.kind === 'destroyed').map((event) => event.windowId), [1]);
+  assert.equal(r.main.destroyed, false);
+  await r.dispose();
+});
+
+test('maximization and minimization restore every independent main window', async () => {
+  const r = await runtime();
+  for (const id of [0, 1]) {
+    await r.manager.attach(request(id), r.context);
+    for (const [operation, value] of [['maximized', true], ['maximized', false], ['minimized', true], ['minimized', false]]) {
+      await r.manager.update(command(id, operation, value));
+    }
+    assert.deepEqual(r.windows.get(id).operations.slice(-4), ['maximize', 'recover', 'minimize', 'restore']);
+  }
+  await r.dispose();
+});
+
+test('window surface cancellation and session isolation prevent mounting into another window', async () => {
+  const r = await runtime();
   const pending = r.WindowSurfaceRegistry.get('old-session', 3);
   let cancel;
   const waiting = pending.wait((callback) => { cancel = callback; return () => {}; });
-  cancel();
-  await assert.rejects(waiting, /cancelled/);
+  cancel(); await assert.rejects(waiting, /cancelled/);
   const fresh = r.WindowSurfaceRegistry.get('new-session', 3);
   const root = new r.FrameNode();
   fresh.attach({ owner: 33 }, root);
   const child = new r.FrameNode();
   fresh.append('webview', child);
   r.WindowSurfaceRegistry.remove('old-session', 3);
-  assert.equal(child.disposed, false);
-  assert.equal(root.children.has(child), true);
+  assert.equal(child.disposed, false); assert.equal(root.children.has(child), true);
   r.WindowSurfaceRegistry.remove('new-session', 3);
   assert.equal(child.disposed, true);
+  await r.dispose();
 });
 
-test('Rust native event registry keeps closure and lifecycle routing window-scoped', () => {
-  const directory = mkdtempSync(path.join(tmpdir(), 'rssh-window-events-'));
-  try {
-    const harness = path.join(directory, 'events.rs');
-    const source = path.join(sourceRoot, 'ability/crates/plugin-window/src/events.rs');
-    writeFileSync(harness, `#[path = ${JSON.stringify(source)}] mod events;`);
-    const binary = path.join(directory, 'events-tests');
-    execFileSync('rustc', ['--edition=2021', '--test', '-A', 'dead_code', harness, '-o', binary]);
-    execFileSync(binary, ['--test-threads=1']);
-  } finally { rmSync(directory, { recursive: true, force: true }); }
-});
-
-
-test('window plugin accepts work after installation and readiness does not replace live owners', async () => {
-  const r = runtime();
-  class AsyncPluginBase { getContext() { return r.context; } }
-  const source = readFileSync(path.join(sourceRoot, 'ability/plugins/window/src/main/ets/WindowPlugin.ets'), 'utf8');
-  const { WindowPlugin } = compile(source, {
-    '@ohos.window': { default: r.native },
-    '@ohos-rs/ability': { AsyncPluginBase },
-    './ManagedWindows': { ManagedWindows: r.ManagedWindows },
-  });
-  const plugin = new WindowPlugin();
-  plugin.onInstall(r.context);
-  await plugin.invokeAsync('attach-managed-window', request(1), r.context);
-  const original = r.windows.get('native-1');
-  await plugin.onLifecycle({ kind: 'ui-context-ready' }, r.context);
-  await plugin.invokeAsync('update-managed-window', { typeName: 'ohos.window.ManagedCommand', value: { windowId: 1, operation: 'destroy' } }, r.context);
-  assert.equal(original.destroyed, true);
-  await plugin.onDispose(r.context);
-});
-
-
-test('maximization and minimization use the correct system recovery operation', async () => {
-  const r = runtime();
-  const manager = new r.ManagedWindows(r.context);
-  await manager.attach(request(0), r.context);
-  await manager.attach(request(1), r.context);
-  for (const id of [0, 1]) {
-    for (const [operation, value] of [['maximized', true], ['maximized', false], ['minimized', true], ['minimized', false]]) {
-      await manager.update({ typeName: 'ohos.window.ManagedCommand', value: { windowId: id, operation, value } });
-    }
-  }
-  assert.deepEqual(r.main.operations.slice(-4), ['maximize', 'recover', 'minimize', 'restore']);
-  assert.deepEqual(r.windows.get('native-1').operations.slice(-4), ['maximize', 'recover', 'minimize', 'show']);
-  await manager.dispose();
-});
-
-
-test('disposing a window host during OS creation cancels attachment and destroys the late window', async () => {
-  const r = runtime();
-  let complete;
-  r.context.getWindowStage = () => ({ createSubWindowWithOptions: () => new Promise((resolve) => { complete = resolve; }) });
-  const manager = new r.ManagedWindows(r.context);
-  const pending = manager.attach(request(1), r.context);
-  await manager.dispose();
-  const late = new r.FakeWindow();
-  complete(late);
-  await assert.rejects(pending, /cancelled/);
-  assert.equal(late.destroyed, true);
-  assert.equal(r.events.length, 0, 'a cancelled creation cannot emit a live owner event');
-});
-
-test('surface cleanup isolates module roots sharing an Ability session and releases pending mounts', async () => {
-  const r = runtime();
+test('legacy module roots still isolate surface cleanup when sharing an Ability session', async () => {
+  const r = await runtime();
   const first = r.WindowSurfaceRegistry.owner('shared-session', new r.FrameNode());
   const second = r.WindowSurfaceRegistry.owner('shared-session', new r.FrameNode());
   assert.notEqual(first, second);
@@ -332,61 +403,35 @@ test('surface cleanup isolates module roots sharing an Ability session and relea
   await assert.rejects(pending, /closed before attachment/);
   assert.equal(surviving.getUIContext().owner, 91);
   r.WindowSurfaceRegistry.clear(second);
+  await r.dispose();
 });
 
-
-test('native destruction before Ability teardown keeps every logical owner alive', async () => {
-  const r = runtime();
-  const manager = new r.ManagedWindows(r.context);
-  await manager.attach(request(0), r.context);
-  await manager.attach(request(1), r.context);
-  r.main.handlers.get('windowEvent')(r.native.WindowEventType.WINDOW_DESTROYED);
-  r.windows.get('native-1').handlers.get('windowEvent')(r.native.WindowEventType.WINDOW_DESTROYED);
-  await manager.dispose();
-  assert.equal(r.events.filter((event) => event.kind === 'destroyed').length, 0);
+test('window plugin readiness does not replace live application window owners', async () => {
+  const r = await runtime();
+  class AsyncPluginBase { getContext() { return r.context; } }
+  const { WindowPlugin } = compile(read('plugins/window/src/main/ets/WindowPlugin.ets'), {
+    '@ohos.window': { default: r.native }, '@ohos-rs/ability': { AsyncPluginBase },
+    './ManagedWindows': { ManagedWindows: r.ManagedWindows },
+  });
+  const plugin = new WindowPlugin();
+  plugin.onInstall(r.context);
+  await plugin.invokeAsync('attach-managed-window', request(1), r.context);
+  const original = r.windows.get(1);
+  await plugin.onLifecycle({ kind: 'ui-context-ready' }, r.context);
+  await plugin.invokeAsync('update-managed-window', command(1, 'destroy'), r.context);
+  assert.equal(original.destroyed, true);
+  await plugin.onDispose(r.context);
+  await r.dispose();
 });
 
-test('explicit main-window closure destroys child owners before its bridge can disappear', async () => {
-  const r = runtime();
-  const manager = new r.ManagedWindows(r.context);
-  await manager.attach(request(0), r.context);
-  await manager.attach(request(1), r.context);
-  await manager.attach(request(2), r.context);
-  await manager.update({ typeName: 'ohos.window.ManagedCommand', value: { windowId: 0, operation: 'destroy' } });
-  assert.deepEqual(r.events.filter((event) => event.kind === 'destroyed').map((event) => event.windowId), [1, 2, 0]);
-  assert.equal(r.main.destroyed, true);
-  await manager.dispose();
-});
-
-
-test('an already queued route appearance after Ability disposal cannot throw into ArkUI or remount', async () => {
-  const r = runtime();
-  const manager = new r.ManagedWindows(r.context);
-  const late = new r.FakeWindow();
-  let queued;
-  const loading = new Promise((resolve) => { queued = resolve; });
-  let finish;
-  let surfaceKey;
-  late.loadContentByName = async (_route, storage) => {
-    surfaceKey = storage.values.get('nativeWindowSurface');
-    queued();
-    await new Promise((resolve) => { finish = resolve; });
-  };
-  r.context.getWindowStage = () => ({ createSubWindowWithOptions: async () => late });
-  const pending = manager.attach(request(1), r.context);
-  const cancelled = assert.rejects(pending, /cancelled/);
-  await loading;
-  await manager.dispose();
-  // ArkUI delivers this lifecycle callback independently of the loadContent Promise.
-  // An exception here is a process-level runtime error, not a Promise rejection.
-  assert.doesNotThrow(() => r.appearance.call({
-    surfaceKey,
-    getUIContext: () => late.getUIContext(),
-    controller: { makeNode: () => { throw new Error('cancelled route must not allocate a frame'); } },
-  }));
-  assert.throws(() => r.WindowSurfaceRegistry.find(surfaceKey), /Unknown native window surface/);
-  finish();
-  await cancelled;
-  assert.equal(late.destroyed, true);
-  assert.equal(r.events.length, 0);
+test('Rust native event registry keeps closure and lifecycle routing window-scoped', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'rssh-window-events-'));
+  try {
+    const harness = path.join(directory, 'events.rs');
+    const source = path.join(abilityRoot, 'crates/plugin-window/src/events.rs');
+    writeFileSync(harness, `#[path = ${JSON.stringify(source)}] mod events;`);
+    const binary = path.join(directory, 'events-tests');
+    execFileSync('rustc', ['--edition=2021', '--test', '-A', 'dead_code', harness, '-o', binary]);
+    execFileSync(binary, ['--test-threads=1']);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });

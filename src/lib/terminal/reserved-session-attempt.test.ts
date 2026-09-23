@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createReservedSessionAttempt } from "./reserved-session-attempt.ts";
+import { createSessionCleanupRegistry } from "./session-cleanup.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -342,18 +343,65 @@ describe("ReservedSessionAttempt", () => {
     expect(attempt.accepts("reserved-2")).toBe(true);
   });
 
-  it("does not leave the close barrier stuck when best-effort cleanup rejects", async () => {
+  it("preserves a failed close and retries that same id before opening the port", async () => {
     let nextId = 0;
+    let nativeOwner: string | undefined;
+    let failClose = true;
+    const close = vi.fn(async (id: string) => {
+      if (id !== nativeOwner) return;
+      if (failClose) throw new Error("native close failed");
+      nativeOwner = undefined;
+    });
+    const openBackend = vi.fn(async (id: string) => {
+      if (nativeOwner) throw new Error("port already in use");
+      nativeOwner = id;
+      return id;
+    });
     const attempt = createReservedSessionAttempt({
       makeId: () => `reserved-${++nextId}`,
       wireEvents: async () => () => {},
-      close: async () => { throw new Error("session already closed"); },
+      close,
     });
 
-    await attempt.open(async (id) => id);
-    await expect(attempt.open(async (id) => id)).resolves.toEqual({
-      kind: "ready",
-      sessionId: "reserved-2",
+    await attempt.open(openBackend);
+    await expect(attempt.open(openBackend)).rejects.toThrow("native close failed");
+    expect(attempt.isPending()).toBe(false);
+    expect(openBackend).toHaveBeenCalledTimes(1);
+    expect(nativeOwner).toBe("reserved-1");
+
+    failClose = false;
+    await expect(attempt.open(openBackend)).resolves.toEqual({ kind: "ready", sessionId: "reserved-3" });
+    expect(close.mock.calls.filter(([id]) => id === "reserved-1")).toHaveLength(2);
+    expect(nativeOwner).toBe("reserved-3");
+  });
+
+  it("retains a failed close after destroying the pane and cleans it before a new pane opens the port", async () => {
+    const registry = createSessionCleanupRegistry();
+    const scope = registry.forScope("serial:device-1", "device-1");
+    const closeFailure = new Error("native close failed");
+    const close = vi.fn().mockRejectedValueOnce(closeFailure).mockResolvedValue(undefined);
+    const first = createReservedSessionAttempt({
+      makeId: () => "old-session",
+      wireEvents: async () => () => {},
+      cleanup: scope,
+      close,
     });
+    await first.open(async (id) => id);
+    first.destroy();
+    await vi.waitFor(() => expect(registry.pending()[0]?.status).toEqual({ kind: "failed", error: closeFailure }));
+
+    const openBackend = vi.fn(async (id: string) => {
+      expect(close).toHaveBeenLastCalledWith("old-session");
+      expect(registry.pending()).toEqual([]);
+      return id;
+    });
+    const second = createReservedSessionAttempt({
+      makeId: () => "new-session",
+      wireEvents: async () => () => {},
+      cleanup: registry.forScope("serial:device-1", "device-1"),
+      close,
+    });
+    await expect(second.open(openBackend)).resolves.toEqual({ kind: "ready", sessionId: "new-session" });
+    expect(close).toHaveBeenCalledTimes(2);
   });
 });

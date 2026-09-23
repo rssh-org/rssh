@@ -14,6 +14,7 @@ const en = {
   "common.no": "No",
   "common.loading": "Loading...",
   "common.retry": "Retry",
+  "session.cleanup_failed": "Connection could not close",
   "startup.failed": "RSSH could not start",
   "common.connecting": "Connecting...",
   "common.connected": "Connected",

@@ -33,6 +33,10 @@ export function walkDirectory(localRoot: string): Promise<LocalWalkEntry[]> {
   return invoke("walk_local_dir", { localRoot });
 }
 
-export function resolvePaths(localRoot: string, relativePaths: string[], write: boolean): Promise<string[]> {
+export type ResolvedPath =
+  | { status: "ready"; relative_path: string; location: string }
+  | { status: "failed"; relative_path: string; error: string };
+
+export function resolvePaths(localRoot: string, relativePaths: string[], write: boolean): Promise<ResolvedPath[]> {
   return invoke("resolve_local_paths", { localRoot, relativePaths, write });
 }

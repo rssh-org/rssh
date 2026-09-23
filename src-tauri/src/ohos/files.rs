@@ -32,6 +32,12 @@ pub struct FileName {
 impl_bridge_napi_type!(FileName, "rssh.files.FileName");
 
 #[napi(object)]
+pub struct DownloadPath {
+    pub path: String,
+}
+impl_bridge_napi_type!(DownloadPath, "rssh.files.DownloadPath");
+
+#[napi(object)]
 pub struct OpenRequest {
     pub uri: String,
     pub write: bool,
@@ -54,8 +60,15 @@ pub struct DirectoryRequest {
 impl_bridge_napi_type!(DirectoryRequest, "rssh.files.DirectoryRequest");
 
 #[napi(object)]
+pub struct ResolvedFile {
+    pub relative_path: String,
+    pub location: Option<String>,
+    pub error: Option<String>,
+}
+
+#[napi(object)]
 pub struct ResolvedPaths {
-    pub files: Vec<String>,
+    pub files: Vec<ResolvedFile>,
 }
 impl_bridge_napi_type!(ResolvedPaths, "rssh.files.ResolvedPaths");
 
@@ -201,7 +214,7 @@ pub async fn resolve_paths(
     uri: String,
     relative_paths: Vec<String>,
     write: bool,
-) -> AppResult<Vec<String>> {
+) -> AppResult<Vec<crate::files::ResolvedPath>> {
     let bridge = super::app()?.bridge().map_err(super::native_error)?;
     let generation = directory_generation(&uri, write)?;
     let resolved = bridge
@@ -216,8 +229,52 @@ pub async fn resolve_paths(
         )
         .await
         .map_err(super::native_error)?;
-    grant_files(generation, &resolved.files, write)?;
-    Ok(resolved.files)
+    let locations: Vec<_> = resolved
+        .files
+        .iter()
+        .filter_map(|file| file.location.clone())
+        .collect();
+    grant_files(generation, &locations, write)?;
+    Ok(resolved
+        .files
+        .into_iter()
+        .map(|file| {
+            let result = match (file.location, file.error) {
+                (Some(location), None) => Ok(location),
+                (_, error) => Err(AppError::other(
+                    "file_path_invalid",
+                    serde_json::json!({
+                        "err": error.unwrap_or_else(|| "Missing resolved file location".to_owned())
+                    }),
+                )),
+            };
+            crate::files::ResolvedPath::new(file.relative_path, result)
+        })
+        .collect())
+}
+
+/// Only an exact directory-child grant authorizes creating a sibling temporary
+/// file and replacing the target. A save-picker URI grants just that document.
+pub async fn download_path(uri: String) -> AppResult<Option<std::path::PathBuf>> {
+    let bridge = super::app()?.bridge().map_err(super::native_error)?;
+    {
+        let grants = GRANTS.lock().map_err(|_| super::unavailable())?;
+        if !grants.permits(&uri, true) {
+            return Err(selection_error());
+        }
+        if !grants.creates_in_directory(&uri) {
+            return Ok(None);
+        }
+    }
+    let path = bridge
+        .call_async::<FilesAccessPlugin, NameRequest, DownloadPath>(
+            "download-path",
+            NameRequest { uri },
+            BridgeCallOptions::default(),
+        )
+        .await
+        .map_err(super::native_error)?;
+    Ok(Some(path.path.into()))
 }
 
 pub async fn walk_directory(uri: String) -> AppResult<Vec<crate::files::LocalWalkEntry>> {
