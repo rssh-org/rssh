@@ -1616,6 +1616,17 @@
         highlightDecorator = new HighlightDecorator(terminal);
         fitTerminal();
 
+        // Resize for the whole pane lifetime, even if async setup or the
+        // initial connection exits early.
+        resizeObs = new ResizeObserver((entries) => {
+            // Skip fitting when the container is hidden (display:none
+            // collapses dimensions to zero) — fitting at 0×0 corrupts
+            // xterm's column count and causes the narrow-tab bug.
+            const { width, height } = entries[0].contentRect;
+            if (width > 0 && height > 0) fitTerminal();
+        });
+        resizeObs.observe(containerEl);
+
         // Terminal font: the chosen family (prepended to the base stack) and
         // pixel size. Registered after open()+fit() because the immediate
         // callback refits, which needs fitAddon to exist. Both fields alter
@@ -1794,15 +1805,6 @@
         // Esc → 清空荧光（不 preventDefault，让 Esc 仍传到 shell）。
         window.addEventListener("mousedown", onWindowMouseDown);
         window.addEventListener("keydown", onWindowKeyDown);
-
-        resizeObs = new ResizeObserver((entries) => {
-            // Skip fitting when the container is hidden (display:none
-            // collapses dimensions to zero) — fitting at 0×0 corrupts
-            // xterm's column count and causes the narrow-tab bug.
-            const { width, height } = entries[0].contentRect;
-            if (width > 0 && height > 0) fitTerminal();
-        });
-        resizeObs.observe(containerEl);
     });
 
     // A missing session id is ambiguous during initial connect and reconnect.
