@@ -57,6 +57,13 @@ function harness() {
 }
 
 describe("HarmonyOS framework host", () => {
+  it("does not restore a raw database without its device-bound master key", () => {
+    const config = JSON.parse(readFileSync(new URL(
+      "../../src-tauri/gen/ohos/common/runtime/src/main/resources/base/profile/backup_config.json", import.meta.url,
+    ), "utf8"));
+    expect(config.allowToBackupRestore).toBe(false);
+  });
+
   it("preserves application filesDir while keeping the framework initialization metadata", () => {
     const h = harness();
     expect(h.ability.createInitContext("rssh_lib")).toEqual({

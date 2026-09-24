@@ -136,12 +136,17 @@ Rust 编译条件统一为 `linux` / `macos` / `windows` / `android` / `ios` /
 
 ### 宿主能力
 
-- **窗口**：Tao 为每个窗口分配独立 ID，Wry 把 ArkWeb 绑定到该窗口的
-  UIContext。系统关闭经过 Tauri 的 CloseRequested / Destroyed 流程；
-  Ability 重建保留逻辑窗口及会话。置顶仅开放给系统允许的主窗口。
+- **窗口**：电脑端每个窗口由独立 UIAbility / WindowStage 持有，共用一次初始化的
+  Rust 运行时；关闭最初窗口不会关闭其它窗口。私有 `WindowAbility` 使用官方
+  `specified` 启动模式，AbilityStage 以创建预约的 nonce 标识实例，`startAbility`
+  负责把对应实例从最小化／后台唤回；不依赖 API 26 的 `startSelf`，也不把主窗口
+  当作子窗口调用 `raiseToAppTop`。Tao 为每个窗口分配独立 ID，Wry 把 ArkWeb
+  绑定到其 UIContext；系统关闭经过 Tauri 的 CloseRequested / Destroyed 流程。
+  置顶仅开放给系统允许的主窗口。参见[官方 specified 启动模式](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/application-models/uiability-launch-type.md#specified启动模式)。
 - **文件**：手机与电脑提供多选，目录传输按原生能力开放。原生文件引用保持
   不透明，目录授权、后代路径解析、父目录创建和文件描述符由原生适配器处理。
-- **本地终端**：所有桌面目标共用 `portable-pty 0.9`。鸿蒙电脑在应用沙箱内
+- **本地终端**：普通桌面保留 `portable-pty 0.8`，鸿蒙构建独立使用 `0.9`，
+  上层共用终端接口。鸿蒙电脑在应用沙箱内
   探测 openpty、启动 shell 和正常退出，成功后才开放入口，不能用 SDK
   含有函数声明代替运行权限验证。
 - **串口**：优先使用 API 26 的 `SystemCapability.BusManager.Serial`，
@@ -163,8 +168,9 @@ Rust 编译条件统一为 `linux` / `macos` / `windows` / `android` / `ios` /
 - **密钥存储**：新安装通过官方 Asset Store Kit（API 11）保存数据库加密
   主密钥；启动时实际探测服务。业务密码仍由共用 `HybridStore` 加密后存入
   数据库。已有 `file` 后端不自动迁移、不更换主密钥；已选系统密钥库后若服务
-  不可用则报错，不静默回退。Asset 只启用同设备系统备份，不启用跨设备或
-  账号云同步；跨设备迁移使用 RSSH 配置导出/同步。
+  不可用则报错，不静默回退。Asset 不启用跨设备或账号云同步；应用关闭系统
+  原始数据备份/恢复，避免只恢复数据库却缺少原设备的加密主密钥。
+  备份及跨设备迁移使用 RSSH 配置导出/同步。
 
 串口接口依据：[官方 API 19 串口管理](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/reference/apis-basic-services-kit/js-apis-serialManager.md)
 及 SDK 的 `@ohos.usbManager.serial.d.ts`、`@ohos.busManager.serial.d.ts`。
@@ -207,7 +213,9 @@ GET/HEAD，其它方法返回 501，避免进入上游异步请求体读取中�
   当前终端的 Esc、Tab、方向键仍发送到正确会话。
 - 触摸长按选字后使用外接鼠标/键盘，右键、首个输入字符和中文输入均正常；
   终端滚动条仍可用鼠标拖动，插件侧栏与横条有可点击的关闭按钮。
-- 电脑端独立窗口、最大化/还原、主窗置顶、关闭子窗不影响主窗会话。
+- 电脑端独立窗口、最大化/还原、主窗置顶；关闭任一窗口不影响其它窗口会话。
+  关闭最初窗口、最小化剩余窗口后点击桌面图标，应唤回原窗口，不能新建重复窗口；
+  窗口聚焦与取消最小化也应唤回相同 UIAbility 实例。
 - 电脑端键鼠输入、快捷键、SSH 分屏，以及本地终端能力探测结果。
 - 电脑端多选上传、包含中文与特殊字符的嵌套目录上传/下载。
 - 串口：未插设备时可进入编辑器并刷新；授权拒绝后可重试，授权期间关闭

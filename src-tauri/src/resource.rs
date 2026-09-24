@@ -5,7 +5,9 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::error::{locked, AppError, AppResult};
 
@@ -187,6 +189,7 @@ enum CleanupState {
 pub(crate) struct ResourceCleanup {
     operation: tokio::sync::Mutex<()>,
     state: Mutex<CleanupState>,
+    background_started: AtomicBool,
 }
 
 impl ResourceCleanup {
@@ -194,6 +197,7 @@ impl ResourceCleanup {
         Arc::new(Self {
             operation: tokio::sync::Mutex::new(()),
             state: Mutex::new(state),
+            background_started: AtomicBool::new(false),
         })
     }
 
@@ -261,10 +265,23 @@ impl ResourceCleanup {
     }
 
     pub(crate) fn start(self: &Arc<Self>) {
+        if self.background_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let cleanup = self.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(error) = cleanup.finish().await {
+            let mut delay = Duration::from_millis(100);
+            while let Err(error) = cleanup.finish().await {
                 log::warn!("session cleanup failed; retained for retry: {error}");
+                // Only an actual retained resource can be retried. A failed
+                // operation with no handle has nothing for a worker to release.
+                if !cleanup.state.lock().is_ok_and(|state| {
+                    matches!(*state, CleanupState::Pending(_) | CleanupState::Resource(_))
+                }) {
+                    break;
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(30));
             }
         });
     }
@@ -309,6 +326,45 @@ mod tests {
             .retain_cleanup(CleanupHandle::new(probe.clone()))
             .unwrap();
         (operation, state)
+    }
+
+    #[tokio::test]
+    async fn background_cleanup_retries_without_a_live_frontend() {
+        let probe = Arc::new(Probe::default());
+        probe.fail.store(true, Ordering::SeqCst);
+        let cleanup = ResourceCleanup::ready(CleanupHandle::new(probe.clone()));
+        cleanup.start();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !cleanup.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("destroyed windows have nobody left to request another close");
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn repeated_background_starts_share_one_retry_worker() {
+        let probe = Arc::new(Probe {
+            release: Some(tokio::sync::Notify::new()),
+            ..Default::default()
+        });
+        let cleanup = ResourceCleanup::ready(CleanupHandle::new(probe.clone()));
+        cleanup.start();
+        cleanup.start();
+        probe.started.notified().await;
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+        probe.release.as_ref().unwrap().notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !cleanup.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        cleanup.finish().await.unwrap();
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

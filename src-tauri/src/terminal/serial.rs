@@ -49,16 +49,6 @@ impl SerialCapabilities {
     }
 }
 
-#[cfg(not(ohos))]
-pub fn capabilities() -> SerialCapabilities {
-    SerialCapabilities {
-        flow_control: true,
-        xany: cfg!(unix),
-        signals: true,
-        baud_rates: Vec::new(),
-    }
-}
-
 /// Serial output destined for the host. Mirrors `pty::PtyOut`, but kept as its
 /// own type so the serial module carries no dependency on the pty module — two
 /// unrelated transports shouldn't couple just to share a 2-variant enum. The
@@ -104,9 +94,9 @@ fn default_stop_bits() -> u8 {
 #[path = "serial/desktop.rs"]
 mod desktop;
 #[cfg(ohos)]
-pub use crate::ohos::serial::{available_ports, capabilities, open, SerialHandle};
+pub use crate::ohos::serial::{available_ports, capabilities, SerialHandle};
 #[cfg(not(ohos))]
-pub use desktop::{available_ports, open, SerialHandle};
+pub use desktop::{available_ports, capabilities, SerialHandle};
 
 /// The platform adapter only opens the resource. This shared coordinator owns
 /// failed-open cleanup and carries that ownership through activation.
@@ -118,9 +108,24 @@ pub async fn open_resource(
     operation: crate::resource::PendingOperation,
 ) -> AppResult<crate::resource::OpenedResource<SerialHandle>> {
     #[cfg(ohos)]
-    let result = open(session_id, port, config, sink, &operation).await;
+    let result = crate::ohos::serial::open(session_id, port, config, sink, &operation).await;
     #[cfg(not(ohos))]
-    let result = open(session_id, port, config, sink);
+    let (result, operation) = {
+        let port = port.to_owned();
+        // Keep the reservation alive until the native open actually finishes,
+        // including when the caller drops its future while the driver blocks.
+        tokio::task::spawn_blocking(move || {
+            let result = desktop::open(session_id, &port, config, sink);
+            (result, operation)
+        })
+        .await
+        .map_err(|error| {
+            AppError::pty(
+                "serial_op_failed",
+                serde_json::json!({ "err": error.to_string() }),
+            )
+        })?
+    };
     operation.finish_open(result).await
 }
 

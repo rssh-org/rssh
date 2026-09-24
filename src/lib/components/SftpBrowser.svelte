@@ -303,39 +303,14 @@
      *  so the caller can display them. */
     async function queueDownloads(items: RemoteEntry[], dir: string): Promise<{ queued: number; walkErrors: string[] }> {
         let queued = 0;
+        const batchSize = 64;
         const files: { relativePath: string; remotePath: string; size: number }[] = [];
         // Accumulate per-tree walk failures so users see every failed dir,
         // not just the last one.
         const walkErrors: string[] = [];
-        for (const e of items) {
-            const remote = joinRemote(cwd, e.name);
-            if (e.is_dir) {
-                // Expand each subtree into N independent Transfers. A walk
-                // failure only skips that subtree; other selected entries
-                // continue to be queued.
-                try {
-                    const walked = await invoke<WalkEntry[]>("sftp_walk_remote_dir", {
-                        sftpId, remoteRoot: remote,
-                    });
-                    for (const w of walked) {
-                        files.push({
-                            relativePath: `${e.name}/${w.rel_path}`,
-                            remotePath: joinRemote(remote, w.rel_path),
-                            size: w.size,
-                        });
-                    }
-                } catch (err) {
-                    walkErrors.push(`${e.name}: ${errMsg(err)}`);
-                }
-            } else {
-                files.push({
-                    relativePath: e.name,
-                    remotePath: remote,
-                    size: e.size,
-                });
-            }
-        }
-        if (files.length > 0) {
+
+        async function flushFiles() {
+            if (files.length === 0) return;
             // A picker may return a document URI. Only the host can authorize
             // children and turn them into usable file references.
             const paths = await fileAccess.resolvePaths(dir, files.map((file) => file.relativePath), true);
@@ -354,7 +329,44 @@
                 });
                 queued++;
             }
+            files.length = 0;
         }
+
+        for (const e of items) {
+            const remote = joinRemote(cwd, e.name);
+            if (e.is_dir) {
+                // Start ready files before waiting for another remote tree.
+                await flushFiles();
+                // Expand each subtree into N independent Transfers. A walk
+                // failure only skips that subtree; other selected entries
+                // continue to be queued.
+                let walked: WalkEntry[];
+                try {
+                    walked = await invoke<WalkEntry[]>("sftp_walk_remote_dir", {
+                        sftpId, remoteRoot: remote,
+                    });
+                } catch (err) {
+                    walkErrors.push(`${e.name}: ${errMsg(err)}`);
+                    continue;
+                }
+                for (const w of walked) {
+                    files.push({
+                        relativePath: `${e.name}/${w.rel_path}`,
+                        remotePath: joinRemote(remote, w.rel_path),
+                        size: w.size,
+                    });
+                    if (files.length >= batchSize) await flushFiles();
+                }
+            } else {
+                files.push({
+                    relativePath: e.name,
+                    remotePath: remote,
+                    size: e.size,
+                });
+                if (files.length >= batchSize) await flushFiles();
+            }
+        }
+        await flushFiles();
         return { queued, walkErrors };
     }
 

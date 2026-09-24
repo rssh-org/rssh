@@ -1,13 +1,14 @@
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 
-use crate::error::{locked, AppError, AppResult};
+use crate::error::{AppError, AppResult};
 
-use super::{SerialConfig, SerialOut, SerialSink};
+use super::{SerialCapabilities, SerialConfig, SerialOut, SerialSink};
 
 /// 8 data bits is the universal default; anything unrecognized falls back to it
 /// rather than erroring — the line should open on 8N1 even if the UI sends junk.
@@ -77,35 +78,52 @@ fn serial_op_err(e: impl std::fmt::Display) -> AppError {
 }
 
 impl SerialHandle {
-    pub fn write(&self, data: &[u8]) -> AppResult<()> {
-        locked(&self.writer)?.write_all(data).map_err(serial_op_err)
+    /// Queue before entering the blocking pool: its worker scheduling must not
+    /// reorder writes or let control-line changes interrupt another operation.
+    /// The owned guard stays with the native call even if its caller is cancelled.
+    async fn with_port(
+        &self,
+        operation: impl FnOnce(&mut dyn SerialPort) -> AppResult<()> + Send + 'static,
+    ) -> AppResult<()> {
+        let mut writer = self.writer.clone().lock_owned().await;
+        let close_guard = self._guard.clone();
+        tokio::task::spawn_blocking(move || {
+            let _close_guard = close_guard;
+            operation(writer.as_mut())
+        })
+        .await
+        .map_err(serial_op_err)?
+    }
+
+    pub async fn write(&self, data: &[u8]) -> AppResult<()> {
+        let data = data.to_vec();
+        self.with_port(move |port| port.write_all(&data).map_err(serial_op_err))
+            .await
     }
 
     /// Drive the DTR control line. Manual DTR/RTS toggling resets MCUs (Arduino
     /// auto-reset), enters bootloaders (the ESP32 DTR/RTS dance), and signals
     /// modems. `level` is the logical assert state (`true` = asserted).
-    pub fn set_dtr(&self, level: bool) -> AppResult<()> {
-        locked(&self.writer)?
-            .write_data_terminal_ready(level)
-            .map_err(serial_op_err)
+    pub async fn set_dtr(&self, level: bool) -> AppResult<()> {
+        self.with_port(move |port| port.write_data_terminal_ready(level).map_err(serial_op_err))
+            .await
     }
 
     /// Drive the RTS control line (see `set_dtr`).
-    pub fn set_rts(&self, level: bool) -> AppResult<()> {
-        locked(&self.writer)?
-            .write_request_to_send(level)
-            .map_err(serial_op_err)
+    pub async fn set_rts(&self, level: bool) -> AppResult<()> {
+        self.with_port(move |port| port.write_request_to_send(level).map_err(serial_op_err))
+            .await
     }
 
-    /// Send a serial BREAK: hold the line in the break condition ~250ms, then
-    /// release. Devices that watch for it (U-Boot, kernel SysRq-over-serial,
-    /// telco gear) treat it as an attention/interrupt. The writer lock is held
-    /// across the pulse so no bytes interleave — a break mid-frame is meaningless.
-    pub fn send_break(&self) -> AppResult<()> {
-        let port = locked(&self.writer)?;
-        port.set_break().map_err(serial_op_err)?;
-        std::thread::sleep(Duration::from_millis(250));
-        port.clear_break().map_err(serial_op_err)
+    /// Hold BREAK for ~250ms without blocking an async worker. Keep the writer
+    /// locked across the pulse so no bytes interleave or controls interrupt it.
+    pub async fn send_break(&self) -> AppResult<()> {
+        self.with_port(|port| {
+            port.set_break().map_err(serial_op_err)?;
+            std::thread::sleep(Duration::from_millis(250));
+            port.clear_break().map_err(serial_op_err)
+        })
+        .await
     }
 
     /// Port path actually opened (e.g. `/dev/cu.usbserial-1420`, `COM3`).
@@ -117,11 +135,24 @@ impl SerialHandle {
 /// Serial ports available on this machine (`/dev/cu.usbserial-*`, `COM3`, …).
 /// Enumeration failure (no permission / platform quirk) degrades to an empty
 /// list rather than erroring — the UI shows "no ports" and the user can retry.
-pub fn available_ports() -> Vec<String> {
-    let ports = serialport::available_ports()
-        .map(|ports| ports.into_iter().map(|p| p.port_name).collect::<Vec<_>>())
-        .unwrap_or_default();
-    prefer_callout_ports(ports)
+pub async fn available_ports() -> AppResult<Vec<String>> {
+    tokio::task::spawn_blocking(|| {
+        let ports = serialport::available_ports()
+            .map(|ports| ports.into_iter().map(|p| p.port_name).collect::<Vec<_>>())
+            .unwrap_or_default();
+        prefer_callout_ports(ports)
+    })
+    .await
+    .map_err(serial_op_err)
+}
+
+pub async fn capabilities() -> AppResult<SerialCapabilities> {
+    Ok(SerialCapabilities {
+        flow_control: true,
+        xany: cfg!(unix),
+        signals: true,
+        baud_rates: Vec::new(),
+    })
 }
 
 /// macOS exposes BOTH device nodes for every serial port: the call-out
@@ -334,3 +365,7 @@ mod tests {
         assert!(got.contains(&"/dev/cu.standalone".to_string()));
     }
 }
+
+#[cfg(test)]
+#[path = "desktop_tests.rs"]
+mod io_tests;

@@ -77,6 +77,29 @@
     let pendingPaneSources = $state<Record<string, string>>({});
     const bypassStartupReconcile = !!window.__rssh_clone || !!window.__rssh_ai_handoff;
     let resourcePanesAllowed = $state(bypassStartupReconcile);
+    const startup = new AbortController();
+    let startupError = $state("");
+    let startupRunning = $state(false);
+    async function initializeResources() {
+        if (startupRunning || startup.signal.aborted) return;
+        startupRunning = true;
+        startupError = "";
+        try {
+            await initializePrimarySessionWindow({
+                signal: startup.signal,
+                canOpenLocal: app.capabilities().localPty,
+                reconcile: () => invoke("reconcile_sessions", { activeIds: [] }),
+                allowResourcePanes: () => { resourcePanesAllowed = true; },
+                loadAutoOpenLocal: async () =>
+                    await invoke<string | null>("get_setting", { key: "open_local_on_startup" }) === "true",
+                openLocal: addLocalTab,
+            });
+        } catch (error) {
+            if (!startup.signal.aborted) startupError = errMsg(error);
+        } finally {
+            startupRunning = false;
+        }
+    }
     let navigationLoad = 0;
     $effect(() => {
         const tabs = app.tabs();
@@ -232,20 +255,11 @@
     }
 
     onMount(() => {
-        const startup = new AbortController();
         keymap.init();
         // Crash recovery must settle before any pane can create a replacement
         // backend resource. Otherwise reconcile([]) can race that new session.
         if (!bypassStartupReconcile) {
-            void initializePrimarySessionWindow({
-                signal: startup.signal,
-                canOpenLocal: app.capabilities().localPty,
-                reconcile: () => invoke("reconcile_sessions", { activeIds: [] }),
-                allowResourcePanes: () => { resourcePanesAllowed = true; },
-                loadAutoOpenLocal: async () =>
-                    await invoke<string | null>("get_setting", { key: "open_local_on_startup" }) === "true",
-                openLocal: addLocalTab,
-            });
+            void initializeResources();
         }
         consumeCloneQuery();
         consumeAiHandoff();
@@ -1427,6 +1441,14 @@
             {@render sideAside(kind, "left")}
         {/each}
         <div class="main-area">
+            {#if startupError}
+                <div class="startup-error" role="alert">
+                    <span>{t("session.reconcile_failed")}: {startupError}</span>
+                    <button class="btn" onclick={initializeResources} disabled={startupRunning}>
+                        {t("common.retry")}
+                    </button>
+                </div>
+            {/if}
             <!-- 插件横条区：终端上/下边缘，per-tab keep-alive，无匹配插件不占位 -->
             {#if resourcePanesAllowed && pluginHostOk && pluginStripPlugins.length > 0 && pluginStripTabs.length > 0 && pluginStripPos === "top"}
                 <PluginStrip
@@ -1673,6 +1695,17 @@
     /* 终端区——所有 .pane 挂在 .terminal-region（绝对定位由它提供 position:
        relative），插件横条区作为兄弟节点贴其上/下边缘。min-width: 0 让 flex
        能把它压到 0（窄屏 AI 接管时）。 */
+    .startup-error {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px;
+        flex-wrap: wrap;
+        overflow-wrap: anywhere;
+        color: var(--text);
+        background: var(--bg);
+        border-bottom: 1px solid var(--divider);
+    }
     .main-area {
         display: flex;
         flex-direction: column;

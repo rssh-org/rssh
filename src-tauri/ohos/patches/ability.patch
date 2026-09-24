@@ -895,10 +895,10 @@ index 6436d31..40ef0dc 100644
  `transparent` 是 create 时的行为：当 `.transparent(true)` 且未显式指定 background color 时，ArkTS
  必须在创建根节点时使用透明色 `#00000000`；显式 background color 优先。不能把这一语义退化为
 diff --git a/native_ability/index.ets b/native_ability/index.ets
-index 6f98445..211a555 100644
+index 6f98445..eca5bc9 100644
 --- a/native_ability/index.ets
 +++ b/native_ability/index.ets
-@@ -27,3 +27,8 @@ export type {
+@@ -27,3 +27,10 @@ export type {
  } from "./src/main/ets/ability/type";
  export { DefaultXComponent } from "./src/main/ets/components/DefaultXComponent";
  export { invokeNativeBackPressInterceptor } from "./src/main/ets/runtime/BackPress";
@@ -907,6 +907,8 @@ index 6f98445..211a555 100644
 +
 +export { ApplicationWindows } from "./src/main/ets/runtime/ApplicationWindows";
 +export { NativeApplicationAbility } from "./src/main/ets/ability/NativeApplicationAbility";
++
++export { NativeApplicationStage } from "./src/main/ets/ability/NativeApplicationStage";
 diff --git a/native_ability/src/main/ets/ability/NativeAbility.ets b/native_ability/src/main/ets/ability/NativeAbility.ets
 index a542f8a..6b51153 100644
 --- a/native_ability/src/main/ets/ability/NativeAbility.ets
@@ -1117,7 +1119,7 @@ index 0000000..33a9fe5
 +}
 diff --git a/native_ability/src/main/ets/ability/NativeApplicationAbility.ets b/native_ability/src/main/ets/ability/NativeApplicationAbility.ets
 new file mode 100644
-index 0000000..da3385d
+index 0000000..a2ecb91
 --- /dev/null
 +++ b/native_ability/src/main/ets/ability/NativeApplicationAbility.ets
 @@ -0,0 +1,143 @@
@@ -1184,7 +1186,7 @@ index 0000000..da3385d
 +    if (!lease.initialOwner) {
 +      // Opening Entry again while a peer survives focuses that application. Its
 +      // destroyed logical window 0 must never be recreated or module.init rerun.
-+      await lease.application.windows.focusExisting();
++      await lease.application.windows.focusExisting(this.context as common.UIAbilityContext);
 +      await this.context.terminateSelf();
 +      return undefined;
 +    }
@@ -1262,6 +1264,21 @@ index 0000000..da3385d
 +  onSaveState(_reason: AbilityConstant.StateType, wantParam: Record<string, object>): AbilityConstant.OnSaveResult {
 +    wantParam[STATE_KEY] = new String(this.application?.saveState() ?? "");
 +    return AbilityConstant.OnSaveResult.RECOVERY_AGREE;
++  }
++}
+diff --git a/native_ability/src/main/ets/ability/NativeApplicationStage.ets b/native_ability/src/main/ets/ability/NativeApplicationStage.ets
+new file mode 100644
+index 0000000..edb5d0e
+--- /dev/null
++++ b/native_ability/src/main/ets/ability/NativeApplicationStage.ets
+@@ -0,0 +1,9 @@
++import { AbilityStage, Want } from "@kit.AbilityKit";
++
++/** Use the reservation nonce as the OS identity for each independent UIAbility. */
++export class NativeApplicationStage extends AbilityStage {
++  onAcceptWant(want: Want): string {
++    const nonce = want.parameters?.["nativeWindowNonce"];
++    return typeof nonce === "string" ? nonce : "";
 +  }
 +}
 diff --git a/native_ability/src/main/ets/ability/type.ets b/native_ability/src/main/ets/ability/type.ets
@@ -1743,11 +1760,12 @@ index 0000000..bb7b7b8
 +}
 diff --git a/native_ability/src/main/ets/runtime/ApplicationWindows.ets b/native_ability/src/main/ets/runtime/ApplicationWindows.ets
 new file mode 100644
-index 0000000..08b2b0d
+index 0000000..b8c9d01
 --- /dev/null
 +++ b/native_ability/src/main/ets/runtime/ApplicationWindows.ets
-@@ -0,0 +1,207 @@
+@@ -0,0 +1,228 @@
 +import common from "@ohos.app.ability.common";
++import Want from "@ohos.app.ability.Want";
 +import window from "@ohos.window";
 +import { BridgeHostRegistry } from "../bridge/BridgeHost";
 +import { WindowSurface, WindowSurfaceRegistry } from "../components/WindowSurface";
@@ -1805,15 +1823,35 @@ index 0000000..08b2b0d
 +    return host;
 +  }
 +
-+  async focusExisting(): Promise<boolean> {
++  async focus(id: number, requester?: common.UIAbilityContext): Promise<void> {
++    const host = this.get(id);
++    const want: Want = {
++      bundleName: host.context.applicationInfo.name,
++      moduleName: host.context.abilityInfo.moduleName,
++      abilityName: host.context.abilityInfo.name,
++    };
++    if (id !== 0) {
++      want.parameters = { nativeApplicationSession: this.sessionId, nativeWindowId: id, nativeWindowNonce: host.nonce };
++    }
++    // Entry is singleton; peers are specified by their creation nonce. startAbility
++    // foregrounds that exact UIAbility, including minimized/background main windows.
++    await (requester ?? host.context).startAbility(want);
++    this.assertAttached(host);
++  }
++
++  async focusExisting(requester: common.UIAbilityContext): Promise<void> {
++    let failure = "No live application window";
 +    for (const host of this.hosts.values()) {
 +      try {
-+        await host.win.restore();
-+        await host.win.raiseToAppTop();
-+        return true;
-+      } catch { continue; } // The native window may already be awaiting its destroy callback.
++        await this.focus(host.windowId, requester);
++        return;
++      } catch (error) {
++        // A native instance may already be awaiting its destroy callback. Try peers,
++        // but do not report a successful relaunch if every activation failed.
++        failure = `Unable to activate window ${host.windowId}: ${String(error)}`;
++      }
 +    }
-+    return false;
++    throw new Error(failure);
 +  }
 +
 +  async open(id: number, onCancel: (listener: () => void) => () => void): Promise<ApplicationWindowHost> {
@@ -1835,7 +1873,7 @@ index 0000000..08b2b0d
 +    });
 +    try {
 +      if (!this.pending.has(id)) { return await result; }
-+      // Keep the independent instance in the same application process. The private multiton
++      // Keep the independent instance in the same application process. The private specified
 +      // Ability accepts only a currently reserved nonce; stale OS callbacks cannot resurrect it.
 +      void issuer.context.startAbility({
 +        bundleName: issuer.context.applicationInfo.name,
@@ -2361,10 +2399,10 @@ index ef07248..4cb225f 100644
            try {
 diff --git a/plugins/window/src/main/ets/ManagedWindows.ets b/plugins/window/src/main/ets/ManagedWindows.ets
 new file mode 100644
-index 0000000..4f5ccf4
+index 0000000..5d60170
 --- /dev/null
 +++ b/plugins/window/src/main/ets/ManagedWindows.ets
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,288 @@
 +import window from "@ohos.window";
 +import deviceInfo from "@ohos.deviceInfo";
 +import { ApplicationWindows, BridgeCallContext, BridgePluginContext, BridgeTypedValue, WindowSurfaceRegistry } from "@ohos-rs/ability";
@@ -2613,10 +2651,14 @@ index 0000000..4f5ccf4
 +      case "resize": await win.resize(command.x!, command.y!); break;
 +      case "move": await win.moveWindowTo(command.x!, command.y!); break;
 +      case "visible": if (command.value) { await win.showWindow(); } else { await win.minimize(); } break;
-+      case "focus": await win.raiseToAppTop(); break;
++      case "focus":
++        if (this.application !== undefined) { await this.application.focus(command.windowId); }
++        else { await win.showWindow(); }
++        break;
 +      case "focusable": await win.setWindowFocusable(command.value!); break;
 +      case "minimized":
 +        if (command.value) { await win.minimize(); }
++        else if (this.application !== undefined) { await this.application.focus(command.windowId); }
 +        else { await win.restore(); }
 +        break;
 +      case "maximized": if (command.value) { await win.maximize(window.MaximizePresentation.EXIT_IMMERSIVE); } else { await win.recover(); } break;

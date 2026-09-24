@@ -7,26 +7,12 @@ use crate::terminal::serial;
 
 #[tauri::command]
 pub async fn serial_get_capabilities() -> AppResult<serial::SerialCapabilities> {
-    #[cfg(ohos)]
-    {
-        serial::capabilities().await
-    }
-    #[cfg(not(ohos))]
-    {
-        Ok(serial::capabilities())
-    }
+    serial::capabilities().await
 }
 
 #[tauri::command]
 pub async fn serial_list_ports() -> AppResult<Vec<String>> {
-    #[cfg(ohos)]
-    {
-        serial::available_ports().await
-    }
-    #[cfg(not(ohos))]
-    {
-        Ok(serial::available_ports())
-    }
+    serial::available_ports().await
 }
 
 #[tauri::command]
@@ -47,7 +33,7 @@ pub async fn serial_open(
     )?;
     let operation = reservation.pending_operation()?;
     // Turn transport-agnostic serial output into Tauri events. The headless ws
-    // server builds a different sink over the same `serial::open`.
+    // server builds a different sink over the same `serial::open_resource`.
     let sink: serial::SerialSink =
         std::sync::Arc::new(move |id: &str, out: serial::SerialOut| match out {
             serial::SerialOut::Data(b) => {
@@ -81,14 +67,7 @@ pub async fn serial_write(
     data: Vec<u8>,
 ) -> AppResult<()> {
     let handle = serial_handle(&state, &session_id)?;
-    #[cfg(ohos)]
-    {
-        handle.write(&data).await
-    }
-    #[cfg(not(ohos))]
-    {
-        handle.write(&data)
-    }
+    handle.write(&data).await
 }
 
 /// Drive the DTR control line (`true` = asserted). Manual line control for
@@ -100,14 +79,7 @@ pub async fn serial_set_dtr(
     level: bool,
 ) -> AppResult<()> {
     let handle = serial_handle(&state, &session_id)?;
-    #[cfg(ohos)]
-    {
-        handle.set_dtr(level).await
-    }
-    #[cfg(not(ohos))]
-    {
-        handle.set_dtr(level)
-    }
+    handle.set_dtr(level).await
 }
 
 /// Drive the RTS control line (`true` = asserted).
@@ -118,14 +90,7 @@ pub async fn serial_set_rts(
     level: bool,
 ) -> AppResult<()> {
     let handle = serial_handle(&state, &session_id)?;
-    #[cfg(ohos)]
-    {
-        handle.set_rts(level).await
-    }
-    #[cfg(not(ohos))]
-    {
-        handle.set_rts(level)
-    }
+    handle.set_rts(level).await
 }
 
 /// Send a serial BREAK pulse — attention/interrupt signal for U-Boot,
@@ -134,14 +99,7 @@ pub async fn serial_set_rts(
 #[tauri::command]
 pub async fn serial_send_break(state: State<'_, AppState>, session_id: String) -> AppResult<()> {
     let handle = serial_handle(&state, &session_id)?;
-    #[cfg(ohos)]
-    {
-        handle.send_break().await
-    }
-    #[cfg(not(ohos))]
-    {
-        handle.send_break()
-    }
+    handle.send_break().await
 }
 
 // No serial_resize: a serial line has no rows/cols. The frontend's transport

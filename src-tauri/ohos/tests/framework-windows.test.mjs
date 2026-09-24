@@ -43,6 +43,13 @@ async function runtime() {
   const entryOptions = vm.runInNewContext(`(${source.match(/@Entry\(([^\n]+)\)/)[1]})`);
   const storageBinding = source.match(/@LocalStorageProp\("([^"]+)"\)\s+surfaceKey:\s*string\s*=\s*"([^"]*)"/);
   const native = { MaximizePresentation: { EXIT_IMMERSIVE: 1 }, WindowStatusType: { MAXIMIZE: 1, MINIMIZE: 2, FLOATING: 3 }, WindowEventType: { WINDOW_ACTIVE: 2, WINDOW_INACTIVE: 3, WINDOW_SHOWN: 1, WINDOW_HIDDEN: 4, WINDOW_DESTROYED: 7 } };
+  const { NativeApplicationStage } = compile(read('native_ability/src/main/ets/ability/NativeApplicationStage.ets'), {
+    '@kit.AbilityKit': { AbilityStage: class {} },
+  });
+  const applicationStage = new NativeApplicationStage();
+  const desktopManifest = JSON.parse(readFileSync(new URL('../../gen/ohos/products/desktop/src/main/module.json5', import.meta.url)));
+  const peerLaunchType = desktopManifest.module.abilities.find((ability) => ability.name === 'WindowAbility').launchType;
+  const instanceKeys = new Map();
   const events = [], launches = [], errors = [], bridgeAttachments = new Map(), detached = [];
   let nextId = 40, emptyCount = 0, firstStageCount = 0;
   class FakeWindow {
@@ -50,6 +57,7 @@ async function runtime() {
     rect = { left: 0, top: 0, width: 1024, height: 768 };
     handlers = new Map();
     destroyed = false;
+    foreground = true;
     operations = [];
     node = new FrameNode();
     on(name, callback) { this.handlers.set(name, callback); }
@@ -71,11 +79,14 @@ async function runtime() {
     async setWindowTitle() {}
     setWindowTitleButtonVisible() {}
     async showWindow() { this.operations.push('show'); }
-    async minimize() { this.operations.push('minimize'); }
+    async minimize() { this.foreground = false; this.operations.push('minimize'); }
     async maximize(presentation) { assert.equal(presentation, 1); this.operations.push('maximize'); }
     async recover() { this.operations.push('recover'); }
-    async restore() { this.operations.push('restore'); }
-    async raiseToAppTop() { this.operations.push('focus'); }
+    async restore() {
+      if (!this.foreground) throw new Error('restore requires its UIAbility in the foreground');
+      this.operations.push('restore');
+    }
+    async raiseToAppTop() { throw new Error('1300004: raiseToAppTop supports only subwindows'); }
     async destroyWindow() { this.destroyed = true; this.handlers.get('windowEvent')?.(native.WindowEventType.WINDOW_DESTROYED); }
   }
   const bridge = {
@@ -93,7 +104,7 @@ async function runtime() {
   let startBehavior;
   const makeStage = (win) => ({ getMainWindowSync: () => win, loadContentByName: (...args) => win.loadContentByName(...args) });
   const makeContext = (id, nonce, win) => ({
-    applicationInfo: { name: 'com.rssh.app' }, abilityInfo: { moduleName: 'desktop' },
+    applicationInfo: { name: 'com.rssh.app' }, abilityInfo: { moduleName: 'desktop', name: id === 0 ? 'EntryAbility' : 'RsshWindowAbility' },
     startAbility: async (want) => { launches.push({ issuer: id, want }); return await startBehavior(want); },
     terminateSelf: async () => { await win.destroyWindow(); queueMicrotask(() => { void application.detach(id, nonce); }); },
   });
@@ -111,6 +122,7 @@ async function runtime() {
     ability.moduleName = 'rssh_lib';
     ability.context = makeContext(id, nonce, win);
     peers.set(id, ability.context);
+    instanceKeys.set(id, applicationStage.onAcceptWant(want));
     windows.set(id, win);
     abilities.set(id, ability);
     ability.onCreate(want, {});
@@ -122,7 +134,18 @@ async function runtime() {
     await ability.stageWork;
     return { ability, win };
   };
-  startBehavior = async (want) => { queueMicrotask(() => { void launch(want).catch((error) => errors.push(String(error))); }); };
+  const start = async (want) => {
+    const id = want.parameters?.nativeWindowId ?? 0;
+    const existing = application.hosts.get(id);
+    if (existing && (id === 0 || (peerLaunchType === 'specified' && instanceKeys.get(id) === applicationStage.onAcceptWant(want)))) {
+      if (existing.win.destroyed) throw new Error('UIAbility is already destroyed');
+      existing.win.foreground = true;
+      existing.win.operations.push('ability-focus');
+      return;
+    }
+    queueMicrotask(() => { void launch(want).catch((error) => errors.push(String(error))); });
+  };
+  startBehavior = start;
   const context = {
     sessionId: 'session-a', isActive: () => true, onCancel: () => () => {},
     getRootFrameNode: () => main.node, getWindow: () => main,
@@ -136,7 +159,7 @@ async function runtime() {
   const manager = new ManagedWindows(context);
   return { ...surfaces, ApplicationWindows, application, manager, ManagedWindows, NativeApplicationAbility, FrameNode, FakeWindow,
     appearance, owner: 'session-a', context, windows, main, events, native, launches, errors, abilities, peers, bridgeAttachments, detached,
-    launch, createPeer, setStart: (behavior) => { startBehavior = behavior; }, makeStage,
+    launch, createPeer, start, applicationStage, desktopManifest, setStart: (behavior) => { startBehavior = behavior; }, makeStage,
     emptyCount: () => emptyCount, firstStageCount: () => firstStageCount,
     dispose: async () => { await manager.dispose(); await application.dispose(); },
   };
@@ -177,7 +200,7 @@ test('native configuration failure settles existing and late surface waiters and
   await r.dispose();
 });
 
-test('private multiton start failure settles surface waiters and leaves the existing window live', async () => {
+test('private specified start failure settles surface waiters and leaves the existing window live', async () => {
   const r = await runtime();
   r.setStart(async () => { throw new Error('OS window limit'); });
   const waiting = r.WindowSurfaceRegistry.get(r.owner, 1).wait(() => () => {});
@@ -279,7 +302,7 @@ test('cancelling a reserved creation rejects a late Ability and its route cannot
   call.cancel();
   await rejected;
   const { win } = await r.launch(want);
-  assert.equal(win.destroyed, true, 'late multiton instance terminates itself');
+  assert.equal(win.destroyed, true, 'late specified instance terminates itself');
   assert.equal(r.bridgeAttachments.has(1), false);
   assert.equal(r.windows.get(0).destroyed, false);
   assert.doesNotThrow(() => r.appearance.call({
@@ -368,7 +391,7 @@ test('maximization and minimization restore every independent main window', asyn
     for (const [operation, value] of [['maximized', true], ['maximized', false], ['minimized', true], ['minimized', false]]) {
       await r.manager.update(command(id, operation, value));
     }
-    assert.deepEqual(r.windows.get(id).operations.slice(-4), ['maximize', 'recover', 'minimize', 'restore']);
+    assert.deepEqual(r.windows.get(id).operations.slice(-4), ['maximize', 'recover', 'minimize', 'ability-focus']);
   }
   await r.dispose();
 });
@@ -434,4 +457,72 @@ test('Rust native event registry keeps closure and lifecycle routing window-scop
     execFileSync('rustc', ['--edition=2021', '--test', '-A', 'dead_code', harness, '-o', binary]);
     execFileSync(binary, ['--test-threads=1']);
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+test('reopening Entry foregrounds the same minimized peer UIAbility after the first window closes', async () => {
+  const r = await runtime();
+  for (const id of [0, 1]) await r.manager.attach(request(id), r.context);
+  await r.application.close(0);
+  const peer = r.windows.get(1);
+  await peer.minimize();
+  const requester = { async startAbility(want) { r.launches.push({ issuer: 'new-entry', want }); await r.start(want); } };
+  await r.application.focusExisting(requester);
+  assert.equal(peer.foreground, true);
+  assert.equal(r.launches.at(-1).issuer, 'new-entry');
+  assert.equal(r.launches.at(-1).want.parameters.nativeWindowNonce, r.launches[0].want.parameters.nativeWindowNonce);
+  assert.equal(r.windows.size, 2, 'focus must not create another peer');
+  assert.equal(r.application.hosts.size, 1);
+  assert.equal(r.emptyCount(), 0);
+  await r.dispose();
+});
+
+test('focus commands use Ability activation for both Entry and peer main windows', async () => {
+  const r = await runtime();
+  for (const id of [0, 1]) {
+    await r.manager.attach(request(id), r.context);
+    await r.windows.get(id).minimize();
+    await r.manager.update(command(id, 'focus'));
+    assert.equal(r.windows.get(id).foreground, true);
+    assert.equal(r.windows.get(id).operations.at(-1), 'ability-focus');
+  }
+  assert.equal(r.windows.size, 2);
+  await r.dispose();
+});
+
+test('focus skips a closing instance but propagates failures when every instance rejects activation', async () => {
+  const r = await runtime();
+  for (const id of [0, 1]) await r.manager.attach(request(id), r.context);
+  let attempts = 0;
+  const requester = { async startAbility(want) {
+    attempts++;
+    if (!want.parameters) throw new Error('entry has already closed');
+    await r.start(want);
+  } };
+  await r.application.focusExisting(requester);
+  assert.equal(attempts, 2);
+  await assert.rejects(r.application.focusExisting({ async startAbility() { throw new Error('SDK activation refused'); } }), /SDK activation refused/);
+  assert.equal(r.application.hosts.size, 2, 'activation failures must not destroy existing windows');
+  await r.dispose();
+});
+
+
+test('desktop module installs the specified instance stage and keeps reservation identities distinct', async () => {
+  const r = await runtime();
+  const manifest = r.desktopManifest.module;
+  const root = new URL('../../gen/ohos/products/desktop/src/main/', import.meta.url);
+  const { default: ApplicationStage } = compile(readFileSync(new URL(manifest.srcEntry, root), 'utf8'), {
+    '@rssh/runtime': { NativeApplicationStage: r.applicationStage.constructor },
+  });
+  const stage = new ApplicationStage();
+  const peer = manifest.abilities.find((ability) => ability.name === 'WindowAbility');
+  assert.equal(peer.launchType, 'specified');
+  assert.equal(peer.exported, false);
+  assert.equal(peer.removeMissionAfterTerminate, true);
+  const key = (nativeWindowNonce) => stage.onAcceptWant({ parameters: { nativeWindowNonce } });
+  assert.equal(key('session-a:1'), key('session-a:1'));
+  assert.notEqual(key('session-a:1'), key('session-a:2'));
+  assert.notEqual(key('session-a:1'), key('session-b:1'));
+  assert.equal(key(undefined), '', 'malformed launches still reach the Ability identity validation');
+  await r.dispose();
 });

@@ -16,7 +16,7 @@ use crate::state::{AiSessionRecord, SessionKind, SessionOwner, SessionPhase, Ses
 /// `active_ids` 是前端当前持有的所有 ID（不区分 ssh / sftp / forward —
 /// UUID 不会撞）。返回被清理的总数。
 #[tauri::command]
-pub fn reconcile_sessions(
+pub async fn reconcile_sessions(
     window: tauri::Window,
     state: State<'_, AppState>,
     active_ids: Vec<String>,
@@ -26,6 +26,7 @@ pub fn reconcile_sessions(
         &SessionOwner::Window(window.label().to_owned()),
         active_ids,
     )
+    .await
 }
 
 /// Resolve a frontend-reserved session identity. Pre-reservation lets the UI
@@ -1226,7 +1227,7 @@ fn remove_owned_resources(
     Ok((ids.len(), removed, cleanups))
 }
 
-pub fn reconcile_owner(
+pub async fn reconcile_owner(
     state: &AppState,
     owner: &SessionOwner,
     active_ids: Vec<String>,
@@ -1234,12 +1235,15 @@ pub fn reconcile_owner(
     let active: HashSet<String> = active_ids.into_iter().collect();
     let (closed, removed, cleanups) = remove_owned_resources(state, owner, Some(&active))?;
     close_removed(removed);
-    for cleanup in cleanups {
+    // The application owns recovery even if the requesting WebView disappears.
+    // The caller still waits for release before opening replacement resources.
+    for cleanup in &cleanups {
         cleanup.start();
     }
-    Ok(closed
-        + close_owned_ai(state, owner, Some(&active))?
-        + close_owned_waiters(state, owner, Some(&active))?)
+    let closed_ai = close_owned_ai(state, owner, Some(&active));
+    let closed_waiters = close_owned_waiters(state, owner, Some(&active));
+    futures_util::future::try_join_all(cleanups.iter().map(|cleanup| cleanup.finish())).await?;
+    Ok(closed + closed_ai? + closed_waiters?)
 }
 
 pub fn close_owner(state: &AppState, owner: &SessionOwner) {
@@ -1260,12 +1264,12 @@ pub fn close_owner(state: &AppState, owner: &SessionOwner) {
     }
 }
 
-pub fn reconcile_sessions_impl(
+pub async fn reconcile_sessions_impl(
     state: &AppState,
     owner: &SessionOwner,
     active_ids: Vec<String>,
 ) -> AppResult<usize> {
-    reconcile_owner(state, owner, active_ids)
+    reconcile_owner(state, owner, active_ids).await
 }
 
 pub fn close_window_sessions(state: &AppState, window_label: &str) {
@@ -1857,8 +1861,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconcile_waits_for_a_cancelled_open_to_release_its_resource() {
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440120";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let reconcile = reconcile_owner(&state, &owner, Vec::new());
+        tokio::pin!(reconcile);
+        tokio::select! {
+            biased;
+            result = &mut reconcile => panic!("reconcile passed the pending open: {result:?}"),
+            _ = operation.cancelled() => {},
+        }
+        assert_eq!(
+            state.lifecycle_sessions.lock().unwrap()[id].phase(),
+            SessionPhase::Closing
+        );
+        operation.complete(Ok(()));
+        assert_eq!(reconcile.await.unwrap(), 1);
+        assert_eq!(
+            state.lifecycle_sessions.lock().unwrap()[id].phase(),
+            SessionPhase::Closed
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_reconcile_reports_the_error_and_keeps_recovering_after_owner_disappears() {
+        use std::sync::atomic::Ordering;
+
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440121";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let probe = Arc::new(AtomicCleanupProbe::default());
+        probe.failures.store(3, Ordering::SeqCst);
+        operation
+            .retain_cleanup(CleanupHandle::new(probe.clone()))
+            .unwrap();
+        drop(operation);
+        assert_eq!(
+            reconcile_owner(&state, &owner, Vec::new())
+                .await
+                .unwrap_err()
+                .code(),
+            "serial_op_failed"
+        );
+        close_owner(&state, &owner);
+        drop(reservation);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while state.lifecycle_sessions.lock().unwrap()[id].phase() != SessionPhase::Closed {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn reconcile_reports_a_failed_close_while_another_open_still_awaits_cancellation() {
+        use std::sync::atomic::Ordering;
+
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let failing = reserve_resource(
+            &state,
+            "550e8400-e29b-41d4-a716-446655440122",
+            SessionKind::Telnet,
+            owner.clone(),
+        )
+        .unwrap();
+        let opening = reserve_resource(
+            &state,
+            "550e8400-e29b-41d4-a716-446655440123",
+            SessionKind::Telnet,
+            owner.clone(),
+        )
+        .unwrap();
+        let failure = failing.pending_operation().unwrap();
+        let pending = opening.pending_operation().unwrap();
+        let probe = Arc::new(AtomicCleanupProbe::default());
+        probe.failures.store(usize::MAX, Ordering::SeqCst);
+        failure
+            .retain_cleanup(CleanupHandle::new(probe.clone()))
+            .unwrap();
+        drop(failure);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            reconcile_owner(&state, &owner, Vec::new()),
+        )
+        .await;
+        // Settle both workers even when this assertion catches a regression.
+        probe.failures.store(0, Ordering::SeqCst);
+        pending.complete(Ok(()));
+        reconcile_owner(&state, &owner, Vec::new()).await.unwrap();
+        assert_eq!(
+            result
+                .expect("a pending permission must not hide another close failure")
+                .unwrap_err()
+                .code(),
+            "serial_op_failed"
+        );
+    }
+
+    #[tokio::test]
     async fn every_pending_close_path_notifies_the_registered_operation() {
-        for action in ["close", "owner", "reconcile", "drop"] {
+        for action in ["close", "owner", "drop"] {
             let state = empty_state();
             let owner = SessionOwner::Window("main".into());
             let id = "550e8400-e29b-41d4-a716-446655440103";
@@ -1869,9 +1979,6 @@ mod tests {
             match action {
                 "close" => close_resource(&state, id, SessionKind::Telnet, &owner).unwrap(),
                 "owner" => close_owner(&state, &owner),
-                "reconcile" => {
-                    assert_eq!(reconcile_owner(&state, &owner, Vec::new()).unwrap(), 1);
-                }
                 "drop" => drop(reservation.take()),
                 _ => unreachable!(),
             }
@@ -1968,8 +2075,8 @@ mod tests {
         operation.complete(Ok(()));
     }
 
-    #[test]
-    fn reconcile_is_scoped_to_one_owner() {
+    #[tokio::test]
+    async fn reconcile_is_scoped_to_one_owner() {
         let state = empty_state();
         let owner_a = SessionOwner::Window("a".into());
         let owner_b = SessionOwner::Window("b".into());
@@ -1988,7 +2095,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(reconcile_owner(&state, &owner_a, Vec::new()).unwrap(), 1);
+        assert_eq!(
+            reconcile_owner(&state, &owner_a, Vec::new()).await.unwrap(),
+            1
+        );
 
         assert_eq!(
             a.ensure_pending().unwrap_err().code(),

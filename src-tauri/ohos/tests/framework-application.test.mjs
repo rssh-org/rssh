@@ -24,6 +24,7 @@ function harness() {
   let loadGate;
   let failAttach = false;
   let failActivation = false;
+  let failFocus = false;
   let mountGate;
   const lifecycle = {
     bridgePlugins: [],
@@ -63,7 +64,11 @@ function harness() {
       mountGate?.resolve();
       if (this.attached.size === 0) await this.onEmpty();
     }
-    async focusExisting() { calls.push('focus-existing'); return this.attached.size > 0; }
+    async focusExisting(context) {
+      assert.ok(context.filesDir, 'reactivation must use the new Entry caller context');
+      calls.push('focus-existing');
+      if (failFocus) throw new Error('SDK refused to activate existing windows');
+    }
     async dispose() { this.attached.clear(); calls.push('dispose-windows'); }
   }
   const BridgeHostRegistry = {
@@ -133,6 +138,7 @@ function harness() {
     blockMount: () => { mountGate = gate(); },
     rejectAttach: () => { failAttach = true; },
     rejectActivation: () => { failActivation = true; },
+    rejectFocus: () => { failFocus = true; },
     count: (name) => calls.filter((call) => (Array.isArray(call) ? call[0] : call) === name).length,
   };
 }
@@ -270,3 +276,23 @@ for (const action of ['onDestroy', 'onWindowStageDestroy']) {
     assert.equal(h.count('dispose-host'), 1);
   });
 }
+
+
+test('a failed Entry reactivation reports the SDK failure without tearing down surviving windows', async () => {
+  const h = harness();
+  const initial = h.ability();
+  await h.stage(initial);
+  const peer = h.peer();
+  await h.stage(peer);
+  await initial.onDestroy();
+  h.rejectFocus();
+  const replacement = h.ability();
+  await h.stage(replacement);
+  await replacement.onDestroy();
+  assert.match(h.errors.join('\n'), /application-create.*SDK refused to activate existing windows/);
+  assert.equal(h.count('init'), 1);
+  assert.equal(h.count('attach'), 2);
+  assert.equal(h.count('dispose-bridge'), 0);
+  assert.equal(h.windows[0].attached.has(1), true);
+  await peer.onDestroy();
+});

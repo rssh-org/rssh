@@ -2,6 +2,7 @@
   "module": {
     "name": "desktop",
     "type": "entry",
+    "srcEntry": "./ets/abilitystage/ApplicationStage.ets",
     "description": "$string:app_description",
     "mainElement": "EntryAbility",
     "deviceTypes": [
@@ -40,7 +41,8 @@
         "startWindowIcon": "$media:rssh_icon",
         "startWindowBackground": "$color:start_window_background",
         "exported": false,
-        "launchType": "multiton"
+        "launchType": "specified",
+        "removeMissionAfterTerminate": true
       }
     ],
     "extensionAbilities": [
