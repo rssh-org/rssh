@@ -21,6 +21,7 @@
         plugins,
         tabs,
         activeTabId,
+        onClose,
     }: {
         position: "top" | "bottom";
         /** Collapsed (active tab has no plugin panel open); DOM stays for keep-alive. */
@@ -28,6 +29,7 @@
         plugins: PluginInfo[];
         tabs: Array<{ tabId: string; sessionId: string }>;
         activeTabId: string;
+        onClose: () => void;
     } = $props();
 
     // Reported content width per plugin id; FALLBACK_PLUGIN_SIZE covers
@@ -70,11 +72,17 @@
             {/each}
         </div>
     {/each}
+    <button class="close-btn" title={t("common.close")} aria-label={t("common.close")} onclick={onClose}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="m6 6 12 12M18 6 6 18" />
+        </svg>
+    </button>
 </div>
 
 <style>
     .plugin-strip {
         position: relative;
+        display: flex;
         flex: 0 0 auto;
         height: 28px;
         background: var(--bg);
@@ -96,6 +104,8 @@
     }
     .plugin-tab-strip.visible {
         display: flex;
+        flex: 1;
+        min-width: 0;
         flex-direction: row;
         height: 100%;
         overflow-x: auto;
@@ -118,4 +128,16 @@
     .plugin-strip-card:first-child {
         border-left: none;
     }
+    .close-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 32px;
+        border: none;
+        border-left: 1px solid var(--divider);
+        background: transparent;
+        color: var(--text-sub);
+        cursor: pointer;
+    }
+    .close-btn:hover { color: var(--text); background: var(--accent-soft); }
 </style>

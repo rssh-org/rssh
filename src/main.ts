@@ -7,10 +7,17 @@ import * as theme from "./lib/themes/store.svelte.ts";
 import * as transfers from "./lib/stores/transfers.svelte.ts";
 import * as app from "./lib/stores/app.svelte.ts";
 import { installLocalFileDropNavigationGuard } from "./lib/local-drop.ts"; /*防止WebView直接打开文件卡死*/
+import { installInputTracking, isTouchContextMenu } from "./lib/input.ts";
 
 installLocalFileDropNavigationGuard();
-document.body.addEventListener("contextmenu", (event) => {
-  if (!app.isMobile) event.preventDefault();
+const stopInputTracking = installInputTracking();
+function onContextMenu(event: MouseEvent) {
+  if (!isTouchContextMenu(event)) event.preventDefault();
+}
+document.body.addEventListener("contextmenu", onContextMenu);
+if (import.meta.hot) import.meta.hot.dispose(() => {
+  stopInputTracking();
+  document.body.removeEventListener("contextmenu", onContextMenu);
 });
 
 // Apply persisted theme before mount so first paint reflects the user's choice.

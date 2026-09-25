@@ -1,5 +1,7 @@
 <script lang="ts">
     import { toasts, dismiss } from "../stores/toast.svelte.ts";
+    import { failedSessionCleanups, retrySessionCleanup } from "../stores/session-cleanup.svelte.ts";
+    import { errMsg, t } from "../i18n/index.svelte.ts";
 </script>
 
 <div class="toast-stack">
@@ -7,6 +9,15 @@
         <button class="toast toast-{item.kind} surface-raised" onclick={() => dismiss(item.id)}>
             {item.message}
         </button>
+    {/each}
+    {#each failedSessionCleanups() as item (item.sessionId)}
+        <div class="toast toast-error cleanup-notice surface-raised">
+            <div role="alert">
+                <strong>{t("session.cleanup_failed")}: {item.label}</strong>
+                <p>{errMsg(item.error)}</p>
+            </div>
+            <button class="btn" onclick={() => void retrySessionCleanup(item.sessionId)}>{t("common.retry")}</button>
+        </div>
     {/each}
 </div>
 
@@ -19,7 +30,9 @@
         display: flex;
         flex-direction: column;
         gap: 8px;
-        max-width: 380px;
+        max-width: min(420px, calc(100vw - 32px));
+        max-height: calc(100dvh - 32px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+        overflow-y: auto;
         pointer-events: none;
     }
     .toast {
@@ -36,7 +49,12 @@
         cursor: pointer;
         animation: slide-in 0.15s ease-out;
         word-break: break-word;
+        flex-shrink: 0;
     }
+    .cleanup-notice { display: flex; align-items: center; gap: 12px; cursor: default; }
+    .cleanup-notice > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .cleanup-notice p { margin: 4px 0 0; color: var(--text-sub); }
+    .cleanup-notice button { flex-shrink: 0; }
     .toast-error { border-left: 3px solid var(--error); }
     .toast-success { border-left: 3px solid var(--success); }
     .toast-info { border-left: 3px solid var(--accent); }

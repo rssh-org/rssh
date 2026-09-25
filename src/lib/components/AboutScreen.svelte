@@ -6,7 +6,7 @@
   import * as updates from "../stores/updates.svelte.ts";
   import { writeText as writeClipboard } from "../clipboard.ts";
   import { toast } from "../stores/toast.svelte.ts";
-  import { isIOS } from "../stores/app.svelte.ts";
+  import { capabilities } from "../stores/runtime.svelte.ts";
   import WelcomeScreen from "./WelcomeScreen.svelte";
 
   const REPO = "rssh-org/rssh";
@@ -56,7 +56,7 @@
     <div class="app-version">v{version}</div>
   </div>
 
-  {#if !isIOS}
+  {#if capabilities().releaseUpdateCheck}
     <div class="update">
     {#if update.kind === "outdated"}
       <button class="update-btn primary surface-raised-sm" onclick={() => openUrl(RELEASES_PAGE)}>

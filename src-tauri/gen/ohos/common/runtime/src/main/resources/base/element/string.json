@@ -1,0 +1,8 @@
+{
+  "string": [
+    {
+      "name": "pasteboard_perm_reason",
+      "value": "Paste text into the terminal when you choose Paste"
+    }
+  ]
+}

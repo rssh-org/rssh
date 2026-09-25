@@ -6,7 +6,7 @@
     import type {RemoteEntry} from "../stores/app.svelte.ts";
     import { errMsg, t } from "../i18n/index.svelte.ts";
     import { fileStamp } from "../save-file.ts";
-    import { remoteUploadName } from "../sftp-name.ts";
+    import * as fileAccess from "../file-access.ts";
     import Modal from "./Modal.svelte";
     import AppIcon from "./AppIcon.svelte";
     import {writeText as writeClipboard} from "../clipboard.ts";
@@ -71,6 +71,8 @@
     let renameInputEl: HTMLInputElement | undefined;
 
     const selectedCount = $derived(selected.size);
+    const canTransferDirectories = $derived(app.capabilities().directoryTransfer);
+    const canUploadMultiple = $derived(app.capabilities().fileMultiSelect);
     const allSelected = $derived(entries.length > 0 && selected.size === entries.length);
     const someSelected = $derived(selected.size > 0 && selected.size < entries.length);
 
@@ -153,14 +155,9 @@
 
     function openEntry(e: RemoteEntry) {
         if (e.is_dir) { listDir(joinRemote(cwd, e.name)); return; }
-        // Mobile has no select-and-download toolbar and can't rely on long-press,
-        // so tapping a file is the download affordance. Desktop keeps the file
-        // tap inert (it downloads via checkbox selection / context menu).
-        if (app.isMobile) downloadEntry(e);
-    }
-
-    function basename(p: string): string {
-        return p.split(/[\\/]/).pop() || p;
+        // Hosts without directory transfer have no batch-download toolbar;
+        // clicking a file provides the single-file download affordance.
+        if (!canTransferDirectories) downloadEntry(e);
     }
 
     /** Join a remote path: always '/'-separated, empty segments filtered,
@@ -173,19 +170,6 @@
             if (cleaned) acc += "/" + cleaned;
         }
         return acc || "/";
-    }
-
-    /** Join a local path: separator follows root (Windows '\\', Unix '/').
-     *  '/' within rel_path is translated to the platform separator. */
-    function joinLocal(root: string, ...rels: string[]): string {
-        const sep = root.includes("\\") ? "\\" : "/";
-        let acc = root.replace(/[\\/]+$/, "");
-        for (const r of rels) {
-            if (!r) continue;
-            const cleaned = r.replace(/^[\\/]+|[\\/]+$/g, "").replace(/\//g, sep);
-            if (cleaned) acc += sep + cleaned;
-        }
-        return acc;
     }
 
     function formatSize(bytes: number): string {
@@ -319,41 +303,70 @@
      *  so the caller can display them. */
     async function queueDownloads(items: RemoteEntry[], dir: string): Promise<{ queued: number; walkErrors: string[] }> {
         let queued = 0;
+        const batchSize = 64;
+        const files: { relativePath: string; remotePath: string; size: number }[] = [];
         // Accumulate per-tree walk failures so users see every failed dir,
         // not just the last one.
         const walkErrors: string[] = [];
-        for (const e of items) {
-            const remote = joinRemote(cwd, e.name);
-            if (e.is_dir) {
-                // Expand each subtree into N independent Transfers. A walk
-                // failure only skips that subtree; other selected entries
-                // continue to be queued.
-                try {
-                    const walked = await invoke<WalkEntry[]>("sftp_walk_remote_dir", {
-                        sftpId, remoteRoot: remote,
-                    });
-                    for (const w of walked) {
-                        await transfers.startDownload({
-                            sessionId: meta.sessionId,
-                            remotePath: joinRemote(remote, w.rel_path),
-                            localPath:  joinLocal(dir, e.name, w.rel_path),
-                            sizeHint:   w.size,
-                        });
-                        queued++;
-                    }
-                } catch (err) {
-                    walkErrors.push(`${e.name}: ${errMsg(err)}`);
+
+        async function flushFiles() {
+            if (files.length === 0) return;
+            // A picker may return a document URI. Only the host can authorize
+            // children and turn them into usable file references.
+            const paths = await fileAccess.resolvePaths(dir, files.map((file) => file.relativePath), true);
+            const filesByName = new Map(files.map((file) => [file.relativePath, file]));
+            for (const path of paths) {
+                if (path.status === "failed") {
+                    walkErrors.push(`${path.relative_path}: ${errMsg(path.error)}`);
+                    continue;
                 }
-            } else {
+                const file = filesByName.get(path.relative_path)!;
                 await transfers.startDownload({
                     sessionId: meta.sessionId,
-                    remotePath: remote,
-                    localPath:  joinLocal(dir, e.name),
-                    sizeHint:   e.size,
+                    remotePath: file.remotePath,
+                    localPath: path.location,
+                    sizeHint: file.size,
                 });
                 queued++;
             }
+            files.length = 0;
         }
+
+        for (const e of items) {
+            const remote = joinRemote(cwd, e.name);
+            if (e.is_dir) {
+                // Start ready files before waiting for another remote tree.
+                await flushFiles();
+                // Expand each subtree into N independent Transfers. A walk
+                // failure only skips that subtree; other selected entries
+                // continue to be queued.
+                let walked: WalkEntry[];
+                try {
+                    walked = await invoke<WalkEntry[]>("sftp_walk_remote_dir", {
+                        sftpId, remoteRoot: remote,
+                    });
+                } catch (err) {
+                    walkErrors.push(`${e.name}: ${errMsg(err)}`);
+                    continue;
+                }
+                for (const w of walked) {
+                    files.push({
+                        relativePath: `${e.name}/${w.rel_path}`,
+                        remotePath: joinRemote(remote, w.rel_path),
+                        size: w.size,
+                    });
+                    if (files.length >= batchSize) await flushFiles();
+                }
+            } else {
+                files.push({
+                    relativePath: e.name,
+                    remotePath: remote,
+                    size: e.size,
+                });
+                if (files.length >= batchSize) await flushFiles();
+            }
+        }
+        await flushFiles();
         return { queued, walkErrors };
     }
 
@@ -364,28 +377,13 @@
         if (!meta.sessionId) { error = "Missing SSH session"; return; }
         try {
             if (entry.is_dir) {
-                const dir = await invoke<string | null>("sftp_pick_folder");
+                const dir = await fileAccess.pickDirectory(true);
                 if (!dir) return;
-                const { queued, walkErrors } = await queueDownloads([entry], dir);
+                const { queued, walkErrors } = await queueDownloads([entry], dir.location);
                 if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
                 if (queued > 0) notice = t("sftp.queued_n", { n: queued });
-            } else if (app.isMobile) {
-                // Mobile: pick a SAF save target via the dialog plugin and stream
-                // to its content:// URI through the shared transfer queue.
-                const { save } = await import("@tauri-apps/plugin-dialog");
-                const target = await save({ defaultPath: entry.name });
-                if (!target) return;
-                await transfers.startDownload({
-                    sessionId: meta.sessionId,
-                    remotePath: entryPath(entry),
-                    localPath:  target,
-                    sizeHint:   entry.size,
-                });
-                notice = t("sftp.queued_n", { n: 1 });
             } else {
-                const localPath = await invoke<string | null>("sftp_pick_save_path", {
-                    defaultName: entry.name,
-                });
+                const localPath = await fileAccess.pickSavePath(entry.name);
                 if (!localPath) return;
                 await transfers.startDownload({
                     sessionId: meta.sessionId,
@@ -462,9 +460,9 @@
         if (selected.size === 0) return;
         const items = entries.filter(e => selected.has(e.name));
         try {
-            const dir = await invoke<string | null>("sftp_pick_folder");
+            const dir = await fileAccess.pickDirectory(true);
             if (!dir) return;
-            const { queued, walkErrors } = await queueDownloads(items, dir);
+            const { queued, walkErrors } = await queueDownloads(items, dir.location);
             if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
             if (queued > 0) notice = t("sftp.queued_n", { n: queued });
             selected = new Set();
@@ -473,22 +471,27 @@
         }
     }
 
+    function uploadName(file: fileAccess.PickedLocation): string {
+        // An opaque provider may not return metadata. Distinct selections still
+        // need distinct targets when queued in the same second.
+        return file.name ?? `upload-${fileStamp()}-${crypto.randomUUID().slice(0, 8)}`;
+    }
+
     async function uploadFiles() {
         error = "";
         notice = "";
         if (!meta.sessionId) { error = "Missing SSH session"; return; }
         try {
-            const paths = await invoke<string[] | null>("sftp_pick_open_files");
-            if (!paths || paths.length === 0) return;
-            for (const p of paths) {
-                const name = basename(p);
+            const files = await fileAccess.pickFiles();
+            if (!files || files.length === 0) return;
+            for (const file of files) {
                 await transfers.startUpload({
                     sessionId: meta.sessionId,
-                    localPath:  p,
-                    remotePath: joinRemote(cwd, name),
+                    localPath:  file.location,
+                    remotePath: joinRemote(cwd, uploadName(file)),
                 });
             }
-            notice = t("sftp.queued_n", { n: paths.length });
+            notice = t("sftp.queued_n", { n: files.length });
         } catch (err: any) {
             error = errMsg(err);
         }
@@ -499,15 +502,15 @@
         notice = "";
         if (!meta.sessionId) { error = "Missing SSH session"; return; }
         try {
-            const dir = await invoke<string | null>("sftp_pick_folder");
+            const dir = await fileAccess.pickDirectory(false);
             if (!dir) return;
-            const walked = await invoke<WalkEntry[]>("walk_local_dir", { localRoot: dir });
+            const walked = await fileAccess.walkDirectory(dir.location);
             if (walked.length === 0) { notice = t("sftp.folder_empty"); return; }
-            const folderName = basename(dir);
+            const folderName = uploadName(dir);
             for (const w of walked) {
                 await transfers.startUpload({
                     sessionId: meta.sessionId,
-                    localPath:  joinLocal(dir, w.rel_path),
+                    localPath:  w.local_path,
                     remotePath: joinRemote(cwd, folderName, w.rel_path),
                 });
             }
@@ -517,23 +520,19 @@
         }
     }
 
-    /** Mobile single-file upload: pick a source via the dialog plugin and stream
-     *  its content:// URI through the shared queue. The remote filename is
-     *  recovered from the URI (SAF encodes the display name for user-visible
-     *  providers); opaque providers fall back to a timestamped name. */
+    /** Single-file picker fallback: stream the opaque location and use the
+     *  host-supplied name, just like the multi-file path. */
     async function uploadFile() {
         error = "";
         notice = "";
         if (!meta.sessionId) { error = "Missing SSH session"; return; }
         try {
-            const { open } = await import("@tauri-apps/plugin-dialog");
-            const src = await open({ multiple: false, directory: false });
-            if (!src || Array.isArray(src)) return;
-            const name = remoteUploadName(src) || `upload-${fileStamp()}`;
+            const src = await fileAccess.pickFile();
+            if (!src) return;
             await transfers.startUpload({
                 sessionId: meta.sessionId,
-                localPath:  src,
-                remotePath: joinRemote(cwd, name),
+                localPath:  src.location,
+                remotePath: joinRemote(cwd, uploadName(src)),
             });
             notice = t("sftp.queued_n", { n: 1 });
         } catch (err: any) {
@@ -552,10 +551,8 @@
     <div class="header">
         <button class="btn btn-sm" onclick={goUp}>{t("sftp.up")}</button>
         <button class="btn btn-sm" onclick={() => listDir(cwd)}>{t("sftp.refresh")}</button>
-        {#if app.isMobile}
-            <!-- Mobile: single-file upload only — folder / multi-select upload
-                 need the desktop-only folder picker. -->
-            <button class="btn btn-sm" disabled={!sftpId} onclick={uploadFile}>
+        {#if !canTransferDirectories}
+            <button class="btn btn-sm" disabled={!sftpId} onclick={canUploadMultiple ? uploadFiles : uploadFile}>
                 {t("sftp.upload")}
             </button>
         {:else}
@@ -565,13 +562,13 @@
             </button>
             {#if uploadMenuOpen}
                 <div class="upload-menu" role="menu">
-                    <button role="menuitem" onclick={() => { closeUploadMenu(); uploadFiles(); }}>{t("sftp.upload_files")}</button>
+                    <button role="menuitem" onclick={() => { closeUploadMenu(); canUploadMultiple ? uploadFiles() : uploadFile(); }}>{canUploadMultiple ? t("sftp.upload_files") : t("sftp.upload")}</button>
                     <button role="menuitem" onclick={() => { closeUploadMenu(); uploadFolder(); }}>{t("sftp.upload_folder")}</button>
                 </div>
             {/if}
         </div>
         {/if}
-        {#if !app.isMobile}
+        {#if canTransferDirectories}
         <button class="btn btn-sm" disabled={selectedCount === 0 || !sftpId} onclick={downloadSelected}>
             {selectedCount > 0 ? t("sftp.download_n", { n: selectedCount }) : t("sftp.download")}
         </button>
@@ -599,7 +596,7 @@
     {#if loading}
         <p class="loading">{t("sftp.loading")}</p>
     {:else}
-        <div class="file-list" class:mobile={app.isMobile} oncontextmenu={onSftpContextMenu}>
+        <div class="file-list" class:no-selection={!canTransferDirectories} oncontextmenu={onSftpContextMenu}>
             <div class="file-row file-header">
                 <span class="cell-check">
                     <input
@@ -655,7 +652,7 @@
          class:ready={ctxReady}
          bind:this={ctxMenuEl}
          style="left: {ctxMenu.x + ctxDx}px; top: {ctxMenu.y + ctxDy}px;">
-        {#if !(app.isMobile && ctxMenu.entry.is_dir)}
+        {#if !ctxMenu.entry.is_dir || canTransferDirectories}
             <button class="ctx-item" onclick={() => downloadEntry(ctxMenu!.entry)}>{t("sftp.ctx.download")}</button>
         {/if}
         <button class="ctx-item" onclick={() => confirmDelete(ctxMenu!.entry)}>{t("sftp.ctx.delete")}</button>
@@ -917,7 +914,7 @@
     }
 
     /* No explicit grid-column: auto-placement keeps name/size in DOM order so
-       mobile (checkbox column hidden) lands name in col 1, not the size slot. */
+       hosts without directory selection (checkbox column hidden) lands name in col 1, not the size slot. */
     .file-name {
         border: none;
         background: none;
@@ -969,15 +966,16 @@
         .cell-mtime { display: none; }
     }
 
-    /* Mobile: drop the checkbox column (multi-select download targets a local
-       folder, which is desktop-only) and mtime — keep the row to name + size.
-       `display:none` removes the cells from grid placement, so 2 columns suffice. */
-    .file-list.mobile .file-row {
-        grid-template-columns: 1fr 60px;
+    /* Selection needs an authorized directory destination. Column visibility
+       follows this panel's width on every host. */
+    .file-list.no-selection .file-row {
+        grid-template-columns: 1fr 60px 110px;
     }
-    .file-list.mobile .cell-check,
-    .file-list.mobile .cell-mtime {
+    .file-list.no-selection .cell-check {
         display: none;
+    }
+    @container (max-width: 360px) {
+        .file-list.no-selection .file-row { grid-template-columns: 1fr 60px; }
     }
 
     .empty {

@@ -771,12 +771,6 @@
     }
     .message-actions {
         display: flex; gap: 1px;
-        opacity: 0; pointer-events: none;
-        transition: opacity 120ms ease;
-    }
-    .item-user:hover .message-actions,
-    .item-user:focus-within .message-actions {
-        opacity: 1; pointer-events: auto;
     }
     .message-action {
         width: 24px; height: 24px; padding: 0;
@@ -791,14 +785,13 @@
     }
     .message-action.rollback:hover { color: var(--error); }
     .message-action:disabled { opacity: 0.4; cursor: default; }
-    @media (hover: none), (any-pointer: coarse) {
+    @media (max-width: 639px) {
         .user-message {
             flex-direction: column;
             align-items: flex-end;
         }
-        .message-actions { opacity: 1; pointer-events: auto; }
-        .message-action { width: 44px; height: 44px; }
         .message-actions { order: 2; }
+        .message-action { width: 44px; height: 44px; }
         .bubble.user { order: 1; }
     }
     .ts {

@@ -510,96 +510,6 @@ fn dispatch(
             Ok(Value::Null)
         }
 
-        // ---- serial console ----
-        "serial_list_ports" => Ok(json!(serial::available_ports())),
-        "serial_open" => {
-            let port: String = arg(&args, "port")?;
-            let config: serial::SerialConfig = arg(&args, "config")?;
-            let requested_id = optional_string_arg(&args, "sessionId")?;
-            let session_id =
-                crate::commands::lifecycle::resolve_session_id(requested_id).map_err(err_value)?;
-            let reservation = crate::commands::lifecycle::reserve_resource(
-                state,
-                &session_id,
-                SessionKind::Serial,
-                owner.clone(),
-            )
-            .map_err(err_value)?;
-            let tx = tx.clone();
-            let sink: SerialSink = Arc::new(move |id: &str, out: SerialOut| {
-                let msg = match out {
-                    SerialOut::Data(b) => {
-                        json!({ "type": "event", "event": format!("serial:data:{id}"), "payload": b })
-                    }
-                    SerialOut::Close => {
-                        json!({ "type": "event", "event": format!("serial:close:{id}"), "payload": Value::Null })
-                    }
-                };
-                let _ = tx.send(Message::Text(msg.to_string()));
-            });
-            let (id, handle) = serial::open(session_id, &port, config, sink).map_err(err_value)?;
-            reservation
-                .activate_returned(
-                    &id,
-                    crate::commands::lifecycle::ReadySession::Serial(handle),
-                )
-                .map_err(err_value)?;
-            Ok(json!(id))
-        }
-        "serial_write" => {
-            let sid: String = arg(&args, "sessionId")?;
-            let data: Vec<u8> = arg(&args, "data")?;
-            let handle = locked(&state.serial_sessions)
-                .map_err(err_value)?
-                .get(&sid)
-                .cloned();
-            match handle {
-                Some(h) => h.write(&data).map(|_| Value::Null).map_err(err_value),
-                None => Err(json!("serial_not_found")),
-            }
-        }
-        "serial_close" => {
-            let sid: String = arg(&args, "sessionId")?;
-            crate::commands::lifecycle::close_resource(state, &sid, SessionKind::Serial, owner)
-                .map_err(err_value)?;
-            Ok(Value::Null)
-        }
-        "serial_set_dtr" => {
-            let sid: String = arg(&args, "sessionId")?;
-            let level: bool = arg(&args, "level")?;
-            let handle = locked(&state.serial_sessions)
-                .map_err(err_value)?
-                .get(&sid)
-                .cloned();
-            match handle {
-                Some(h) => h.set_dtr(level).map(|_| Value::Null).map_err(err_value),
-                None => Err(json!("serial_not_found")),
-            }
-        }
-        "serial_set_rts" => {
-            let sid: String = arg(&args, "sessionId")?;
-            let level: bool = arg(&args, "level")?;
-            let handle = locked(&state.serial_sessions)
-                .map_err(err_value)?
-                .get(&sid)
-                .cloned();
-            match handle {
-                Some(h) => h.set_rts(level).map(|_| Value::Null).map_err(err_value),
-                None => Err(json!("serial_not_found")),
-            }
-        }
-        "serial_send_break" => {
-            let sid: String = arg(&args, "sessionId")?;
-            let handle = locked(&state.serial_sessions)
-                .map_err(err_value)?
-                .get(&sid)
-                .cloned();
-            match handle {
-                Some(h) => h.send_break().map(|_| Value::Null).map_err(err_value),
-                None => Err(json!("serial_not_found")),
-            }
-        }
-
         // ---- telnet (open lives in dispatch_async — blocking DNS+connect) ----
         "telnet_write" => {
             let sid: String = arg(&args, "sessionId")?;
@@ -739,6 +649,9 @@ fn dispatch(
         }
 
         // ---- CLI: PATH-based status; install is host-managed in embedded mode ----
+        "get_runtime_capabilities" => ok(Ok::<_, AppError>(
+            crate::platform::runtime::RuntimeCapabilities::headless(),
+        )),
         "cli_status" => ok(Ok::<_, AppError>(
             crate::commands::cli::cli_status_headless(),
         )),
@@ -775,18 +688,6 @@ fn dispatch(
             Ok(Value::Null)
         }
 
-        // ---- orphan-session reap on (re)mount: the server outlives a page reload,
-        //      so stale ssh/sftp/forward/pty from before the reload get cleaned ----
-        "reconcile_sessions" => {
-            let active_ids: Vec<String> = args
-                .get("activeIds")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            ok(crate::commands::lifecycle::reconcile_sessions_impl(
-                state, owner, active_ids,
-            ))
-        }
-
         // `getVersion()` (@tauri-apps/api/app) → plugin:app|version. Desktop has
         // the Tauri app plugin; headless answers with the crate version (synced
         // across manifests at release) so About + update checks work embedded.
@@ -806,6 +707,127 @@ async fn dispatch_async(
     tx: &mpsc::UnboundedSender<Message>,
 ) -> Result<Value, Value> {
     match cmd {
+        // ---- orphan-session reap on (re)mount: the server outlives a page reload,
+        //      so stale ssh/sftp/forward/pty from before the reload get cleaned ----
+        "reconcile_sessions" => {
+            let active_ids: Vec<String> = args
+                .get("activeIds")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            ok(crate::commands::lifecycle::reconcile_sessions_impl(state, owner, active_ids).await)
+        }
+
+        // ---- serial console ----
+        "serial_get_capabilities" => Ok(json!(serial::capabilities().await.map_err(err_value)?)),
+        "serial_list_ports" => Ok(json!(serial::available_ports().await.map_err(err_value)?)),
+        "serial_open" => {
+            let port: String = arg(&args, "port")?;
+            let config: serial::SerialConfig = arg(&args, "config")?;
+            let requested_id = optional_string_arg(&args, "sessionId")?;
+            let session_id =
+                crate::commands::lifecycle::resolve_session_id(requested_id).map_err(err_value)?;
+            let reservation = crate::commands::lifecycle::reserve_resource(
+                state,
+                &session_id,
+                SessionKind::Serial,
+                owner.clone(),
+            )
+            .map_err(err_value)?;
+            let tx = tx.clone();
+            let sink: SerialSink = Arc::new(move |id: &str, out: SerialOut| {
+                let msg = match out {
+                    SerialOut::Data(b) => {
+                        json!({ "type": "event", "event": format!("serial:data:{id}"), "payload": b })
+                    }
+                    SerialOut::Close => {
+                        json!({ "type": "event", "event": format!("serial:close:{id}"), "payload": Value::Null })
+                    }
+                };
+                let _ = tx.send(Message::Text(msg.to_string()));
+            });
+            let operation = reservation.pending_operation().map_err(err_value)?;
+            let opened = serial::open_resource(session_id, &port, config, sink, operation)
+                .await
+                .map_err(err_value)?;
+            let id = opened
+                .activate(|id, handle| {
+                    reservation.activate_returned(
+                        id,
+                        crate::commands::lifecycle::ReadySession::Serial(handle),
+                    )
+                })
+                .await
+                .map_err(err_value)?;
+            Ok(json!(id))
+        }
+        "serial_write" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let data: Vec<u8> = arg(&args, "data")?;
+            let handle = locked(&state.serial_sessions)
+                .map_err(err_value)?
+                .get(&sid)
+                .cloned();
+            match handle {
+                Some(h) => h.write(&data).await.map(|_| Value::Null).map_err(err_value),
+                None => Err(json!("serial_not_found")),
+            }
+        }
+        "serial_close" => {
+            let sid: String = arg(&args, "sessionId")?;
+            crate::commands::lifecycle::close_resource_and_wait(
+                state,
+                &sid,
+                SessionKind::Serial,
+                owner,
+            )
+            .await
+            .map_err(err_value)?;
+            Ok(Value::Null)
+        }
+        "serial_set_dtr" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let level: bool = arg(&args, "level")?;
+            let handle = locked(&state.serial_sessions)
+                .map_err(err_value)?
+                .get(&sid)
+                .cloned();
+            match handle {
+                Some(h) => h
+                    .set_dtr(level)
+                    .await
+                    .map(|_| Value::Null)
+                    .map_err(err_value),
+                None => Err(json!("serial_not_found")),
+            }
+        }
+        "serial_set_rts" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let level: bool = arg(&args, "level")?;
+            let handle = locked(&state.serial_sessions)
+                .map_err(err_value)?
+                .get(&sid)
+                .cloned();
+            match handle {
+                Some(h) => h
+                    .set_rts(level)
+                    .await
+                    .map(|_| Value::Null)
+                    .map_err(err_value),
+                None => Err(json!("serial_not_found")),
+            }
+        }
+        "serial_send_break" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let handle = locked(&state.serial_sessions)
+                .map_err(err_value)?
+                .get(&sid)
+                .cloned();
+            match handle {
+                Some(h) => h.send_break().await.map(|_| Value::Null).map_err(err_value),
+                None => Err(json!("serial_not_found")),
+            }
+        }
+
         "ssh_connect" => ssh_connect(state, owner, args, tx).await,
         // Async like the Tauri command, for the same reason: DNS + TCP connect
         // can block up to 10s per address and must not stall the ws event loop.
@@ -966,6 +988,12 @@ async fn dispatch_async(
             let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
             ok(h.walk_files(&arg::<String>(&args, "remoteRoot")?).await)
         }
+        "resolve_local_paths" => ok(crate::commands::files::resolve_local_paths(
+            arg(&args, "localRoot")?,
+            arg(&args, "relativePaths")?,
+            arg(&args, "write")?,
+        )
+        .await),
         "walk_local_dir" => {
             ok(crate::commands::sftp::walk_local_dir(arg::<String>(&args, "localRoot")?).await)
         }

@@ -1,3 +1,5 @@
+import { createSessionCleanupRegistry, type SessionCleanupScope } from "./session-cleanup.ts";
+
 export type ReservedSessionOpenResult = {
   kind: "ready";
   sessionId: string;
@@ -9,6 +11,7 @@ interface ReservedSessionAttemptDependencies {
   makeId: () => string;
   wireEvents: (sessionId: string) => Promise<() => void>;
   close: (sessionId: string) => void | Promise<void>;
+  cleanup?: SessionCleanupScope;
 }
 
 export function createReservedSessionAttempt(
@@ -23,17 +26,10 @@ export function createReservedSessionAttempt(
   let generation = 0;
   let current: CurrentAttempt | null = null;
   let destroyed = false;
-
-  async function closeAndIgnore(sessionId: string): Promise<void> {
-    try {
-      await dependencies.close(sessionId);
-    } catch {
-      // Cancellation is best-effort and must not revive a stale attempt.
-    }
-  }
+  const cleanup = dependencies.cleanup ?? createSessionCleanupRegistry().forScope("attempt", "");
 
   function requestClose(sessionId: string): void {
-    void closeAndIgnore(sessionId);
+    cleanup.requestClose(sessionId, dependencies.close);
   }
 
   function cancel(): void {
@@ -58,6 +54,22 @@ export function createReservedSessionAttempt(
         pending: true,
       };
       current = attempt;
+
+      // Cancellation invalidates ownership immediately; opening the replacement
+      // waits until the old native handle has released its exclusive resource.
+      // A late result may enqueue another close while this barrier is pending.
+      try {
+        await cleanup.wait(() => current === attempt && generation === attemptGeneration);
+      } catch (error) {
+        if (current !== attempt || generation !== attemptGeneration) {
+          return { kind: "cancelled" };
+        }
+        current = null;
+        throw error;
+      }
+      if (current !== attempt || generation !== attemptGeneration) {
+        return { kind: "cancelled" };
+      }
 
       let disposeEvents: () => void;
       try {

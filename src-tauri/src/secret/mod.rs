@@ -8,7 +8,7 @@
 //!         ▼
 //!     HybridStore             ← ChaCha20-Poly1305 加/解密
 //!       ├── master_key (32B)
-//!       │     ├── KeyringMasterKey  ← keychain（macOS/iOS/Windows/Linux desktop）
+//!       │     ├── KeyringMasterKey  ← keychain（macOS/iOS/Windows/Linux）/ HarmonyOS Asset
 //!       │     └── FileMasterKey     ← <data_dir>/master.key（headless/Android）
 //!       │
 //!       └── DbStore  ← rssh.db 的 `secrets` 表（密文 base64）
@@ -49,23 +49,17 @@ use crate::error::{AppError, AppResult};
 pub mod crypto;
 mod db_store;
 mod hybrid_store;
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "windows",
-    target_os = "linux"
-))]
+// keyring crate is not compiled for ohos (Cargo.toml target table), so its
+// linux branch must not claim it either — target_os = "linux" is true there.
+#[cfg(any(macos, ios, windows, linux))]
 mod keyring_store;
 mod master_key;
+#[cfg(any(ohos, test))]
+mod ohos_asset;
 
 pub use db_store::DbStore;
 pub use hybrid_store::HybridStore;
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "windows",
-    target_os = "linux"
-))]
+#[cfg(any(macos, ios, windows, linux))]
 pub use keyring_store::KeyringStore;
 pub use master_key::{FileMasterKey, KeyringMasterKey, MasterKeyBackend};
 
@@ -114,7 +108,7 @@ pub fn open(db: Arc<Db>, data_dir: &Path) -> AppResult<SecretSystem> {
     let db_store = Arc::new(DbStore::new(db.clone()));
     let recorded = db::settings::get(&db, BACKEND_MARKER)?;
 
-    // 运行期探测：编译进 keyring crate 的平台 + 真能 probe 写读
+    // 运行期探测：原生 keychain / Asset 后端 + 真能 probe 写读
     let probed: Option<Arc<dyn SecretStore>> = probe_keyring();
 
     match (recorded.as_deref(), probed) {
@@ -171,27 +165,21 @@ pub fn open(db: Arc<Db>, data_dir: &Path) -> AppResult<SecretSystem> {
     }
 }
 
-/// 运行期探测系统 keychain。`#[cfg(...)]` 排除编译不进 keyring crate 的平台
-/// （例如 Android），其他平台靠 `try_open()` 真探测（写 probe key + 读回 + 删）。
+/// 运行期探测系统 keychain / Asset。没有原生后端的平台（例如 Android）
+/// 不参与；其他平台靠 `try_open()` 真探测（写 probe key + 读回 + 删）。
 fn probe_keyring() -> Option<Arc<dyn SecretStore>> {
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "windows",
-        target_os = "linux"
-    ))]
+    #[cfg(any(macos, ios, windows, linux))]
     {
         keyring_store::try_open().map(|kr| {
             let arc: Arc<KeyringStore> = Arc::new(kr);
             arc as Arc<dyn SecretStore>
         })
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "windows",
-        target_os = "linux"
-    )))]
+    #[cfg(ohos)]
+    {
+        ohos_asset::try_open().map(|store| Arc::new(store) as Arc<dyn SecretStore>)
+    }
+    #[cfg(not(any(macos, ios, windows, linux, ohos)))]
     {
         None
     }

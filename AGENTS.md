@@ -70,12 +70,16 @@ Tab、导航和连接会话协调在 `app.svelte.ts`；AI、主题、快捷键�
 rg '^let _.*\$state|^export function' src/lib/stores src/lib/ai src/lib/themes
 ```
 
-### R9. 平台条件统一走 `cfg` / `app.isMobile`
+### R9. 布局、输入方式与宿主能力分别判断
 
-OS / 设备形态分支：Rust 端用 `#[cfg(...)]`，前端用 `app.isMobile`（UA 嗅探，顶层 const），不要在各组件重复造一套判断。Docker CLI、kubectl、keychain 等外部能力是否可用，仍应在运行时真实探测。
+页面排版只看窗口或容器宽度：CSS 用 media/container query，需要切换 DOM 时用 `layout.compact()`；不能用 UA、OS 或触摸能力选择手机/电脑布局。触摸、鼠标、键盘按实际输入事件处理，窄窗口不代表没有硬件键盘，宽窗口也可能需要软键盘。
+
+原生功能必须走 `app.capabilities()`（后端 `get_runtime_capabilities`），不能从宽度推断 PTY、串口、多窗口、目录授权等能力。Rust 只在平台 API、库或实现不同处使用 `#[cfg(...)]`。OHOS 的 Rust 目标同时是 `target_os="linux"` 和 `target_env="ohos"`；Linux 专用的 libudev、Secret Service、WebKitGTK 等必须排除 OHOS；Rust 源码统一使用 `linux` / `macos` / `windows` / `android` / `ios` / `ohos` 六个互斥条件（`windows` 为 Rust 内建，其余在 build.rs 定义）；`linux` 明确排除 OHOS，不使用 Tauri 的 `mobile` / `desktop` 分类。多系统实现显式列举，例如 `any(android, ios)`。鸿蒙两个 HAP 共用一份 Rust 库，手机/平板与电脑由 `ohos::device::DeviceClass` 在运行时区分，不能伪造两个编译期 OS。Cargo.toml 依赖条件仍使用原生 target 表达式（build.rs 的 cfg 不参与依赖解析）。App 成功加载能力后才挂载资源页面。Docker CLI、kubectl、keychain 等外部能力仍应在运行时真实探测。
 
 ```bash
-rg 'cfg\(target_os|isMobile' src src-tauri/src
+rg 'layout\.compact|@media|@container|capabilities\(' src
+cat src-tauri/build.rs  # 六个系统条件的唯一定义
+rg 'cfg\(|cfg!\(' src-tauri/src
 ```
 
 ### R10. 新增功能必须显式考虑四条入口
@@ -83,14 +87,14 @@ rg 'cfg\(target_os|isMobile' src src-tauri/src
 每个新 feature / UI 改动，PR 描述里至少写清以下入口各自怎么处理：
 
 - **桌面 GUI**：默认目标，必须可用
-- **移动 GUI**：`app.isMobile` 路径。没右键、没快捷键、没多窗口、屏幕窄。要么适配（`MobileKeybar` 加按钮、长按代替右键），要么显式声明"移动端不提供"
+- **移动 GUI**：窄窗口与触摸输入都要可操作，同时保留外接键盘/鼠标的能力；宽屏平板使用宽布局。操作需有可点击入口；确实缺少原生 API 的功能由能力查询关闭，不能按设备名称一概隐藏。
 - **CLI**：`src-tauri/src/bin/rssh/`。CRUD 类操作大概率要补；纯 UI/可视化类可声明 N/A
 - **Headless / JetBrains**：`src-tauri/src/server.rs` + `src/lib/ipc-shim.ts`。复用同一前端，但 command / event 需要 server adapter 支持
 
 允许的结论是“全部支持”或“只在 X 入口，因为 Y”。**不允许**的是没想过——上线后才发现移动端按钮够不着、CLI 改了 schema 但读不出新字段、JetBrains 页面只能报 unknown command。
 
 ```bash
-rg 'isMobile' src/lib/components       # 看现有移动端分支怎么写
+rg 'layout\.compact|@media|@container' src/lib/components  # 看宽度响应式布局
 rg '#\[cfg\(' src-tauri/src/commands   # 看 command 层平台分支
 rg '"[a-z_]+" =>' src-tauri/src/server.rs  # 看 headless dispatcher
 ```
@@ -244,9 +248,9 @@ rg 'db::|secret_store|sync::config' src-tauri/src/bin/rssh
 
 本地 export 是全量备份；远程 `rssh config github push` / `rssh config webdav push` 与 GUI push 才按同步类别、分组及 secret opt-in 过滤。Credential 用 `save_to_remote`，Telnet 登录脚本用 `save_script_to_remote`。改同步逻辑必须统一走 `sync::config::build_payload`，不能让 GUI / CLI / GitHub / WebDAV 四条路径各写一份规则。
 
-### P7. `isMobile` 是 const，不响应窗口缩放
+### P7. 布局断点不能决定输入或原生能力
 
-UA 嗅探，启动一次。需要响应式断点 → 自己加 `$state` + `resize` 监听，别误以为现成。
+`stores/layout.svelte.ts` 统一观察窗口宽度，App 根组件管理监听生命周期。侧栏保留窄/宽两份偏好；resize 只切换读取，不改持久化设置。终端辅助键盘（包括唤起系统键盘的按钮）只在窄屏显示；宽屏不显示辅助键盘或独立浮钮，不按 OS、触摸能力或系统键盘是否打开增加例外。硬件键盘与系统输入法的输入处理独立于断点。
 
 ### P8. Command 名是跨适配器 wire contract
 

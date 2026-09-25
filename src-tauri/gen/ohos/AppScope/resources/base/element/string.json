@@ -1,0 +1,12 @@
+{
+  "string": [
+    {
+      "name": "app_name",
+      "value": "RSSH"
+    },
+    {
+      "name": "app_description",
+      "value": "RSSH terminal and SSH client"
+    }
+  ]
+}

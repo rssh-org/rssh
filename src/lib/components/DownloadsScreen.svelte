@@ -31,7 +31,7 @@
     }
 
     function basename(p: string): string {
-        return p.split(/[\\/]/).pop() || p;
+        return p.split("/").pop() || p;
     }
 
     /** Trigger elements (sidebar entry, SFTP toolbar icon, etc.) are marked
@@ -91,7 +91,7 @@
                     <span class="kind" title={item.kind}>{item.kind === "download" ? "↓" : "↑"}</span>
 
                     <div class="name" title={item.kind === "download" ? item.remotePath : item.localPath}>
-                        {basename(item.kind === "download" ? item.remotePath : item.localPath)}
+                        {basename(item.remotePath)}
                     </div>
                     <div class="path" title={item.kind === "download" ? item.localPath : item.remotePath}>
                         → {item.kind === "download" ? item.localPath : item.remotePath}

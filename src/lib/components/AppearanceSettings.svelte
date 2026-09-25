@@ -2,6 +2,7 @@
     import { onMount } from "svelte";
     import { invoke } from "@tauri-apps/api/core";
     import * as app from "../stores/app.svelte.ts";
+    import * as layout from "../stores/layout.svelte.ts";
     import * as ai from "../ai/store.svelte.ts";
     import * as theme from "../themes/store.svelte.ts";
     import type { PaletteId } from "../themes/palettes.ts";
@@ -25,10 +26,9 @@
         { value: "bottom", labelKey: "settings.appearance.pos.bottom" },
     ] as const;
 
-    // "bottom" collides with MobileKeybar on mobile — block the choice there,
-    // don't leave the user to discover the clash after picking.
+    // The compact terminal toolbar already occupies the bottom edge.
     function disabled(value: app.SidebarPosition): boolean {
-        return app.isMobile && value === "bottom";
+        return layout.compact() && value === "bottom";
     }
 
     function pick(value: app.SidebarPosition) {

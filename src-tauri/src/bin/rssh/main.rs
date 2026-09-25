@@ -163,7 +163,7 @@ enum GroupCmd {
 /// GUI binary at `/usr/bin/rssh`.  When invoked without a subcommand, detect
 /// the GUI binary and launch it instead — so `rssh` opens the app, while
 /// `rssh profile list`, `rssh profile open …` etc. still use the CLI path.
-#[cfg(target_os = "linux")]
+#[cfg(linux)]
 fn try_launch_gui() -> bool {
     use std::os::unix::process::CommandExt;
     use std::process::Command;
@@ -237,7 +237,7 @@ fn main() {
     let cli = Cli::parse();
 
     // No subcommand → try launching GUI on Linux.
-    #[cfg(target_os = "linux")]
+    #[cfg(linux)]
     if cli.command.is_none() && try_launch_gui() {
         return;
     }

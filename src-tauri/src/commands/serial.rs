@@ -6,12 +6,17 @@ use crate::state::{AppState, SessionKind, SessionOwner};
 use crate::terminal::serial;
 
 #[tauri::command]
-pub fn serial_list_ports() -> AppResult<Vec<String>> {
-    Ok(serial::available_ports())
+pub async fn serial_get_capabilities() -> AppResult<serial::SerialCapabilities> {
+    serial::capabilities().await
 }
 
 #[tauri::command]
-pub fn serial_open(
+pub async fn serial_list_ports() -> AppResult<Vec<String>> {
+    serial::available_ports().await
+}
+
+#[tauri::command]
+pub async fn serial_open(
     app: AppHandle,
     window: tauri::Window,
     state: State<'_, AppState>,
@@ -26,8 +31,9 @@ pub fn serial_open(
         SessionKind::Serial,
         SessionOwner::Window(window.label().to_owned()),
     )?;
+    let operation = reservation.pending_operation()?;
     // Turn transport-agnostic serial output into Tauri events. The headless ws
-    // server builds a different sink over the same `serial::open`.
+    // server builds a different sink over the same `serial::open_resource`.
     let sink: serial::SerialSink =
         std::sync::Arc::new(move |id: &str, out: serial::SerialOut| match out {
             serial::SerialOut::Data(b) => {
@@ -37,12 +43,13 @@ pub fn serial_open(
                 let _ = app.emit(&format!("serial:close:{id}"), ());
             }
         });
-    let (id, handle) = serial::open(session_id, &port, config, sink)?;
-    reservation.activate_returned(
-        &id,
-        crate::commands::lifecycle::ReadySession::Serial(handle),
-    )?;
-    Ok(id)
+    let opened = serial::open_resource(session_id, &port, config, sink, operation).await?;
+    opened
+        .activate(|id, handle| {
+            reservation
+                .activate_returned(id, crate::commands::lifecycle::ReadySession::Serial(handle))
+        })
+        .await
 }
 
 /// Look up an open serial session's handle (cloned — `SerialHandle` is Arc-backed).
@@ -54,57 +61,63 @@ fn serial_handle(state: &State<'_, AppState>, session_id: &str) -> AppResult<ser
 }
 
 #[tauri::command]
-pub fn serial_write(
+pub async fn serial_write(
     state: State<'_, AppState>,
     session_id: String,
     data: Vec<u8>,
 ) -> AppResult<()> {
-    serial_handle(&state, &session_id)?.write(&data)
+    let handle = serial_handle(&state, &session_id)?;
+    handle.write(&data).await
 }
 
 /// Drive the DTR control line (`true` = asserted). Manual line control for
 /// MCU reset / bootloader entry / modem signalling.
 #[tauri::command]
-pub fn serial_set_dtr(
+pub async fn serial_set_dtr(
     state: State<'_, AppState>,
     session_id: String,
     level: bool,
 ) -> AppResult<()> {
-    serial_handle(&state, &session_id)?.set_dtr(level)
+    let handle = serial_handle(&state, &session_id)?;
+    handle.set_dtr(level).await
 }
 
 /// Drive the RTS control line (`true` = asserted).
 #[tauri::command]
-pub fn serial_set_rts(
+pub async fn serial_set_rts(
     state: State<'_, AppState>,
     session_id: String,
     level: bool,
 ) -> AppResult<()> {
-    serial_handle(&state, &session_id)?.set_rts(level)
+    let handle = serial_handle(&state, &session_id)?;
+    handle.set_rts(level).await
 }
 
-/// Send a serial BREAK pulse (~250ms) — attention/interrupt signal for U-Boot,
-/// kernel SysRq-over-serial, telco gear.
+/// Send a serial BREAK pulse — attention/interrupt signal for U-Boot,
+/// kernel SysRq-over-serial, telco gear. Desktop holds it for ~250ms;
+/// HarmonyOS uses the system serial service's pulse duration.
 #[tauri::command]
-pub fn serial_send_break(state: State<'_, AppState>, session_id: String) -> AppResult<()> {
-    serial_handle(&state, &session_id)?.send_break()
+pub async fn serial_send_break(state: State<'_, AppState>, session_id: String) -> AppResult<()> {
+    let handle = serial_handle(&state, &session_id)?;
+    handle.send_break().await
 }
 
 // No serial_resize: a serial line has no rows/cols. The frontend's transport
 // table maps serial's resize entry to null, so it simply never calls it.
 
 #[tauri::command]
-pub fn serial_close(
+pub async fn serial_close(
     window: tauri::Window,
     state: State<'_, AppState>,
     session_id: String,
 ) -> AppResult<()> {
-    crate::commands::lifecycle::close_resource(
+    crate::commands::lifecycle::close_resource_and_wait(
         &state,
         &session_id,
         SessionKind::Serial,
         &SessionOwner::Window(window.label().to_owned()),
     )
+    .await
 }
 
 // ── Saved serial profiles (peer of profile/forward; SQLite-persisted CRUD) ──

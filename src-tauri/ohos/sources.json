@@ -1,0 +1,33 @@
+{
+  "repositories": {
+    "ability": {
+      "url": "https://github.com/harmony-contrib/openharmony-ability.git",
+      "rev": "282425aea194665e2ca9f70126c7e412530330bd",
+      "patches": ["patches/ability.patch"]
+    },
+    "tao": {
+      "url": "https://github.com/tauri-apps/tao.git",
+      "rev": "813572fbe582005e2fb513458bc212842745ceab",
+      "patches": ["patches/tao.patch"]
+    },
+    "wry": {
+      "url": "https://github.com/tauri-apps/wry.git",
+      "rev": "6aaf4b84b6e420015c6a14f264f1c7399f150392",
+      "patches": ["patches/wry.patch"]
+    },
+    "tauri": {
+      "url": "https://github.com/tauri-apps/tauri.git",
+      "rev": "e3bf6eb168bacc7bb5c8c32d923bb8beaf77c92b",
+      "patches": ["patches/tauri.patch"]
+    }
+  },
+  "abilityModules": [
+    "native_ability",
+    "plugins/app-control",
+    "plugins/files",
+    "plugins/permission",
+    "plugins/url",
+    "plugins/webview",
+    "plugins/window"
+  ]
+}

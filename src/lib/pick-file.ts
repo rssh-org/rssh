@@ -3,7 +3,8 @@
  *
  * One path for every webview we ship: desktop Tauri (WKWebView / WebView2 /
  * WebKitGTK all wire up the native open panel), mobile Tauri (Android's
- * `onShowFileChooser` → SAF document picker), and a plain browser. The webview
+ * `onShowFileChooser` → SAF document picker), HarmonyOS's default ArkWeb file
+ * selector, and a plain browser. The webview
  * reads the bytes itself, so there's no Rust round-trip and no native dialog —
  * which also means no `~/.ssh` default directory (the webview can't set one).
  *
@@ -13,6 +14,8 @@
  * button.
  *
  * Resolves null when the user cancels.
+ * ArkWeb's default file selector:
+ * https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/reference/apis-arkweb/arkts-basic-components-web-events.md#onshowfileselector9
  */
 export interface PickedFile {
   name: string;
