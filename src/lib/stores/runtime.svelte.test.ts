@@ -23,6 +23,7 @@ const desktop = {
   directoryTransfer: true,
   plugins: true,
   nativeClipboard: true,
+  releaseUpdateCheck: true,
   terminalPolicy: {
     imageStorageLimitMb: 128,
     imagePixelLimit: 16_000_000,

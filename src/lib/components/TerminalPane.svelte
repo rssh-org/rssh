@@ -1235,7 +1235,7 @@
                 if (!isCurrent()) {
                     return false;
                 }
-                terminal.write(`\x1b[31mLaunch failed: ${e}\x1b[0m\r\n`);
+                terminal.write(`\x1b[31m${errMsg(e)}\x1b[0m\r\n`);
                 disconnected = true;
                 reportInitialConnectionFailure(e);
                 return false;
@@ -1269,7 +1269,7 @@
             } catch (e: any) {
                 clearSshPromptUi();
                 if (!isCurrent()) return false;
-                terminal.write(`\x1b[31mConnection failed: ${e}\x1b[0m\r\n`);
+                terminal.write(`\x1b[31m${errMsg(e)}\x1b[0m\r\n`);
                 terminal.write("\x1b[90mPress any key to reconnect.\x1b[0m\r\n");
                 disconnected = true;
                 reportInitialConnectionFailure(e);
@@ -1834,16 +1834,6 @@
     {/if}
     <div class="term-wrap" class:soft-keyboard={softKeyboardRequested} class:no-block-bar={!app.commandBlockBar()}>
         <div class="xterm-host" bind:this={containerEl}></div>
-        {#if !layout.compact() && !softKeyboardRequested}
-            <button class="keyboard-toggle" class:active={softKeyboardRequested}
-                    title={t("terminal.keyboard")} aria-label={t("terminal.keyboard")} aria-pressed={softKeyboardRequested}
-                    onpointerdown={(event) => event.preventDefault()} onclick={() => { app.setActivePane(tabId); softKeyboard?.toggle(); }}>
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-                    <rect x="2" y="5" width="20" height="14" rx="2" />
-                    <path d="M5 9h2m2 0h2m2 0h2m2 0h2M5 12h2m2 0h2m2 0h2m2 0h2M7 15h10" />
-                </svg>
-            </button>
-        {/if}
         {#if backlogBytes > BACKLOG_INDICATOR_BYTES}
             <div class="backlog-badge">
                 <span>{formatBacklogBytes(backlogBytes)}</span>
@@ -1910,9 +1900,8 @@
             onClose={() => (ctxMenu = null)}
         />
     {/if}
-    <!-- Wide layouts collapse the controls until the user requests the keyboard;
-         opening it must still expose Esc/Tab/modifiers on touch-only tablets. -->
-    {#if app.activeTabId() === tabId && (layout.compact() || softKeyboardRequested)}
+    <!-- Auxiliary controls follow window width, independently of input hardware. -->
+    {#if app.activeTabId() === tabId && layout.compact()}
         <TerminalKeybar />
     {/if}
 </div>
@@ -1975,24 +1964,6 @@
     .term-wrap.soft-keyboard :global(.composition-view) {
         visibility: hidden !important;
     }
-
-    .keyboard-toggle {
-        position: absolute;
-        right: 18px;
-        bottom: 10px;
-        display: grid;
-        place-items: center;
-        width: 34px;
-        height: 30px;
-        padding: 0;
-        border: 1px solid var(--divider);
-        border-radius: 6px;
-        background: var(--surface);
-        color: var(--text-sub);
-        cursor: pointer;
-        z-index: 2;
-    }
-    .keyboard-toggle.active { background: var(--accent); color: var(--white); }
 
     /* Overlay painted inside the enlarged left padding. SVG itself ignores
        pointer events so text selection still works; only the per-block

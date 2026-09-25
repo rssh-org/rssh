@@ -1008,6 +1008,8 @@ fn close_removed(mut removed: Vec<ReadySession>) {
     }
 }
 
+/// Ensure a transport is closed. Missing or already released resources are
+/// successful no-ops; retained records still enforce their owner and kind.
 pub fn close_resource(
     state: &AppState,
     session_id: &str,
@@ -1061,9 +1063,10 @@ fn take_closed_resource(
     expected_owner: &SessionOwner,
 ) -> AppResult<(Option<ReadySession>, Option<Arc<ResourceCleanup>>)> {
     let mut registry = locked(&state.lifecycle_sessions)?;
-    let record = registry.get_mut(session_id).ok_or_else(|| {
-        AppError::not_found("session_not_found", serde_json::json!({ "id": session_id }))
-    })?;
+    let Some(record) = registry.get_mut(session_id) else {
+        // A frontend may cancel before its opening command was dispatched.
+        return Ok((None, None));
+    };
     if record.kind != expected_kind {
         return Err(AppError::config(
             "session_kind_mismatch",
@@ -1073,12 +1076,6 @@ fn take_closed_resource(
     if &record.owner != expected_owner {
         return Err(AppError::config(
             "session_owner_mismatch",
-            serde_json::json!({ "id": session_id }),
-        ));
-    }
-    if record.phase() == SessionPhase::Closed {
-        return Err(AppError::not_found(
-            "session_not_found",
             serde_json::json!({ "id": session_id }),
         ));
     }
@@ -1123,9 +1120,9 @@ pub fn close_ssh_tree(
     expected_owner: &SessionOwner,
 ) -> AppResult<()> {
     let mut registry = locked(&state.lifecycle_sessions)?;
-    let parent = registry.get(session_id).ok_or_else(|| {
-        AppError::not_found("session_not_found", serde_json::json!({ "id": session_id }))
-    })?;
+    let Some(parent) = registry.get(session_id) else {
+        return Ok(());
+    };
     if parent.kind != SessionKind::Ssh {
         return Err(AppError::config(
             "session_kind_mismatch",
@@ -1138,13 +1135,6 @@ pub fn close_ssh_tree(
             serde_json::json!({ "id": session_id }),
         ));
     }
-    if parent.phase() == SessionPhase::Closed {
-        return Err(AppError::not_found(
-            "session_not_found",
-            serde_json::json!({ "id": session_id }),
-        ));
-    }
-
     let child_ids: Vec<String> = registry
         .iter()
         .filter(|(_, record)| {
@@ -1640,6 +1630,107 @@ mod tests {
             reservation.ensure_pending().unwrap_err().code(),
             "session_reservation_lost"
         );
+    }
+
+    #[tokio::test]
+    async fn session_close_is_idempotent_before_dispatch_and_after_failed_open() {
+        for kind in [SessionKind::Ssh, SessionKind::Telnet] {
+            let state = empty_state();
+            let owner = SessionOwner::Window("rssh-clone".into());
+            let id = "550e8400-e29b-41d4-a716-446655440130";
+
+            // The pane can disappear while its event listeners are being wired,
+            // before the opening command has reserved anything in the backend.
+            close_resource(&state, id, kind, &owner).unwrap();
+            close_resource_and_wait(&state, id, kind, &owner)
+                .await
+                .unwrap();
+            assert!(state.lifecycle_sessions.lock().unwrap().is_empty());
+
+            let reservation = reserve_resource(&state, id, kind, owner.clone()).unwrap();
+            // A rejected open (for example SSH TCP timeout) drops its reservation
+            // before the frontend requests its defensive cleanup.
+            drop(reservation);
+            close_resource(&state, id, kind, &owner).unwrap();
+            close_resource(&state, id, kind, &owner).unwrap();
+            close_resource_and_wait(&state, id, kind, &owner)
+                .await
+                .unwrap();
+            assert_eq!(
+                state.lifecycle_sessions.lock().unwrap()[id].phase(),
+                SessionPhase::Closed
+            );
+            assert!(
+                reserve_resource(&state, id, kind, owner).is_err(),
+                "closed identities must stay retired"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn idempotent_close_keeps_owner_and_kind_checks_for_closed_records() {
+        for kind in [SessionKind::Ssh, SessionKind::Telnet] {
+            let state = empty_state();
+            let owner = SessionOwner::Window("main".into());
+            let other = SessionOwner::Window("rssh-clone".into());
+            let id = "550e8400-e29b-41d4-a716-446655440131";
+            drop(reserve_resource(&state, id, kind, owner.clone()).unwrap());
+            assert_eq!(
+                close_resource(&state, id, kind, &other).unwrap_err().code(),
+                "session_owner_mismatch"
+            );
+            assert_eq!(
+                close_resource_and_wait(&state, id, kind, &other)
+                    .await
+                    .unwrap_err()
+                    .code(),
+                "session_owner_mismatch"
+            );
+            let other_kind = if kind == SessionKind::Ssh {
+                SessionKind::Telnet
+            } else {
+                SessionKind::Ssh
+            };
+            assert_eq!(
+                close_resource(&state, id, other_kind, &owner)
+                    .unwrap_err()
+                    .code(),
+                "session_kind_mismatch"
+            );
+            assert_eq!(
+                close_resource_and_wait(&state, id, other_kind, &owner)
+                    .await
+                    .unwrap_err()
+                    .code(),
+                "session_kind_mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_clone_cleanup_does_not_cancel_the_source_window_connection() {
+        let state = empty_state();
+        let source_owner = SessionOwner::Window("main".into());
+        let clone_owner = SessionOwner::Window("rssh-clone".into());
+        let source = reserve_resource(
+            &state,
+            "550e8400-e29b-41d4-a716-446655440132",
+            SessionKind::Ssh,
+            source_owner,
+        )
+        .unwrap();
+        let failed_id = "550e8400-e29b-41d4-a716-446655440133";
+        drop(reserve_resource(&state, failed_id, SessionKind::Ssh, clone_owner.clone()).unwrap());
+        close_resource(&state, failed_id, SessionKind::Ssh, &clone_owner).unwrap();
+        let retry = reserve_resource(
+            &state,
+            "550e8400-e29b-41d4-a716-446655440134",
+            SessionKind::Ssh,
+            clone_owner,
+        )
+        .unwrap();
+        source.ensure_pending().unwrap();
+        retry.ensure_pending().unwrap();
     }
 
     #[tokio::test]

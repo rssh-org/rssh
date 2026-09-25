@@ -24,6 +24,7 @@ export interface RuntimeCapabilities {
   directoryTransfer: boolean;
   plugins: boolean;
   nativeClipboard: boolean;
+  releaseUpdateCheck: boolean;
 }
 
 export interface RuntimeResponse extends RuntimeCapabilities {
@@ -44,6 +45,7 @@ let _capabilities = $state<Readonly<RuntimeCapabilities>>({
   directoryTransfer: false,
   plugins: false,
   nativeClipboard: false,
+  releaseUpdateCheck: false,
 });
 let _terminalPolicy = $state<Readonly<TerminalRuntimePolicy> | null>(null);
 let _loaded = $state(false);

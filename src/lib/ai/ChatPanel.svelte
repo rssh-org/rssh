@@ -771,12 +771,6 @@
     }
     .message-actions {
         display: flex; gap: 1px;
-        opacity: 0; pointer-events: none;
-        transition: opacity 120ms ease;
-    }
-    .item-user:hover .message-actions,
-    .item-user:focus-within .message-actions {
-        opacity: 1; pointer-events: auto;
     }
     .message-action {
         width: 24px; height: 24px; padding: 0;
@@ -797,11 +791,8 @@
             align-items: flex-end;
         }
         .message-actions { order: 2; }
-        .bubble.user { order: 1; }
-    }
-    @media (hover: none), (any-pointer: coarse) {
-        .message-actions { opacity: 1; pointer-events: auto; }
         .message-action { width: 44px; height: 44px; }
+        .bubble.user { order: 1; }
     }
     .ts {
         font-size: 10px; color: var(--text-dim);

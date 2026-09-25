@@ -148,6 +148,7 @@ describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
             fileMultiSelect: serverSupport,
             directoryTransfer: serverSupport,
             nativeClipboard: true,
+            releaseUpdateCheck: true,
             terminalPolicy,
         } });
         await expect(result).resolves.toEqual({
@@ -155,6 +156,7 @@ describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
             fileMultiSelect: expected,
             directoryTransfer: expected,
             nativeClipboard: false,
+            releaseUpdateCheck: true,
             terminalPolicy,
         });
     });

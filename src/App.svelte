@@ -2,9 +2,8 @@
   import { onMount } from "svelte";
   import AppShell from "./lib/components/AppShell.svelte";
   import ToastStack from "./lib/components/ToastStack.svelte";
-  import SessionCleanupNotice from "./lib/components/SessionCleanupNotice.svelte";
   import WelcomeScreen from "./lib/components/WelcomeScreen.svelte";
-  import { isIOS, loadProfiles, loadForwards } from "./lib/stores/app.svelte.ts";
+  import { loadProfiles, loadForwards } from "./lib/stores/app.svelte.ts";
   import * as updates from "./lib/stores/updates.svelte.ts";
   import * as sync from "./lib/stores/sync.svelte.ts";
   import * as cli from "./lib/stores/cli.svelte.ts";
@@ -64,9 +63,7 @@
     // Skip background update polling on clone / AI-handoff windows —
     // they're transient and the main window already owns the timer.
     if (!auxiliaryWindow) {
-      // App Store/TestFlight owns updates on iOS; never direct those users to a
-      // GitHub desktop/Android artifact.
-      if (!isIOS) updates.startBackgroundChecks();
+      if (runtime.capabilities().releaseUpdateCheck) updates.startBackgroundChecks();
       sync.startBackgroundChecks();
       if (runtime.capabilities().cliInstall) cli.startBackgroundChecks();
     }
@@ -118,7 +115,6 @@
   </main>
 {/if}
 <ToastStack />
-<SessionCleanupNotice />
 
 {#if showWelcome}
   <WelcomeScreen onDismiss={dismissWelcome} />

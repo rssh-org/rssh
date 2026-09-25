@@ -250,7 +250,7 @@ rg 'db::|secret_store|sync::config' src-tauri/src/bin/rssh
 
 ### P7. 布局断点不能决定输入或原生能力
 
-`stores/layout.svelte.ts` 统一观察窗口宽度，App 根组件管理监听生命周期。侧栏保留窄/宽两份偏好；resize 只切换读取，不改持久化设置。终端输入控制独立于断点，不能在隐藏窄屏工具栏时同时丢掉软键盘入口。
+`stores/layout.svelte.ts` 统一观察窗口宽度，App 根组件管理监听生命周期。侧栏保留窄/宽两份偏好；resize 只切换读取，不改持久化设置。终端辅助键盘（包括唤起系统键盘的按钮）只在窄屏显示；宽屏不显示辅助键盘或独立浮钮，不按 OS、触摸能力或系统键盘是否打开增加例外。硬件键盘与系统输入法的输入处理独立于断点。
 
 ### P8. Command 名是跨适配器 wire contract
 

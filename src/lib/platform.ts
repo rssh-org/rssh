@@ -3,7 +3,7 @@ interface NavigatorPlatformInfo {
   maxTouchPoints?: number;
 }
 
-/** Platform-specific update/IME behavior only; never use this for layout. */
+/** Local browser IME behavior only; never use this for layout or host capabilities. */
 export function isIOSPlatform(navigatorInfo?: NavigatorPlatformInfo): boolean {
   if (!navigatorInfo) return false;
   const { userAgent, maxTouchPoints = 0 } = navigatorInfo;

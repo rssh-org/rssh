@@ -2,7 +2,6 @@ import { invoke } from "@tauri-apps/api/core";
 import * as ai from "../ai/store.svelte.ts";
 import * as pluginStore from "../plugins/store.svelte.ts";
 import { errMsg, t } from "../i18n/index.svelte.ts";
-import { isIOS } from "../platform.ts";
 import { capabilities } from "./runtime.svelte.ts";
 import * as layout from "./layout.svelte.ts";
 import type {
@@ -25,7 +24,6 @@ import { createSidePanelState } from "./panel-state.svelte.ts";
 /* ═══════════════════════════════════════════════════════
    Platform
    ═══════════════════════════════════════════════════════ */
-export { isIOS };
 export { capabilities };
 
 /* ═══════════════════════════════════════════════════════

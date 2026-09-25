@@ -145,6 +145,86 @@ describe("ReservedSessionAttempt", () => {
     expect(close).toHaveBeenCalledWith("reserved-1");
   });
 
+  it("retries a failed open after its backend reservation was already closed", async () => {
+    const registry = createSessionCleanupRegistry();
+    const resources = new Map<string, "pending" | "ready" | "closed">();
+    const timeout = new Error("TCP connection timed out after 10 seconds");
+    let nextId = 0;
+    let connectionAvailable = false;
+    const openBackend = vi.fn(async (id: string) => {
+      resources.set(id, "pending");
+      if (!connectionAvailable) {
+        // The backend reservation's Drop closes a failed open before its
+        // rejection reaches the frontend. Closing that record is idempotent.
+        resources.set(id, "closed");
+        throw timeout;
+      }
+      resources.set(id, "ready");
+      return id;
+    });
+    const close = vi.fn(async (id: string) => {
+      if (resources.has(id)) resources.set(id, "closed");
+    });
+    const attempt = createReservedSessionAttempt({
+      makeId: () => `reserved-${++nextId}`,
+      wireEvents: async () => () => {},
+      cleanup: registry.forScope("tab:ssh-1", "SSH server"),
+      close,
+    });
+
+    await expect(attempt.open(openBackend)).rejects.toBe(timeout);
+    expect(resources.get("reserved-1")).toBe("closed");
+    expect(close).toHaveBeenCalledWith("reserved-1");
+    connectionAvailable = true;
+    await expect(attempt.open(openBackend)).resolves.toEqual({ kind: "ready", sessionId: "reserved-2" });
+    expect(openBackend).toHaveBeenCalledTimes(2);
+    expect(resources.get("reserved-2")).toBe("ready");
+    expect(registry.pending()).toEqual([]);
+  });
+
+  it("keeps a real cleanup failure visible without blocking an independent connection", async () => {
+    const registry = createSessionCleanupRegistry();
+    const resources = new Set<string>();
+    const cleanupFailure = new Error("native close failed");
+    let cleanupAvailable = false;
+    const first = createReservedSessionAttempt({
+      makeId: () => "session-1",
+      wireEvents: async () => () => {},
+      cleanup: registry.forScope("tab:ssh-1", "first server"),
+      close: async (id) => {
+        if (!resources.has(id)) return;
+        if (!cleanupAvailable) throw cleanupFailure;
+        resources.delete(id);
+      },
+    });
+    await expect(first.open(async (id) => {
+      resources.add(id);
+      throw new Error("open response lost");
+    })).rejects.toThrow("open response lost");
+
+    const second = createReservedSessionAttempt({
+      makeId: () => "session-2",
+      wireEvents: async () => () => {},
+      cleanup: registry.forScope("tab:ssh-2", "second server"),
+      close: async (id) => { resources.delete(id); },
+    });
+    await expect(second.open(async (id) => {
+      resources.add(id);
+      return id;
+    })).resolves.toEqual({ kind: "ready", sessionId: "session-2" });
+    expect(registry.pending()).toEqual([{
+      sessionId: "session-1", scope: "tab:ssh-1", label: "first server",
+      status: { kind: "failed", error: cleanupFailure },
+    }]);
+    expect(resources).toEqual(new Set(["session-1", "session-2"]));
+
+    cleanupAvailable = true;
+    await registry.retry("session-1");
+    expect(registry.pending()).toEqual([]);
+    expect(resources).toEqual(new Set(["session-2"]));
+    expect(second.accepts("session-2")).toBe(true);
+  });
+
   it("rejects a backend id that differs from the canonical reservation", async () => {
     const close = vi.fn();
     const disposeEvents = vi.fn();

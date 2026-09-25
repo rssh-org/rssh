@@ -17,6 +17,7 @@ pub struct RuntimeCapabilities {
     pub directory_transfer: bool,
     pub plugins: bool,
     pub native_clipboard: bool,
+    pub release_update_check: bool,
     pub terminal_policy: TerminalRuntimePolicy,
 }
 
@@ -38,6 +39,9 @@ impl RuntimeCapabilities {
             directory_transfer: cfg!(any(windows, macos, linux)),
             plugins: true,
             native_clipboard: cfg!(any(windows, macos, linux)),
+            // App Store/TestFlight manages native iOS releases. Browser clients
+            // follow their RSSH server's policy, not the browser's operating system.
+            release_update_check: !cfg!(ios),
             terminal_policy: if cfg!(any(android, ios)) {
                 TerminalRuntimePolicy::constrained()
             } else {
@@ -127,11 +131,13 @@ mod tests {
             "directoryTransfer",
             "plugins",
             "nativeClipboard",
+            "releaseUpdateCheck",
         ] {
             assert!(value[key].is_boolean(), "missing boolean capability {key}");
         }
-        assert_eq!(value.as_object().unwrap().len(), 14);
+        assert_eq!(value.as_object().unwrap().len(), 15);
         assert_eq!(value["fileMultiSelect"], true);
+        assert_eq!(value["releaseUpdateCheck"], !cfg!(ios));
         let expected = if cfg!(any(android, ios)) {
             TerminalRuntimePolicy::constrained()
         } else {
@@ -153,5 +159,6 @@ mod tests {
         assert!(!capabilities.cli_install);
         assert!(!capabilities.plugins);
         assert!(capabilities.local_pty);
+        assert!(capabilities.release_update_check);
     }
 }
