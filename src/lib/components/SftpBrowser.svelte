@@ -1,6 +1,7 @@
 <script lang="ts">
     import {onDestroy, onMount, tick} from "svelte";
     import {invoke} from "@tauri-apps/api/core";
+    import {WebviewWindow} from "@tauri-apps/api/webviewWindow";
     import * as app from "../stores/app.svelte.ts";
     import * as transfers from "../stores/transfers.svelte.ts";
     import type {RemoteEntry} from "../stores/app.svelte.ts";
@@ -9,6 +10,8 @@
     import { remoteUploadName } from "../sftp-name.ts";
     import Modal from "./Modal.svelte";
     import AppIcon from "./AppIcon.svelte";
+    import PreviewPane from "./PreviewPane.svelte";
+    import { previewKind } from "../sftp-preview.ts";
     import {writeText as writeClipboard} from "../clipboard.ts";
     import {toast} from "../stores/toast.svelte.ts";
 
@@ -67,12 +70,88 @@
     /** Delete confirm state. */
     let deleteEntry = $state<RemoteEntry | null>(null);
 
+    /** Preview state: a remote file opened in the in-window modal. */
+    let previewEntry = $state<RemoteEntry | null>(null);
+
+    // "Reveal this file" from the editor tab: navigate to its directory and
+    // briefly highlight the row. Only the SftpBrowser instance owning the same
+    // SFTP session acts on the request.
+    let pendingReveal = $state<{ name: string; nonce: number } | null>(null);
+    let revealed = $state<string | null>(null);
+    let revealTimer: number | undefined;
+
+    // Files that are open in a tab (editor or preview) stay highlighted in the
+    // tree, so the user can find "which figure did I just open" at a glance
+    // among many similarly-named files — like VS Code's explorer.
+    let openedPaths = $derived(
+        new Set(
+            app.workspaceTabs()
+                .filter((t) => t.type === "sftp_edit" || t.type === "sftp_preview")
+                .map((t) => t.meta?.path ?? ""),
+        ),
+    );
+    let activeOpenPath = $derived(
+        (() => {
+            const id = app.activeWorkspaceId();
+            const tab = app.workspaceTabs().find((t) => t.id === id);
+            return tab && (tab.type === "sftp_edit" || tab.type === "sftp_preview")
+                ? (tab.meta?.path ?? "")
+                : "";
+        })(),
+    );
+
+    $effect(() => {
+        const req = app.revealRequest();
+        if (!req || req.sftpId !== sftpId) return;
+        const i = req.path.lastIndexOf("/");
+        const dir = i > 0 ? req.path.slice(0, i) : "/";
+        const name = req.path.slice(i + 1);
+        pendingReveal = { name, nonce: req.nonce };
+        void listDir(dir);
+    });
+
+    onDestroy(() => { clearTimeout(revealTimer); });
+
     /** Renames the input after mount so it can receive focus. */
     let renameInputEl: HTMLInputElement | undefined;
 
     const selectedCount = $derived(selected.size);
     const allSelected = $derived(entries.length > 0 && selected.size === entries.length);
     const someSelected = $derived(selected.size > 0 && selected.size < entries.length);
+
+    // ── Sort: name / size / mtime, asc / desc. "" keeps the server order.
+    //    Directories always sort before files (VS Code explorer style).
+    type SortField = "name" | "size" | "mtime" | "";
+    let sortBy = $state<SortField>("");
+    let sortDir = $state<"asc" | "desc">("asc");
+    function cmpFor(a: RemoteEntry, b: RemoteEntry): number {
+        let r: number;
+        if (sortBy === "name") {
+            r = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+        } else if (sortBy === "size") {
+            r = (a.is_dir ? 0 : a.size) - (b.is_dir ? 0 : b.size);
+        } else {
+            r = a.mtime - b.mtime;
+        }
+        return sortDir === "asc" ? r : -r;
+    }
+    let sortedEntries = $derived.by(() => {
+        if (!sortBy) return entries;
+        const dirs = entries.filter((e) => e.is_dir).slice().sort(cmpFor);
+        const files = entries.filter((e) => !e.is_dir).slice().sort(cmpFor);
+        return [...dirs, ...files];
+    });
+    function toggleSort(field: SortField) {
+        if (sortBy === field) {
+            sortDir = sortDir === "asc" ? "desc" : "asc";
+        } else {
+            sortBy = field;
+            sortDir = "asc";
+        }
+    }
+    function sortArrow(field: SortField): string {
+        return sortBy === field ? (sortDir === "asc" ? "▲" : "▼") : "";
+    }
 
     onMount(async () => {
         try {
@@ -115,6 +194,21 @@
             error = errMsg(e);
         }
         loading = false;
+        // A pending "reveal file in tree" request (Ctrl+click in the editor
+        // tab) finished loading: highlight and scroll to the file.
+        if (pendingReveal) {
+            const pr = pendingReveal;
+            pendingReveal = null;
+            if (entries.some((e) => e.name === pr.name)) {
+                revealed = pr.name;
+                clearTimeout(revealTimer);
+                revealTimer = window.setTimeout(() => { revealed = null; }, 3000);
+                requestAnimationFrame(() => {
+                    document.querySelector(`[data-reveal="${CSS.escape(pr.name)}"]`)?.scrollIntoView({ block: "nearest" });
+                });
+            }
+            app.clearRevealRequest(pr.nonce);
+        }
     }
 
     function goUp() {
@@ -453,6 +547,130 @@
 
     function closeProperties() { propsStat = null; propsLoading = false; }
 
+    // ── Preview (image / PDF / markdown / table / code) ──
+
+    function isPreviewable(entry: RemoteEntry): boolean {
+        if (entry.is_dir || entry.is_symlink) return false;
+        return previewKind(entry.name) !== null;
+    }
+
+    /** Open the file in the in-window modal. The pane downloads and renders
+     *  it itself (image/PDF/markdown/CSV·TSV/CodeMirror with Ctrl+F search). */
+    function openPreview(entry: RemoteEntry) {
+        closeCtxMenu();
+        error = "";
+        if (!isPreviewable(entry)) return;
+        previewEntry = entry;
+    }
+
+    /** Open a preview-only file (image/PDF) in a main-window tab, so it shows
+     *  in the tab bar like a VS Code editor tab. */
+    function openPreviewTab(entry: RemoteEntry) {
+        closeCtxMenu();
+        error = "";
+        if (!isPreviewable(entry)) return;
+        app.openRemotePreview({
+            sftpId: sftpId ?? "",
+            path: entryPath(entry),
+            name: entry.name,
+            size: entry.size,
+        });
+    }
+
+    /** Open the file in a standalone desktop window. The SFTP session belongs
+     *  to the main window, so closing the preview window never disconnects. */
+    async function openInWindow(entry: RemoteEntry) {
+        closeCtxMenu();
+        error = "";
+        if (!isPreviewable(entry)) return;
+        try {
+            const q = new URLSearchParams({
+                view: "preview",
+                sftp: sftpId ?? "",
+                path: entryPath(entry),
+                name: entry.name,
+                size: String(entry.size),
+            });
+            const win = new WebviewWindow("rssh-preview-" + Date.now(), {
+                url: "index.html?" + q.toString(),
+                title: entry.name,
+                width: 1100,
+                height: 760,
+                minWidth: 480,
+                minHeight: 360,
+                resizable: true,
+                // Same GPU workaround as the main window: WebView2's GPU
+                // renderer can crash/flicker windows on machines with a flaky
+                // GPU, so new preview windows get software rendering too.
+                additionalBrowserArgs: "--disable-gpu",
+            });
+            win.once("tauri://error", (e: any) => {
+                error = t("sftp.preview.window_failed", { err: String(e ?? "") });
+            });
+        } catch (e: any) {
+            error = errMsg(e);
+        }
+    }
+
+    // ── Edit (VS Code style) ──
+
+    /** Text-ish files open in the editor; image/PDF stay preview-only. */
+    function isEditable(entry: RemoteEntry): boolean {
+        if (entry.is_dir || entry.is_symlink) return false;
+        const k = previewKind(entry.name);
+        return k === "code" || k === "markdown" || k === "table";
+    }
+
+    /** Open the file in a main-window editor tab (VS Code style): the SFTP
+     *  sidebar stays mounted as the file tree, the editor opens in the center
+     *  region. Reuses the tab when the same file is already open. */
+    function openEditor(entry: RemoteEntry) {
+        closeCtxMenu();
+        error = "";
+        if (!isEditable(entry)) return;
+        app.openRemoteEdit({
+            sftpId: sftpId ?? "",
+            path: entryPath(entry),
+            name: entry.name,
+            size: entry.size,
+        });
+    }
+
+    /** Open the file in a standalone edit window (multi-instance, VS Code tab
+     *  style). CSV/TSV get the editable grid inside that window. */
+    async function openEditorWindow(entry: RemoteEntry) {
+        closeCtxMenu();
+        error = "";
+        if (!isEditable(entry)) return;
+        try {
+            const q = new URLSearchParams({
+                view: "edit",
+                sftp: sftpId ?? "",
+                path: entryPath(entry),
+                name: entry.name,
+                size: String(entry.size),
+            });
+            const win = new WebviewWindow("rssh-edit-" + Date.now(), {
+                url: "index.html?" + q.toString(),
+                title: entry.name,
+                width: 1100,
+                height: 760,
+                minWidth: 480,
+                minHeight: 360,
+                resizable: true,
+                // Same GPU workaround as the main window: WebView2's GPU
+                // renderer can crash/flicker windows on machines with a flaky
+                // GPU, so new edit windows get software rendering too.
+                additionalBrowserArgs: "--disable-gpu",
+            });
+            win.once("tauri://error", (e: any) => {
+                error = t("sftp.preview.window_failed", { err: String(e ?? "") });
+            });
+        } catch (e: any) {
+            error = errMsg(e);
+        }
+    }
+
     // ── Download selected ──
 
     async function downloadSelected() {
@@ -611,16 +829,39 @@
                         aria-label={t("sftp.select_all")}
                     />
                 </span>
-                <span class="cell-name h-label">{t("sftp.column.name")}</span>
-                <span class="cell-size h-label">{t("sftp.column.size")}</span>
-                <span class="cell-mtime h-label">{t("sftp.column.modified")}</span>
+                <span class="cell-name h-label">
+                    <button type="button" class="sort-btn" onclick={() => toggleSort("name")} title={t("sftp.sort_by_name")}>
+                        {t("sftp.column.name")} <span class="sort-arrow">{sortArrow("name")}</span>
+                    </button>
+                </span>
+                <span class="cell-size h-label">
+                    <button type="button" class="sort-btn" onclick={() => toggleSort("size")} title={t("sftp.sort_by_size")}>
+                        {t("sftp.column.size")} <span class="sort-arrow">{sortArrow("size")}</span>
+                    </button>
+                </span>
+                <span class="cell-mtime h-label">
+                    <button type="button" class="sort-btn" onclick={() => toggleSort("mtime")} title={t("sftp.sort_by_mtime")}>
+                        {t("sftp.column.modified")} <span class="sort-arrow">{sortArrow("mtime")}</span>
+                    </button>
+                </span>
             </div>
-            {#each entries as e (e.name)}
+            {#each sortedEntries as e (e.name)}
                 <div
                     class="file-row"
                     class:dir={e.is_dir}
                     class:selected={selected.has(e.name)}
+                    class:revealed={revealed === e.name}
+                    class:open={!e.is_dir && openedPaths.has(entryPath(e))}
+                    class:open-active={!e.is_dir && entryPath(e) === activeOpenPath}
+                    data-reveal={e.name}
+                    onclick={() => { revealed = null; }}
                     oncontextmenu={(ev) => onContextMenu(ev, e)}
+                    ondblclick={(ev) => {
+                        if (!app.isMobile && !e.is_dir && !e.is_symlink) {
+                            ev.preventDefault();
+                            if (isEditable(e)) openEditor(e); else openPreviewTab(e);
+                        }
+                    }}
                 >
                     <span class="cell-check">
                         <input
@@ -657,6 +898,14 @@
          style="left: {ctxMenu.x + ctxDx}px; top: {ctxMenu.y + ctxDy}px;">
         {#if !(app.isMobile && ctxMenu.entry.is_dir)}
             <button class="ctx-item" onclick={() => downloadEntry(ctxMenu!.entry)}>{t("sftp.ctx.download")}</button>
+        {/if}
+        {#if isEditable(ctxMenu!.entry)}
+            <button class="ctx-item" onclick={() => openEditor(ctxMenu!.entry)}>{t("sftp.ctx.edit")}</button>
+            <button class="ctx-item" onclick={() => openEditorWindow(ctxMenu!.entry)}>{t("sftp.ctx.edit_window")}</button>
+        {/if}
+        {#if isPreviewable(ctxMenu!.entry)}
+            <button class="ctx-item" onclick={() => openPreview(ctxMenu!.entry)}>{t("sftp.ctx.preview")}</button>
+            <button class="ctx-item" onclick={() => openInWindow(ctxMenu!.entry)}>{t("sftp.ctx.open_window")}</button>
         {/if}
         <button class="ctx-item" onclick={() => confirmDelete(ctxMenu!.entry)}>{t("sftp.ctx.delete")}</button>
         <button class="ctx-item" onclick={() => startRename(ctxMenu!.entry)}>{t("sftp.ctx.rename")}</button>
@@ -728,6 +977,23 @@
         <div class="modal-actions" style="margin-top: 16px;">
             <button class="btn btn-sm" onclick={closeProperties}>{t("sftp.props.ok")}</button>
         </div>
+    </Modal>
+{/if}
+
+{#if previewEntry}
+    <Modal onClose={() => (previewEntry = null)} style="max-width: 94vw; width: 82vw; min-width: 60vw; max-height: 90vh;">
+        {#key previewEntry.name + previewEntry.size}
+            <div style="height: calc(90vh - 140px); min-height: 260px;">
+                <PreviewPane
+                    name={previewEntry.name}
+                    sftpId={sftpId ?? ""}
+                    path={entryPath(previewEntry)}
+                    size={previewEntry.size}
+                    onClose={() => (previewEntry = null)}
+                    onOpenWindow={() => openInWindow(previewEntry)}
+                />
+            </div>
+        {/key}
     </Modal>
 {/if}
 
@@ -894,6 +1160,41 @@
         background: color-mix(in srgb, var(--accent) 18%, transparent);
     }
 
+    /* Row revealed from the editor tab (Ctrl+click on the filename). */
+    .file-row.revealed {
+        background: color-mix(in srgb, var(--accent) 24%, transparent);
+        box-shadow: inset 0 0 0 1px var(--accent);
+    }
+    .file-row.revealed .file-label {
+        color: var(--accent);
+        font-weight: 600;
+    }
+
+    /* Files open in a tab keep a persistent marker — the user often opens many
+       similarly-named figures and needs to spot the one just opened at a
+       glance (VS Code explorer style). */
+    .file-row.open {
+        background: color-mix(in srgb, var(--accent) 10%, transparent);
+    }
+    .file-row.open .file-label {
+        font-weight: 600;
+    }
+    .file-row.open .file-label::after {
+        content: "●";
+        margin-left: 6px;
+        font-size: 9px;
+        vertical-align: 1px;
+        color: var(--accent);
+    }
+    .file-row.open-active {
+        background: color-mix(in srgb, var(--accent) 22%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+    }
+    .file-row.open:hover,
+    .file-row.open-active:hover {
+        background: color-mix(in srgb, var(--accent) 20%, transparent);
+    }
+
     .file-header {
         font-size: 11px;
         color: var(--text-dim);
@@ -902,6 +1203,28 @@
         border-bottom: 1px solid var(--divider);
         padding-bottom: 6px;
         margin-bottom: 2px;
+    }
+
+    .sort-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        padding: 0;
+        border: none;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        letter-spacing: inherit;
+        text-transform: inherit;
+        cursor: pointer;
+    }
+    .sort-btn:hover {
+        color: var(--accent, #8bc8ea);
+    }
+    .sort-arrow {
+        font-size: 9px;
+        min-width: 10px;
+        color: var(--accent, #8bc8ea);
     }
     .h-label { user-select: none; }
     .cell-size.h-label, .cell-mtime.h-label { text-align: right; }

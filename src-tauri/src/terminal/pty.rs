@@ -410,10 +410,11 @@ fn spawn_builder(
         }),
     };
 
-    // 读取线程：PTY stdout → Tauri 事件
+    // 读取线程：PTY stdout → Tauri 事件。大缓冲直接摊薄每次 read 的
+    // emit/编码开销；flood 输出时 read() 会尽量填满。
     let pty_id = session_id.clone();
     std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; 64 * 1024];
         let mut reader = reader;
         loop {
             match reader.read(&mut buf) {
