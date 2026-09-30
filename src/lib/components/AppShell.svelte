@@ -4,6 +4,7 @@
     import {getCurrentWindow} from "@tauri-apps/api/window";
     import type {Profile, Tab, Group} from "../stores/app.svelte.ts";
     import * as app from "../stores/app.svelte.ts";
+    import * as sessionRestore from "../stores/session-restore.svelte.ts";
     import * as updates from "../stores/updates.svelte.ts";
     import * as syncStatus from "../stores/sync.svelte.ts";
     import HomeScreen from "./HomeScreen.svelte";
@@ -75,6 +76,10 @@
     const bypassStartupReconcile = !!window.__rssh_clone || !!window.__rssh_ai_handoff;
     let resourcePanesAllowed = $state(bypassStartupReconcile);
     let navigationLoad = 0;
+    $effect(() => {
+        if (bypassStartupReconcile || !sessionRestore.ready() || !sessionRestore.enabled()) return;
+        sessionRestore.persist(sessionRestore.snapshot());
+    });
     $effect(() => {
         const tabs = app.tabs();
         for (const paneId of Object.keys(pendingPaneSources)) {
@@ -238,10 +243,13 @@
                 canOpenLocal: !app.isMobile,
                 reconcile: () => invoke("reconcile_sessions", { activeIds: [] }),
                 allowResourcePanes: () => { resourcePanesAllowed = true; },
+                restoreSessions: () => sessionRestore.restore(startup.signal),
                 loadAutoOpenLocal: async () =>
                     await invoke<string | null>("get_setting", { key: "open_local_on_startup" }) === "true",
                 openLocal: addLocalTab,
             });
+        } else {
+            void sessionRestore.initializeSecondaryWindow();
         }
         consumeCloneQuery();
         consumeAiHandoff();

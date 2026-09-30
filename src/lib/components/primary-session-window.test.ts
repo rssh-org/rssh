@@ -11,6 +11,30 @@ function deferred<T>() {
 }
 
 describe("initializePrimarySessionWindow", () => {
+  it("restores only after reconciliation, including on mobile", async () => {
+    const events: string[] = [];
+    await initializePrimarySessionWindow({
+      canOpenLocal: false,
+      reconcile: async () => { events.push("reconcile"); },
+      allowResourcePanes: () => events.push("release"),
+      restoreSessions: async () => { events.push("restore"); return false; },
+      loadAutoOpenLocal: async () => { events.push("auto-open"); return true; },
+      openLocal: () => events.push("local"),
+    });
+    expect(events).toEqual(["reconcile", "release", "restore"]);
+  });
+
+  it("does not duplicate a restored local terminal", async () => {
+    const loadAutoOpenLocal = vi.fn(async () => true);
+    const openLocal = vi.fn();
+    await initializePrimarySessionWindow({
+      reconcile: async () => {}, allowResourcePanes: () => {},
+      restoreSessions: async () => true, loadAutoOpenLocal, openLocal,
+    });
+    expect(loadAutoOpenLocal).not.toHaveBeenCalled();
+    expect(openLocal).not.toHaveBeenCalled();
+  });
+
   it("releases resource panes before reading and applying auto-open", async () => {
     const reconcile = deferred<void>();
     const events: string[] = [];

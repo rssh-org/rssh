@@ -1200,6 +1200,8 @@ const en = {
   "settings.shell.local_shell": "LOCAL SHELL",
   "settings.shell.custom": "CUSTOM",
   "settings.shell.open_local_on_startup": "Open on startup",
+  "settings.shell.restore_sessions": "Restore sessions on startup",
+  "settings.shell.restore_sessions_desc": "Reopen saved SSH, Telnet and serial connections and local terminals from this device's last session. Connections start fresh using current profiles; startup commands may run again. Split panes reopen as separate tabs. Terminal output, editors, forwards and discovered containers are not restored. Off by default.",
   "settings.shell.open_local_on_startup_desc": "When rssh starts, automatically open one local terminal tab.",
   "settings.shell.connection_timeout": "CONNECTION TIMEOUT",
   "settings.shell.timeout_label": "Timeout (seconds)",

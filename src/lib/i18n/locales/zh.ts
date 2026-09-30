@@ -1203,6 +1203,8 @@ const zh: Messages = {
   "settings.shell.local_shell": "本地 SHELL",
   "settings.shell.custom": "自定义",
   "settings.shell.open_local_on_startup": "启动时打开",
+  "settings.shell.restore_sessions": "启动时恢复会话",
+  "settings.shell.restore_sessions_desc": "重新打开本机上次的已保存 SSH、Telnet、串口连接和本地终端。使用当前配置建立新连接，启动命令可能再次执行；分屏恢复为独立标签页。不恢复终端输出、编辑器、端口转发或动态发现的容器。默认关闭。",
   "settings.shell.open_local_on_startup_desc": "rssh 启动时自动打开一个本地终端标签页。",
   "settings.shell.connection_timeout": "连接超时",
   "settings.shell.timeout_label": "超时（秒）",

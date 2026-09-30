@@ -2,9 +2,11 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import * as app from "../stores/app.svelte.ts";
+  import * as sessionRestore from "../stores/session-restore.svelte.ts";
   import * as transfers from "../stores/transfers.svelte.ts";
   import { isMac } from "../stores/keymap.svelte.ts";
-  import { t } from "../i18n/index.svelte.ts";
+  import { t, errMsg } from "../i18n/index.svelte.ts";
+  import { toast } from "../stores/toast.svelte.ts";
   import Select from "./Select.svelte";
   import Modal from "./Modal.svelte";
 
@@ -17,6 +19,7 @@
   let pendingCustom = $state(false);
   /** Auto-open one local terminal on startup — default off (unset reads as off). */
   let openLocalOnStartup = $state(false);
+  let savingRestore = $state(false);
   let verboseLog = $state(true);
   let connectTimeout = $state(10);
   let copyOnSelect = $state(false);
@@ -101,6 +104,19 @@
     await invoke("set_setting", { key: "open_local_on_startup", value: String(openLocalOnStartup) });
   }
 
+  async function saveRestore(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    savingRestore = true;
+    try {
+      await sessionRestore.setEnabled(input.checked);
+    } catch (error) {
+      toast.error(errMsg(error));
+    } finally {
+      input.checked = sessionRestore.enabled();
+      savingRestore = false;
+    }
+  }
+
   async function saveTimeout() {
     const val = Math.max(1, Math.min(300, connectTimeout));
     connectTimeout = val;
@@ -151,6 +167,17 @@
 </script>
 
 <div class="page">
+  <div class="switch-card">
+    <div class="switch-card-body">
+      <div class="switch-card-title" id="restore-sessions-label">{t("settings.shell.restore_sessions")}</div>
+      <div class="switch-card-desc">{t("settings.shell.restore_sessions_desc")}</div>
+    </div>
+    <label class="switch">
+      <input type="checkbox" checked={sessionRestore.enabled()} aria-labelledby="restore-sessions-label"
+        disabled={savingRestore || !sessionRestore.ready()} onchange={saveRestore} />
+      <span class="slider"></span>
+    </label>
+  </div>
   {#if !app.isMobile}
     <div class="section-label" id="local-shell-label">{t("settings.shell.local_shell")}</div>
     <div class="card surface-raised shell-card">
