@@ -4,8 +4,10 @@
     import {getCurrentWindow} from "@tauri-apps/api/window";
     import type {Profile, Tab, Group} from "../stores/app.svelte.ts";
     import * as app from "../stores/app.svelte.ts";
+    import * as layout from "../stores/layout.svelte.ts";
     import * as updates from "../stores/updates.svelte.ts";
     import * as syncStatus from "../stores/sync.svelte.ts";
+    import * as serial from "../stores/serial.svelte.ts";
     import HomeScreen from "./HomeScreen.svelte";
     import TerminalSplitLayout from "./TerminalSplitLayout.svelte";
     import ForwardPane from "./ForwardPane.svelte";
@@ -33,6 +35,7 @@
     import {toast} from "../stores/toast.svelte.ts";
     import {readText as readClipboard, writeText as writeClipboard} from "../clipboard.ts";
     import {initializePrimarySessionWindow} from "./primary-session-window.ts";
+    import {isTouchContextMenu} from "../input.ts";
     import {
         defaultPanelWidth,
         fitPanelWidths,
@@ -74,6 +77,29 @@
     let pendingPaneSources = $state<Record<string, string>>({});
     const bypassStartupReconcile = !!window.__rssh_clone || !!window.__rssh_ai_handoff;
     let resourcePanesAllowed = $state(bypassStartupReconcile);
+    const startup = new AbortController();
+    let startupError = $state("");
+    let startupRunning = $state(false);
+    async function initializeResources() {
+        if (startupRunning || startup.signal.aborted) return;
+        startupRunning = true;
+        startupError = "";
+        try {
+            await initializePrimarySessionWindow({
+                signal: startup.signal,
+                canOpenLocal: app.capabilities().localPty,
+                reconcile: () => invoke("reconcile_sessions", { activeIds: [] }),
+                allowResourcePanes: () => { resourcePanesAllowed = true; },
+                loadAutoOpenLocal: async () =>
+                    await invoke<string | null>("get_setting", { key: "open_local_on_startup" }) === "true",
+                openLocal: addLocalTab,
+            });
+        } catch (error) {
+            if (!startup.signal.aborted) startupError = errMsg(error);
+        } finally {
+            startupRunning = false;
+        }
+    }
     let navigationLoad = 0;
     $effect(() => {
         const tabs = app.tabs();
@@ -100,6 +126,7 @@
     }
 
     function togglePin() {
+        if (!app.capabilities().windowPin) return;
         pinned = !pinned;
         getCurrentWindow().setAlwaysOnTop(pinned).catch(e => {
             console.error("setAlwaysOnTop failed:", e);
@@ -162,7 +189,7 @@
                 handler: () => {
                     const tab = app.activeTab();
                     // serial excluded: the port is exclusive, a second window would fail.
-                    if (!tab || !canOpenTabInNewWindow(tab) || app.isMobile) return false;
+                    if (!tab || !canOpenTabInNewWindow(tab)) return false;
                     openInNewWindow(tab);
                 },
             },
@@ -228,20 +255,11 @@
     }
 
     onMount(() => {
-        const startup = new AbortController();
         keymap.init();
         // Crash recovery must settle before any pane can create a replacement
         // backend resource. Otherwise reconcile([]) can race that new session.
         if (!bypassStartupReconcile) {
-            void initializePrimarySessionWindow({
-                signal: startup.signal,
-                canOpenLocal: !app.isMobile,
-                reconcile: () => invoke("reconcile_sessions", { activeIds: [] }),
-                allowResourcePanes: () => { resourcePanesAllowed = true; },
-                loadAutoOpenLocal: async () =>
-                    await invoke<string | null>("get_setting", { key: "open_local_on_startup" }) === "true",
-                openLocal: addLocalTab,
-            });
+            void initializeResources();
         }
         consumeCloneQuery();
         consumeAiHandoff();
@@ -249,7 +267,9 @@
         // Plugin registry: manifest rows + on-disk root (for iframe entry URLs).
         // A failed load (e.g. plain-browser dev without the shim server) only
         // means no plugins — never block startup on it.
-        void plugins.load().catch((e) => console.warn("[plugins] registry load failed:", e));
+        if (app.capabilities().plugins) {
+            void plugins.load().catch((e) => console.warn("[plugins] registry load failed:", e));
+        }
 
         const detachKeydown = attachShortcuts(shortcutsTable());
         const detachKeyup = attachKeyup((e) => {
@@ -279,6 +299,7 @@
         const data = window.__rssh_ai_handoff;
         if (!data) return;
         delete window.__rssh_ai_handoff;
+        if (!app.capabilities().localPty) return;
         let payload: { local_path: string; task: string };
         try {
             payload = JSON.parse(data);
@@ -345,6 +366,7 @@
     }
 
     function openInNewWindow(tab: Tab) {
+        if (!canOpenTabInNewWindow(tab)) return;
         invoke("open_tab_in_new_window", {
             clone: JSON.stringify({type: tab.type, label: tab.label, meta: tab.meta}),
         }).catch(e => console.error("open_tab_in_new_window failed:", e));
@@ -371,6 +393,7 @@
 
 
     $effect(() => {
+        if (!app.capabilities().windowControls) return;
         const workspace = app.workspaceTabs().find((tab) => tab.id === app.activeWorkspaceId())
             ?? app.tabs().find((tab) => tab.id === "home");
         const pane = app.tabs().find((tab) => tab.id === app.activePaneId());
@@ -494,8 +517,7 @@
     let aiPanelWidth = $derived(ai.panelWidth(aiTabId));
     let sftpPanelWidth = $derived(app.sftpPanelWidthForTab(app.activePaneId()));
     let contentEl = $state<HTMLDivElement | null>(null);
-    let contentWidth = $state(window.innerWidth);
-    let viewportWidth = $state(window.innerWidth);
+    let contentWidth = $state(layout.viewportWidth());
     let panelFitPriorityByTab = $state<Record<string, PanelFitPriority>>({});
 
     $effect(() => {
@@ -503,7 +525,6 @@
         if (!el) return;
         const sync = () => {
             contentWidth = el.getBoundingClientRect().width;
-            viewportWidth = window.innerWidth;
         };
         sync();
         const observer = new ResizeObserver(sync);
@@ -523,7 +544,7 @@
         containerWidth: contentWidth,
         mainMinWidth: mainPanelMinWidth,
         panelMinWidth,
-        defaultWidth: defaultPanelWidth(viewportWidth),
+        defaultWidth: defaultPanelWidth(layout.viewportWidth()),
         pluginVisible: pluginSideVisible,
         pluginWidth: plugins.sideWidth(app.activePaneId()),
         aiVisible,
@@ -533,7 +554,7 @@
         containerWidth: pluginSideFitted.remainingContainerWidth,
         mainMinWidth: mainPanelMinWidth,
         panelMinWidth,
-        defaultWidth: defaultPanelWidth(viewportWidth),
+        defaultWidth: defaultPanelWidth(layout.viewportWidth()),
         aiVisible,
         sftpVisible,
         aiWidth: aiPanelWidth,
@@ -699,7 +720,8 @@
     let navSections = $derived<{ header: NavItem[]; middle: NavItem[]; footer: NavItem[] }>({
         header: [
             {kind: "tab" as const, tab: {id: "home", type: "home", label: app.tabLabel(app.tabs().find((tab) => tab.id === "home")!)} },
-            ...(app.isMobile ? [] : [{kind: "new-tab" as const}, {kind: "new-edit" as const}]),
+            ...(app.capabilities().localPty ? [{kind: "new-tab" as const}] : []),
+            {kind: "new-edit" as const},
             // Horizontal strip would burst sideways with N pinned profiles — collapse
             // them into one star button that pops a menu. Vertical sidebar keeps the list.
             ...(isHorizontal
@@ -708,9 +730,8 @@
         ],
         middle: app.workspaceTabs().map(t => ({kind: "tab" as const, tab: t})),
         footer: [
-            // Downloads (transfer queue) is now reachable on mobile too — SFTP
-            // single-file transfer runs through it. pin-window stays desktop-only.
-            ...(app.isMobile ? [{kind: "downloads" as const}] : [{kind: "pin-window" as const}, {kind: "downloads" as const}]),
+            ...(app.capabilities().windowPin ? [{kind: "pin-window" as const}] : []),
+            {kind: "downloads" as const},
             {kind: "settings" as const},
         ],
     });
@@ -820,6 +841,7 @@
     }
 
     function addLocalTab() {
+        if (!app.capabilities().localPty) return;
         const id = `local:${crypto.randomUUID()}`;
         app.addTab({id, type: "local", label: "Local"});
         closeDrawer();
@@ -835,6 +857,15 @@
     function openCtxMenu(e: MouseEvent, tab: Tab) {
         e.preventDefault();
         menuCtx = {x: e.clientX, y: e.clientY, tab};
+        if (tab.type === "serial") void loadSerialCapabilities();
+    }
+
+    async function loadSerialCapabilities() {
+        await serial.load();
+        const state = serial.state();
+        if (state.kind === "error") {
+            toast.error(t("serial.capabilities_failed", {error: errMsg(state.error)}));
+        }
     }
 
     /** Detect 10-digit Unix seconds or 13-digit Unix ms timestamp. */
@@ -864,12 +895,16 @@
     }
 
     function canOpenTabInNewWindow(tab: Tab): boolean {
-        return app.isTerminalTabType(tab.type) && tab.type !== "serial";
+        return app.capabilities().multiWindow && app.isTerminalTabType(tab.type) && tab.type !== "serial";
+    }
+
+    function canSplitTab(tab: Tab): boolean {
+        return !layout.compact() && app.isTerminalTabType(tab.type) && tab.type !== "serial";
     }
     type SplitSide = "left" | "right" | "top" | "bottom";
 
     function splitCurrentPane(tab: Tab, side: SplitSide) {
-        if (!app.isTerminalTabType(tab.type) || tab.type === "serial") return;
+        if (!canSplitTab(tab)) return;
         const workspaceId = tab.workspaceId ?? tab.id;
         if (!app.isTerminalWorkspace(workspaceId)) return;
         if (tab.paneOf) app.setActivePane(tab.id);
@@ -981,37 +1016,42 @@
                     onClick: () => { app.setActivePane(tab.id); app.openSnippetPicker(); },
                 },
             ];
-            // Tab context menu is a desktop right-click affordance; on mobile
-            // SFTP opens from the keybar instead.
-            if (!app.isMobile) {
-                items.push({
-                    label: t("tab.context.sftp"),
-                    shortcut: keymap.format("term.sftp"),
-                    disabled: !isSsh,
-                    onClick: () => { app.setActivePane(tab.id); app.openSftp(); },
-                });
-            }
+            items.push({
+                label: t("tab.context.sftp"),
+                shortcut: keymap.format("term.sftp"),
+                disabled: !isSsh,
+                onClick: () => { app.setActivePane(tab.id); app.openSftp(); },
+            });
             sections.push(items);
         }
 
-        // Serial control lines: DTR/RTS assert/deassert + break. Runtime ops on
-        // the open port (MCU reset, bootloader entry, break-to-debugger). Greyed
-        // out until the session exists (briefly during connect / after unplug).
+        // Control lines require both an open session and native signal support.
         if (tab.type === "serial") {
             const sid = app.sessionIdForTab(tab.id);
+            const capabilities = serial.capabilities();
+            const state = serial.state();
+            const disabled = !sid || !capabilities?.signals;
             const ctl = (cmd: string, extra: Record<string, unknown> = {}) => () =>
                 void invoke(cmd, {sessionId: sid, ...extra}).catch((e) => toast.error(errMsg(e)));
+            const status: CtxMenuItem[] = [];
+            if (state.kind === "error") {
+                status.push({label: t("serial.capabilities_retry"), onClick: () => void loadSerialCapabilities()});
+            } else if (!capabilities) {
+                status.push({label: t("serial.capabilities_loading"), disabled: true, onClick: () => {}});
+            } else if (!capabilities.signals) {
+                status.push({label: t("serial.signals_unsupported"), disabled: true, onClick: () => {}});
+            }
             sections.push([
                 {
                     label: t("serial.ctl"),
-                    disabled: !sid,
                     onClick: () => {},
                     submenu: [
-                        {label: t("serial.ctl.dtr_assert"), disabled: !sid, onClick: ctl("serial_set_dtr", {level: true})},
-                        {label: t("serial.ctl.dtr_deassert"), disabled: !sid, onClick: ctl("serial_set_dtr", {level: false})},
-                        {label: t("serial.ctl.rts_assert"), disabled: !sid, onClick: ctl("serial_set_rts", {level: true})},
-                        {label: t("serial.ctl.rts_deassert"), disabled: !sid, onClick: ctl("serial_set_rts", {level: false})},
-                        {label: t("serial.ctl.break"), disabled: !sid, onClick: ctl("serial_send_break")},
+                        ...status,
+                        {label: t("serial.ctl.dtr_assert"), disabled, onClick: ctl("serial_set_dtr", {level: true})},
+                        {label: t("serial.ctl.dtr_deassert"), disabled, onClick: ctl("serial_set_dtr", {level: false})},
+                        {label: t("serial.ctl.rts_assert"), disabled, onClick: ctl("serial_set_rts", {level: true})},
+                        {label: t("serial.ctl.rts_deassert"), disabled, onClick: ctl("serial_set_rts", {level: false})},
+                        {label: t("serial.ctl.break"), disabled, onClick: ctl("serial_send_break")},
                     ],
                 },
             ]);
@@ -1040,13 +1080,9 @@
             ]);
         }
 
-        // Split panes + multi-window: one desktop-only terminal section.
-        // canOpenTabInNewWindow already excludes serial (panes would fight the
-        // exclusive port), so a single guard covers both items. Split follows
-        // the old directional open-new-window submenu idiom: the parent click
-        // runs the common default (split right, VS Code/iTerm style), the four
-        // directions live one hover away.
-        if (canOpenTabInNewWindow(tab) && !app.isMobile) {
+        // Splitting is a frontend layout operation and does not require
+        // native multi-window support. Serial ports remain exclusive.
+        if (canSplitTab(tab)) {
             sections.push([
                 {
                     label: t("tab.context.split"),
@@ -1058,6 +1094,10 @@
                         {label: t("tab.context.split.right"), onClick: () => splitCurrentPane(tab, "right")},
                     ],
                 },
+            ]);
+        }
+        if (canOpenTabInNewWindow(tab)) {
+            sections.push([
                 {
                     label: t("tab.context.open_new_window"),
                     shortcut: keymap.format("tab.openNewWindow"),
@@ -1070,12 +1110,12 @@
         return sections;
     }
     function openPaneContextMenu(e: MouseEvent, tabId: string) {
-        if (app.isMobile) return;
+        if (isTouchContextMenu(e)) return;
         const tab = app.tabs().find((candidate) => candidate.id === tabId);
         if (tab) openCtxMenu(e, tab);
     }
     function openRouteContextMenu(e: MouseEvent, tab: Tab | undefined) {
-        if (app.isMobile || !tab) return;
+        if (!tab) return;
         openCtxMenu(e, tab);
     }
 
@@ -1349,6 +1389,7 @@
                     activeTabId={app.activePaneId()}
                     onResizeStart={startPluginSideResize}
                     onResetWidth={resetPluginSideWidth}
+                    onClose={() => plugins.closeSide(app.activePaneId())}
                 />
             {/if}
         {:else if kind === "ai"}
@@ -1400,6 +1441,14 @@
             {@render sideAside(kind, "left")}
         {/each}
         <div class="main-area">
+            {#if startupError}
+                <div class="startup-error" role="alert">
+                    <span>{t("session.reconcile_failed")}: {startupError}</span>
+                    <button class="btn" onclick={initializeResources} disabled={startupRunning}>
+                        {t("common.retry")}
+                    </button>
+                </div>
+            {/if}
             <!-- 插件横条区：终端上/下边缘，per-tab keep-alive，无匹配插件不占位 -->
             {#if resourcePanesAllowed && pluginHostOk && pluginStripPlugins.length > 0 && pluginStripTabs.length > 0 && pluginStripPos === "top"}
                 <PluginStrip
@@ -1408,6 +1457,7 @@
                     plugins={pluginStripPlugins}
                     tabs={pluginStripTabs}
                     activeTabId={app.activePaneId()}
+                    onClose={() => plugins.closeStrip(app.activePaneId())}
                 />
             {/if}
             <div class="terminal-region">
@@ -1479,6 +1529,7 @@
                     plugins={pluginStripPlugins}
                     tabs={pluginStripTabs}
                     activeTabId={app.activePaneId()}
+                    onClose={() => plugins.closeStrip(app.activePaneId())}
                 />
             {/if}
         </div>
@@ -1644,6 +1695,17 @@
     /* 终端区——所有 .pane 挂在 .terminal-region（绝对定位由它提供 position:
        relative），插件横条区作为兄弟节点贴其上/下边缘。min-width: 0 让 flex
        能把它压到 0（窄屏 AI 接管时）。 */
+    .startup-error {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px;
+        flex-wrap: wrap;
+        overflow-wrap: anywhere;
+        color: var(--text);
+        background: var(--bg);
+        border-bottom: 1px solid var(--divider);
+    }
     .main-area {
         display: flex;
         flex-direction: column;

@@ -21,6 +21,7 @@
         activeTabId,
         onResizeStart,
         onResetWidth,
+        onClose,
     }: {
         side: HorizontalSide;
         width: number;
@@ -31,6 +32,7 @@
         activeTabId: string;
         onResizeStart: (e: MouseEvent) => void;
         onResetWidth: () => void;
+        onClose: () => void;
     } = $props();
 
     // Card collapse is per plugin (global, not per tab): collapsing a chart
@@ -67,6 +69,14 @@
 >
     {#snippet pane(p)}
         {@const tab = tabs.find((entry) => entry.tabId === p.id)}
+        <header class="region-header">
+            <span>{t("plugins.side_region")}</span>
+            <button class="close-btn" title={t("common.close")} aria-label={t("common.close")} onclick={onClose}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="m6 6 12 12M18 6 6 18" />
+                </svg>
+            </button>
+        </header>
         <div class="plugin-cards">
             {#if tab}
                 {#each plugins as plugin (plugin.id)}
@@ -102,6 +112,28 @@
 </SidePanel>
 
 <style>
+    .region-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex: 0 0 auto;
+        padding-left: 10px;
+        border-bottom: 1px solid var(--divider);
+        color: var(--text-sub);
+        font-size: 12px;
+    }
+    .close-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 36px;
+        height: 36px;
+        border: none;
+        background: transparent;
+        color: var(--text-sub);
+        cursor: pointer;
+    }
+    .close-btn:hover { color: var(--text); background: var(--accent-soft); }
     .plugin-cards {
         flex: 1;
         min-height: 0;

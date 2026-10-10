@@ -101,7 +101,7 @@ fn discovery_cli_fallback_dirs() -> Vec<PathBuf> {
         if let Some(home) = dirs::home_dir() {
             fallback_dirs.push(home.join(".docker").join("bin"));
             fallback_dirs.push(home.join(".local").join("bin"));
-            #[cfg(target_os = "macos")]
+            #[cfg(macos)]
             fallback_dirs.push(
                 home.join("Applications")
                     .join("Docker.app")
@@ -114,9 +114,9 @@ fn discovery_cli_fallback_dirs() -> Vec<PathBuf> {
         fallback_dirs.push(PathBuf::from("/usr/local/bin"));
         fallback_dirs.push(PathBuf::from("/usr/bin"));
         fallback_dirs.push(PathBuf::from("/bin"));
-        #[cfg(target_os = "linux")]
+        #[cfg(linux)]
         fallback_dirs.push(PathBuf::from("/snap/bin"));
-        #[cfg(target_os = "macos")]
+        #[cfg(macos)]
         fallback_dirs.push(PathBuf::from(
             "/Applications/Docker.app/Contents/Resources/bin",
         ));

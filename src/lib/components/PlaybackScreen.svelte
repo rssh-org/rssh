@@ -51,9 +51,8 @@
       fitAddon?.fit();
     });
 
-    // Mobile: one-finger drag scrolls the playback scrollback (xterm wires no
-    // touch scroll itself). Desktop uses the wheel, so gate on isMobile.
-    if (app.isMobile) touchScrollCleanup = setupTouchScroll(containerEl, terminal);
+    // Handle actual touch input on every host; mouse/wheel remain owned by xterm.
+    touchScrollCleanup = setupTouchScroll(containerEl, terminal);
 
     if (fileName) await loadCast(fileName);
     window.addEventListener("resize", handleResize);
@@ -169,7 +168,7 @@
     <div class="progress-fill" style="width: {progress}%;"></div>
   </div>
 
-  <div class="term-container" class:is-mobile={app.isMobile} bind:this={containerEl}></div>
+  <div class="term-container" bind:this={containerEl}></div>
 </div>
 
 <style>
@@ -208,10 +207,5 @@
      around the rendered rows when "terminal bg follows theme" is off. */
   .term-container :global(.xterm-viewport) {
     background-color: var(--term-bg) !important;
-  }
-  /* Mobile: make xterm's scrollbar a pure indicator so its slider drag doesn't
-     race the touch-scroll handler (same fix as TerminalPane). */
-  .term-container.is-mobile :global(.xterm-scrollable-element > .scrollbar) {
-    pointer-events: none;
   }
 </style>

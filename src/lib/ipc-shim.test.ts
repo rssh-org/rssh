@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { installTauriShim } from "./ipc-shim.ts";
+import { installTauriShim, onRuntimeCapabilitiesChanged } from "./ipc-shim.ts";
 
 // The shim targets the browser; vitest runs in `node`, so we stub the handful of
 // globals it touches (window, location, WebSocket, navigator) with controllable
@@ -47,7 +47,7 @@ let clipboardText = "";
 beforeEach(() => {
     FakeWS.instances = [];
     clipboardText = "from-os-clipboard";
-    fakeWindow = {};
+    fakeWindow = new EventTarget();
     vi.stubGlobal("window", fakeWindow);
     vi.stubGlobal("location", { search: "", pathname: "/", hash: "" });
     vi.stubGlobal("WebSocket", FakeWS as unknown as typeof WebSocket);
@@ -84,6 +84,7 @@ describe("installTauriShim", () => {
         const { internals, ws } = installWithServer();
         expect(typeof internals.invoke).toBe("function");
         expect(typeof internals.transformCallback).toBe("function");
+        expect(fakeWindow.__RSSH_IPC_SHIM__).toBe(true);
         expect(ws.url).toBe("ws://127.0.0.1:5555/?token=tok-123");
     });
 
@@ -93,17 +94,73 @@ describe("installTauriShim", () => {
         fakeWindow.__RSSH_SERVER__ = { port: 5555, token: "tok" };
         installTauriShim();
         expect(fakeWindow.__TAURI_INTERNALS__).toBe(native); // untouched
+        expect(fakeWindow.__RSSH_IPC_SHIM__).toBeUndefined();
         expect(FakeWS.instances).toHaveLength(0); // never dialed
     });
 
     it("does not install when no server coordinates are present", () => {
         installTauriShim(); // no __RSSH_SERVER__, no URL params
         expect(fakeWindow.__TAURI_INTERNALS__).toBeUndefined();
+        expect(fakeWindow.__RSSH_IPC_SHIM__).toBeUndefined();
         expect(FakeWS.instances).toHaveLength(0);
     });
 });
 
 describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
+    it("reports late host capability changes through the adapter subscription", () => {
+        installWithServer();
+        const changed = vi.fn();
+        const stop = onRuntimeCapabilitiesChanged(changed);
+        fakeWindow.dispatchEvent(new Event("rssh:host-ready"));
+        expect(changed).toHaveBeenCalledTimes(1);
+        stop();
+        fakeWindow.dispatchEvent(new Event("rssh:host-ready"));
+        expect(changed).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores IDE readiness events in a native host", () => {
+        const changed = vi.fn();
+        const stop = onRuntimeCapabilitiesChanged(changed);
+        fakeWindow.dispatchEvent(new Event("rssh:host-ready"));
+        expect(changed).not.toHaveBeenCalled();
+        stop();
+    });
+
+    it.each([
+        [false, true, false],
+        [true, true, true],
+        [true, false, false],
+    ])("intersects file capabilities with the host picker (%s, %s)", async (hasPicker, serverSupport, expected) => {
+        if (hasPicker) fakeWindow.__RSSH_PICK__ = vi.fn();
+        const { internals, ws } = installWithServer();
+        ws.open();
+        const result = internals.invoke("get_runtime_capabilities");
+        const request = ws.sentFrames()[0];
+        expect(request.cmd).toBe("get_runtime_capabilities");
+        const terminalPolicy = {
+            imageStorageLimitMb: 128,
+            imagePixelLimit: 16_000_000,
+            outputBacklogLimitBytes: 128 * 1024 * 1024,
+            gpuRenderDefault: true,
+        };
+        ws.deliver({ type: "response", id: request.id, ok: true, result: {
+            localPty: true,
+            fileMultiSelect: serverSupport,
+            directoryTransfer: serverSupport,
+            nativeClipboard: true,
+            releaseUpdateCheck: true,
+            terminalPolicy,
+        } });
+        await expect(result).resolves.toEqual({
+            localPty: true,
+            fileMultiSelect: expected,
+            directoryTransfer: expected,
+            nativeClipboard: false,
+            releaseUpdateCheck: true,
+            terminalPolicy,
+        });
+    });
+
     it("provides metadata so getCurrentWindow()/getCurrentWebview() don't throw", () => {
         const { internals } = installWithServer();
         // @tauri-apps/api reads these labels SYNCHRONOUSLY in the getters; a
@@ -235,10 +292,68 @@ describe("browser-environment commands (served locally, never over ws)", () => {
             kind === "files" ? ["/tmp/a.txt", "/tmp/b.txt"] : null,
         );
         await expect(internals.invoke("sftp_pick_open_files")).resolves.toEqual([
-            "/tmp/a.txt",
-            "/tmp/b.txt",
+            { location: "/tmp/a.txt", name: "a.txt" },
+            { location: "/tmp/b.txt", name: "b.txt" },
         ]);
         expect(fakeWindow.__RSSH_PICK__).toHaveBeenCalledWith("files");
+    });
+
+    it.each([
+        ["/tmp/ report:final%20.txt", " report:final%20.txt"],
+        ["/tmp/a\\b.txt", "a\\b.txt"],
+        ["C:\\Downloads\\报告%20.txt", "报告%20.txt"],
+        ["C:/Downloads/report:final.txt", "report:final.txt"],
+    ])("preserves literal host filename metadata for %s", async (location, name) => {
+        const { internals } = installWithServer();
+        fakeWindow.__RSSH_PICK__ = vi.fn(async () => [location]);
+        await expect(internals.invoke("sftp_pick_open_files"))
+            .resolves.toEqual([{ location, name }]);
+    });
+
+    it("returns directory metadata without interpreting its name as a URI", async () => {
+        const { internals, ws } = installWithServer();
+        ws.open();
+        fakeWindow.__RSSH_PICK__ = vi.fn(async () => "/tmp/备份%20:2026");
+        await expect(internals.invoke("sftp_pick_folder", { write: false }))
+            .resolves.toEqual({ location: "/tmp/备份%20:2026", name: "备份%20:2026" });
+        expect(ws.sent).toHaveLength(0);
+    });
+
+    it("preserves cancellation from multi-file and directory choosers", async () => {
+        const { internals } = installWithServer();
+        fakeWindow.__RSSH_PICK__ = vi.fn(async () => null);
+        await expect(internals.invoke("sftp_pick_open_files")).resolves.toBeNull();
+        await expect(internals.invoke("sftp_pick_folder")).resolves.toBeNull();
+    });
+
+    it("sftp_pick_open_path returns one explicitly selected host file without using the server", async () => {
+        const { internals, ws } = installWithServer();
+        ws.open();
+        fakeWindow.__RSSH_PICK__ = vi.fn(async () => ["/tmp/report.txt", "/tmp/other.txt"]);
+
+        const picked = internals.invoke("sftp_pick_open_path");
+        expect(ws.sent).toHaveLength(0);
+        await expect(picked).resolves.toEqual({ location: "/tmp/report.txt", name: "report.txt" });
+        expect(fakeWindow.__RSSH_PICK__).toHaveBeenCalledExactlyOnceWith("files");
+    });
+
+    it.each([{ files: null }, { files: [] }])("sftp_pick_open_path preserves host cancellation: $files", async ({ files }) => {
+        const { internals, ws } = installWithServer();
+        ws.open();
+        fakeWindow.__RSSH_PICK__ = vi.fn(async () => files);
+
+        const picked = internals.invoke("sftp_pick_open_path");
+        expect(ws.sent).toHaveLength(0);
+        await expect(picked).resolves.toBeNull();
+    });
+
+    it("sftp_pick_open_path rejects locally when a browser has no host chooser", async () => {
+        const { internals, ws } = installWithServer();
+        ws.open();
+
+        const picked = internals.invoke("sftp_pick_open_path");
+        expect(ws.sent).toHaveLength(0);
+        await expect(picked).rejects.toMatch(/file_dialog_unavailable/);
     });
 
     it("builds an SFTP save path from the host folder picker", async () => {
