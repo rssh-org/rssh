@@ -18,6 +18,7 @@
 - 滚动到上一屏，按cmd会回到光标处，不好复制
 - 折叠的块，也要支持复制文本
 - 快捷命令块，增加占位符
+- run_command命令先判断当前是不是在alter程序
 
 
 ![Stars](https://img.shields.io/github/stars/rssh-org/rssh)
