@@ -19,7 +19,7 @@
   let credentialTypeOptions = $derived([
     { value: "password",    label: t("credential.type.password") },
     { value: "key",         label: t("credential.type.key") },
-    ...(!app.isMobile || credentialType === "agent"
+    ...(app.capabilities().sshAgent || credentialType === "agent"
       ? [{ value: "agent", label: t("credential.type.agent") }]
       : []),
     { value: "none",        label: t("credential.type.none") },
@@ -48,7 +48,7 @@
 
   /** The usual default private keys. One click reads ~/.ssh/<name> on the host
    *  (where the keys live) and drops it into the textarea — saves hunting for
-   *  the file in a picker. Hidden on mobile: there is no ~/.ssh there. */
+   *  the file in a picker. Only hosts with home-directory access offer it. */
   const DEFAULT_KEY_NAMES = ["id_rsa", "id_ed25519"];
   async function fillDefaultKey(keyName: string) {
     picking = true;
@@ -97,7 +97,7 @@
         <button class="btn btn-sm" onclick={pickKeyFile} disabled={picking}>
           {t("credential.pick_key_file")}
         </button>
-        {#if !app.isMobile}
+        {#if app.capabilities().defaultKeyFiles}
           {#each DEFAULT_KEY_NAMES as keyName}
             <button class="chip" onclick={() => fillDefaultKey(keyName)} disabled={picking}>~/.ssh/{keyName}</button>
           {/each}

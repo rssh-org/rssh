@@ -9,9 +9,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 // module load (loadPos). Node has no localStorage, so give the import an
 // in-memory stub. Fresh per test to avoid cross-test leakage.
 //
-// app.svelte.ts also reads navigator.userAgent at module load (isMobile).
-// Node < 21 has no navigator global, so stub a desktop UA — the MRU tests
-// don't exercise mobile behavior, any string is fine.
+// Some imported platform helpers read navigator at module load. The MRU tests
+// do not exercise platform behavior, so a neutral value is sufficient.
 beforeEach(() => {
   invokeMock.mockReset();
   invokeMock.mockResolvedValue(null);
@@ -37,6 +36,44 @@ async function loadAppModule() {
 }
 
 const local = (id: string) => ({ id, type: "local" as const, label: id });
+
+describe("sidebar layout preferences", () => {
+  it.each([
+    "Mozilla/5.0 (Phone; OpenHarmony 5.0)",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15)",
+  ])("selects by width and preserves both preferences while resizing: %s", async (userAgent) => {
+    vi.stubGlobal("navigator", { userAgent });
+    const viewport = Object.assign(new EventTarget(), { innerWidth: 900 });
+    vi.stubGlobal("window", viewport);
+    localStorage.setItem("sidebar.position.desktop", "left");
+    localStorage.setItem("sidebar.position.mobile", "right");
+    const app = await loadAppModule();
+    const layout = await import("./layout.svelte.ts");
+    const stop = layout.observeViewport();
+    const write = vi.spyOn(localStorage, "setItem");
+    invokeMock.mockClear();
+
+    expect(app.sidebarPosition()).toBe("left");
+    viewport.innerWidth = 400;
+    viewport.dispatchEvent(new Event("resize"));
+    expect(app.sidebarPosition()).toBe("right");
+    expect(write).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    app.setSidebarPosition("top");
+    expect(localStorage.getItem("sidebar.position.mobile")).toBe("top");
+    expect(localStorage.getItem("sidebar.position.desktop")).toBe("left");
+    write.mockClear();
+
+    viewport.innerWidth = 900;
+    viewport.dispatchEvent(new Event("resize"));
+    expect(app.sidebarPosition()).toBe("left");
+    expect(write).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalled();
+    stop();
+    write.mockRestore();
+  });
+});
 
 describe("recent Home connections", () => {
   it("records every saved or discovered GUI connection through addTab", async () => {
@@ -567,8 +604,83 @@ describe("command block line limit", () => {
   });
 });
 
-describe("mobile key modifier lock", () => {
-  // Two ways to arm a modifier on the mobile keybar:
+describe("terminal control routing", () => {
+  function controls() {
+    return {
+      getSelection: vi.fn(() => ""),
+      paste: vi.fn(),
+      writeControl: vi.fn(),
+      sendArrow: vi.fn(),
+      sendText: vi.fn(),
+      focus: vi.fn(),
+    };
+  }
+
+  it("closing a hidden pane leaves the active pane's control keys connected", async () => {
+    const app = await loadAppModule();
+    const a = controls();
+    const b = controls();
+    app.addTab(local("a"));
+    app.addTab(local("b"));
+    app.registerTerminalControls("a", a);
+    app.registerTerminalControls("b", b);
+    app.setActiveTab("a");
+
+    app.unregisterTerminalControls("b");
+    app.sendToTerminal("\x1b");
+    app.sendArrow("A", 5);
+
+    expect(a.writeControl).toHaveBeenCalledWith("\x1b");
+    expect(a.sendArrow).toHaveBeenCalledWith("A", 5);
+    expect(b.writeControl).not.toHaveBeenCalled();
+    expect(b.sendArrow).not.toHaveBeenCalled();
+  });
+
+  it("routes to the newly active pane without registering again and keeps raw controls separate from text", async () => {
+    const app = await loadAppModule();
+    const a = controls();
+    const b = controls();
+    app.addTab(local("a"));
+    app.addTab(local("b"));
+    app.registerTerminalControls("a", a);
+    app.registerTerminalControls("b", b);
+    app.setActiveTab("a");
+    app.sendToTerminal("\t");
+
+    app.setActiveTab("b");
+    app.sendToTerminal("\x1b");
+    app.sendArrow("D", 0);
+    app.sendTextToActiveTerminal("line\n");
+
+    expect(a.writeControl).toHaveBeenCalledExactlyOnceWith("\t");
+    expect(a.sendArrow).not.toHaveBeenCalled();
+    expect(b.writeControl).toHaveBeenCalledExactlyOnceWith("\x1b");
+    expect(b.sendArrow).toHaveBeenCalledExactlyOnceWith("D", 0);
+    expect(b.sendText).toHaveBeenCalledExactlyOnceWith("line\n");
+  });
+
+  it("sends nothing when the active route has no registered terminal", async () => {
+    const app = await loadAppModule();
+    const a = controls();
+    app.addTab(local("a"));
+    app.registerTerminalControls("a", a);
+    app.setActiveTab("home");
+    app.sendToTerminal("\x1b");
+    app.sendArrow("B", 0);
+    app.sendTextToActiveTerminal("line\n");
+
+    app.setActiveTab("a");
+    app.unregisterTerminalControls("a");
+    app.sendToTerminal("\x1b");
+    app.sendArrow("B", 0);
+    expect(a.writeControl).not.toHaveBeenCalled();
+    expect(a.sendArrow).not.toHaveBeenCalled();
+    expect(a.sendText).not.toHaveBeenCalled();
+  });
+});
+
+describe("terminal key modifier lock", () => {
+  // Two ways to arm a modifier on the compact keybar:
   //  - short tap (setCtrl): one-shot — arms for the NEXT key, then clears
   //  - long-press (lockCtrl): sticky — stays armed across many keys until tapped off
   // The distinction lives entirely in clearModifiers: it clears one-shot arms but

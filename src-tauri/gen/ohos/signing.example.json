@@ -1,0 +1,17 @@
+{
+  "signingConfigs": [
+    {
+      "name": "default",
+      "type": "HarmonyOS",
+      "material": {
+        "storeFile": "signing/release.p12",
+        "storePassword": "REPLACE_WITH_DEVECO_ENCRYPTED_STORE_PASSWORD",
+        "keyAlias": "REPLACE_WITH_KEY_ALIAS",
+        "keyPassword": "REPLACE_WITH_DEVECO_ENCRYPTED_KEY_PASSWORD",
+        "signAlg": "SHA256withECDSA",
+        "profile": "signing/release.p7b",
+        "certpath": "signing/release.cer"
+      }
+    }
+  ]
+}

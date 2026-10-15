@@ -39,10 +39,12 @@
         modPress[mod].fired = false;
     }
     onDestroy(() => {
-        // A tab switch can unmount the bar mid-press; a pending timer must not
-        // lock a modifier after the UI is gone.
+        // Width changes and pane switches remove this bar. Neither a pending
+        // press nor an armed modifier may keep altering input without its UI.
         clearModTimer("ctrl");
         clearModTimer("alt");
+        app.setCtrl(false);
+        app.setAlt(false);
     });
 
     function send(seq: string) {
@@ -80,32 +82,15 @@
     });
     let aiOpen = $derived(ai.isOpen(app.activeTabId()));
 
-    // 移动端唤起 AI 时提示一次：建议横屏 + 两个工具不可用。
-    // 模块级 flag——一次 app run 提一次；togglePanel 只有"开"动作时才提。
-    let mobileHintShown = false;
     function toggleAi() {
         if (!aiOpen && !canOpenAi) {
             toast.info(t("ai.no_session"));
             return;
         }
-        if (!aiOpen && !mobileHintShown) {
-            toast.info(t("ai.mobile.hint"));
-            mobileHintShown = true;
-        }
         void ai.togglePanel(app.activeTabId()).catch((e) => {
-            console.warn("[ai] toggle mobile panel:", e);
+            console.warn("[ai] toggle panel:", e);
             toast.error(errMsg(e));
         });
-    }
-
-    // 移动端唤起 SFTP 时提示一次：建议横屏。与 AI 面板同款，一次 app run 提一次。
-    let sftpHintShown = false;
-    function openSftpPanel() {
-        if (!sftpHintShown) {
-            toast.info(t("sftp.mobile.hint"));
-            sftpHintShown = true;
-        }
-        app.openSftp();
     }
 </script>
 
@@ -127,7 +112,12 @@
     <button class="key" onpointerdown={prevent} onclick={() => arrow('D')}>←</button>
     <button class="key" onpointerdown={prevent} onclick={() => arrow('C')}>→</button>
     <button class="key" class:active={extOpen} title="More keys" aria-label="More keys" onpointerdown={prevent} onclick={() => extOpen = !extOpen}>⋯</button>
-    <button class="key" class:active={app.softKeyboardOpen()} title="Keyboard" aria-label="Keyboard" onpointerdown={prevent} onclick={() => app.toggleSoftKeyboard()}>⌨</button>
+    <button class="key" class:active={app.softKeyboardOpen()} title={t("terminal.keyboard")} aria-label={t("terminal.keyboard")} aria-pressed={app.softKeyboardOpen()} onpointerdown={prevent} onclick={() => app.toggleSoftKeyboard()}>
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+            <rect x="2" y="5" width="20" height="14" rx="2" />
+            <path d="M5 9h2m2 0h2m2 0h2m2 0h2M5 12h2m2 0h2m2 0h2m2 0h2M7 15h10" />
+        </svg>
+    </button>
     {#if extOpen}
         <!-- Transparent: a tap on the terminal area above dismisses the panel. -->
         <div class="ext-backdrop" onpointerdown={() => { extOpen = false; }}></div>
@@ -141,7 +131,7 @@
                 <AppIcon name="snippet" size={16} />
             </button>
             {#if app.activeTab()?.type === "ssh"}
-                <button class="key ext" title="SFTP" aria-label="SFTP" onpointerdown={prevent} onclick={() => { extOpen = false; openSftpPanel(); }}>
+                <button class="key ext" title="SFTP" aria-label="SFTP" onpointerdown={prevent} onclick={() => { extOpen = false; app.openSftp(); }}>
                     <AppIcon name="folder" size={16} />
                 </button>
             {/if}

@@ -19,7 +19,7 @@ pub struct CliStatus {
 }
 
 fn install_dir() -> PathBuf {
-    if cfg!(target_os = "windows") {
+    if cfg!(windows) {
         dirs::data_local_dir()
             .unwrap_or_default()
             .join("Programs")
@@ -30,7 +30,7 @@ fn install_dir() -> PathBuf {
 }
 
 fn cli_name() -> &'static str {
-    if cfg!(target_os = "windows") {
+    if cfg!(windows) {
         "rssh.exe"
     } else {
         "rssh"
@@ -40,7 +40,7 @@ fn cli_name() -> &'static str {
 fn find_installed() -> Option<PathBuf> {
     let name = cli_name();
     // Check common paths
-    let candidates = if cfg!(target_os = "windows") {
+    let candidates = if cfg!(windows) {
         vec![
             install_dir().join(name),
             dirs::home_dir()
@@ -68,7 +68,7 @@ fn find_installed() -> Option<PathBuf> {
 }
 
 fn find_bundled(app: &AppHandle) -> Option<PathBuf> {
-    let name = if cfg!(target_os = "windows") {
+    let name = if cfg!(windows) {
         "rssh-cli.exe"
     } else {
         "rssh-cli"
@@ -183,7 +183,7 @@ pub fn cli_install(app: AppHandle) -> AppResult<String> {
     let dest_dir = install_dir();
     let dest = dest_dir.join(cli_name());
 
-    #[cfg(target_os = "macos")]
+    #[cfg(macos)]
     {
         let script = format!(
             r#"do shell script "mkdir -p '{}' && cp '{}' '{}' && chmod 755 '{}'" with administrator privileges"#,
@@ -210,7 +210,7 @@ pub fn cli_install(app: AppHandle) -> AppResult<String> {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(linux)]
     {
         let status = Command::new("pkexec")
             .arg("sh")
@@ -237,7 +237,7 @@ pub fn cli_install(app: AppHandle) -> AppResult<String> {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     {
         std::fs::create_dir_all(&dest_dir)?;
         std::fs::copy(&src, &dest)?;
@@ -288,7 +288,7 @@ fn setup_completions(cli: &PathBuf) {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     {
         // PowerShell completion — append to profile if not already present
         if let Ok(out) = Command::new(cli)

@@ -40,7 +40,7 @@
   let customMode = $derived(pendingCustom || (selectedShell !== "" && !shells.includes(selectedShell)));
 
   onMount(async () => {
-    if (!app.isMobile) {
+    if (app.capabilities().localPty) {
       try { shells = await invoke<string[]>("list_shells"); } catch { shells = []; }
       selectedShell = await invoke<string | null>("get_setting", { key: "local_shell" }) ?? "";
       if (selectedShell && !shells.includes(selectedShell)) {
@@ -151,7 +151,7 @@
 </script>
 
 <div class="page">
-  {#if !app.isMobile}
+  {#if app.capabilities().localPty}
     <div class="section-label" id="local-shell-label">{t("settings.shell.local_shell")}</div>
     <div class="card surface-raised shell-card">
       <div class="shell-hint">
@@ -241,20 +241,18 @@
   <!-- 终端交互：选中即复制（开关）+ 关闭标签页确认（开关）+ 右键动作（下拉）合在一张卡片，
        "行 + 分隔线 + 行"结构，跟命令块卡片同款，避免控件割裂。 -->
   <div class="card surface-raised mouse-card">
-    {#if !app.isMobile}
-      <div class="cmd-block-head">
-        <div class="cmd-block-head-body">
-          <div class="cmd-block-title" class:on={copyOnSelect} class:off={!copyOnSelect}>{t("settings.shell.copy_on_select")}</div>
-          <div class="cmd-block-desc">{t("settings.shell.copy_on_select_desc")}</div>
-        </div>
-        <label class="switch">
-          <input type="checkbox" bind:checked={copyOnSelect} onchange={saveCopyOnSelect} />
-          <span class="slider"></span>
-        </label>
+    <div class="cmd-block-head">
+      <div class="cmd-block-head-body">
+        <div class="cmd-block-title" class:on={copyOnSelect} class:off={!copyOnSelect}>{t("settings.shell.copy_on_select")}</div>
+        <div class="cmd-block-desc">{t("settings.shell.copy_on_select_desc")}</div>
       </div>
+      <label class="switch">
+        <input type="checkbox" bind:checked={copyOnSelect} onchange={saveCopyOnSelect} />
+        <span class="slider"></span>
+      </label>
+    </div>
 
-      <div class="card-divider"></div>
-    {/if}
+    <div class="card-divider"></div>
 
     <div class="cmd-block-head">
       <div class="cmd-block-head-body">
@@ -267,21 +265,19 @@
       </label>
     </div>
 
-    {#if !app.isMobile}
-      <div class="card-divider"></div>
+    <div class="card-divider"></div>
 
-      <div class="cmd-block-head">
-        <div class="cmd-block-head-body">
-          <label for="rca-select" class="cmd-block-title">{t("settings.shell.right_click")}</label>
-          <div class="cmd-block-desc">{t("settings.shell.right_click_desc")}</div>
-        </div>
-        <div class="rca-select">
-          <Select id="rca-select" bind:value={rightClickAction}
-                  options={rightClickOptions}
-                  onchange={(v) => saveRightClickAction(v as app.RightClickAction)} />
-        </div>
+    <div class="cmd-block-head">
+      <div class="cmd-block-head-body">
+        <label for="rca-select" class="cmd-block-title">{t("settings.shell.right_click")}</label>
+        <div class="cmd-block-desc">{t("settings.shell.right_click_desc")}</div>
       </div>
-    {/if}
+      <div class="rca-select">
+        <Select id="rca-select" bind:value={rightClickAction}
+                options={rightClickOptions}
+                onchange={(v) => saveRightClickAction(v as app.RightClickAction)} />
+      </div>
+    </div>
   </div>
 
   <!-- Leaving "menu" hides the system right-click menu (entry point for many

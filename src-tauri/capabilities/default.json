@@ -1,14 +1,11 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for RSSH",
+  "description": "Core capabilities for RSSH (all platforms incl. OHOS)",
   "windows": ["main", "rssh-*"],
   "permissions": [
     "core:default",
     "core:window:allow-set-title",
-    "core:window:allow-set-always-on-top",
-    "opener:default",
-    "dialog:default",
-    "fs:default",
-    "fs:allow-write-text-file"
+    "core:window:allow-set-decorations",
+    "core:window:allow-set-always-on-top"
   ]
 }
