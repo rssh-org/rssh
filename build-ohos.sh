@@ -147,7 +147,7 @@ for package in "$PHONE_HAP" "$DESKTOP_HAP" "$APP"; do
     if [ ! -s "$package" ]; then
         echo "Missing $PACKAGE_SUFFIX package: $package" >&2
         if [ "$SIGN_PACKAGES" = true ]; then
-            echo "Configure signing in DevEco Studio; unsigned packages are accepted only with --unsigned." >&2
+            echo "Configure signing in src-tauri/gen/ohos/signing.local.json; unsigned packages are accepted only with --unsigned." >&2
         fi
         exit 1
     fi

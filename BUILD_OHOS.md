@@ -29,8 +29,23 @@ export OHOS_HOME="/Applications/DevEco-Studio.app/Contents/sdk/default/openharmo
 
 ## 签名
 
-用 DevEco Studio 打开 `src-tauri/gen/ohos`，在 Project Structure →
-Signing Configs 中配置签名。签名材料保存在本机，不提交仓库。
+公共 `src-tauri/gen/ohos/build-profile.json5` 保留空的 `signingConfigs`，
+产品中的 `signingConfig: "default"` 是共享的签名方案名称。
+将同目录的 `signing.example.json` 复制为 `signing.local.json`，填入本机
+证书、Profile、密钥库路径、别名；路径相对于鸿蒙工程根目录，也可使用绝对路径。
+`storePassword` / `keyPassword` 必须原样复制 DevEco 生成的密文，不能填写明文密码；
+保留密钥库旁的 `material` 目录，Hvigor 解密时需要它。已有材料可留在工程外；
+如果放进工程内，统一使用被整体忽略的 `signing/` 目录（包括其 `material` 子目录）。
+本地文件和签名材料都被 Git 忽略，不提交仓库；建议将本地文件权限设为 `600`。
+
+`hvigorfile.ts` 通过 Hvigor 的 `afterNodeEvaluate` 和 `setBuildProfileOpt`
+接口将本地签名配置载入构建内存，不改写公共 JSON。命令行与 DevEco 构建共用此入口。
+如果通过 DevEco 的 Project Structure → Signing Configs 生成或更新签名，
+它仍会写入公共 JSON：将该文件的 `app.signingConfigs` 数组移入本地文件的
+`signingConfigs` 字段，并把公共数组恢复为 `[]`；构建会拒绝公共文件内遗留的签名材料。
+不要复制完整的公共构建配置到本地文件。
+
+显式开启签名时，缺少本地文件会报错；`--unsigned` 不读取本地签名文件。
 默认构建要求两个 signed HAP 与签名 `.app` 都存在；缺少任一个就报错退出。
 模拟器人工验收可显式使用 `--unsigned`，不能将未签名产物用于商店发布。
 

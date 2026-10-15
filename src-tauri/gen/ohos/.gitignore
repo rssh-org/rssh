@@ -22,6 +22,8 @@
 *.har
 
 # Local signing credentials and provisioning profiles.
+/signing.local.json
+/signing/
 *.p12
 *.pfx
 *.p7b
