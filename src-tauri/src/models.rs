@@ -491,6 +491,9 @@ pub struct Group {
     pub name: String,
     pub color: String,
     pub sort_order: i32,
+    /// Non-null enables terminal bottom waves; the rendered hue follows `color`.
+    #[serde(default)]
+    pub terminal_background: Option<String>,
 }
 
 // --- Highlight ---

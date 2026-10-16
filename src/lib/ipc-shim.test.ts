@@ -135,6 +135,19 @@ describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
 });
 
 describe("invoke round-trip over ws", () => {
+    it("relays only scoped configuration notifications across headless clients", async () => {
+        const { internals, ws } = installWithServer();
+        ws.open();
+        const pending = internals.invoke("plugin:event|emit", { event: "group:changed:g1", payload: "ignored" });
+        const frame = ws.sentFrames()[0];
+        expect(frame).toMatchObject({cmd: "plugin:event|emit", args: {event: "group:changed:g1"}});
+        expect(frame.args).not.toHaveProperty("payload");
+        ws.deliver({type: "response", id: frame.id, ok: true, result: null});
+        await pending;
+        await internals.invoke("plugin:event|emit", {event: "ssh:data:session1"});
+        await internals.invoke("plugin:event|emit_to", {event: "group:changed:g1"});
+        expect(ws.sentFrames()).toHaveLength(1);
+    });
     it("queues before open, flushes on open, resolves on matching response", async () => {
         const { internals, ws } = installWithServer();
         const p = internals.invoke("list_profiles", { a: 1 });

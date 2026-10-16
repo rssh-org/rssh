@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { notifyEnvironmentChanged } from "../terminal/environment-events.ts";
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import * as app from "../stores/app.svelte.ts";
@@ -134,6 +135,7 @@
       };
       if (id) await invoke("update_profile", { profile });
       else await invoke("create_profile", { profile });
+      await notifyEnvironmentChanged("connection", profile.id);
       app.navigate("connections");
     } catch (e: any) { toast.error(`${t("toast.error.save")}: ${errMsg(e)}`); }
     finally { saving = false; }

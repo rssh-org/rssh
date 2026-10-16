@@ -889,6 +889,7 @@ const zh: Messages = {
   "error.telnet_login_script_missing": "Telnet 配置 {id} 的加密登录脚本缺失。",
   "error.telnet_login_script_epoch_invalid": "Telnet 登录脚本迁移状态无效：{key}",
   "error.session_id_invalid": "会话标识无效",
+  "error.configuration_event_invalid": "配置变更通知无效",
   "error.session_id_conflict": "会话「{id}」已存在",
   "error.session_reservation_lost": "会话「{id}」在启动时已被关闭",
   "error.task_join_failed": "后台任务失败：{err}",
@@ -1079,6 +1080,9 @@ const zh: Messages = {
   "forward.local_port_socks5": "本地端口（SOCKS5 代理）",
   "forward.name_placeholder": "Web Forward",
   // 分组
+  "group.terminal_background": "终端底部波浪",
+  "group.terminal_background_hint": "在此分组的 SSH、Telnet 和串口会话底部显示波浪渐变，颜色跟随分组；终端主体保留当前配色。",
+  "group.preview": "会话预览",
   "group.new": "+ 新建分组",
   "group.empty": "暂无分组",
   "group.name_placeholder": "分组名称",

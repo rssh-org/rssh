@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppResult;
 
-const SCHEMA_VERSION: u32 = 30;
+const SCHEMA_VERSION: u32 = 31;
 
 fn column_exists(conn: &Connection, table: &str, col: &str) -> AppResult<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
@@ -667,6 +667,13 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
         )?;
     }
 
+    if version < 31
+        && table_exists(conn, "groups")?
+        && !column_exists(conn, "groups", "terminal_background")?
+    {
+        conn.execute_batch("ALTER TABLE groups ADD COLUMN terminal_background TEXT DEFAULT NULL;")?;
+    }
+
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -676,6 +683,23 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn migration_31_preserves_groups_and_defaults_background_to_global() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL, sort_order INTEGER NOT NULL);
+            INSERT INTO groups VALUES ('prod', 'Production', '#FF0000', 1);
+            PRAGMA user_version = 30;").unwrap();
+        super::migrate(&conn).unwrap();
+        super::migrate(&conn).unwrap();
+        let group: (String, Option<String>) = conn
+            .query_row(
+                "SELECT name, terminal_background FROM groups WHERE id = 'prod'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(group, ("Production".into(), None));
+    }
     use super::*;
 
     #[test]

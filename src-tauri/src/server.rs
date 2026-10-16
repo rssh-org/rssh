@@ -35,6 +35,35 @@ use crate::terminal::telnet::{self, TelnetOut, TelnetSink};
 
 type ConnResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
+type ConfigurationClients = Arc<Mutex<HashMap<uuid::Uuid, mpsc::UnboundedSender<Message>>>>;
+
+fn relay_configuration_event(
+    clients: &ConfigurationClients,
+    args: &Value,
+) -> Result<Value, String> {
+    let event = args.get("event").and_then(Value::as_str).unwrap_or("");
+    let id = event
+        .strip_prefix("group:changed:")
+        .or_else(|| event.strip_prefix("connection:changed:"));
+    if !id.is_some_and(|id| {
+        !id.is_empty()
+            && id.len() <= 128
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }) {
+        return Err(AppError::config("configuration_event_invalid", json!({})).to_string());
+    }
+    // Never relay caller-supplied payloads or arbitrary session/auth channels.
+    let message =
+        Message::Text(json!({ "type": "event", "event": event, "payload": null }).to_string());
+    clients
+        .lock()
+        .expect("configuration clients poisoned")
+        .retain(|_, client| client.send(message.clone()).is_ok());
+    Ok(Value::Null)
+}
+
 /// The built frontend, embedded at compile time so the server is self-contained
 /// (the IDEA plugin just spawns the binary + points JCEF at `http://127.0.0.1:<port>/`).
 /// Requires `npm run build` (→ ../dist) before `cargo build --features server`.
@@ -80,6 +109,7 @@ fn build_state() -> AppResult<AppState> {
 /// Bind loopback on a random port, print `{"port":..,"token":..}` as a JSON line
 /// on stdout (the launcher reads it), then serve until the process is killed.
 pub async fn run() -> std::io::Result<()> {
+    let configuration_clients: ConfigurationClients = Arc::new(Mutex::new(HashMap::new()));
     let state = Arc::new(build_state().map_err(|e| std::io::Error::other(e.to_string()))?);
     let token = uuid::Uuid::new_v4().to_string();
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -109,15 +139,21 @@ pub async fn run() -> std::io::Result<()> {
         };
         let expected = token.clone();
         let state = state.clone();
+        let configuration_clients = configuration_clients.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, expected, state).await {
+            if let Err(e) = handle_conn(stream, expected, state, configuration_clients).await {
                 log::warn!("rssh-server: connection ended: {e}");
             }
         });
     }
 }
 
-async fn handle_conn(stream: TcpStream, expected: String, state: Arc<AppState>) -> ConnResult {
+async fn handle_conn(
+    stream: TcpStream,
+    expected: String,
+    state: Arc<AppState>,
+    configuration_clients: ConfigurationClients,
+) -> ConnResult {
     // Sniff the request without consuming it (peek): a WebSocket upgrade takes the
     // ws path below; any other GET is served the embedded frontend over HTTP, so a
     // single port serves both the UI and the IPC socket.
@@ -151,7 +187,12 @@ async fn handle_conn(stream: TcpStream, expected: String, state: Arc<AppState>) 
 
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-    let connection_owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+    let connection_id = uuid::Uuid::new_v4();
+    let connection_owner = SessionOwner::Headless(connection_id);
+    configuration_clients
+        .lock()
+        .expect("configuration clients poisoned")
+        .insert(connection_id, tx.clone());
     // Broadcasts "connection gone" to in-flight invoke tasks. A task blocked on a
     // frontend response (SSH auth / passphrase / host-key prompt) would otherwise
     // wait forever after the socket drops — the headless emit is a sink no-op, so
@@ -197,6 +238,15 @@ async fn handle_conn(stream: TcpStream, expected: String, state: Arc<AppState>) 
             .to_string();
         let args = req.get("args").cloned().unwrap_or_else(|| json!({}));
 
+        if cmd == "plugin:event|emit" {
+            let response = match relay_configuration_event(&configuration_clients, &args) {
+                Ok(result) => json!({ "type": "response", "id": id, "ok": true, "result": result }),
+                Err(error) => json!({ "type": "response", "id": id, "ok": false, "error": error }),
+            };
+            let _ = tx.send(Message::Text(response.to_string()));
+            continue;
+        }
+
         // Each invoke runs concurrently: a slow ssh_connect must not block the
         // ssh_auth_respond on the SAME connection that unblocks its auth prompt.
         let state = state.clone();
@@ -224,6 +274,10 @@ async fn handle_conn(stream: TcpStream, expected: String, state: Arc<AppState>) 
     // connections and native windows share AppState, so global waiter cleanup would
     // incorrectly cancel their in-flight SSH handshakes.
     let _ = shutdown_tx.send(true);
+    configuration_clients
+        .lock()
+        .expect("configuration clients poisoned")
+        .remove(&connection_id);
     writer.abort();
     let _ = writer.await;
     crate::commands::lifecycle::close_owner(&state, &connection_owner);
@@ -1767,6 +1821,42 @@ fn query_token(q: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configuration_events_reach_all_clients_without_relaying_session_events() {
+        let clients: ConfigurationClients = Arc::new(Mutex::new(HashMap::new()));
+        let (first, mut rx1) = mpsc::unbounded_channel();
+        let (second, mut rx2) = mpsc::unbounded_channel();
+        clients.lock().unwrap().insert(uuid::Uuid::new_v4(), first);
+        clients.lock().unwrap().insert(uuid::Uuid::new_v4(), second);
+        relay_configuration_event(
+            &clients,
+            &json!({"event": "group:changed:g1", "payload": "discard"}),
+        )
+        .unwrap();
+        for rx in [&mut rx1, &mut rx2] {
+            let message = rx.try_recv().unwrap();
+            let data: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(
+                data,
+                json!({"type":"event", "event":"group:changed:g1", "payload":null})
+            );
+        }
+        for event in [
+            "ssh:data:s1",
+            "ssh:auth:s1",
+            "group:changed:",
+            "group:changed:g1:other",
+        ] {
+            assert!(relay_configuration_event(&clients, &json!({"event":event})).is_err());
+        }
+        assert!(rx1.try_recv().is_err());
+        assert!(rx2.try_recv().is_err());
+        drop(rx2);
+        relay_configuration_event(&clients, &json!({"event":"connection:changed:p1"})).unwrap();
+        assert_eq!(clients.lock().unwrap().len(), 1);
+        assert!(rx1.try_recv().is_ok());
+    }
 
     #[test]
     fn headless_timeline_target_arg_is_optional() {

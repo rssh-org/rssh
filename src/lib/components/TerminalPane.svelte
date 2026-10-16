@@ -14,6 +14,9 @@
     import * as syncStatus from "../stores/sync.svelte.ts";
     import * as ai from "../ai/store.svelte.ts";
     import * as theme from "../themes/store.svelte.ts";
+    import {groupWaveColor, environmentWaveLayout} from "../terminal/environment-wave.ts";
+    import {watchEnvironmentGroup} from "../terminal/watch-environment-group.ts";
+    import EnvironmentWave from "./EnvironmentWave.svelte";
     import MobileKeybar from "./MobileKeybar.svelte";
     import {registerRsshOscHandlers} from "../osc/handler.ts";
     import {registerClipboardOscHandler} from "../osc/clipboard.ts";
@@ -96,6 +99,33 @@
         meta: Record<string, string>;
         onInitialConnectionFailure?: (tabId: string, error: unknown) => boolean;
     } = $props();
+
+    let environmentGroup = $state<app.Group | null>(null);
+    let waveColor = $derived(groupWaveColor(environmentGroup));
+    let paneHeight = $state(0);
+    let waveLayout = $derived(environmentWaveLayout(paneHeight));
+    let baseTermTheme = $state(theme.currentTermTheme());
+
+    $effect(() => {
+        syncStatus.configurationRevision();
+        const command = tabType === "ssh" ? "get_profile"
+            : tabType === "telnet" ? "get_telnet_profile"
+            : tabType === "serial" ? "get_serial_profile" : null;
+        const id = tabType === "serial" ? meta.serialProfileId : meta.profileId;
+        if (command && id) {
+            return watchEnvironmentGroup(id,
+                () => invoke<{group_id: string | null}>(command, {id}), app.loadGroups,
+                group => { environmentGroup = group; },
+                error => console.warn("[terminal] environment group lookup failed:", error));
+        } else {
+            environmentGroup = null;
+        }
+    });
+
+    $effect(() => {
+        const colors = baseTermTheme;
+        if (terminal) terminal.options.theme = colors;
+    });
 
     let containerEl: HTMLDivElement;
     let paneEl: HTMLDivElement; // the .term-outer root — soft-keyboard inset target
@@ -1547,7 +1577,7 @@
             // users cannot select at all in mouse mode. Match iTerm2's Option-drag.
             macOptionClickForcesSelection: true,
             */
-            theme: theme.currentTermTheme(),
+            theme: baseTermTheme,
             // xterm 6 draws its own scrollbar at overviewRuler.width||14 (=14px),
             // out of reach of the global ::-webkit-scrollbar; pin it to the app's 6px.
             overviewRuler: { width: 6 },
@@ -1555,7 +1585,7 @@
         // Listener fires immediately with current theme (already applied above)
         // and on every palette change. Keep the unsubscribe for onDestroy.
         unsubscribeTheme = theme.registerXtermThemeListener((t) => {
-            if (terminal) terminal.options.theme = t;
+            baseTermTheme = t;
         });
         fitAddon = new FitAddon();
         searchAddon = new SearchAddon();
@@ -1619,6 +1649,9 @@
         // Resize for the whole pane lifetime, even if async setup or the
         // initial connection exits early.
         resizeObs = new ResizeObserver((entries) => {
+            // Reuse the existing pane lifecycle observer. CSS size containment
+            // would change the containing block of fixed terminal context menus.
+            paneHeight = paneEl.clientHeight;
             // Skip fitting when the container is hidden (display:none
             // collapses dimensions to zero) — fitting at 0×0 corrupts
             // xterm's column count and causes the narrow-tab bug.
@@ -1952,7 +1985,7 @@
     });
 </script>
 
-<div class="term-outer" bind:this={paneEl}>
+<div class="term-outer" bind:this={paneEl} style="--term-bg: {baseTermTheme.background}">
     {#if showSearch}
         <div class="search-bar">
             <input
@@ -2050,6 +2083,9 @@
             {/each}
         {/if}
     </div>
+    {#if waveColor && environmentGroup && waveLayout.visible}
+        <EnvironmentWave color={waveColor} name={environmentGroup.name} foreground={baseTermTheme.foreground} showName={waveLayout.showName} />
+    {/if}
     {#if ctxMenu}
         <BlockContextMenu
             x={ctxMenu.x}
@@ -2065,6 +2101,8 @@
 
 <style>
     .term-outer {
+        min-height: 0;
+        background: var(--term-bg);
         display: flex;
         flex-direction: column;
         width: 100%;
@@ -2072,6 +2110,7 @@
     }
 
     .term-wrap {
+        background: var(--term-bg);
         flex: 1;
         min-height: 0;
         position: relative;

@@ -76,6 +76,7 @@ export type SettingsPage =
 
 export interface Group {
   id: string; name: string; color: string; sort_order: number;
+  terminal_background?: string | null;
 }
 export type ConnectionKind = "ssh" | "forward" | "serial" | "telnet";
 export type ConnectionEditorIntent =

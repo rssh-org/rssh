@@ -6,6 +6,9 @@
   import { toast } from "../stores/toast.svelte.ts";
   import { t, errMsg } from "../i18n/index.svelte.ts";
   import AppIcon from "./AppIcon.svelte";
+  import { notifyEnvironmentChanged } from "../terminal/environment-events.ts";
+  import EnvironmentWave from "./EnvironmentWave.svelte";
+  import * as theme from "../themes/store.svelte.ts";
 
   let groups = $state<Group[]>([]);
   let adding = $state(false);
@@ -15,6 +18,8 @@
   let formName = $state("");
   let formColor = $state("#4A6CF7");
   let formOrder = $state(0);
+  let formBackgroundEnabled = $state(false);
+  let previewTheme = $derived(theme.currentTermTheme());
 
   let deleting = $state<string | null>(null);
 
@@ -30,6 +35,7 @@
     formName = "";
     formColor = "#4A6CF7";
     formOrder = 0;
+    formBackgroundEnabled = false;
   }
 
   function startEdit(g: Group) {
@@ -38,6 +44,7 @@
     formName = g.name;
     formColor = g.color;
     formOrder = g.sort_order;
+    formBackgroundEnabled = !!g.terminal_background;
   }
 
   function cancelForm() {
@@ -52,9 +59,11 @@
       name: formName.trim(),
       color: formColor,
       sort_order: formOrder,
+      terminal_background: formBackgroundEnabled ? formColor : null,
     };
     try {
       await invoke("create_group", { group });
+      await notifyEnvironmentChanged("group", group.id);
       adding = false;
       await refresh();
     } catch (e: any) { toast.error(`${t("toast.error.add")}: ${errMsg(e)}`); }
@@ -67,9 +76,11 @@
       name: formName.trim(),
       color: formColor,
       sort_order: formOrder,
+      terminal_background: formBackgroundEnabled ? formColor : null,
     };
     try {
       await invoke("update_group", { group });
+      await notifyEnvironmentChanged("group", group.id);
       editId = null;
       await refresh();
     } catch (e: any) { toast.error(`${t("toast.error.save")}: ${errMsg(e)}`); }
@@ -79,12 +90,27 @@
     deleting = id;
     try {
       await invoke("delete_group", { id });
+      await notifyEnvironmentChanged("group", id);
       if (editId === id) editId = null;
       await refresh();
     } catch (e: any) { toast.error(`${t("toast.error.delete")}: ${errMsg(e)}`); }
     finally { deleting = null; }
   }
 </script>
+
+{#snippet backgroundFields()}
+  <label class="background-toggle">
+    <input type="checkbox" bind:checked={formBackgroundEnabled} />
+    {t("group.terminal_background")}
+  </label>
+  <p class="background-hint">{t("group.terminal_background_hint")}</p>
+  {#if formBackgroundEnabled}
+    <div class="terminal-preview" style:background={previewTheme.background} style:color={previewTheme.foreground}>
+      <div class="preview-content">{formName || t("group.name_placeholder")} ~ # <span>{t("group.preview")}</span></div>
+      <EnvironmentWave color={formColor} name={formName || t("group.name_placeholder")} foreground={previewTheme.foreground} compact />
+    </div>
+  {/if}
+{/snippet}
 
 <div class="page">
   <div class="toolbar">
@@ -97,6 +123,7 @@
       <input type="text" bind:value={formName} placeholder={t("group.name_placeholder")} />
       <label>{t("common.color")}</label>
       <input type="color" bind:value={formColor} />
+      {@render backgroundFields()}
       <label>{t("group.sort_order")}</label>
       <input type="number" bind:value={formOrder} min="0" />
       <div class="form-actions">
@@ -113,6 +140,7 @@
         <input type="text" bind:value={formName} placeholder={t("group.name_placeholder")} />
         <label>{t("common.color")}</label>
         <input type="color" bind:value={formColor} />
+        {@render backgroundFields()}
         <label>{t("group.sort_order")}</label>
         <input type="number" bind:value={formOrder} min="0" />
         <div class="form-actions">
@@ -127,6 +155,9 @@
           <div class="item-text">
             <div class="item-name" title={g.name}>{g.name}</div>
             <div class="item-sub">{t("group.order", { n: g.sort_order })}</div>
+            {#if g.terminal_background}
+              <div class="item-sub">{t("group.terminal_background")}: {g.color}</div>
+            {/if}
           </div>
         </div>
         <div class="item-actions">
@@ -160,6 +191,10 @@
 
 <style>
   .page { padding: 24px; }
+  .background-toggle { display: flex; align-items: center; gap: 8px; }
+  .background-hint { color: var(--text-sub); font-size: 12px; margin: 0; }
+  .terminal-preview { border-radius: 4px; overflow: hidden; font-family: monospace; }
+  .preview-content { padding: 12px 12px 20px; overflow-wrap: anywhere; }
   .toolbar { display: flex; justify-content: flex-end; margin-bottom: 16px; }
   .item-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
   .item-info { display: flex; align-items: center; gap: 10px; min-width: 0; }

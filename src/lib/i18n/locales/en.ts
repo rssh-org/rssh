@@ -886,6 +886,7 @@ const en = {
   "error.telnet_login_script_missing": "The encrypted Telnet login script is missing for profile {id}.",
   "error.telnet_login_script_epoch_invalid": "Invalid Telnet login-script migration state: {key}",
   "error.session_id_invalid": "Invalid session identifier",
+  "error.configuration_event_invalid": "Invalid configuration change notification",
   "error.session_id_conflict": "Session '{id}' already exists",
   "error.session_reservation_lost": "Session '{id}' was closed while it was starting",
   "error.task_join_failed": "Background task failed: {err}",
@@ -1076,6 +1077,9 @@ const en = {
   "forward.local_port_socks5": "Local Port (SOCKS5 proxy)",
   "forward.name_placeholder": "Web Forward",
   // Groups
+  "group.terminal_background": "Terminal bottom waves",
+  "group.terminal_background_hint": "Show group-color gradient waves below SSH, Telnet and serial sessions. The terminal keeps its current theme.",
+  "group.preview": "Session preview",
   "group.new": "+ New Group",
   "group.empty": "No groups yet",
   "group.name_placeholder": "Group name",
