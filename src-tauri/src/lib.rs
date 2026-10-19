@@ -320,6 +320,8 @@ pub fn run() {
             // Native multi-window hosts
             #[cfg(any(windows, macos, linux, ohos))]
             commands::window::open_tab_in_new_window,
+            #[cfg(any(windows, macos, linux, ohos))]
+            commands::window::set_app_window_title,
             commands::clipboard::clipboard_read,
             commands::clipboard::clipboard_write,
             // external URL opener — cross-platform via tauri-plugin-opener

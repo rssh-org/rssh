@@ -1052,6 +1052,7 @@ const en = {
   "error.session_stopped_user": "Session stopped",
   "error.window_clone_encode_failed": "Encode tab clone payload failed: {err}",
   "error.window_open_failed": "Open window failed: {err}",
+  "error.window_title_failed": "Update window title failed: {err}",
   "error.window_non_https_url": "Refusing non-http(s) URL: {url}",
   "error.window_open_url_failed": "Open URL failed: {err}",
   "error.update_invalid_repo": "Invalid repo: {repo}",

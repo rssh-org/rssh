@@ -182,6 +182,13 @@ describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
         expect(ws.sentFrames().some((f) => String(f.cmd).startsWith("plugin:window|"))).toBe(false);
     });
 
+    it("leaves window titles to the browser or IDE host even before the backend connects", async () => {
+        const { internals, ws } = installWithServer();
+        await expect(internals.invoke("set_app_window_title", { title: "首页" })).resolves.toBeUndefined();
+        ws.open();
+        expect(ws.sentFrames()).toEqual([]);
+    });
+
     it("routes plugin:app|version over the ws (the server answers it, not the shim)", () => {
         const { internals, ws } = installWithServer();
         internals.invoke("plugin:app|version", {});

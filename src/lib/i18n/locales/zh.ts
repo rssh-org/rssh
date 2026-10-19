@@ -1055,6 +1055,7 @@ const zh: Messages = {
   "error.session_stopped_user": "会话已停止",
   "error.window_clone_encode_failed": "编码 Tab 克隆数据失败：{err}",
   "error.window_open_failed": "打开窗口失败：{err}",
+  "error.window_title_failed": "更新窗口标题失败：{err}",
   "error.window_non_https_url": "拒绝打开非 http(s) 链接：{url}",
   "error.window_open_url_failed": "打开链接失败：{err}",
   "error.update_invalid_repo": "仓库格式不合法：{repo}",

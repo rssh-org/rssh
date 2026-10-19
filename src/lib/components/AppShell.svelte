@@ -397,14 +397,16 @@
         const workspace = app.workspaceTabs().find((tab) => tab.id === app.activeWorkspaceId())
             ?? app.tabs().find((tab) => tab.id === "home");
         const pane = app.tabs().find((tab) => tab.id === app.activePaneId());
+        let title = "RSSH";
         if (app.settingsActive()) {
-            getCurrentWindow().setTitle("Settings");
+            title = "Settings";
         } else if (workspace || pane) {
             const terminalTitle = app.terminalTitle(app.activePaneId());
-            getCurrentWindow().setTitle(terminalTitle || (workspace && app.tabLabel(workspace)) || (pane && app.tabLabel(pane)) || "RSSH");
-        } else {
-            getCurrentWindow().setTitle("RSSH");
+            title = terminalTitle || (workspace && app.tabLabel(workspace)) || (pane && app.tabLabel(pane)) || "RSSH";
         }
+        void invoke("set_app_window_title", { title }).catch((error) => {
+            console.warn("Failed to update window title", error);
+        });
         // The Transfers popover does not touch the window title — it is an
         // overlay, not a route.
     });

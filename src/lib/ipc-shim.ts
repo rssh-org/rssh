@@ -246,6 +246,7 @@ export function installTauriShim(): void {
         // works (we supply `metadata` below); these calls just succeed with no
         // effect so the title / pin / decoration code paths don't reject. Title
         // and chrome belong to the host (IDE tab / browser tab).
+        set_app_window_title: async () => {},
         "plugin:window|set_title": async () => {},
         "plugin:window|set_always_on_top": async () => {},
         "plugin:window|set_decorations": async () => {},

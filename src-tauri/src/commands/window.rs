@@ -4,6 +4,17 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::platform::window::{open_app_window, AppWindowPurpose};
 
+/// Apply host title policy to the invoking window only.
+#[tauri::command]
+pub async fn set_app_window_title(window: tauri::Window, title: String) -> AppResult<()> {
+    crate::platform::window::set_app_window_title(&window, &title).map_err(|error| {
+        AppError::other(
+            "window_title_failed",
+            serde_json::json!({ "err": error.to_string() }),
+        )
+    })
+}
+
 /// Encode the frontend clone payload as a JavaScript string literal.
 ///
 /// The frontend reads `window.__rssh_clone` as a string and parses it once

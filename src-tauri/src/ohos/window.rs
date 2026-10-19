@@ -2,6 +2,12 @@
 
 use crate::platform::window::AppWindowPurpose;
 
+pub(crate) fn native_title(_requested: &str) -> &str {
+    // HarmonyOS main-window setWindowTitle also calls SetMissionLabel. Page or
+    // terminal titles would replace the application name in Recent Tasks.
+    "RSSH"
+}
+
 fn check_window_capabilities(
     desktop_device: bool,
     multi_window: bool,
@@ -80,6 +86,31 @@ async fn confirm_native_creation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_title_keeps_the_packaged_app_name_for_every_page() {
+        let resources: serde_json::Value = serde_json::from_str(include_str!(
+            "../../gen/ohos/AppScope/resources/base/element/string.json"
+        ))
+        .unwrap();
+        let app_name = resources["string"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "app_name")
+            .unwrap()["value"]
+            .as_str()
+            .unwrap();
+        for requested in [
+            "首页",
+            "Settings",
+            "user@host:~",
+            "RSSH — Local Analysis",
+            "",
+        ] {
+            assert_eq!(native_title(requested), app_name);
+        }
+    }
 
     #[test]
     fn native_creation_waits_and_rolls_back_native_failure() {

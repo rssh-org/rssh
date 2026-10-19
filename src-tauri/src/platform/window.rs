@@ -18,6 +18,10 @@ pub(crate) async fn ensure_app_window_available(purpose: AppWindowPurpose) -> Re
     backend::ensure_available(purpose).await
 }
 
+pub(crate) fn set_app_window_title(window: &tauri::Window, title: &str) -> tauri::Result<()> {
+    window.set_title(backend::native_title(title))
+}
+
 /// Both IPC tab cloning and AI handoff use this boundary. The window's unique
 /// label becomes its session owner when the frontend creates its resources.
 pub(crate) async fn open_app_window(
@@ -29,7 +33,7 @@ pub(crate) async fn open_app_window(
 ) -> Result<(), String> {
     ensure_app_window_available(purpose).await?;
     let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
-        .title(title)
+        .title(backend::native_title(title))
         .inner_size(1200.0, 800.0)
         .initialization_script(init_script)
         .build()
