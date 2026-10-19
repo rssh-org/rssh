@@ -3,6 +3,7 @@ interface PrimarySessionWindowDependencies {
   canOpenLocal?: boolean;
   reconcile: () => Promise<unknown>;
   allowResourcePanes: () => void;
+  restoreSessions?: () => Promise<boolean>;
   loadAutoOpenLocal: () => Promise<boolean>;
   openLocal: () => void;
 }
@@ -19,6 +20,13 @@ export async function initializePrimarySessionWindow(
   }
   if (dependencies.signal?.aborted) return;
   dependencies.allowResourcePanes();
+  let restoredLocal = false;
+  try {
+    restoredLocal = await dependencies.restoreSessions?.() ?? false;
+  } catch {
+    // A failed restore must not prevent the existing startup preference.
+  }
+  if (dependencies.signal?.aborted || restoredLocal) return;
   if (dependencies.canOpenLocal === false) return;
 
   try {
