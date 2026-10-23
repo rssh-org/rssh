@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -11,12 +9,6 @@ use crate::models::{Credential, CredentialType};
 use crate::ssh::sftp::{FileStat, RemoteEntry, SftpHandle, WalkEntry};
 use crate::state::AppState;
 use crate::state::{SessionKind, SessionOwner};
-
-#[cfg(desktop)]
-use tauri_plugin_dialog::{DialogExt, FilePath};
-
-/// Maximum recursion depth for the local walker. Mirrors the remote-side cap.
-const LOCAL_WALK_DEPTH_CAP: u32 = 32;
 
 /// RAII：注册 cancel flag 并在 drop 时自动 unregister，无论 streaming 正常返回、
 /// 早 `?`、还是 panic。替代旧的手写 register/unregister 配对。
@@ -152,69 +144,10 @@ pub async fn sftp_walk_remote_dir(
     h.walk_files(&remote_root).await
 }
 
-/// Recursively list every file under a local directory; the local-side
-/// counterpart of `sftp_walk_remote_dir`. `rel_path` always uses '/'; the
-/// frontend swaps the separator when rebuilding the local physical path.
+/// The file adapter owns local filesystem and authorized URI traversal.
 #[tauri::command]
-pub async fn walk_local_dir(local_root: String) -> AppResult<Vec<WalkEntry>> {
-    let root = PathBuf::from(&local_root);
-    let mut queue: VecDeque<(PathBuf, u32)> = VecDeque::new();
-    queue.push_back((root.clone(), 0));
-    let mut result: Vec<WalkEntry> = Vec::new();
-
-    while let Some((dir, depth)) = queue.pop_front() {
-        if depth >= LOCAL_WALK_DEPTH_CAP {
-            return Err(AppError::other(
-                "local_tree_too_deep",
-                json!({
-                    "path": dir.display().to_string(),
-                    "depth": depth,
-                    "limit": LOCAL_WALK_DEPTH_CAP,
-                }),
-            ));
-        }
-        let mut rd = tokio::fs::read_dir(&dir).await?;
-        while let Some(entry) = rd.next_entry().await? {
-            // `entry.metadata()` does not traverse symlinks — single syscall
-            // covers both type discrimination and size for regular files,
-            // replacing the previous file_type() + metadata() double-stat.
-            let path = entry.path();
-            let meta = entry.metadata().await?;
-            if meta.is_dir() {
-                queue.push_back((path, depth + 1));
-            } else if meta.is_file() {
-                result.push(WalkEntry {
-                    rel_path: rel_unix(&path, &root),
-                    size: meta.len(),
-                });
-            } else if meta.is_symlink() {
-                // Follow once to learn what the target is. Skip symlink-to-dir
-                // to avoid cycles, and silently skip broken symlinks.
-                if let Ok(target_meta) = tokio::fs::metadata(&path).await {
-                    if target_meta.is_file() {
-                        result.push(WalkEntry {
-                            rel_path: rel_unix(&path, &root),
-                            size: target_meta.len(),
-                        });
-                    }
-                }
-            }
-            // Anything else (block/char/fifo): skip.
-        }
-    }
-    Ok(result)
-}
-
-/// Convert the portion of `full` relative to `root` into a '/'-separated string.
-/// On Windows std::path::Component uses '\'; we normalise here and the frontend
-/// converts back to the platform separator when joining.
-fn rel_unix(full: &Path, root: &Path) -> String {
-    let stripped = full.strip_prefix(root).unwrap_or(full);
-    stripped
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
+pub async fn walk_local_dir(local_root: String) -> AppResult<Vec<crate::files::LocalWalkEntry>> {
+    crate::files::walk_directory(local_root).await
 }
 
 #[tauri::command]
@@ -262,239 +195,49 @@ pub async fn sftp_close(
     )
 }
 
-/// dialog plugin 的 FilePath → 本地 PathBuf。这里的命令仅在桌面注册，
-/// 所以 dialog 总返回真实路径，移动端 URI 不会出现在这里。
-#[cfg(desktop)]
-fn dialog_to_path(fp: FilePath) -> AppResult<PathBuf> {
-    fp.into_path()
-        .map_err(|e| AppError::other("file_path_invalid", json!({ "err": e.to_string() })))
-}
-
-/// `spawn_blocking` 的 JoinError → AppError。
-#[cfg(desktop)]
-fn dialog_join_err(e: tokio::task::JoinError) -> AppError {
-    AppError::other("dialog_task_failed", json!({ "err": e.to_string() }))
-}
-
-/// Download a remote file via native Save As dialog with streaming + progress.
-#[cfg(desktop)]
-#[tauri::command]
-pub async fn sftp_save_file(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    sftp_id: String,
-    remote_path: String,
-    default_name: String,
-) -> AppResult<Option<String>> {
-    let dialog_app = app.clone();
-    let picked = tokio::task::spawn_blocking(move || {
-        dialog_app
-            .dialog()
-            .file()
-            .set_file_name(&default_name)
-            .blocking_save_file()
-    })
-    .await
-    .map_err(dialog_join_err)?;
-    let Some(fp) = picked else { return Ok(None) };
-    let local = dialog_to_path(fp)?;
-
-    let sftp = get_sftp(&state, &sftp_id)?;
-    let transfer_id = uuid::Uuid::new_v4().to_string();
-    let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
-    let host = crate::emitter::Host::Tauri(app);
-    sftp.download_streaming(&remote_path, &local, &host, &transfer_id, cancel)
-        .await?;
-    Ok(Some(local.display().to_string()))
-}
-
-/// Pick a local file via native Open dialog and upload with streaming + progress.
-#[cfg(desktop)]
-#[tauri::command]
-pub async fn sftp_pick_and_upload(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    sftp_id: String,
-    remote_dir: String,
-) -> AppResult<Option<String>> {
-    let dialog_app = app.clone();
-    let picked =
-        tokio::task::spawn_blocking(move || dialog_app.dialog().file().blocking_pick_file())
-            .await
-            .map_err(dialog_join_err)?;
-    let Some(fp) = picked else { return Ok(None) };
-    let local = dialog_to_path(fp)?;
-
-    let name = local
-        .file_name()
-        .ok_or_else(|| AppError::other("sftp_invalid_filename", json!({})))?
-        .to_string_lossy()
-        .into_owned();
-    let remote_path = if remote_dir == "/" {
-        format!("/{}", name)
-    } else {
-        format!("{}/{}", remote_dir.trim_end_matches('/'), name)
-    };
-
-    let sftp = get_sftp(&state, &sftp_id)?;
-    let transfer_id = uuid::Uuid::new_v4().to_string();
-    let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
-    let host = crate::emitter::Host::Tauri(app);
-    let mut reader = tokio::fs::File::open(&local).await?;
-    let total = reader.metadata().await?.len();
-    sftp.upload_streaming(
-        &mut reader,
-        total,
-        &remote_path,
-        &host,
-        &transfer_id,
-        cancel,
-    )
-    .await?;
-    Ok(Some(name))
-}
-
-/// Open native Save-As dialog and return the chosen path. No transfer happens here.
-#[cfg(desktop)]
+/// Pick a destination or source using the native host; keep authorization URIs intact.
 #[tauri::command]
 pub async fn sftp_pick_save_path(
     app: tauri::AppHandle,
     default_name: String,
 ) -> AppResult<Option<String>> {
-    let picked = tokio::task::spawn_blocking(move || {
-        app.dialog()
-            .file()
-            .set_file_name(&default_name)
-            .blocking_save_file()
-    })
-    .await
-    .map_err(dialog_join_err)?;
-    match picked {
-        Some(fp) => Ok(Some(dialog_to_path(fp)?.display().to_string())),
-        None => Ok(None),
-    }
+    crate::files::pick_save(&app, default_name, Vec::new()).await
 }
 
-/// Open native Open dialog and return the chosen path. No transfer happens here.
-#[cfg(desktop)]
 #[tauri::command]
-pub async fn sftp_pick_open_path(app: tauri::AppHandle) -> AppResult<Option<String>> {
-    let picked = tokio::task::spawn_blocking(move || app.dialog().file().blocking_pick_file())
-        .await
-        .map_err(dialog_join_err)?;
-    match picked {
-        Some(fp) => Ok(Some(dialog_to_path(fp)?.display().to_string())),
-        None => Ok(None),
-    }
-}
-
-/// Pick a folder via the native dialog. Used both as the destination root
-/// (multi-select download) and the source root (recursive upload) — both
-/// flows want the same `blocking_pick_folder()` call, so a single command suffices.
-#[cfg(desktop)]
-#[tauri::command]
-pub async fn sftp_pick_folder(app: tauri::AppHandle) -> AppResult<Option<String>> {
-    let picked = tokio::task::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
-        .await
-        .map_err(dialog_join_err)?;
-    match picked {
-        Some(fp) => Ok(Some(dialog_to_path(fp)?.display().to_string())),
-        None => Ok(None),
-    }
-}
-
-/// Pick multiple source files for upload. `blocking_pick_files` supports
-/// multi-selection on every desktop platform we ship to.
-#[cfg(desktop)]
-#[tauri::command]
-pub async fn sftp_pick_open_files(app: tauri::AppHandle) -> AppResult<Option<Vec<String>>> {
-    let picked = tokio::task::spawn_blocking(move || app.dialog().file().blocking_pick_files())
-        .await
-        .map_err(dialog_join_err)?;
-    let Some(fps) = picked else { return Ok(None) };
-    let paths = fps
-        .into_iter()
-        .map(|fp| dialog_to_path(fp).map(|p| p.display().to_string()))
-        .collect::<AppResult<Vec<_>>>()?;
-    Ok(Some(paths))
-}
-
-/// `sftp_io_failed` for a local open failure — same code/i18n as other SFTP IO.
-fn open_err(e: std::io::Error) -> AppError {
-    AppError::sftp(
-        "sftp_io_failed",
-        json!({ "op": "open", "err": e.to_string() }),
-    )
-}
-
-/// Keeps an iOS security-scoped file URL active for exactly as long as the
-/// transfer owns its file handle. Other platforms need no matching release.
-struct FileAccessGuard {
-    #[cfg(target_os = "ios")]
+pub async fn sftp_pick_open_path(
     app: tauri::AppHandle,
-    #[cfg(target_os = "ios")]
-    path: Option<tauri_plugin_fs::FilePath>,
+) -> AppResult<Option<crate::files::PickedLocation>> {
+    crate::files::pick_open(&app).await
 }
 
-impl FileAccessGuard {
-    fn new(app: &tauri::AppHandle, path: &tauri_plugin_fs::FilePath) -> Self {
-        #[cfg(target_os = "ios")]
-        {
-            let path = match path {
-                tauri_plugin_fs::FilePath::Url(url) if url.scheme() == "file" => Some(path.clone()),
-                _ => None,
-            };
-            Self {
-                app: app.clone(),
-                path,
-            }
-        }
-        #[cfg(not(target_os = "ios"))]
-        {
-            let _ = (app, path);
-            Self {}
-        }
+/// Select a source or destination directory and retain its platform grant.
+#[cfg(any(windows, macos, linux, ohos))]
+#[tauri::command]
+pub async fn sftp_pick_folder(
+    app: tauri::AppHandle,
+    write: bool,
+) -> AppResult<Option<crate::files::PickedLocation>> {
+    crate::files::pick_folder(&app, write).await
+}
+
+#[tauri::command]
+pub async fn sftp_pick_open_files(
+    app: tauri::AppHandle,
+) -> AppResult<Option<Vec<crate::files::PickedLocation>>> {
+    crate::files::pick_open_files(&app).await
+}
+
+// File access keeps its native errors for non-SFTP callers. Preserve SFTP's
+// existing open-error contract without nesting a coded error inside params.
+fn local_open_error(error: AppError) -> AppError {
+    match error {
+        AppError::Io(cause) => AppError::sftp(
+            "sftp_io_failed",
+            json!({ "op": "open", "err": cause.params["err"] }),
+        ),
+        other => other,
     }
-}
-
-impl Drop for FileAccessGuard {
-    fn drop(&mut self) {
-        #[cfg(target_os = "ios")]
-        if let Some(path) = self.path.take() {
-            use tauri_plugin_fs::FsExt;
-            if let Err(e) = self.app.fs().stop_accessing_security_scoped_resource(path) {
-                log::warn!("failed to release iOS security-scoped file: {e}");
-            }
-        }
-    }
-}
-
-/// Resolve a desktop path, Android content URI, or iOS security-scoped file URL
-/// to a real file. The guard must live until the file handle is dropped.
-fn fs_open_read(
-    app: &tauri::AppHandle,
-    fp: tauri_plugin_fs::FilePath,
-) -> AppResult<(std::fs::File, FileAccessGuard)> {
-    use tauri_plugin_fs::{FsExt, OpenOptions};
-    let mut opts = OpenOptions::new();
-    opts.read(true);
-    let access = FileAccessGuard::new(app, &fp);
-    let file = app.fs().open(fp, opts).map_err(open_err)?;
-    Ok((file, access))
-}
-
-/// Same as [`fs_open_read`] but opens (create + truncate) for writing — the
-/// mobile download target.
-fn fs_open_write(
-    app: &tauri::AppHandle,
-    fp: tauri_plugin_fs::FilePath,
-) -> AppResult<(std::fs::File, FileAccessGuard)> {
-    use tauri_plugin_fs::{FsExt, OpenOptions};
-    let mut opts = OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    let access = FileAccessGuard::new(app, &fp);
-    let file = app.fs().open(fp, opts).map_err(open_err)?;
-    Ok((file, access))
 }
 
 /// Stream-download to a caller-supplied local target. transfer_id is used as the
@@ -512,25 +255,28 @@ pub async fn sftp_download_to(
     let sftp = get_sftp(&state, &sftp_id)?;
     let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
     let host = crate::emitter::Host::Tauri(app.clone());
-    // Desktop sends a filesystem path → keep the atomic `.part` + rename.
-    // Mobile sends a SAF `content://` URI → open it through plugin-fs (which
-    // resolves the URI to a real fd) and stream straight in. There's no path to
-    // rename through on mobile, so that download has no local atomicity (agreed).
-    match local_path
-        .parse::<tauri_plugin_fs::FilePath>()
-        .expect("FilePath::from_str is infallible")
+    match crate::files::download_target(&app, local_path)
+        .await
+        .map_err(local_open_error)?
     {
-        tauri_plugin_fs::FilePath::Path(p) => sftp
-            .download_streaming(&remote_path, &p, &host, &transfer_id, cancel)
+        crate::files::DownloadTarget::AtomicPath(path) => sftp
+            .download_streaming(&remote_path, &path, &host, &transfer_id, cancel)
             .await
             .map(|_| ()),
-        fp @ tauri_plugin_fs::FilePath::Url(_) => {
-            let (dst, _access) = fs_open_write(&app, fp)?;
-            let mut dst = tokio::fs::File::from_std(dst);
-            sftp.download_streaming_to_writer(&remote_path, &mut dst, &host, &transfer_id, cancel)
-                .await
-                .map(|_| ())
-        }
+        crate::files::DownloadTarget::Provider(location) => sftp
+            .download_streaming_to_writer(
+                &remote_path,
+                || async {
+                    crate::files::open_file(&app, location, true)
+                        .await
+                        .map_err(local_open_error)
+                },
+                &host,
+                &transfer_id,
+                cancel,
+            )
+            .await
+            .map(|_| ()),
     }
 }
 
@@ -547,25 +293,15 @@ pub async fn sftp_upload_from(
     let sftp = get_sftp(&state, &sftp_id)?;
     let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
     let host = crate::emitter::Host::Tauri(app.clone());
-    // Local end is just a reader, so desktop (path) and mobile (content:// URI)
-    // share one path — plugin-fs resolves either to a real fd.
-    let fp = local_path
-        .parse::<tauri_plugin_fs::FilePath>()
-        .expect("FilePath::from_str is infallible");
-    let (reader, _access) = fs_open_read(&app, fp)?;
-    let mut reader = tokio::fs::File::from_std(reader);
+    let mut file = crate::files::open_file(&app, local_path, false)
+        .await
+        .map_err(local_open_error)?;
     // content:// fds may not support fstat; fall back to 0 (indeterminate bar).
-    let total = reader.metadata().await.map(|m| m.len()).unwrap_or(0);
-    sftp.upload_streaming(
-        &mut reader,
-        total,
-        &remote_path,
-        &host,
-        &transfer_id,
-        cancel,
-    )
-    .await
-    .map(|_| ())
+    let total = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let reader = file.stream();
+    sftp.upload_streaming(reader, total, &remote_path, &host, &transfer_id, cancel)
+        .await
+        .map(|_| ())
 }
 
 #[tauri::command]
@@ -608,4 +344,30 @@ pub fn sftp_cancel_transfer(state: State<'_, AppState>, transfer_id: String) -> 
         flag.store(true, Ordering::SeqCst);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod file_error_tests {
+    use super::*;
+
+    #[test]
+    fn local_open_failure_preserves_sftp_wire_error_without_nested_encoding() {
+        let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let error = local_open_error(io.into());
+        let AppError::Sftp(cause) = error else {
+            panic!("expected the existing SFTP open error");
+        };
+        assert_eq!(cause.code, "sftp_io_failed");
+        assert_eq!(
+            cause.params,
+            json!({ "op": "open", "err": "access denied" })
+        );
+    }
+
+    #[test]
+    fn provider_authorization_errors_keep_their_original_contract() {
+        let error = AppError::other("ohos_native_failed", json!({"err": "not selected"}));
+        let expected = error.to_string();
+        assert_eq!(local_open_error(error).to_string(), expected);
+    }
 }

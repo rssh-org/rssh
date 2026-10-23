@@ -1560,6 +1560,15 @@ impl Actor {
             }
         };
 
+        if let Err(error) = self.app.ensure_local_analysis_available().await {
+            return Ok(self.make_tool_error(
+                &tc.id,
+                &format!(
+                    "analyze_locally is unavailable: {error}. Continue diagnosis in the current session."
+                ),
+            ));
+        }
+
         // File must exist — LLM should have called download_file first.
         if !std::path::Path::new(&input.local_path).exists() {
             return Ok(self.make_tool_error(
@@ -1615,25 +1624,14 @@ impl Actor {
             "task": input.task,
         })
         .to_string();
-        let json_literal = match serde_json::to_string(&handoff) {
-            Ok(s) => s,
-            Err(e) => {
-                return Ok(
-                    self.make_tool_error(&tc.id, &format!("Failed to encode handoff payload: {e}"))
-                );
-            }
-        };
         // 直接把 JSON 字符串赋值为 JS string；前端走 JSON.parse(data) 还原。
         // 不要在这里 JSON.parse —— 否则 window.__rssh_ai_handoff 已经是 object，
         // 前端再 JSON.parse 会撞 "[object Object]" 解析失败。
-        let init_script = format!("window.__rssh_ai_handoff = {};", json_literal);
+        let init_script = format!("window.__rssh_ai_handoff = {};", json!(handoff));
         let label = format!("rssh-ai-{}", uuid::Uuid::new_v4().simple());
 
-        // Tauri 2 把 .title()/.inner_size() 等窗口方法限定在 #[cfg(desktop)]，
-        // 移动端不存在。analyze_locally 的本质就是开新窗口，移动端语义上不存在，
-        // 直接告知 LLM 工具不可用。
-        // 简单的卡片关闭辅助：开窗成功 / 失败 / 移动端都得 emit command_completed，
-        // 否则 UI 上审批卡片一直停在 "executing"（前端已 ack 但没拿到结果事件）。
+        // Every accepted proposal must complete, including a capability change
+        // or native window failure after approval.
         let emit_done = |this: &Self, ok: bool, summary: String| {
             this.emit(
                 "analyze_completed",
@@ -1646,54 +1644,42 @@ impl Actor {
             );
         };
 
-        #[cfg(desktop)]
+        if let Err(e) = self
+            .app
+            .open_app_window(&label, "RSSH — Local Analysis", &init_script)
+            .await
         {
-            if let Err(e) = self
-                .app
-                .open_app_window(&label, "RSSH — Local Analysis", &init_script)
-            {
-                emit_done(self, false, format!("Failed to open analysis window: {e}"));
-                return Ok(self.make_tool_error(
-                    &tc.id,
-                    &format!(
-                        "Failed to open analysis window: {e}. Continue diagnosis in the current session."
-                    ),
-                ));
-            }
-
-            self.audit_push(AuditKind::Note {
-                message: format!(
-                    "analyze_locally: spawned new window for {} (task: {})",
-                    input.local_path, input.task
-                ),
-            });
-
-            emit_done(
-                self,
-                true,
-                format!("Opened analysis window for {}", input.local_path),
-            );
-            return Ok(Self::make_tool_result(
+            emit_done(self, false, format!("Failed to open analysis window: {e}"));
+            return Ok(self.make_tool_error(
                 &tc.id,
-                format!(
-                    "Opened a new window with a separate AI session to analyze {} (task: {}). \
-                     This session will NOT receive the analysis result — continue with the current remote diagnosis. \
-                     Once the user has the result in the new window, they'll decide how to bring the conclusion back here.",
-                    input.local_path, input.task
+                &format!(
+                    "Failed to open analysis window: {e}. Continue diagnosis in the current session."
                 ),
-                true,
             ));
         }
 
-        #[cfg(mobile)]
-        {
-            let _ = (init_script, label);
-            emit_done(self, false, "Desktop-only feature".into());
-            Ok(self.make_tool_error(
-                &tc.id,
-                "analyze_locally is desktop-only: this build cannot spawn additional windows. Continue diagnosis in the current session.",
-            ))
-        }
+        self.audit_push(AuditKind::Note {
+            message: format!(
+                "analyze_locally: spawned new window for {} (task: {})",
+                input.local_path, input.task
+            ),
+        });
+
+        emit_done(
+            self,
+            true,
+            format!("Opened analysis window for {}", input.local_path),
+        );
+        Ok(Self::make_tool_result(
+            &tc.id,
+            format!(
+                "Opened a new window with a separate AI session to analyze {} (task: {}). \
+                 This session will NOT receive the analysis result — continue with the current remote diagnosis. \
+                 Once the user has the result in the new window, they'll decide how to bring the conclusion back here.",
+                input.local_path, input.task
+            ),
+            true,
+        ))
     }
 
     async fn handle_run_command(&mut self, tc: ToolCall) -> AppResult<ChatMessage> {

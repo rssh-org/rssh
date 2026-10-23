@@ -290,7 +290,7 @@ fn default_shell() -> String {
     // Windows 走 available_shells() 的扫描结果（System32 / Program Files / PATH）。
     // 即便在 Unix，也得校验 SHELL 真有效（trim + is_shell_candidate）—— 空串、
     // 卸载残留的旧路径、user 手改坏的值都得过滤，避免拿垃圾路径去 spawn。
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(windows))]
     {
         if let Ok(s) = std::env::var("SHELL") {
             let trimmed = s.trim();
@@ -303,7 +303,7 @@ fn default_shell() -> String {
             .next()
             .unwrap_or_else(|| "/bin/sh".to_string())
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     {
         // Windows 没有 $SHELL 等价物 —— available_shells() 是字典序排好的，
         // 直接拿 first 会让 `C:\Program Files\Git\bin\bash.exe` 这种偏门项目
@@ -337,7 +337,7 @@ pub fn spawn(
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("RSSH_APP", "1");
-    if !cfg!(target_os = "windows") {
+    if !cfg!(windows) {
         cmd.arg("-l");
     }
     spawn_builder(session_id, cols, rows, sink, cmd, shell)
@@ -425,4 +425,57 @@ fn spawn_builder(
     });
 
     Ok((session_id, handle))
+}
+
+#[cfg(all(test, any(windows, macos, linux), unix))]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn local_pty_streams_input_reports_resize_and_closes() {
+        let (sender, receiver) = mpsc::channel();
+        let sink: PtySink = Arc::new(move |_, output| {
+            let _ = sender.send(output);
+        });
+        let (_, handle) = spawn_command(
+            "pty-test".into(),
+            80,
+            24,
+            sink,
+            PathBuf::from("/bin/sh"),
+            OsString::from("/usr/bin:/bin"),
+            vec![
+                "-c".into(),
+                "stty -echo; printf 'PTY_READY\\n'; IFS= read -r line; printf 'PTY_INPUT:%s\\n' \"$line\"; stty size"
+                    .into(),
+            ],
+        )
+        .expect("spawn local PTY");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        while !String::from_utf8_lossy(&output).contains("PTY_READY") {
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(PtyOut::Data(data)) => output.extend(data),
+                _ => panic!(
+                    "PTY did not become ready: {}",
+                    String::from_utf8_lossy(&output)
+                ),
+            }
+        }
+        handle.resize(103, 41).expect("resize local PTY");
+        handle.write(b"hello-pty\n").expect("write local PTY");
+        loop {
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(PtyOut::Data(data)) => output.extend(data),
+                Ok(PtyOut::Close) => break,
+                Err(error) => panic!("PTY did not close: {error}"),
+            }
+        }
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("PTY_INPUT:hello-pty"), "{output}");
+        assert!(output.contains("41 103"), "{output}");
+        assert_eq!(handle.shell_path(), "/bin/sh");
+    }
 }

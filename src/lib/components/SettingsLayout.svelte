@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Component } from "svelte";
   import * as app from "../stores/app.svelte.ts";
+  import * as layout from "../stores/layout.svelte.ts";
   import * as updates from "../stores/updates.svelte.ts";
   import * as syncStatus from "../stores/sync.svelte.ts";
   import * as cliStatus from "../stores/cli.svelte.ts";
@@ -57,15 +58,7 @@
     "about":              { component: AboutScreen },
   };
 
-  const COMPACT_BREAKPOINT = 640;
-  let compact = $state(window.innerWidth < COMPACT_BREAKPOINT);
-
-  $effect(() => {
-    const mq = window.matchMedia(`(max-width: ${COMPACT_BREAKPOINT - 1}px)`);
-    const onChange = (e: MediaQueryListEvent) => { compact = e.matches; };
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  });
+  let compact = $derived(layout.compact());
 
   // 注：菜单数据用 t() 直接调用，配合 $derived 触发响应式更新
   let allMenu = $derived<MenuItem[]>([
@@ -89,15 +82,16 @@
     { id: "about", label: t("settings.section.about"), section: "settings.group.help" },
   ]);
 
-  const hiddenOnCompact = new Set<string>([]);
-  const hiddenOnMobile = new Set<string>(["cli", "dynamic-discovery", "shortcuts", "plugins"]);
-  // ConnectionEditor removes the desktop-only Serial type on mobile;
-  // the unified connection-list entry itself remains available.
-  let menu = $derived(
-    allMenu
-      .filter(m => !(compact && hiddenOnCompact.has(m.id)))
-      .filter(m => !(app.isMobile && hiddenOnMobile.has(m.id)))
-  );
+  function pageAvailable(id: app.SettingsPage): boolean {
+    const capabilities = app.capabilities();
+    switch (id) {
+      case "cli": return capabilities.cliInstall;
+      case "dynamic-discovery": return capabilities.localDiscovery;
+      case "plugins": return capabilities.plugins;
+      default: return true;
+    }
+  }
+  let menu = $derived(allMenu.filter(m => pageAvailable(m.id)));
 
   let sections = $derived((() => {
     const seen = new Set<string>();
@@ -170,7 +164,7 @@
       </div>
     {:else}
       {@const route = routes[app.settingsPage()]}
-      {#if route}
+      {#if route && pageAvailable(app.settingsPage())}
         {@const C = route.component}
         {#if route.needsId}
           <C id={app.editingId()} />

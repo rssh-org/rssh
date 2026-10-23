@@ -68,11 +68,11 @@ impl SecretStore for KeyringStore {
     }
 
     fn backend_name(&self) -> &'static str {
-        if cfg!(target_os = "macos") {
+        if cfg!(macos) {
             "macos-keychain"
-        } else if cfg!(target_os = "ios") {
+        } else if cfg!(ios) {
             "ios-keychain"
-        } else if cfg!(target_os = "windows") {
+        } else if cfg!(windows) {
             "windows-credential-manager"
         } else {
             "linux-secret-service"
@@ -86,11 +86,11 @@ mod tests {
 
     #[test]
     fn backend_name_matches_the_native_store() {
-        let expected = if cfg!(target_os = "macos") {
+        let expected = if cfg!(macos) {
             "macos-keychain"
-        } else if cfg!(target_os = "ios") {
+        } else if cfg!(ios) {
             "ios-keychain"
-        } else if cfg!(target_os = "windows") {
+        } else if cfg!(windows) {
             "windows-credential-manager"
         } else {
             "linux-secret-service"

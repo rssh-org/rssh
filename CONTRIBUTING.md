@@ -2,13 +2,17 @@
 
 ## Data
 
-CLI and desktop app share the same database:
+On macOS, Windows and Linux, the CLI and desktop app share the same database:
 
 ```
 ~/.rssh/rssh.db        # SQLite (profiles, credentials, forwards, settings)
 ~/.rssh/snippets.json  # command snippets
 ~/.ssh/known_hosts     # OpenSSH-standard host key store (shared with `ssh`)
 ```
+
+Android, iOS and HarmonyOS use their application sandbox for data and known
+hosts. Use RSSH's export/import or encrypted sync to move configurations between
+devices.
 
 ## Prerequisites
 
@@ -48,6 +52,13 @@ No extra dependencies. Visual Studio Build Tools with C++ workload must be insta
   rustup target add aarch64-linux-android armv7-linux-androideabi
   ```
 
+### HarmonyOS phone and PC
+
+Both editions are available in [Huawei AppGallery](https://appgallery.huawei.com/app/detail?id=com.rssh.app&channelId=SHARE&source=appshare).
+Open the store link or search for **RSSH** on the target device to install.
+Source builds require DevEco Studio with the full
+HarmonyOS SDK and the pinned tooling described in [BUILD_OHOS.md](BUILD_OHOS.md).
+
 ## Dev
 
 ```bash
@@ -60,7 +71,7 @@ npm run tauri dev
 
 ## Build
 
-### Desktop (current platform)
+### Desktop (macOS, Windows or Linux)
 
 ```bash
 npm run tauri build
@@ -171,6 +182,27 @@ required privacy manifest into the generated Xcode project before packaging.
 
 iOS may suspend network sessions when RSSH enters the background; this project
 does not claim a background execution mode it cannot guarantee.
+
+### HarmonyOS phone and PC
+
+Follow [BUILD_OHOS.md](BUILD_OHOS.md) for SDK setup, signing, packaging and device
+regression checks. From the repository root:
+
+```bash
+./build-ohos.sh             # signed phone HAP, PC HAP and App Pack
+./build-ohos.sh --unsigned  # unsigned packages for emulator development
+```
+
+The phone and PC have separate product entries under `src-tauri/gen/ohos/products/`
+and share `common/runtime`. AppGallery distributes the matching HAP to each device.
+The HarmonyOS build uses an isolated Cargo workspace and lockfile for its pinned
+framework patches; other platforms keep the upstream dependencies in the normal
+Cargo workspace.
+
+Keep shared build configuration in Git. Keep local signing configuration in
+`src-tauri/gen/ohos/signing.local.json`, with certificates and key material outside
+the repository or in the ignored `src-tauri/gen/ohos/signing/` directory. Do not
+commit signing credentials or generated packages.
 
 ## Running outside Tauri (headless server + IDEA plugin)
 

@@ -1,0 +1,2786 @@
+diff --git a/crates/ability/src/app.rs b/crates/ability/src/app.rs
+index 9d52dcd..3bcbc3b 100644
+--- a/crates/ability/src/app.rs
++++ b/crates/ability/src/app.rs
+@@ -22,7 +22,7 @@ use crate::{
+     bridge::MainThreadBridgeEndpoint, AvoidArea, AvoidAreaType, BridgeMainThread,
+     BridgeMainThreadEvent, BridgePlugin, BridgePluginDeclaration, BridgePluginRegistry,
+     BridgeRuntime, Configuration, Event, MainThreadScheduler, OpenHarmonyWaker,
+-    PluginLifecycleEvent, Rect, TouchInputDelivery, WAKER,
++    PluginLifecycleEvent, Rect, TouchInputDelivery,
+ };
+ 
+ static ID: AtomicI64 = AtomicI64::new(0);
+@@ -170,8 +170,7 @@ impl OpenHarmonyAppInner {
+     }
+ 
+     pub fn create_waker(&self) -> OpenHarmonyWaker {
+-        let guard = (*WAKER).read().expect("Failed to read WAKER");
+-        OpenHarmonyWaker::new((*guard).clone())
++        OpenHarmonyWaker::new()
+     }
+ 
+     pub fn config(&self) -> Configuration {
+diff --git a/crates/ability/src/bridge/mod.rs b/crates/ability/src/bridge/mod.rs
+index f3a5b35..92d794f 100644
+--- a/crates/ability/src/bridge/mod.rs
++++ b/crates/ability/src/bridge/mod.rs
+@@ -704,6 +704,13 @@ pub struct BridgeCallOptions {
+ }
+ 
+ impl BridgeCallOptions {
++    /// Wait for a human interaction without a wall-clock deadline. The call
++    /// remains bound to its Ability session and is cancelled during teardown.
++    pub fn without_timeout(mut self) -> Self {
++        self.timeout_ms = 0;
++        self
++    }
++
+     pub fn with_timeout_ms(mut self, timeout_ms: u32) -> Self {
+         self.timeout_ms = timeout_ms.clamp(1, MAX_TIMEOUT_MS);
+         self
+@@ -1487,6 +1494,18 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn human_interaction_explicitly_disables_only_the_deadline() {
++        assert_eq!(BridgeCallOptions::default().without_timeout().timeout_ms(), 0);
++        assert_eq!(
++            BridgeCallOptions::default()
++                .without_timeout()
++                .with_timeout_ms(100)
++                .timeout_ms(),
++            100
++        );
++    }
++
+     #[test]
+     fn registry_rejects_duplicate_contracts() {
+         let registry = BridgePluginRegistry::default();
+diff --git a/crates/ability/src/waker.rs b/crates/ability/src/waker.rs
+index 6183607..64609d1 100644
+--- a/crates/ability/src/waker.rs
++++ b/crates/ability/src/waker.rs
+@@ -6,30 +6,20 @@ type WakerType = LazyLock<RwLock<Option<Arc<ThreadsafeFunction<(), ()>>>>>;
+ 
+ pub(crate) static WAKER: WakerType = LazyLock::new(|| RwLock::new(None));
+ 
+-pub struct OpenHarmonyWaker {
+-    waker: Option<Arc<ThreadsafeFunction<(), ()>>>,
+-}
+-
+-// Safety: ThreadsafeFunction can be called from any thread.
+-unsafe impl Send for OpenHarmonyWaker {}
+-unsafe impl Sync for OpenHarmonyWaker {}
++#[derive(Clone, Default)]
++pub struct OpenHarmonyWaker;
+ 
+ impl OpenHarmonyWaker {
+-    pub fn new(waker: Option<Arc<ThreadsafeFunction<(), ()>>>) -> Self {
+-        Self { waker }
++    pub fn new() -> Self {
++        Self
+     }
+ 
+     pub fn wake(&self) {
+-        if let Some(waker) = &self.waker {
++        // Proxies may precede lifecycle registration and survive Ability recreation.
++        // Clone the current callback, releasing the slot lock before scheduling.
++        let waker = WAKER.read().expect("Failed to read WAKER").clone();
++        if let Some(waker) = waker {
+             waker.call(Ok(()), ThreadsafeFunctionCallMode::NonBlocking);
+         }
+     }
+ }
+-
+-impl Clone for OpenHarmonyWaker {
+-    fn clone(&self) -> Self {
+-        Self {
+-            waker: self.waker.clone(),
+-        }
+-    }
+-}
+diff --git a/crates/plugin-files/src/lib.rs b/crates/plugin-files/src/lib.rs
+index 2cd0fd7..d1fb509 100644
+--- a/crates/plugin-files/src/lib.rs
++++ b/crates/plugin-files/src/lib.rs
+@@ -74,6 +74,8 @@ pub struct FileDialogOptions {
+     pub dialog_type: String,
+     pub allow_many: bool,
+     pub default_location: Option<String>,
++    /// Suggested basename for a save dialog, separate from its directory URI.
++    pub default_name: Option<String>,
+     pub filters: Vec<FileDialogFilter>,
+ }
+ 
+@@ -85,6 +87,7 @@ impl FileDialogOptions {
+             dialog_type: dialog_type.into(),
+             allow_many: false,
+             default_location: None,
++            default_name: None,
+             filters: Vec::new(),
+         }
+     }
+@@ -104,7 +107,22 @@ impl FileDialogOptions {
+         self
+     }
+ 
++    pub fn default_name(mut self, default_name: impl Into<String>) -> Self {
++        self.default_name = Some(default_name.into());
++        self
++    }
++
+     fn validate(&self) -> Result<()> {
++        if let Some(name) = &self.default_name {
++            if name.is_empty()
++                || matches!(name.as_str(), "." | "..")
++                || name.contains(['/', '\\', '\0'])
++            {
++                return Err(Error::from_reason(
++                    "default_name must be a non-empty file name",
++                ));
++            }
++        }
+         match self.dialog_type.as_str() {
+             dialog_type::OPEN_FILE | dialog_type::SAVE_FILE | dialog_type::OPEN_FOLDER => {}
+             _ => {
+@@ -166,7 +184,7 @@ impl FilesExt for OpenHarmonyApp {
+                 .call_async::<FilesBridgePlugin, FileDialogOptions, FileDialogResponse>(
+                     "file-dialog",
+                     options,
+-                    BridgeCallOptions::default().with_timeout_ms(60_000),
++                    BridgeCallOptions::default().without_timeout(),
+                 )
+                 .await
+         })
+@@ -219,4 +237,25 @@ mod tests {
+         assert_eq!(response.files.len(), 1);
+         assert_eq!(response.filter, -1);
+     }
++
++    #[test]
++    fn save_dialog_preserves_a_suggested_file_name() {
++        let options = FileDialogOptions::new(dialog_type::SAVE_FILE).default_name("report.txt");
++        assert_eq!(options.default_name.as_deref(), Some("report.txt"));
++        assert!(options.validate().is_ok());
++        for invalid in [
++            "",
++            "../report.txt",
++            "sub/report.txt",
++            "a\\b",
++            ".",
++            "..",
++            "\0",
++        ] {
++            assert!(FileDialogOptions::new(dialog_type::SAVE_FILE)
++                .default_name(invalid)
++                .validate()
++                .is_err());
++        }
++    }
+ }
+diff --git a/crates/plugin-webview/README.md b/crates/plugin-webview/README.md
+index 6a59eab..0d8b117 100644
+--- a/crates/plugin-webview/README.md
++++ b/crates/plugin-webview/README.md
+@@ -138,6 +138,7 @@ WebviewCallbacksBuilder::new("article")
+     .on_download_start(|request| WebviewDownloadStartResponse::allow(request.temp_path))
+     .on_download_end(|event| tracing::info!(?event, "download completed"))
+     .on_title_change(|event| tracing::info!(?event, "title changed"))
++    .on_page_load(|event| tracing::info!(?event, "document load phase changed"))
+     .build()?;
+ ```
+ 
+diff --git a/crates/plugin-webview/src/callbacks.rs b/crates/plugin-webview/src/callbacks.rs
+index b52e6c5..1641d9b 100644
+--- a/crates/plugin-webview/src/callbacks.rs
++++ b/crates/plugin-webview/src/callbacks.rs
+@@ -10,11 +10,12 @@ use std::{
+ };
+ 
+ use napi_ohos::{Error, Result};
++use openharmony_ability::PluginLifecycleEvent;
+ 
+ use super::{
+     controller, WebviewCallbackOptions, WebviewDownloadEndEvent, WebviewDownloadStartRequest,
+     WebviewDownloadStartResponse, WebviewNavigationRequest, WebviewNavigationResponse,
+-    WebviewTitleChangeEvent,
++    WebviewPageLoadEvent, WebviewTitleChangeEvent,
+ };
+ 
+ type NavigationCallback = Arc<dyn Fn(WebviewNavigationRequest) -> bool + Send + Sync + 'static>;
+@@ -23,6 +24,8 @@ type DownloadStartCallback = Arc<
+ >;
+ type DownloadEndCallback = Arc<dyn Fn(WebviewDownloadEndEvent) + Send + Sync + 'static>;
+ type TitleChangeCallback = Arc<dyn Fn(WebviewTitleChangeEvent) + Send + Sync + 'static>;
++type PageLoadCallback = Arc<dyn Fn(WebviewPageLoadEvent) + Send + Sync + 'static>;
++type LifecycleCallback = Arc<dyn Fn(PluginLifecycleEvent) + Send + Sync + 'static>;
+ 
+ #[derive(Default, Clone)]
+ struct WebviewCallbacks {
+@@ -30,6 +33,8 @@ struct WebviewCallbacks {
+     download_start: Option<DownloadStartCallback>,
+     download_end: Option<DownloadEndCallback>,
+     title_change: Option<TitleChangeCallback>,
++    page_load: Option<PageLoadCallback>,
++    lifecycle: Option<LifecycleCallback>,
+ }
+ 
+ impl WebviewCallbacks {
+@@ -39,6 +44,7 @@ impl WebviewCallbacks {
+             download_start: self.download_start.is_some(),
+             download_end: self.download_end.is_some(),
+             title_change: self.title_change.is_some(),
++            page_load: self.page_load.is_some(),
+         }
+     }
+ 
+@@ -47,12 +53,22 @@ impl WebviewCallbacks {
+             && self.download_start.is_none()
+             && self.download_end.is_none()
+             && self.title_change.is_none()
++            && self.page_load.is_none()
++            && self.lifecycle.is_none()
+     }
+ }
+ 
+ static CALLBACKS: LazyLock<RwLock<BTreeMap<String, WebviewCallbacks>>> =
+     LazyLock::new(|| RwLock::new(BTreeMap::new()));
+ 
++pub(crate) fn release(webview_id: &str) -> Result<()> {
++    CALLBACKS
++        .write()
++        .map_err(|_| Error::from_reason("Failed to lock WebView callback registry"))?
++        .remove(webview_id);
++    Ok(())
++}
++
+ /// Builder for Rust-owned WebView lifecycle and platform callbacks.
+ ///
+ /// Build this before WebviewClient::create. Calling build for the same ID replaces the previous
+@@ -71,6 +87,17 @@ impl WebviewCallbacksBuilder {
+         }
+     }
+ 
++    /// Observes this module's plugin lifecycle on the active N-API callback.
++    /// Schedule asynchronous work to recreate a WebView after UiContextReady;
++    /// never block this callback waiting for an ArkTS operation.
++    pub fn on_lifecycle<F>(mut self, callback: F) -> Self
++    where
++        F: Fn(PluginLifecycleEvent) + Send + Sync + 'static,
++    {
++        self.callbacks.lifecycle = Some(Arc::new(callback));
++        self
++    }
++
+     /// Decides whether ArkWeb should intercept a navigation. The callback runs synchronously on
+     /// the active N-API main-thread callback and must return promptly.
+     pub fn on_navigation_request<F>(mut self, callback: F) -> Self
+@@ -110,6 +137,15 @@ impl WebviewCallbacksBuilder {
+         self
+     }
+ 
++    /// Receives main-document load start and completion on the active N-API callback.
++    pub fn on_page_load<F>(mut self, callback: F) -> Self
++    where
++        F: Fn(WebviewPageLoadEvent) + Send + Sync + 'static,
++    {
++        self.callbacks.page_load = Some(Arc::new(callback));
++        self
++    }
++
+     pub fn build(self) -> Result<()> {
+         if self.webview_id.trim().is_empty() {
+             return Err(Error::from_reason("WebView callback id must not be empty"));
+@@ -127,6 +163,20 @@ impl WebviewCallbacksBuilder {
+     }
+ }
+ 
++pub(crate) fn dispatch_lifecycle(event: &PluginLifecycleEvent) -> Result<()> {
++    let callbacks: Vec<LifecycleCallback> = CALLBACKS
++        .read()
++        .map_err(|_| Error::from_reason("Failed to lock WebView callback registry"))?
++        .values()
++        .filter_map(|callbacks| callbacks.lifecycle.clone())
++        .collect();
++    // Observers may release or replace declarations while responding to teardown.
++    for callback in callbacks {
++        callback(event.clone());
++    }
++    Ok(())
++}
++
+ pub(crate) fn options_for(webview_id: &str) -> Result<WebviewCallbackOptions> {
+     let callbacks = CALLBACKS
+         .read()
+@@ -187,6 +237,22 @@ pub(crate) fn dispatch_download_end(event: WebviewDownloadEndEvent) -> Result<()
+     Ok(())
+ }
+ 
++pub(crate) fn dispatch_page_load(event: WebviewPageLoadEvent) -> Result<()> {
++    if !controller::is_current(&event.id, &event.native_tag)? {
++        return Ok(());
++    }
++    let callback = CALLBACKS
++        .read()
++        .map_err(|_| Error::from_reason("Failed to lock WebView callback registry"))?
++        .get(&event.id)
++        .and_then(|callbacks| callbacks.page_load.as_ref())
++        .cloned();
++    if let Some(callback) = callback {
++        callback(event);
++    }
++    Ok(())
++}
++
+ pub(crate) fn dispatch_title_change(event: WebviewTitleChangeEvent) -> Result<()> {
+     if !controller::is_current(&event.id, &event.native_tag)? {
+         return Ok(());
+@@ -218,6 +284,80 @@ mod tests {
+         assert!(WebviewCallbacksBuilder::new("webview").build().is_err());
+     }
+ 
++    #[test]
++    fn page_load_reports_phases_and_ignores_stale_or_released_controllers() {
++        use crate::WebviewPageLoadEvent;
++        use std::sync::Mutex;
++
++        let events = Arc::new(Mutex::new(Vec::new()));
++        let received = Arc::clone(&events);
++        let id = "page-load-test";
++        WebviewCallbacksBuilder::new(id)
++            .on_page_load(move |event| {
++                received.lock().unwrap().push((event.url, event.started));
++            })
++            .build()
++            .unwrap();
++        assert!(super::options_for(id).unwrap().page_load);
++        controller::on_attached(id, "current").unwrap();
++        for (native_tag, started) in [("stale", true), ("current", true), ("current", false)] {
++            super::dispatch_page_load(WebviewPageLoadEvent {
++                id: id.into(),
++                native_tag: native_tag.into(),
++                url: "https://example.test".into(),
++                started,
++            })
++            .unwrap();
++        }
++        assert_eq!(
++            *events.lock().unwrap(),
++            vec![
++                ("https://example.test".into(), true),
++                ("https://example.test".into(), false),
++            ]
++        );
++        super::release(id).unwrap();
++        assert!(!super::options_for(id).unwrap().page_load);
++        super::dispatch_page_load(WebviewPageLoadEvent {
++            id: id.into(),
++            native_tag: "current".into(),
++            url: "https://example.test/late".into(),
++            started: false,
++        })
++        .unwrap();
++        assert_eq!(events.lock().unwrap().len(), 2);
++        controller::on_removed(id, "current").unwrap();
++    }
++
++    #[test]
++    fn lifecycle_observers_are_reentrant_and_release_only_their_webview() {
++        use openharmony_ability::PluginLifecycleEvent;
++
++        let first = Arc::new(AtomicUsize::new(0));
++        let second = Arc::new(AtomicUsize::new(0));
++        let first_calls = first.clone();
++        let second_calls = second.clone();
++        WebviewCallbacksBuilder::new("lifecycle-first")
++            .on_lifecycle(move |_| {
++                first_calls.fetch_add(1, Ordering::Relaxed);
++                super::release("lifecycle-first").unwrap();
++            })
++            .build()
++            .unwrap();
++        WebviewCallbacksBuilder::new("lifecycle-second")
++            .on_lifecycle(move |_| {
++                second_calls.fetch_add(1, Ordering::Relaxed);
++            })
++            .build()
++            .unwrap();
++
++        super::dispatch_lifecycle(&PluginLifecycleEvent::UiContextReady).unwrap();
++        super::dispatch_lifecycle(&PluginLifecycleEvent::UiContextDestroyed).unwrap();
++        assert_eq!(first.load(Ordering::Relaxed), 1);
++        assert_eq!(second.load(Ordering::Relaxed), 2);
++        super::release("lifecycle-second").unwrap();
++    }
++
+     #[test]
+     fn stale_controller_callback_cannot_reach_a_replacement_webview() {
+         let calls = Arc::new(AtomicUsize::new(0));
+diff --git a/crates/plugin-webview/src/js_proxy.rs b/crates/plugin-webview/src/js_proxy.rs
+index 8e27af1..9d5f862 100644
+--- a/crates/plugin-webview/src/js_proxy.rs
++++ b/crates/plugin-webview/src/js_proxy.rs
+@@ -39,6 +39,15 @@ struct ProxyState {
+ static PROXY_STATE: LazyLock<Mutex<ProxyState>> =
+     LazyLock::new(|| Mutex::new(ProxyState::default()));
+ 
++pub(crate) fn release(webview_id: &str) -> Result<()> {
++    let mut state = PROXY_STATE
++        .lock()
++        .map_err(|_| Error::from_reason("Failed to lock WebView JavaScript proxy state"))?;
++    state.declarations.remove(webview_id);
++    state.attached_webviews.remove(webview_id);
++    Ok(())
++}
++
+ /// Builder for a persistent JavaScript object exposed to a WebView page.
+ ///
+ /// The registered object is available as `window.<object_name>` and each declared method receives
+diff --git a/crates/plugin-webview/src/lib.rs b/crates/plugin-webview/src/lib.rs
+index 53806e9..8ad71d6 100644
+--- a/crates/plugin-webview/src/lib.rs
++++ b/crates/plugin-webview/src/lib.rs
+@@ -27,6 +27,15 @@ pub use protocol::{
+     WebviewProtocolRequest, WebviewProtocolResponder, WebviewProtocolResponse,
+ };
+ 
++/// Releases Rust callback, protocol and JavaScript proxy declarations for one removed WebView.
++/// Call after `WebviewHandle::remove` (or a failed create). Other WebViews are unaffected.
++/// A later create with this ID must declare its bindings again before creation.
++pub fn release_webview_bindings(webview_id: &str) -> Result<()> {
++    callbacks::release(webview_id)?;
++    protocol::release(webview_id)?;
++    js_proxy::release(webview_id)
++}
++
+ const BEFORE_ENGINE_INIT_EVENT: &str = "before-engine-init";
+ const SEAL_ENGINE_SCHEMES_EVENT: &str = "seal-engine-schemes";
+ const ENGINE_INITIALIZED_EVENT: &str = "engine-initialized";
+@@ -114,6 +123,11 @@ impl BridgePlugin for WebviewBridgePlugin {
+                 callbacks::dispatch_title_change(notification)?;
+                 event.respond(WebviewEventAcknowledgement { accepted: true })
+             }
++            "page-load" => {
++                let notification = event.decode::<WebviewPageLoadEvent>()?;
++                callbacks::dispatch_page_load(notification)?;
++                event.respond(WebviewEventAcknowledgement { accepted: true })
++            }
+             _ => Err(Error::from_reason(format!(
+                 "Unsupported ohos.webview main-thread event '{}'",
+                 event.name()
+@@ -122,13 +136,16 @@ impl BridgePlugin for WebviewBridgePlugin {
+     }
+ 
+     fn on_lifecycle(&self, event: &PluginLifecycleEvent) -> Result<()> {
+-        if matches!(
++        let cleanup = if matches!(
+             event,
+             PluginLifecycleEvent::UiContextDestroyed | PluginLifecycleEvent::AbilityDestroyed
+         ) {
+-            clear_attached_webview_state()?;
+-        }
+-        Ok(())
++            clear_attached_webview_state()
++        } else {
++            Ok(())
++        };
++        let notification = callbacks::dispatch_lifecycle(event);
++        cleanup.and(notification)
+     }
+ }
+ 
+@@ -267,6 +284,7 @@ pub struct WebviewCallbackOptions {
+     pub download_start: bool,
+     pub download_end: bool,
+     pub title_change: bool,
++    pub page_load: bool,
+ }
+ 
+ /// A document-start script and the URL rules for pages where ArkWeb may inject it.
+@@ -285,6 +303,8 @@ pub struct WebviewCreateRequest {
+     /// the ArkTS host appends the WebView FrameNode under that container instead of this native
+     /// module's DefaultXComponent root.
+     pub parent_handle: Option<u32>,
++    /// Logical OS window owner; zero is the existing Ability main window.
++    pub window_id: Option<i64>,
+     pub url: Option<String>,
+     pub html: Option<String>,
+     pub style: WebviewStyle,
+@@ -311,6 +331,7 @@ impl WebviewCreateRequest {
+         Self {
+             id: id.into(),
+             parent_handle: None,
++            window_id: None,
+             url: None,
+             html: None,
+             style: WebviewStyle::default(),
+@@ -469,8 +490,20 @@ pub struct WebviewTitleChangeEvent {
+     pub title: String,
+ }
+ 
++/// Main-document load start or completion, delivered on the active N-API callback.
++#[napi(object)]
++#[derive(Clone, Debug)]
++pub struct WebviewPageLoadEvent {
++    pub id: String,
++    /// Process-unique controller generation used to reject stale notifications.
++    pub native_tag: String,
++    pub url: String,
++    pub started: bool,
++}
++
+ impl_bridge_napi_type!(WebviewDownloadEndEvent, "ohos.webview.DownloadEndEvent");
+ impl_bridge_napi_type!(WebviewTitleChangeEvent, "ohos.webview.TitleChangeEvent");
++impl_bridge_napi_type!(WebviewPageLoadEvent, "ohos.webview.PageLoadEvent");
+ 
+ /// Response used by one-way named N-API notifications sent directly from ArkTS.
+ #[napi(object)]
+@@ -1033,6 +1066,10 @@ mod tests {
+             <WebviewTitleChangeEvent as BridgeNapiType>::TYPE_NAME,
+             "ohos.webview.TitleChangeEvent"
+         );
++        assert_eq!(
++            <WebviewPageLoadEvent as BridgeNapiType>::TYPE_NAME,
++            "ohos.webview.PageLoadEvent"
++        );
+         assert_eq!(
+             <WebviewEventAcknowledgement as BridgeNapiType>::TYPE_NAME,
+             "ohos.webview.EventAcknowledgement"
+diff --git a/crates/plugin-webview/src/protocol.rs b/crates/plugin-webview/src/protocol.rs
+index c2acbe2..c33a27a 100644
+--- a/crates/plugin-webview/src/protocol.rs
++++ b/crates/plugin-webview/src/protocol.rs
+@@ -49,6 +49,19 @@ struct ProtocolState {
+ static PROTOCOL_STATE: LazyLock<Mutex<ProtocolState>> =
+     LazyLock::new(|| Mutex::new(ProtocolState::default()));
+ 
++pub(crate) fn release(webview_id: &str) -> Result<()> {
++    let mut state = PROTOCOL_STATE
++        .lock()
++        .map_err(|_| Error::from_reason("Failed to lock WebView protocol state"))?;
++    state.declarations.remove(webview_id);
++    if let Some(native_tag) = state.attached_webviews.remove(webview_id) {
++        state.installing_schemes.remove(&native_tag);
++        state.installed_schemes.remove(&native_tag);
++    }
++    // Schemes belong to the process-wide engine and must remain registered.
++    Ok(())
++}
++
+ /// ArkWeb scheme flags re-exported under the WebView plugin API.
+ pub use ohos_web_binding::CustomProtocolOption as WebviewProtocolOptions;
+ 
+@@ -447,25 +460,18 @@ fn install_declaration(native_tag: &str, declaration: ProtocolDeclaration) -> Re
+         let headers = request.headers();
+         let is_main_frame = request.is_main_frame();
+ 
+-        if let Some(body) = request.http_body_stream() {
+-            let callback = Arc::clone(&callback);
+-            let mut request_handle = Some(request_handle);
+-            body.read(body.size() as usize, move |body| {
+-                let Some(request_handle) = request_handle.take() else {
+-                    return;
+-                };
+-                let responder = responder_for(request_handle);
+-                match build_request(&method, &url, headers.iter(), body) {
+-                    Ok(native_request) => callback(&url, native_request, is_main_frame, responder),
+-                    Err(_) => responder.respond(invalid_request_response()),
+-                }
+-            });
+-        } else {
+-            let responder = responder_for(request_handle);
+-            match build_request(&method, &url, headers.iter(), Vec::new()) {
+-                Ok(native_request) => callback(&url, native_request, is_main_frame, responder),
+-                Err(_) => responder.respond(invalid_request_response()),
+-            }
++        let responder = responder_for(request_handle);
++        // ohos-web-binding 0.2.3 drops the read buffer before ArkWeb's worker
++        // finishes filling it. Until the binding owns that buffer through completion,
++        // custom schemes serve resources only; IPC uses the native JavaScript proxy.
++        // Do not inspect a GET/HEAD body: some controllers expose an empty stream.
++        if !matches!(method.as_str(), "GET" | "HEAD") {
++            responder.respond(unsupported_request_response());
++            return true;
++        }
++        match build_request(&method, &url, headers.iter(), Vec::new()) {
++            Ok(native_request) => callback(&url, native_request, is_main_frame, responder),
++            Err(_) => responder.respond(invalid_request_response()),
+         }
+         true
+     });
+@@ -508,6 +514,14 @@ fn invalid_request_response() -> WebviewProtocolResponse {
+     response
+ }
+ 
++fn unsupported_request_response() -> WebviewProtocolResponse {
++    let mut response = Response::new(Cow::Borrowed(
++        &b"Custom schemes support GET and HEAD only"[..],
++    ));
++    *response.status_mut() = http::StatusCode::NOT_IMPLEMENTED;
++    response
++}
++
+ fn responder_for(request_handle: ohos_web_binding::ResourceHandle) -> WebviewProtocolResponder {
+     WebviewProtocolResponder {
+         responder: Box::new(move |response| {
+diff --git a/crates/plugin-window/src/events.rs b/crates/plugin-window/src/events.rs
+new file mode 100644
+index 0000000..4614bd0
+--- /dev/null
++++ b/crates/plugin-window/src/events.rs
+@@ -0,0 +1,115 @@
++use std::{cell::RefCell, collections::HashMap, rc::Rc};
++
++/// OS events carry the logical owner ID, never the platform ID (which may be reused).
++#[derive(Clone, Debug, Default)]
++pub struct WindowEvent {
++    pub window_id: i64,
++    pub kind: String,
++    pub x: i32,
++    pub y: i32,
++    pub width: i32,
++    pub height: i32,
++    pub scale: f64,
++    pub focused: bool,
++    pub visible: bool,
++    pub maximized: bool,
++    pub minimized: bool,
++}
++
++type Callback = Rc<dyn Fn(WindowEvent)>;
++thread_local! {
++    static HANDLERS: RefCell<HashMap<i64, Callback>> = RefCell::new(HashMap::new());
++}
++
++pub fn observe_window(id: i64, callback: impl Fn(WindowEvent) + 'static) {
++    HANDLERS.with(|handlers| handlers.borrow_mut().insert(id, Rc::new(callback)));
++}
++
++pub fn forget_window(id: i64) {
++    HANDLERS.with(|handlers| handlers.borrow_mut().remove(&id));
++}
++
++pub fn dispatch_window_event(event: WindowEvent) {
++    let callback = HANDLERS.with(|handlers| {
++        if event.kind == "destroyed" {
++            handlers.borrow_mut().remove(&event.window_id)
++        } else {
++            handlers.borrow().get(&event.window_id).cloned()
++        }
++    });
++    if let Some(callback) = callback {
++        callback(event);
++    }
++}
++
++pub fn window_context_ready() {
++    // Take a snapshot: callbacks may destroy a window or register a new one.
++    let handlers = HANDLERS.with(|handlers| handlers.borrow().clone());
++    for (id, callback) in handlers {
++        callback(WindowEvent {
++            window_id: id,
++            kind: "ready".into(),
++            ..Default::default()
++        });
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn close_is_scoped_and_context_recreation_keeps_survivors() {
++        let events = Rc::new(RefCell::new(Vec::new()));
++        for id in [7, 8] {
++            let events = events.clone();
++            observe_window(id, move |event| {
++                events.borrow_mut().push((event.window_id, event.kind))
++            });
++        }
++        dispatch_window_event(WindowEvent {
++            window_id: 7,
++            kind: "close-requested".into(),
++            ..Default::default()
++        });
++        dispatch_window_event(WindowEvent {
++            window_id: 7,
++            kind: "destroyed".into(),
++            ..Default::default()
++        });
++        dispatch_window_event(WindowEvent {
++            window_id: 7,
++            kind: "resized".into(),
++            ..Default::default()
++        });
++        window_context_ready();
++        assert_eq!(
++            &*events.borrow(),
++            &[
++                (7, "close-requested".into()),
++                (7, "destroyed".into()),
++                (8, "ready".into())
++            ]
++        );
++        dispatch_window_event(WindowEvent {
++            window_id: 8,
++            kind: "destroyed".into(),
++            ..Default::default()
++        });
++    }
++    #[test]
++    fn callbacks_can_register_another_window_without_reentrant_borrow() {
++        observe_window(1, |_| observe_window(2, |_| {}));
++        dispatch_window_event(WindowEvent {
++            window_id: 1,
++            kind: "close-requested".into(),
++            ..Default::default()
++        });
++        for id in [1, 2] {
++            dispatch_window_event(WindowEvent {
++                window_id: id,
++                kind: "destroyed".into(),
++                ..Default::default()
++            });
++        }
++    }
++}
+diff --git a/crates/plugin-window/src/lib.rs b/crates/plugin-window/src/lib.rs
+index f8ffebd..00886dd 100644
+--- a/crates/plugin-window/src/lib.rs
++++ b/crates/plugin-window/src/lib.rs
+@@ -4,10 +4,14 @@
+ //! decorations, focus, move/resize/minimize/maximize, background color, blur and destruction).
+ 
+ use napi_derive_ohos::napi;
++use napi_ohos::bindgen_prelude::Unknown;
++mod events;
++pub use events::{forget_window, observe_window, WindowEvent};
+ use napi_ohos::{Error, Result};
+ use openharmony_ability::{
+     impl_bridge_napi_type, AsyncBridge, AvoidArea, AvoidAreaType, BridgeCallOptions,
+-    BridgeContextRequirement, BridgeNapiType, BridgePlugin, BridgeRuntime, OpenHarmonyApp, Rect,
++    BridgeContextRequirement, BridgeMainThreadEvent, BridgeNapiType, BridgePlugin, BridgeRuntime,
++    OpenHarmonyApp, PluginLifecycleEvent, Rect,
+ };
+ 
+ pub struct WindowBridgePlugin;
+@@ -18,6 +22,37 @@ impl BridgePlugin for WindowBridgePlugin {
+     const ID: &'static str = "ohos.window";
+     const REQUIRED_CONTEXTS: &'static [BridgeContextRequirement] =
+         &[BridgeContextRequirement::UiContext];
++
++    fn on_main_thread_event<'env>(
++        &self,
++        event: BridgeMainThreadEvent<'env>,
++    ) -> Result<Unknown<'env>> {
++        if event.name() != "window-event" {
++            return Err(Error::from_reason("Unknown window event"));
++        }
++        let value = event.decode::<NativeWindowEvent>()?;
++        events::dispatch_window_event(WindowEvent {
++            window_id: value.window_id,
++            kind: value.kind,
++            x: value.x,
++            y: value.y,
++            width: value.width,
++            height: value.height,
++            scale: value.scale,
++            focused: value.focused,
++            visible: value.visible,
++            maximized: value.maximized,
++            minimized: value.minimized,
++        });
++        event.respond(WindowAcknowledgement { accepted: true })
++    }
++
++    fn on_lifecycle(&self, event: &PluginLifecycleEvent) -> Result<()> {
++        if matches!(event, PluginLifecycleEvent::UiContextReady) {
++            events::window_context_ready();
++        }
++        Ok(())
++    }
+ }
+ 
+ #[napi(object)]
+@@ -78,6 +113,56 @@ impl From<RawAvoidArea> for AvoidArea {
+     }
+ }
+ 
++/// Logical window creation contract used by windowing runtimes. ID 0 owns the Ability's
++/// existing main window; all other IDs own independently mounted OS sub-windows.
++#[napi(object)]
++#[derive(Clone, Debug)]
++pub struct ManagedWindowRequest {
++    pub window_id: i64,
++    pub title: String,
++    pub width: i32,
++    pub height: i32,
++    pub x: i32,
++    pub y: i32,
++    pub visible: bool,
++    pub decorations: bool,
++    pub resizable: bool,
++    pub minimizable: bool,
++    pub maximizable: bool,
++    pub closable: bool,
++    pub maximized: bool,
++}
++impl_bridge_napi_type!(ManagedWindowRequest, "ohos.window.ManagedRequest");
++
++#[napi(object)]
++#[derive(Clone, Debug)]
++pub struct ManagedWindowCommand {
++    pub window_id: i64,
++    pub operation: String,
++    pub value: Option<bool>,
++    pub text: Option<String>,
++    pub x: Option<i32>,
++    pub y: Option<i32>,
++}
++impl_bridge_napi_type!(ManagedWindowCommand, "ohos.window.ManagedCommand");
++
++#[napi(object)]
++#[derive(Clone, Debug)]
++pub struct NativeWindowEvent {
++    pub window_id: i64,
++    pub kind: String,
++    pub x: i32,
++    pub y: i32,
++    pub width: i32,
++    pub height: i32,
++    pub scale: f64,
++    pub focused: bool,
++    pub visible: bool,
++    pub maximized: bool,
++    pub minimized: bool,
++}
++impl_bridge_napi_type!(NativeWindowEvent, "ohos.window.WindowEvent");
++
+ // ── Multi-window operations ────────────────────────────────────────────────────
+ 
+ #[napi(object)]
+@@ -259,6 +344,20 @@ impl WindowClient {
+             .await
+     }
+ 
++    pub async fn attach_managed_window(&self, request: ManagedWindowRequest) -> Result<()> {
++        validate_window_id(request.window_id)?;
++        self.call::<ManagedWindowRequest, WindowAcknowledgement>("attach-managed-window", request)
++            .await?
++            .ensure()
++    }
++
++    pub async fn update_managed_window(&self, request: ManagedWindowCommand) -> Result<()> {
++        validate_window_id(request.window_id)?;
++        self.call::<ManagedWindowCommand, WindowAcknowledgement>("update-managed-window", request)
++            .await?
++            .ensure()
++    }
++
+     /// Queries the avoid area of the Window that owns the attached DefaultXComponent.
+     pub async fn query_avoid_area(&self, area_type: AvoidAreaType) -> Result<AvoidArea> {
+         let response = self
+diff --git a/docs/plugin-development-standard.md b/docs/plugin-development-standard.md
+index 6436d31..40ef0dc 100644
+--- a/docs/plugin-development-standard.md
++++ b/docs/plugin-development-standard.md
+@@ -511,6 +511,7 @@ WebView 的 callback builder 必须在 `WebviewClient::create` 前按 facade-loc
+ | `WebDownloadDelegate.onBeforeDownload` | `DownloadStartRequest` → `DownloadStartResponse` | 失败时取消下载，fail-closed；允许改写临时保存路径 |
+ | `onDownloadFinish` / `onDownloadFailed` | `DownloadEndEvent` → `EventAcknowledgement` | 含 success 与可选 temp path；通知失败只记录 |
+ | `onTitleReceive` | `TitleChangeEvent` → `EventAcknowledgement` | 通知失败只记录 |
++| `onPageBegin` / `onPageEnd` | `PageLoadEvent` → `EventAcknowledgement` | 主文档加载开始/完成，含 URL 与 started；旧 controller 事件丢弃，通知失败只记录 |
+ 
+ `transparent` 是 create 时的行为：当 `.transparent(true)` 且未显式指定 background color 时，ArkTS
+ 必须在创建根节点时使用透明色 `#00000000`；显式 background color 优先。不能把这一语义退化为
+diff --git a/native_ability/index.ets b/native_ability/index.ets
+index 6f98445..eca5bc9 100644
+--- a/native_ability/index.ets
++++ b/native_ability/index.ets
+@@ -27,3 +27,10 @@ export type {
+ } from "./src/main/ets/ability/type";
+ export { DefaultXComponent } from "./src/main/ets/components/DefaultXComponent";
+ export { invokeNativeBackPressInterceptor } from "./src/main/ets/runtime/BackPress";
++
++export { WindowSurface, WindowSurfaceRegistry } from "./src/main/ets/components/WindowSurface";
++
++export { ApplicationWindows } from "./src/main/ets/runtime/ApplicationWindows";
++export { NativeApplicationAbility } from "./src/main/ets/ability/NativeApplicationAbility";
++
++export { NativeApplicationStage } from "./src/main/ets/ability/NativeApplicationStage";
+diff --git a/native_ability/src/main/ets/ability/NativeAbility.ets b/native_ability/src/main/ets/ability/NativeAbility.ets
+index a542f8a..6b51153 100644
+--- a/native_ability/src/main/ets/ability/NativeAbility.ets
++++ b/native_ability/src/main/ets/ability/NativeAbility.ets
+@@ -278,7 +278,7 @@ export class NativeAbility extends UIAbility {
+ 
+     // Prepare hosts without activating `ability` plugins. Their onInstall hooks are allowed to
+     // call Rust synchronously, so module.init and both sinks must exist first.
+-    const sessionId = BridgeHostRegistry.prepare(
++    const sessionId = await BridgeHostRegistry.prepare(
+       requestedModules,
+       this.context as common.UIAbilityContext,
+       this.bridgePlugins,
+@@ -288,6 +288,7 @@ export class NativeAbility extends UIAbility {
+     const loadedModules: LoadedNativeModule[] = [];
+     const initializedRuntimes: NativeModuleRuntime[] = [];
+     try {
++      this.assertInitializationActive(generation);
+       // Loading is transactional. Parallel arrays and partial "continue after error" states made
+       // a module name point at the wrong lifecycle object after one dynamic import failed.
+       for (const moduleName of requestedModules) {
+diff --git a/native_ability/src/main/ets/ability/NativeApplication.ets b/native_ability/src/main/ets/ability/NativeApplication.ets
+new file mode 100644
+index 0000000..33a9fe5
+--- /dev/null
++++ b/native_ability/src/main/ets/ability/NativeApplication.ets
+@@ -0,0 +1,181 @@
++import common from "@ohos.app.ability.common";
++import window from "@ohos.window";
++import { BridgeHostRegistry } from "../bridge/BridgeHost";
++import { NativeModuleLoader } from "../runtime/NativeModuleLoader";
++import { ApplicationWindows } from "../runtime/ApplicationWindows";
++import {
++  AbilityInitContext, ApplicationLifecycle, BridgeBindings,
++  BridgeAbilityCreateLifecyclePayload, BridgeEmptyLifecyclePayload,
++  BridgeLifecycleEvent, BridgeMemoryLevelLifecyclePayload, BridgePluginFactory, Module,
++} from "./type";
++
++export interface NativeApplicationLease {
++  application: NativeApplication;
++  initialOwner: boolean;
++}
++
++/** One native application per process; UIAbility instances own only its windows. */
++export class NativeApplication {
++  private static readonly modules = new Map<string, Promise<NativeApplication>>();
++  private static readonly sessions = new Map<string, Promise<NativeApplication>>();
++
++  readonly sessionId: string;
++  readonly moduleName: string;
++  readonly windows: ApplicationWindows;
++  private module?: Module;
++  private lifecycle?: ApplicationLifecycle;
++  private stageCreated: boolean = false;
++  private firstStage?: Promise<void>;
++  private closing?: Promise<void>;
++
++  private constructor(sessionId: string, moduleName: string, peerAbilityName: string) {
++    this.sessionId = sessionId;
++    this.moduleName = moduleName;
++    this.windows = new ApplicationWindows(sessionId, moduleName, peerAbilityName,
++      async (): Promise<void> => { await this.shutdown(); },
++      async (stage: window.WindowStage): Promise<void> => { await this.initializeStage(stage); });
++  }
++
++  static async acquire(context: common.UIAbilityContext, moduleName: string,
++    plugins: BridgePluginFactory[], initContext: AbilityInitContext,
++    peerAbilityName: string, restoredState: string): Promise<NativeApplicationLease> {
++    if (!moduleName || !peerAbilityName) throw new Error("Native application module and peer Ability names are required");
++    const existing = NativeApplication.modules.get(moduleName);
++    if (existing !== undefined) {
++      const application = await existing;
++      application.assertActive();
++      return { application, initialOwner: false };
++    }
++    // Publish the initialization promise synchronously before any SDK or import
++    // await. Concurrent entry creation must not initialize the native module twice.
++    const creating: Promise<NativeApplication> = Promise.resolve().then(async (): Promise<NativeApplication> => {
++      const sessionId = await BridgeHostRegistry.prepare([moduleName], context, plugins);
++      const application = new NativeApplication(sessionId, moduleName, peerAbilityName);
++      NativeApplication.sessions.set(sessionId, creating);
++      try {
++        await application.initialize(initContext, restoredState);
++        return application;
++      } catch (error) {
++        await application.shutdown();
++        throw new Error(`Unable to initialize native application: ${String(error)}`);
++      }
++    });
++    // Keep even a failed/closed entry: Tauri cannot be initialized twice in one
++    // process. Normal application exit creates a fresh process on the next launch.
++    NativeApplication.modules.set(moduleName, creating);
++    return { application: await creating, initialOwner: true };
++  }
++
++  static async find(sessionId: string, moduleName: string): Promise<NativeApplication> {
++    const ready = NativeApplication.sessions.get(sessionId);
++    if (ready === undefined) throw new Error("Native application session is unavailable");
++    const application = await ready;
++    if (application.moduleName !== moduleName) throw new Error("Native application module does not match");
++    application.assertActive();
++    return application;
++  }
++
++  private assertActive(): void {
++    if (this.closing !== undefined) throw new Error("Native application is closing");
++  }
++
++  private bindings(): BridgeBindings {
++    const sessionId = this.sessionId;
++    const moduleName = this.moduleName;
++    return {
++      bridgeInvoke: async (pluginId: string, action: string, requestTypeName: string,
++        responseTypeName: string, value: ESObject, timeoutMs: number): Promise<ESObject> =>
++        await BridgeHostRegistry.invokeAsync(sessionId, moduleName, pluginId, action,
++          requestTypeName, responseTypeName, value, timeoutMs),
++      bridgeInvokeSync: (pluginId: string, action: string, requestTypeName: string,
++        responseTypeName: string, value: ESObject): ESObject =>
++        BridgeHostRegistry.invokeSync(sessionId, moduleName, pluginId, action,
++          requestTypeName, responseTypeName, value),
++      bridgeDispatch: (): void => {},
++    };
++  }
++
++  private async initialize(context: AbilityInitContext, restoredState: string): Promise<void> {
++    const module = await NativeModuleLoader.load(this.moduleName, "async");
++    this.module = module;
++    const lifecycle = module.init(this.bindings(), `${this.sessionId}:${this.moduleName}`, context);
++    this.lifecycle = lifecycle;
++    BridgeHostRegistry.configurePlugins(this.sessionId, this.moduleName, lifecycle.bridgePlugins);
++    BridgeHostRegistry.attachApplicationLifecycle(this.sessionId, this.moduleName, lifecycle);
++    const syncSink = typeof module.onBridgeSyncEvent === "function"
++      ? (pluginId: string, event: string, requestTypeName: string, responseTypeName: string,
++          value: ESObject): ESObject => module.onBridgeSyncEvent!(pluginId, event, requestTypeName, responseTypeName, value)
++      : undefined;
++    const lifecycleSink = typeof module.onBridgeLifecycle === "function"
++      ? (kind: string): void => module.onBridgeLifecycle!(kind) : undefined;
++    BridgeHostRegistry.attachEventSink(this.sessionId, this.moduleName, syncSink, lifecycleSink);
++    lifecycle.windowStageEventCallback.onAbilityCreate(restoredState);
++    await BridgeHostRegistry.activateAbility(this.sessionId, this.moduleName, {
++      kind: "ability-create", payload: new BridgeAbilityCreateLifecyclePayload(restoredState),
++    });
++  }
++
++  private initializeStage(stage: window.WindowStage): Promise<void> {
++    this.assertActive();
++    if (this.firstStage === undefined) {
++      this.firstStage = Promise.resolve().then(async (): Promise<void> => {
++        await BridgeHostRegistry.setWindowStage(this.sessionId, this.moduleName, stage);
++        this.lifecycle!.windowStageEventCallback.onWindowStageCreate();
++        this.stageCreated = true;
++        await this.notify({ kind: "window-stage-create", payload: new BridgeEmptyLifecyclePayload() });
++      });
++    }
++    return this.firstStage;
++  }
++
++  private async notify(event: BridgeLifecycleEvent): Promise<void> {
++    await BridgeHostRegistry.emitLifecycle(this.sessionId, this.moduleName, event);
++  }
++
++  async configurationUpdated(config: object): Promise<void> {
++    this.assertActive();
++    this.lifecycle!.environmentCallback.onConfigurationUpdated(config);
++    await this.notify({ kind: "configuration-updated", payload: new BridgeEmptyLifecyclePayload() });
++  }
++
++  async memoryLevel(level: number): Promise<void> {
++    this.assertActive();
++    this.lifecycle!.environmentCallback.onMemoryLevel(level);
++    await this.notify({ kind: "memory-level", payload: new BridgeMemoryLevelLifecyclePayload(level) });
++  }
++
++  saveState(): string {
++    return this.lifecycle?.windowStageEventCallback.onAbilitySaveState() ?? "";
++  }
++
++  shutdown(): Promise<void> {
++    if (this.closing !== undefined) return this.closing;
++    BridgeHostRegistry.beginClosing(this.sessionId);
++    this.closing = Promise.resolve().then(async (): Promise<void> => {
++      try {
++        await this.windows.dispose();
++        if (this.stageCreated) {
++          await BridgeHostRegistry.clearWindowStage(this.sessionId, this.moduleName);
++          this.lifecycle!.windowStageEventCallback.onWindowStageDestroy();
++          this.stageCreated = false;
++        }
++        if (this.lifecycle !== undefined) {
++          await this.notify({ kind: "ability-destroy", payload: new BridgeEmptyLifecyclePayload() });
++          this.lifecycle.windowStageEventCallback.onAbilityDestroy();
++        }
++      } finally {
++        try {
++          this.module?.disposeAllRenders();
++        } finally {
++          try {
++            this.module?.disposeBridge(`${this.sessionId}:${this.moduleName}`);
++          } finally {
++            await BridgeHostRegistry.dispose(this.sessionId);
++            NativeApplication.sessions.delete(this.sessionId);
++          }
++        }
++      }
++    });
++    return this.closing;
++  }
++}
+diff --git a/native_ability/src/main/ets/ability/NativeApplicationAbility.ets b/native_ability/src/main/ets/ability/NativeApplicationAbility.ets
+new file mode 100644
+index 0000000..a2ecb91
+--- /dev/null
++++ b/native_ability/src/main/ets/ability/NativeApplicationAbility.ets
+@@ -0,0 +1,143 @@
++import { AbilityConstant, Configuration, UIAbility, Want } from "@kit.AbilityKit";
++import common from "@ohos.app.ability.common";
++import window from "@ohos.window";
++import { NativeApplication } from "./NativeApplication";
++import { AbilityInitContext, BridgePluginFactory } from "./type";
++
++const STATE_KEY = "ohos.rs.ability.application.state";
++
++/** A real platform UIAbility for one independent application WindowStage. */
++export class NativeApplicationAbility extends UIAbility {
++  public moduleName: string = "";
++  public bridgePlugins: BridgePluginFactory[] = [];
++  public peerAbilityName: string = "";
++
++  private application?: NativeApplication;
++  private creating: Promise<NativeApplication | undefined> = Promise.resolve(undefined);
++  private stageWork: Promise<void> = Promise.resolve();
++  private detaching?: Promise<void>;
++  private windowId: number = 0;
++  private nonce: string = "initial";
++  private initialOwner: boolean = false;
++  private stageStarted: boolean = false;
++  private closing: boolean = false;
++
++  protected createInitContext(moduleName: string): AbilityInitContext {
++    const context = this.context as common.UIAbilityContext;
++    return {
++      basePath: context.filesDir,
++      prefPath: context.filesDir,
++      preferredLocales: context.config?.language ?? "",
++      moduleName,
++      resourceManager: context.resourceManager,
++    };
++  }
++
++  onCreate(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
++    this.creating = this.resolveApplication(want).catch(async (error: Error): Promise<undefined> => {
++      await this.fail("application-create", error);
++      return undefined;
++    });
++  }
++
++  private async resolveApplication(want: Want): Promise<NativeApplication | undefined> {
++    const requestedSession = want.parameters?.["nativeApplicationSession"];
++    if (requestedSession !== undefined) {
++      const id = want.parameters?.["nativeWindowId"];
++      const nonce = want.parameters?.["nativeWindowNonce"];
++      if (typeof requestedSession !== "string" || typeof id !== "number" ||
++          !Number.isSafeInteger(id) || id <= 0 || typeof nonce !== "string" || !nonce) {
++        throw new Error("Invalid native application window identity");
++      }
++      this.windowId = id;
++      this.nonce = nonce;
++      this.application = await NativeApplication.find(requestedSession, this.moduleName);
++      return this.application;
++    }
++    const restoring = want.parameters?.["ohos.ability.params.abilityRecoveryRestart"] === true;
++    const state = restoring ? want.parameters?.[STATE_KEY]?.toString() ?? "" : "";
++    const lease = await NativeApplication.acquire(this.context as common.UIAbilityContext,
++      this.moduleName, this.bridgePlugins, this.createInitContext(this.moduleName), this.peerAbilityName, state);
++    if (!lease.initialOwner) {
++      // Opening Entry again while a peer survives focuses that application. Its
++      // destroyed logical window 0 must never be recreated or module.init rerun.
++      await lease.application.windows.focusExisting(this.context as common.UIAbilityContext);
++      await this.context.terminateSelf();
++      return undefined;
++    }
++    this.initialOwner = true;
++    this.application = lease.application;
++    return this.application;
++  }
++
++  onWindowStageCreate(stage: window.WindowStage): void {
++    this.stageWork = this.stageWork.then(async (): Promise<void> => {
++      const application = await this.creating;
++      if (application === undefined || this.closing) return;
++      this.stageStarted = true;
++      await application.windows.attach(this.windowId, this.nonce, this.context as common.UIAbilityContext, stage);
++    }).catch(async (error: Error): Promise<void> => {
++      try {
++        await this.detach();
++      } catch (cleanupError) {
++        console.error(`[NativeApplicationAbility] failed stage cleanup: ${String(cleanupError)}`);
++      }
++      await this.fail("window-stage-create", error);
++    });
++  }
++
++  onWindowStageDestroy(): void {
++    this.closing = true;
++    // Detach must interrupt a pending mount; waiting for stageWork here would
++    // deadlock when the platform destroys a window before its surface mounts.
++    void this.detach()
++      .catch((error: Error): void => { console.error(`[NativeApplicationAbility] stage teardown failed: ${String(error)}`); });
++  }
++
++  onDestroy(): Promise<void> {
++    this.closing = true;
++    const detached = this.detach();
++    return Promise.allSettled([this.stageWork, detached]).then((results): void => {
++      for (const result of results) {
++        if (result.status === "rejected") throw new Error(`Native Ability teardown failed: ${String(result.reason)}`);
++      }
++    });
++  }
++
++  private detach(): Promise<void> {
++    if (this.detaching !== undefined) return this.detaching;
++    this.detaching = this.creating.then(async (application): Promise<void> => {
++      if (application === undefined) return;
++      if (this.initialOwner && !this.stageStarted) await application.shutdown();
++      else await application.windows.detach(this.windowId, this.nonce);
++    });
++    return this.detaching;
++  }
++
++  private async fail(operation: string, error: Error): Promise<void> {
++    this.closing = true;
++    console.error(`[NativeApplicationAbility] ${operation} failed: ${String(error)}`);
++    try {
++      await this.context.terminateSelf();
++    } catch (terminateError) {
++      console.error(`[NativeApplicationAbility] terminate failed: ${String(terminateError)}`);
++    }
++  }
++
++  onConfigurationUpdate(config: Configuration): void {
++    void this.creating.then(async (application): Promise<void> => {
++      if (!this.closing) await application?.configurationUpdated(config);
++    }).catch((error: Error): void => { console.error(`[NativeApplicationAbility] configuration update failed: ${String(error)}`); });
++  }
++
++  onMemoryLevel(level: AbilityConstant.MemoryLevel): void {
++    void this.creating.then(async (application): Promise<void> => {
++      if (!this.closing) await application?.memoryLevel(level);
++    }).catch((error: Error): void => { console.error(`[NativeApplicationAbility] memory event failed: ${String(error)}`); });
++  }
++
++  onSaveState(_reason: AbilityConstant.StateType, wantParam: Record<string, object>): AbilityConstant.OnSaveResult {
++    wantParam[STATE_KEY] = new String(this.application?.saveState() ?? "");
++    return AbilityConstant.OnSaveResult.RECOVERY_AGREE;
++  }
++}
+diff --git a/native_ability/src/main/ets/ability/NativeApplicationStage.ets b/native_ability/src/main/ets/ability/NativeApplicationStage.ets
+new file mode 100644
+index 0000000..edb5d0e
+--- /dev/null
++++ b/native_ability/src/main/ets/ability/NativeApplicationStage.ets
+@@ -0,0 +1,9 @@
++import { AbilityStage, Want } from "@kit.AbilityKit";
++
++/** Use the reservation nonce as the OS identity for each independent UIAbility. */
++export class NativeApplicationStage extends AbilityStage {
++  onAcceptWant(want: Want): string {
++    const nonce = want.parameters?.["nativeWindowNonce"];
++    return typeof nonce === "string" ? nonce : "";
++  }
++}
+diff --git a/native_ability/src/main/ets/ability/type.ets b/native_ability/src/main/ets/ability/type.ets
+index 531f86b..1026e54 100644
+--- a/native_ability/src/main/ets/ability/type.ets
++++ b/native_ability/src/main/ets/ability/type.ets
+@@ -183,7 +183,7 @@ export interface BridgeLifecycleEvent {
+ export interface BridgePluginContext {
+   pluginId: string;
+   sessionId: string;
+-  abilityContext: common.UIAbilityContext;
++  getAbilityContext: () => common.UIAbilityContext;
+   isActive: () => boolean;
+   /** Returns the Ability-level WindowStage. This is not necessarily the component's window. */
+   getWindowStage: () => window.WindowStage;
+diff --git a/native_ability/src/main/ets/bridge/BridgeHost.ets b/native_ability/src/main/ets/bridge/BridgeHost.ets
+index b4e7b2c..940071a 100644
+--- a/native_ability/src/main/ets/bridge/BridgeHost.ets
++++ b/native_ability/src/main/ets/bridge/BridgeHost.ets
+@@ -65,6 +65,12 @@ interface HostComponentState {
+   windowBinding?: ComponentWindowBinding;
+ }
+ 
++interface ApplicationWindowContext {
++  context: common.UIAbilityContext;
++  stage: window.WindowStage;
++  component: HostComponentState;
++}
++
+ interface ComponentWindowBinding {
+   componentWindow: window.Window;
+   onSizeChange: (size: window.Size) => void;
+@@ -205,6 +211,8 @@ function isBridgeIdentifier(value: string): boolean {
+ }
+ 
+ function clampTimeout(timeoutMs: number): number {
++  // Explicit Rust without_timeout() policy. Lifecycle cancellation is kept.
++  if (timeoutMs === 0) return 0;
+   if (!Number.isFinite(timeoutMs)) {
+     return MAX_TIMEOUT_MS;
+   }
+@@ -255,7 +263,8 @@ class BridgeHost {
+   });
+   private readonly sessionId: string;
+   private readonly moduleName: string;
+-  private readonly abilityContext: common.UIAbilityContext;
++  private abilityContext?: common.UIAbilityContext;
++  private readonly applicationWindows: Map<number, ApplicationWindowContext> = new Map();
+   private readonly pluginFactories: BridgePluginFactory[];
+   private pluginsConfigured: boolean = false;
+   private applicationLifecycle?: ApplicationLifecycle;
+@@ -359,6 +368,49 @@ class BridgeHost {
+     });
+   }
+ 
++  /** Application-scoped WebView hosts use one independently owned root per WindowStage. */
++  async attachApplicationWindow(id: number, context: common.UIAbilityContext, stage: window.WindowStage,
++    uiContext: UIContext, root: FrameNode): Promise<void> {
++    this.assertActive();
++    const component: HostComponentState = {
++      owner: `${this.sessionId}:window:${id}`, uiContext, rootFrameNode: root,
++      mountedChildren: new Map(), nodeHandles: new Map(), nodeParents: new Map(), nextNodeHandle: 1,
++    };
++    this.applicationWindows.set(id, { context, stage, component });
++    this.selectApplicationWindow();
++    if (this.uiContextReady) { return; }
++    this.uiContextReady = true;
++    this.notifyContextChanged();
++    this.notifyRustLifecycle("ui-context-ready");
++    await this.emitLifecycle({ kind: "ui-context-ready", payload: new BridgeEmptyLifecyclePayload() });
++  }
++
++  detachApplicationWindow(id: number): void {
++    const removed = this.applicationWindows.get(id);
++    if (removed === undefined) { return; }
++    this.applicationWindows.delete(id);
++    try { this.selectApplicationWindow(); }
++    finally { this.disposeComponentState(removed.component); }
++    // Plugin and bridge lifetime belongs to the application. Pending peer creation may still
++    // be active; only application shutdown sends ui-context-destroy and cancels those calls.
++  }
++
++  private selectApplicationWindow(): void {
++    let selected: ApplicationWindowContext | undefined;
++    for (const candidate of this.applicationWindows.values()) {
++      // Native destruction may precede its Ability callback. Such a window must
++      // neither supply a stale context nor prevent another owner's cleanup.
++      try {
++        const focused = this.requireComponentWindow(candidate.component).isFocused();
++        if (selected === undefined || focused) { selected = candidate; }
++        if (focused) { break; }
++      } catch { continue; }
++    }
++    this.abilityContext = selected?.context;
++    this.windowStage = selected?.stage;
++    this.component = selected?.component;
++  }
++
+   /** Registers this native module's single DefaultXComponent root. */
+   attachComponent(componentOwner: string, uiContext: UIContext, root: FrameNode): Promise<void> {
+     this.assertActive();
+@@ -639,6 +691,7 @@ class BridgeHost {
+   }
+ 
+   private requireComponent(): HostComponentState {
++    if (this.applicationWindows.size > 0) { this.selectApplicationWindow(); }
+     const state = this.component;
+     if (state === undefined) {
+       throw new Error(`Native module '${this.moduleName}' has no attached DefaultXComponent`);
+@@ -1217,10 +1270,15 @@ class BridgeHost {
+     return {
+       pluginId,
+       sessionId: this.sessionId,
+-      abilityContext: this.abilityContext,
++      getAbilityContext: (): common.UIAbilityContext => {
++        if (this.applicationWindows.size > 0) { this.selectApplicationWindow(); }
++        if (this.abilityContext === undefined) { throw new Error("No live UIAbility context"); }
++        return this.abilityContext;
++      },
+       isActive: (): boolean =>
+         this.abilityReady && !this.closing && !this.disposed && this.pluginOperational(pluginId),
+       getWindowStage: (): window.WindowStage => {
++        if (this.applicationWindows.size > 0) { this.selectApplicationWindow(); }
+         if (this.windowStage === undefined) {
+           throw new Error(`Bridge plugin '${pluginId}' requires a WindowStage that is not ready`);
+         }
+@@ -1267,7 +1325,11 @@ class BridgeHost {
+     return {
+       pluginId,
+       sessionId: this.sessionId,
+-      abilityContext: this.abilityContext,
++      getAbilityContext: (): common.UIAbilityContext => {
++        if (this.applicationWindows.size > 0) { this.selectApplicationWindow(); }
++        if (this.abilityContext === undefined) { throw new Error("No live UIAbility context"); }
++        return this.abilityContext;
++      },
+       action,
+       timeoutMs,
+       isActive: (): boolean =>
+@@ -1311,7 +1373,11 @@ class BridgeHost {
+     return {
+       pluginId,
+       sessionId: this.sessionId,
+-      abilityContext: this.abilityContext,
++      getAbilityContext: (): common.UIAbilityContext => {
++        if (this.applicationWindows.size > 0) { this.selectApplicationWindow(); }
++        if (this.abilityContext === undefined) { throw new Error("No live UIAbility context"); }
++        return this.abilityContext;
++      },
+       isActive: (): boolean => context.isActive() && !signal.isCancelled(),
+       isCancelled: (): boolean => signal.isCancelled() || this.disposed,
+       onCancel: (listener: () => void): (() => void) => signal.onCancel(listener),
+@@ -1692,6 +1758,9 @@ class BridgeHost {
+     action: string,
+     onTimeout: (reason: Error) => void,
+   ): Promise<BridgeTypedValue> {
++    // operation already races the lifecycle cancellation Promise. A human
++    // picker may stay open indefinitely without outliving its Ability session.
++    if (timeoutMs === 0) return operation;
+     let timer = 0;
+     const timeout = new Promise<BridgeTypedValue>((_resolve, reject) => {
+       timer = setTimeout(() => {
+@@ -1710,6 +1779,20 @@ class BridgeHost {
+   }
+ }
+ 
++class SessionRelease {
++  readonly finished: Promise<void>;
++  private finish?: () => void;
++
++  constructor() {
++    this.finished = new Promise<void>((resolve) => { this.finish = resolve; });
++  }
++
++  complete(): void {
++    this.finish?.();
++    this.finish = undefined;
++  }
++}
++
+ /**
+  * Session registry is transport plumbing only. It is keyed by a NativeAbility-created session
+  * instead of a process-global Helper, so stale calls cannot reach a recreated ability instance.
+@@ -1718,19 +1801,21 @@ export class BridgeHostRegistry {
+   private static readonly sessions: Map<string, Map<string, BridgeHost>> = new Map();
+   /** One loaded native module may belong to only one active Ability session. */
+   private static readonly moduleOwners: Map<string, string> = new Map();
++  private static readonly closingSessions: Map<string, SessionRelease> = new Map();
+   private static nextSession: number = 1;
+ 
+-  static prepare(
++  static async prepare(
+     moduleNames: string[],
+     abilityContext: common.UIAbilityContext,
+     factories: BridgePluginFactory[],
+-  ): string {
++  ): Promise<string> {
+     const sessionId = `bridge-${Date.now()}-${BridgeHostRegistry.nextSession++}`;
+     const hosts: Map<string, BridgeHost> = new Map();
+     if (moduleNames.length === 0) {
+       throw new Error("NativeAbility must declare at least one native module");
+     }
+     const requestedModules: Map<string, boolean> = new Map();
++    const releases: Promise<void>[] = [];
+     for (const moduleName of moduleNames) {
+       if (!isBridgeIdentifier(moduleName)) {
+         throw new Error(`Invalid native module name '${moduleName}'`);
+@@ -1739,6 +1824,22 @@ export class BridgeHostRegistry {
+         throw new Error(`Native module '${moduleName}' is declared more than once for one Ability`);
+       }
+       requestedModules.set(moduleName, true);
++      const owner = BridgeHostRegistry.moduleOwners.get(moduleName);
++      if (owner !== undefined) {
++        const closing = BridgeHostRegistry.closingSessions.get(owner);
++        if (closing !== undefined) {
++          releases.push(closing.finished);
++          continue;
++        }
++        throw new Error(
++          `Native module '${moduleName}' already belongs to active Ability session '${owner}'; use a distinct native module for another Ability`,
++        );
++      }
++    }
++    // UIAbility does not await another instance's async onDestroy. A replacement
++    // may reserve this module only after the closing owner's plugins release it.
++    await Promise.all(releases);
++    for (const moduleName of moduleNames) {
+       const owner = BridgeHostRegistry.moduleOwners.get(moduleName);
+       if (owner !== undefined) {
+         throw new Error(
+@@ -1868,6 +1969,15 @@ export class BridgeHostRegistry {
+     BridgeHostRegistry.sessions.get(sessionId)?.get(moduleName)?.invalidateWindowStage();
+   }
+ 
++  static async attachApplicationWindow(sessionId: string, moduleName: string, id: number,
++    context: common.UIAbilityContext, stage: window.WindowStage, uiContext: UIContext, root: FrameNode): Promise<void> {
++    await BridgeHostRegistry.host(sessionId, moduleName).attachApplicationWindow(id, context, stage, uiContext, root);
++  }
++
++  static detachApplicationWindow(sessionId: string, moduleName: string, id: number): void {
++    BridgeHostRegistry.sessions.get(sessionId)?.get(moduleName)?.detachApplicationWindow(id);
++  }
++
+   /** Binds the module to its one DefaultXComponent/root tree. */
+   static async attachComponent(
+     sessionId: string,
+@@ -1923,6 +2033,9 @@ export class BridgeHostRegistry {
+     if (hosts === undefined) {
+       return;
+     }
++    if (!BridgeHostRegistry.closingSessions.has(sessionId)) {
++      BridgeHostRegistry.closingSessions.set(sessionId, new SessionRelease());
++    }
+     for (const host of hosts.values()) {
+       host.beginClosing();
+     }
+@@ -1931,8 +2044,11 @@ export class BridgeHostRegistry {
+   static async dispose(sessionId: string): Promise<void> {
+     const hosts = BridgeHostRegistry.sessions.get(sessionId);
+     if (!hosts) {
++      await BridgeHostRegistry.closingSessions.get(sessionId)?.finished;
+       return;
+     }
++    BridgeHostRegistry.beginClosing(sessionId);
++    const release = BridgeHostRegistry.closingSessions.get(sessionId);
+     BridgeHostRegistry.sessions.delete(sessionId);
+     try {
+       await BridgeHostRegistry.disposeHosts(hosts);
+@@ -1943,6 +2059,8 @@ export class BridgeHostRegistry {
+         }
+       }
+       hosts.clear();
++      BridgeHostRegistry.closingSessions.delete(sessionId);
++      release?.complete();
+     }
+   }
+ 
+diff --git a/native_ability/src/main/ets/components/WindowSurface.ets b/native_ability/src/main/ets/components/WindowSurface.ets
+new file mode 100644
+index 0000000..bb7b7b8
+--- /dev/null
++++ b/native_ability/src/main/ets/components/WindowSurface.ets
+@@ -0,0 +1,196 @@
++import { FrameNode, NodeController } from "@ohos.arkui.node";
++import { UIContext } from "@ohos.arkui.UIContext";
++
++interface SurfaceWaiter {
++  requireReady: boolean;
++  resolve: (surface: WindowSurface) => void;
++  reject: (error: Error) => void;
++}
++
++/** A window's UIContext and mount root always travel together. A sub-window never borrows
++ * the main window's context or claims its DefaultXComponent render owner. */
++export class WindowSurface {
++  private context?: UIContext;
++  private root?: FrameNode;
++  private disposed: boolean = false;
++  private ready: boolean = false;
++  private failure: Error = new Error("Window surface is closed");
++  private readonly waiters: SurfaceWaiter[] = [];
++  private readonly nodes: Map<string, FrameNode> = new Map();
++
++  isClosed(): boolean { return this.disposed; }
++
++  attach(context: UIContext, root: FrameNode): void {
++    if (this.disposed) { throw new Error("Window surface has already been disposed"); }
++    this.context = context;
++    this.root = root;
++    this.resolveReady();
++  }
++
++  markReady(): void {
++    if (this.disposed) { throw this.failure; }
++    this.ready = true;
++    this.resolveReady();
++  }
++
++  private resolveReady(): void {
++    if (this.root === undefined) { return; }
++    for (const waiter of this.waiters.slice()) {
++      if (waiter.requireReady && !this.ready) { continue; }
++      this.waiters.splice(this.waiters.indexOf(waiter), 1);
++      waiter.resolve(this);
++    }
++  }
++
++  wait(onCancel: (listener: () => void) => () => void): Promise<WindowSurface> {
++    return this.waitForAttachment(onCancel, true);
++  }
++
++  waitForMount(onCancel: (listener: () => void) => () => void): Promise<WindowSurface> {
++    return this.waitForAttachment(onCancel, false);
++  }
++
++  private waitForAttachment(onCancel: (listener: () => void) => () => void, requireReady: boolean): Promise<WindowSurface> {
++    if (this.disposed) { return Promise.reject(this.failure); }
++    if ((!requireReady || this.ready) && this.root !== undefined) { return Promise.resolve(this); }
++    return new Promise<WindowSurface>((resolve, reject): void => {
++      let unsubscribe: () => void = (): void => {};
++      const waiter: SurfaceWaiter = {
++        requireReady,
++        resolve: (surface: WindowSurface): void => { unsubscribe(); resolve(surface); },
++        reject: (error: Error): void => { unsubscribe(); reject(error); },
++      };
++      this.waiters.push(waiter);
++      unsubscribe = onCancel((): void => {
++        const index = this.waiters.indexOf(waiter);
++        if (index >= 0) { this.waiters.splice(index, 1); }
++        waiter.reject(new Error("Window surface wait was cancelled"));
++      });
++    });
++  }
++
++  getRootFrameNode(): FrameNode {
++    if (this.root === undefined || this.disposed) { throw new Error("Window mount root is unavailable"); }
++    return this.root;
++  }
++
++  getUIContext(): UIContext {
++    if (this.context === undefined) { throw new Error("Window UIContext is unavailable"); }
++    return this.context;
++  }
++
++  append(key: string, node: FrameNode): void {
++    if (this.root === undefined || this.disposed) { throw new Error("Window surface is unavailable"); }
++    this.remove(key);
++    this.root.appendChild(node);
++    this.nodes.set(key, node);
++  }
++
++  remove(key: string): void {
++    const node = this.nodes.get(key);
++    if (node === undefined) { return; }
++    this.nodes.delete(key);
++    try { this.root?.removeChild(node); } catch {}
++    try { node.dispose(); } catch {}
++  }
++
++  dispose(reason: Error = new Error("Window surface closed before attachment")): void {
++    if (this.disposed) { return; }
++    this.disposed = true;
++    this.failure = reason;
++    for (const waiter of this.waiters.splice(0)) { waiter.reject(reason); }
++    for (const key of Array.from(this.nodes.keys())) { this.remove(key); }
++    this.context = undefined;
++    this.root = undefined;
++  }
++}
++
++/** Bridge-session scoped: a late controller from an old Ability cannot mount in its replacement. */
++export class WindowSurfaceRegistry {
++  private static readonly surfaces: Map<string, WindowSurface> = new Map();
++  private static readonly owners: WeakMap<FrameNode, string> = new WeakMap();
++  private static nextOwner: number = 1;
++
++  static owner(sessionId: string, root: FrameNode): string {
++    let owner = WindowSurfaceRegistry.owners.get(root);
++    if (owner === undefined) {
++      owner = `${sessionId}:surface:${WindowSurfaceRegistry.nextOwner++}`;
++      WindowSurfaceRegistry.owners.set(root, owner);
++    }
++    return owner;
++  }
++
++  static clear(owner: string): void {
++    for (const key of Array.from(WindowSurfaceRegistry.surfaces.keys())) {
++      if (!key.startsWith(`${owner}:window:`)) { continue; }
++      const surface = WindowSurfaceRegistry.surfaces.get(key);
++      WindowSurfaceRegistry.surfaces.delete(key);
++      surface?.dispose();
++    }
++  }
++
++  static key(sessionId: string, windowId: number): string { return `${sessionId}:window:${windowId}`; }
++
++  static get(sessionId: string, windowId: number): WindowSurface {
++    const key = WindowSurfaceRegistry.key(sessionId, windowId);
++    let surface = WindowSurfaceRegistry.surfaces.get(key);
++    if (surface === undefined) {
++      surface = new WindowSurface();
++      WindowSurfaceRegistry.surfaces.set(key, surface);
++    }
++    return surface;
++  }
++
++  static has(key: string): boolean { return WindowSurfaceRegistry.surfaces.has(key); }
++
++  static find(key: string): WindowSurface {
++    const surface = WindowSurfaceRegistry.surfaces.get(key);
++    if (surface === undefined) { throw new Error("Unknown native window surface"); }
++    return surface;
++  }
++
++  static remove(sessionId: string, windowId: number): void {
++    const key = WindowSurfaceRegistry.key(sessionId, windowId);
++    const surface = WindowSurfaceRegistry.surfaces.get(key);
++    WindowSurfaceRegistry.surfaces.delete(key);
++    surface?.dispose();
++  }
++}
++
++class WindowRootController extends NodeController {
++  private root?: FrameNode;
++  makeNode(context: UIContext): FrameNode {
++    if (this.root === undefined) { this.root = new FrameNode(context); }
++    return this.root;
++  }
++  release(): void {
++    try { this.root?.dispose(); } catch {}
++    this.root = undefined;
++  }
++}
++
++@Entry({ routeName: "NativeAbilityWindow", useSharedStorage: true })
++@Component
++struct NativeAbilityWindow {
++  @LocalStorageProp("nativeWindowSurface") surfaceKey: string = "";
++  private controller: WindowRootController = new WindowRootController();
++
++  aboutToAppear(): void {
++    // A queued route can appear after its Ability session has already been disposed.
++    if (!WindowSurfaceRegistry.has(this.surfaceKey)) { return; }
++    const surface = WindowSurfaceRegistry.find(this.surfaceKey);
++    if (surface.isClosed()) { return; }
++    const context = this.getUIContext();
++    surface.attach(context, this.controller.makeNode(context));
++  }
++
++  aboutToDisappear(): void { this.controller.release(); }
++
++  build() {
++    Row() {
++      Column() {
++        NodeContainer(this.controller).width("100%").height("100%")
++      }.width("100%")
++    }.height("100%")
++  }
++}
+diff --git a/native_ability/src/main/ets/runtime/ApplicationWindows.ets b/native_ability/src/main/ets/runtime/ApplicationWindows.ets
+new file mode 100644
+index 0000000..b8c9d01
+--- /dev/null
++++ b/native_ability/src/main/ets/runtime/ApplicationWindows.ets
+@@ -0,0 +1,228 @@
++import common from "@ohos.app.ability.common";
++import Want from "@ohos.app.ability.Want";
++import window from "@ohos.window";
++import { BridgeHostRegistry } from "../bridge/BridgeHost";
++import { WindowSurface, WindowSurfaceRegistry } from "../components/WindowSurface";
++
++export interface ApplicationWindowHost {
++  windowId: number;
++  nonce: string;
++  context: common.UIAbilityContext;
++  stage: window.WindowStage;
++  win: window.Window;
++  surface: WindowSurface;
++}
++
++interface PendingWindow {
++  nonce: string;
++  resolve: (host: ApplicationWindowHost) => void;
++  reject: (error: Error) => void;
++}
++
++/** One application owns its live UIAbility instances; no window is another window's child. */
++export class ApplicationWindows {
++  private static readonly applications: Map<string, ApplicationWindows> = new Map();
++  private readonly hosts: Map<number, ApplicationWindowHost> = new Map();
++  private readonly pending: Map<number, PendingWindow> = new Map();
++  private firstStage?: Promise<void>;
++  private closedListener?: (id: number) => void;
++  private disposed: boolean = false;
++  private nextNonce: number = 1;
++
++  private readonly sessionId: string;
++  private readonly moduleName: string;
++  private readonly abilityName: string;
++  private readonly onEmpty: () => Promise<void>;
++  private readonly onFirstStage: (stage: window.WindowStage) => Promise<void>;
++
++  constructor(sessionId: string, moduleName: string, abilityName: string,
++    onEmpty: () => Promise<void>, onFirstStage: (stage: window.WindowStage) => Promise<void>) {
++    this.sessionId = sessionId;
++    this.moduleName = moduleName;
++    this.abilityName = abilityName;
++    this.onEmpty = onEmpty;
++    this.onFirstStage = onFirstStage;
++    ApplicationWindows.applications.set(sessionId, this);
++  }
++
++  static find(sessionId: string): ApplicationWindows | undefined {
++    return ApplicationWindows.applications.get(sessionId);
++  }
++
++  onClosed(listener: (id: number) => void): void { this.closedListener = listener; }
++
++  get(id: number): ApplicationWindowHost {
++    const host = this.hosts.get(id);
++    if (host === undefined) { throw new Error(`Unknown application window ${id}`); }
++    return host;
++  }
++
++  async focus(id: number, requester?: common.UIAbilityContext): Promise<void> {
++    const host = this.get(id);
++    const want: Want = {
++      bundleName: host.context.applicationInfo.name,
++      moduleName: host.context.abilityInfo.moduleName,
++      abilityName: host.context.abilityInfo.name,
++    };
++    if (id !== 0) {
++      want.parameters = { nativeApplicationSession: this.sessionId, nativeWindowId: id, nativeWindowNonce: host.nonce };
++    }
++    // Entry is singleton; peers are specified by their creation nonce. startAbility
++    // foregrounds that exact UIAbility, including minimized/background main windows.
++    await (requester ?? host.context).startAbility(want);
++    this.assertAttached(host);
++  }
++
++  async focusExisting(requester: common.UIAbilityContext): Promise<void> {
++    let failure = "No live application window";
++    for (const host of this.hosts.values()) {
++      try {
++        await this.focus(host.windowId, requester);
++        return;
++      } catch (error) {
++        // A native instance may already be awaiting its destroy callback. Try peers,
++        // but do not report a successful relaunch if every activation failed.
++        failure = `Unable to activate window ${host.windowId}: ${String(error)}`;
++      }
++    }
++    throw new Error(failure);
++  }
++
++  async open(id: number, onCancel: (listener: () => void) => () => void): Promise<ApplicationWindowHost> {
++    if (this.disposed || this.hosts.has(id) || this.pending.has(id)) { throw new Error("Invalid application window creation"); }
++    let issuer: ApplicationWindowHost | undefined;
++    for (const host of this.hosts.values()) {
++      try {
++        const focused = host.win.isFocused();
++        if (issuer === undefined || focused) { issuer = host; }
++        if (focused) { break; }
++      } catch { continue; }
++    }
++    if (issuer === undefined) { throw new Error("No live UIAbility can start a window"); }
++    const nonce = `${this.sessionId}:${this.nextNonce++}`;
++    let unsubscribe: () => void = (): void => {};
++    const result = new Promise<ApplicationWindowHost>((resolve, reject): void => {
++      this.pending.set(id, { nonce, resolve, reject });
++      unsubscribe = onCancel((): void => this.cancel(id, nonce, new Error("Window creation was cancelled")));
++    });
++    try {
++      if (!this.pending.has(id)) { return await result; }
++      // Keep the independent instance in the same application process. The private specified
++      // Ability accepts only a currently reserved nonce; stale OS callbacks cannot resurrect it.
++      void issuer.context.startAbility({
++        bundleName: issuer.context.applicationInfo.name,
++        moduleName: issuer.context.abilityInfo.moduleName,
++        abilityName: this.abilityName,
++        parameters: { nativeApplicationSession: this.sessionId, nativeWindowId: id, nativeWindowNonce: nonce },
++      }).catch((error: Error): void => this.cancel(id, nonce, new Error(String(error))));
++      return await result;
++    } finally { unsubscribe(); }
++  }
++
++  private cancel(id: number, nonce: string, error: Error): void {
++    const pending = this.pending.get(id);
++    if (pending?.nonce !== nonce) { return; }
++    this.pending.delete(id);
++    pending.reject(error);
++    WindowSurfaceRegistry.get(this.sessionId, id).dispose(error);
++    if (this.hosts.get(id)?.nonce === nonce) {
++      void this.close(id).catch((failure: Error): void => console.error(`Cancelled window cleanup failed: ${String(failure)}`));
++    } else { void this.finishIfEmpty(); }
++  }
++
++  async attach(id: number, nonce: string, context: common.UIAbilityContext, stage: window.WindowStage): Promise<void> {
++    if (this.disposed || this.hosts.has(id) || (id !== 0 && this.pending.get(id)?.nonce !== nonce)) {
++      throw new Error("Unknown or cancelled application window reservation");
++    }
++    const surface = WindowSurfaceRegistry.get(this.sessionId, id);
++    const host: ApplicationWindowHost = { windowId: id, nonce, context, stage, win: stage.getMainWindowSync(), surface };
++    this.hosts.set(id, host);
++    try {
++      if (this.firstStage === undefined) { this.firstStage = this.onFirstStage(stage); }
++      await this.firstStage;
++      this.assertAttached(host);
++      const storage = new LocalStorage();
++      storage.setOrCreate("nativeWindowSurface", WindowSurfaceRegistry.key(this.sessionId, id));
++      await stage.loadContentByName("NativeAbilityWindow", storage);
++      this.assertAttached(host);
++      // Route mounting and window configuration are separate barriers. WebViews still wait
++      // for ManagedWindows.markReady after title, sizing and visibility have all succeeded.
++      await surface.waitForMount((_listener: () => void): (() => void) => (): void => {});
++      this.assertAttached(host);
++      await BridgeHostRegistry.attachApplicationWindow(this.sessionId, this.moduleName, id,
++        context, stage, surface.getUIContext(), surface.getRootFrameNode());
++      this.assertAttached(host);
++      const pending = this.pending.get(id);
++      if (pending?.nonce === nonce) {
++        this.pending.delete(id);
++        pending.resolve(host);
++      }
++    } catch (error) {
++      this.cancel(id, nonce, new Error(String(error)));
++      await this.detach(id, nonce);
++      throw new Error(String(error));
++    }
++  }
++
++  private assertAttached(host: ApplicationWindowHost): void {
++    if (this.disposed || this.hosts.get(host.windowId) !== host || host.surface.isClosed()) {
++      throw new Error("Application window attachment was cancelled");
++    }
++  }
++
++  async close(id: number): Promise<void> {
++    const host = this.get(id);
++    await host.context.terminateSelf();
++    await this.detach(id, host.nonce);
++  }
++
++  async detach(id: number, nonce: string): Promise<void> {
++    const host = this.hosts.get(id);
++    if (host === undefined) {
++      const pending = this.pending.get(id);
++      if (pending?.nonce !== nonce) { return; }
++      this.pending.delete(id);
++      const error = new Error("UIAbility closed before window attachment");
++      pending.reject(error);
++      WindowSurfaceRegistry.get(this.sessionId, id).dispose(error);
++      await this.finishIfEmpty();
++      return;
++    }
++    if (host.nonce !== nonce) { return; }
++    this.hosts.delete(id);
++    // Notify the logical owner while the bridge is live, before final application shutdown.
++    this.closedListener?.(id);
++    BridgeHostRegistry.detachApplicationWindow(this.sessionId, this.moduleName, id);
++    // Preserve failed surfaces until the logical window is explicitly destroyed.
++    // A late WebView create must receive the same failure, never a fresh unready surface.
++    host.surface.dispose();
++    const pending = this.pending.get(id);
++    if (pending?.nonce === nonce) {
++      this.pending.delete(id);
++      pending.reject(new Error("UIAbility closed before window attachment"));
++    }
++    await this.finishIfEmpty();
++  }
++
++  private async finishIfEmpty(): Promise<void> {
++    if (!this.disposed && this.hosts.size === 0 && this.pending.size === 0) { await this.onEmpty(); }
++  }
++
++  async dispose(): Promise<void> {
++    if (this.disposed) { return; }
++    this.disposed = true;
++    ApplicationWindows.applications.delete(this.sessionId);
++    const pending = Array.from(this.pending.values());
++    this.pending.clear();
++    for (const item of pending) { item.reject(new Error("Application is shutting down")); }
++    const hosts = Array.from(this.hosts.values());
++    this.hosts.clear();
++    this.closedListener = undefined;
++    WindowSurfaceRegistry.clear(this.sessionId);
++    for (const host of hosts) {
++      BridgeHostRegistry.detachApplicationWindow(this.sessionId, this.moduleName, host.windowId);
++      try { await host.context.terminateSelf(); }
++      catch (error) { console.error(`UIAbility shutdown failed: ${String(error)}`); }
++    }
++  }
++}
+diff --git a/native_ability/src/test/LocalUnit.test.ets b/native_ability/src/test/LocalUnit.test.ets
+index 7fd5709..9fbc781 100644
+--- a/native_ability/src/test/LocalUnit.test.ets
++++ b/native_ability/src/test/LocalUnit.test.ets
+@@ -289,7 +289,7 @@ export default function localUnitTest() {
+     it("abilityPluginActivatesOnlyAfterRustSinkIsAttached", 0, async () => {
+       installProbeCount = 0;
+       installProbeSinkCount = 0;
+-      const sessionId = BridgeHostRegistry.prepare(["test_native"], {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare(["test_native"], {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new InstallProbePlugin()),
+       ]);
+       BridgeHostRegistry.configurePlugins(sessionId, "test_native", [
+@@ -314,7 +314,7 @@ export default function localUnitTest() {
+     it("pluginFactoriesAreSelectedByEachRustRegistryWithoutModuleFilters", 0, async () => {
+       installProbeCount = 0;
+       const modules = ["factory_match_module_a", "factory_match_module_b"];
+-      const sessionId = BridgeHostRegistry.prepare(modules, {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare(modules, {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new InstallProbePlugin()),
+         new LazyPlugin(() => new AbilityEchoPlugin()),
+       ]);
+@@ -359,7 +359,7 @@ export default function localUnitTest() {
+     });
+     it("pluginConfigurationFailsWhenRustPluginHasNoArkTSFactory", 0, async () => {
+       const moduleName = "missing_factory_module";
+-      const sessionId = BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, []);
++      const sessionId = await BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, []);
+       let configurationError = "";
+       try {
+         BridgeHostRegistry.configurePlugins(sessionId, moduleName, [
+@@ -375,7 +375,7 @@ export default function localUnitTest() {
+     });
+     it("pluginConfigurationRejectsExecutionAndContextMismatches", 0, async () => {
+       const executionModule = "execution_mismatch_module";
+-      const executionSession = BridgeHostRegistry.prepare(
++      const executionSession = await BridgeHostRegistry.prepare(
+         [executionModule],
+         {} as common.UIAbilityContext,
+         [new LazyPlugin(() => new AbilityEchoPlugin())],
+@@ -397,7 +397,7 @@ export default function localUnitTest() {
+       await BridgeHostRegistry.dispose(executionSession);
+ 
+       const contextModule = "context_mismatch_module";
+-      const contextSession = BridgeHostRegistry.prepare(
++      const contextSession = await BridgeHostRegistry.prepare(
+         [contextModule],
+         {} as common.UIAbilityContext,
+         [new LazyPlugin(() => new AbilityEchoPlugin())],
+@@ -416,7 +416,7 @@ export default function localUnitTest() {
+     });
+     it("pluginConfigurationRejectsBuiltInPluginIdConflicts", 0, async () => {
+       const moduleName = "reserved_plugin_id_module";
+-      const sessionId = BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new ReservedNodePlugin()),
+       ]);
+       let configurationError = "";
+@@ -432,7 +432,7 @@ export default function localUnitTest() {
+     });
+     it("pluginContextRequirementsAreComparedAsASet", 0, async () => {
+       const moduleName = "requirement_order_module";
+-      const sessionId = BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new OrderedRequirementsPlugin()),
+       ]);
+       BridgeHostRegistry.configurePlugins(sessionId, moduleName, [
+@@ -444,7 +444,7 @@ export default function localUnitTest() {
+     });
+     it("abilityPluginDoesNotDependOnDefaultXComponentLifetime", 0, async () => {
+       const moduleName = "ability_only_module";
+-      const sessionId = BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new AbilityEchoPlugin()),
+       ]);
+       BridgeHostRegistry.configurePlugins(sessionId, moduleName, [
+@@ -487,7 +487,7 @@ export default function localUnitTest() {
+     });
+     it("invalidatedWindowStageCannotBecomeReadyFromAQueuedCreate", 0, async () => {
+       stageInstallProbeCount = 0;
+-      const sessionId = BridgeHostRegistry.prepare(["test_native"], {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare(["test_native"], {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new StageInstallProbePlugin()),
+       ]);
+       BridgeHostRegistry.configurePlugins(sessionId, "test_native", [
+@@ -515,7 +515,7 @@ export default function localUnitTest() {
+       await BridgeHostRegistry.dispose(sessionId);
+     });
+     it("oneNativeModuleCannotBelongToTwoActiveAbilities", 0, async () => {
+-      const firstSession = BridgeHostRegistry.prepare(
++      const firstSession = await BridgeHostRegistry.prepare(
+         ["module_owner_test"],
+         {} as common.UIAbilityContext,
+         [],
+@@ -523,7 +523,7 @@ export default function localUnitTest() {
+       BridgeHostRegistry.configurePlugins(firstSession, "module_owner_test", []);
+       let duplicateError = "";
+       try {
+-        BridgeHostRegistry.prepare(["module_owner_test"], {} as common.UIAbilityContext, []);
++        await BridgeHostRegistry.prepare(["module_owner_test"], {} as common.UIAbilityContext, []);
+       } catch (error) {
+         duplicateError = String(error);
+       }
+@@ -531,7 +531,7 @@ export default function localUnitTest() {
+ 
+       BridgeHostRegistry.beginClosing(firstSession);
+       await BridgeHostRegistry.dispose(firstSession);
+-      const replacementSession = BridgeHostRegistry.prepare(
++      const replacementSession = await BridgeHostRegistry.prepare(
+         ["module_owner_test"],
+         {} as common.UIAbilityContext,
+         [],
+@@ -543,7 +543,7 @@ export default function localUnitTest() {
+     it("pluginInstanceCannotBeSharedAcrossNativeModules", 0, async () => {
+       const singleton = new InstallProbePlugin();
+       let reuseError = "";
+-      const sessionId = BridgeHostRegistry.prepare(
++      const sessionId = await BridgeHostRegistry.prepare(
+         ["singleton_module_a", "singleton_module_b"],
+         {} as common.UIAbilityContext,
+         [new LazyPlugin(() => singleton)],
+@@ -564,7 +564,7 @@ export default function localUnitTest() {
+     });
+     it("oneNativeModuleRejectsASecondDefaultXComponent", 0, async () => {
+       const moduleName = "single_component_module";
+-      const sessionId = BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, []);
++      const sessionId = await BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, []);
+       BridgeHostRegistry.configurePlugins(sessionId, moduleName, []);
+       await BridgeHostRegistry.activateAbility(sessionId, moduleName, {
+         kind: "ability-create",
+@@ -615,7 +615,7 @@ export default function localUnitTest() {
+     });
+     it("oneAbilityCanAttachComponentsBackedByDifferentModules", 0, async () => {
+       const modules = ["component_module_a", "component_module_b"];
+-      const sessionId = BridgeHostRegistry.prepare(modules, {} as common.UIAbilityContext, []);
++      const sessionId = await BridgeHostRegistry.prepare(modules, {} as common.UIAbilityContext, []);
+       for (const moduleName of modules) {
+         BridgeHostRegistry.configurePlugins(sessionId, moduleName, []);
+         await BridgeHostRegistry.activateAbility(sessionId, moduleName, {
+@@ -642,7 +642,7 @@ export default function localUnitTest() {
+       broadcastProbeContext = undefined;
+       const modules = ["broadcast_module_a", "broadcast_module_b"];
+       const receivedBy: string[] = [];
+-      const sessionId = BridgeHostRegistry.prepare(modules, {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare(modules, {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new BroadcastProbePlugin()),
+       ]);
+       for (const moduleName of modules) {
+@@ -679,7 +679,7 @@ export default function localUnitTest() {
+     it("windowStageCleanupCannotOvertakeComponentCleanup", 0, async () => {
+       lifecycleOrderProbe = [];
+       const moduleName = "lifecycle_order_module";
+-      const sessionId = BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
++      const sessionId = await BridgeHostRegistry.prepare([moduleName], {} as common.UIAbilityContext, [
+         new LazyPlugin(() => new LifecycleOrderProbePlugin()),
+       ]);
+       BridgeHostRegistry.configurePlugins(sessionId, moduleName, [
+diff --git a/plugins/files/src/main/ets/FilesPlugin.ets b/plugins/files/src/main/ets/FilesPlugin.ets
+index 7abd128..3f92f7a 100644
+--- a/plugins/files/src/main/ets/FilesPlugin.ets
++++ b/plugins/files/src/main/ets/FilesPlugin.ets
+@@ -22,6 +22,7 @@ interface FileDialogOptions {
+   dialogType: string;
+   allowMany: boolean;
+   defaultLocation?: string | null;
++  defaultName?: string | null;
+   filters: FileDialogFilter[];
+ }
+ 
+@@ -57,6 +58,14 @@ function parseDialogOptions(payload: BridgeTypedValue): FileDialogOptions {
+   if (typeof request.filters !== "object") {
+     throw new Error("file-dialog.filters must be an array");
+   }
++  const name = request.defaultName;
++  if (
++    name !== undefined && name !== null &&
++    (typeof name !== "string" || name.length === 0 || name === "." || name === ".." ||
++      name.includes("/") || name.includes("\\") || name.includes("\0"))
++  ) {
++    throw new Error("file-dialog.defaultName must be a non-empty file name");
++  }
+   return request;
+ }
+ 
+@@ -108,6 +117,7 @@ async function showFileDialog(
+   if (options.dialogType === "save-file") {
+     const saveOptions = new picker.DocumentSaveOptions();
+     saveOptions.defaultFilePathUri = location;
++    if (options.defaultName) saveOptions.newFileNames = [options.defaultName];
+     saveOptions.fileSuffixChoices = suffixFilters;
+     const files = await documentPicker.save(saveOptions);
+     let filter = -1;
+@@ -150,7 +160,7 @@ export class FilesPlugin extends AsyncPluginBase {
+       throw new Error(`Unsupported ohos.files action '${action}'`);
+     }
+     const options = parseDialogOptions(payload);
+-    const response = await showFileDialog(context.abilityContext, options);
++    const response = await showFileDialog(context.getAbilityContext(), options);
+     if (!context.isActive()) {
+       throw new Error("Ability was destroyed while the file dialog was pending");
+     }
+diff --git a/plugins/permission/src/main/ets/PermissionPlugin.ets b/plugins/permission/src/main/ets/PermissionPlugin.ets
+index 2d9c4d2..31ac971 100644
+--- a/plugins/permission/src/main/ets/PermissionPlugin.ets
++++ b/plugins/permission/src/main/ets/PermissionPlugin.ets
+@@ -62,7 +62,7 @@ export class PermissionPlugin extends AsyncPluginBase {
+     try {
+       const manager = abilityAccessCtrl.createAtManager();
+       const result = await manager.requestPermissionsFromUser(
+-        context.abilityContext,
++        context.getAbilityContext(),
+         permissions as Permissions[],
+       );
+       const authResults = result.authResults || [];
+diff --git a/plugins/resource/src/main/ets/ResourcePlugin.ets b/plugins/resource/src/main/ets/ResourcePlugin.ets
+index 9aa0aa2..9308c0f 100644
+--- a/plugins/resource/src/main/ets/ResourcePlugin.ets
++++ b/plugins/resource/src/main/ets/ResourcePlugin.ets
+@@ -27,7 +27,7 @@ export class ResourcePlugin extends AsyncPluginBase {
+   readonly requires: BridgeContextRequirement[] = ["ability"];
+ 
+   override onInstall(context: BridgePluginHookContext): void {
+-    const manager = context.abilityContext?.resourceManager;
++    const manager = context.getAbilityContext()?.resourceManager;
+     if (manager === undefined) {
+       throw new Error("ohos.resource requires abilityContext.resourceManager");
+     }
+diff --git a/plugins/url/src/main/ets/UrlPlugin.ets b/plugins/url/src/main/ets/UrlPlugin.ets
+index a33bb86..75fad70 100644
+--- a/plugins/url/src/main/ets/UrlPlugin.ets
++++ b/plugins/url/src/main/ets/UrlPlugin.ets
+@@ -45,7 +45,7 @@ export class UrlPlugin extends AsyncPluginBase {
+     }
+     const request = parseOpenRequest(payload);
+     try {
+-      await context.abilityContext.openLink(request.url);
++      await context.getAbilityContext().openLink(request.url);
+     } catch (error) {
+       throw new Error(`openLink failed: ${String(error)}`);
+     }
+diff --git a/plugins/webview/src/main/ets/WebviewPlugin.ets b/plugins/webview/src/main/ets/WebviewPlugin.ets
+index ef07248..4cb225f 100644
+--- a/plugins/webview/src/main/ets/WebviewPlugin.ets
++++ b/plugins/webview/src/main/ets/WebviewPlugin.ets
+@@ -2,6 +2,9 @@ import { WebHeader } from "@kit.ArkUI";
+ import { BuilderNode } from "@ohos.arkui.node";
+ import webview from "@ohos.web.webview";
+ import {
++  ApplicationWindows,
++  WindowSurface,
++  WindowSurfaceRegistry,
+   BridgeCallContext,
+   BridgeTypedValue,
+   BridgePluginContext,
+@@ -24,6 +27,7 @@ const DOWNLOAD_START_REQUEST_TYPE = "ohos.webview.DownloadStartRequest";
+ const DOWNLOAD_START_RESPONSE_TYPE = "ohos.webview.DownloadStartResponse";
+ const DOWNLOAD_END_EVENT_TYPE = "ohos.webview.DownloadEndEvent";
+ const TITLE_CHANGE_EVENT_TYPE = "ohos.webview.TitleChangeEvent";
++const PAGE_LOAD_EVENT_TYPE = "ohos.webview.PageLoadEvent";
+ const ENGINE_LIFECYCLE_EVENT_TYPE = "ohos.webview.EngineLifecycleEvent";
+ const ENGINE_LIFECYCLE_RESPONSE_TYPE = "ohos.webview.EngineLifecycleResponse";
+ const CONTROLLER_EVENT_TYPE = "ohos.webview.ControllerEvent";
+@@ -64,6 +68,7 @@ interface WebviewEventOptions {
+   downloadStart?: boolean | null;
+   downloadEnd?: boolean | null;
+   titleChange?: boolean | null;
++  pageLoad?: boolean | null;
+ }
+ 
+ interface WebviewCreatePayload {
+@@ -74,6 +79,7 @@ interface WebviewCreatePayload {
+    * so an RS-layer node tree can adopt WebViews as children.
+    */
+   parentHandle?: number | null;
++  windowId?: number | null;
+   url?: string | null;
+   html?: string | null;
+   style?: WebviewStyle | null;
+@@ -116,10 +122,12 @@ interface ManagedWebview extends WebviewCreatePayload {
+   failControllerAttach: (reason: string) => void;
+   onNavigationRequest: (url: string) => boolean;
+   onTitleChange: (title: string) => void;
++  onPageLoad: (url: string, started: boolean) => void;
+   onDownloadStart: (url: string, tempPath: string | null) => WebviewDownloadStartResponse;
+   onDownloadEnd: (url: string, tempPath: string | null, success: boolean) => void;
+   /** How this WebView was mounted: a parent-handle container or the component root. */
+   mountParentHandle: number | null;
++  mountWindowSurface?: WindowSurface;
+   /** Host-internal cleanup key; WebView IDs remain opaque business identifiers. */
+   mountKey: string;
+ }
+@@ -320,6 +328,20 @@ class WebviewTitleChangeEvent {
+   }
+ }
+ 
++class WebviewPageLoadEvent {
++  readonly id: string;
++  readonly nativeTag: string;
++  readonly url: string;
++  readonly started: boolean;
++
++  constructor(id: string, nativeTag: string, url: string, started: boolean) {
++    this.id = id;
++    this.nativeTag = nativeTag;
++    this.url = url;
++    this.started = started;
++  }
++}
++
+ class WebviewEngineLifecycleEvent {
+   readonly phase: string;
+   readonly schemes: WebviewSchemeDeclaration[];
+@@ -496,6 +518,7 @@ function normalizeEventOptions(
+     downloadStart: optionalEventFlag(options?.downloadStart, "WebView eventOptions.downloadStart"),
+     downloadEnd: optionalEventFlag(options?.downloadEnd, "WebView eventOptions.downloadEnd"),
+     titleChange: optionalEventFlag(options?.titleChange, "WebView eventOptions.titleChange"),
++    pageLoad: optionalEventFlag(options?.pageLoad, "WebView eventOptions.pageLoad"),
+   };
+ }
+ 
+@@ -772,6 +795,8 @@ function BuildWebview(data: ManagedWebview) {
+       }
+     })
+     .onLoadIntercept((event) => data.onNavigationRequest(event.data.getRequestUrl()))
++    .onPageBegin((event) => data.onPageLoad(event.url, true))
++    .onPageEnd((event) => data.onPageLoad(event.url, false))
+     .onTitleReceive((event) => data.onTitleChange(event.title));
+ }
+ 
+@@ -799,12 +824,22 @@ class WebviewSurface {
+     const style = normalizeStyle(payload.style, payload.transparent);
+     const eventOptions = normalizeEventOptions(payload.eventOptions);
+     const parentHandle = payload.parentHandle ?? null;
++    const windowId = payload.windowId ?? 0;
++    if (parentHandle !== null && windowId !== 0) { throw new Error("Cross-window node handles are not supported"); }
++    const application = ApplicationWindows.find(this.pluginContext.sessionId);
++    let windowSurface: WindowSurface | undefined;
++    if (application !== undefined || windowId !== 0) {
++      const owner = application === undefined ? WindowSurfaceRegistry.owner(this.pluginContext.sessionId, this.pluginContext.getRootFrameNode()) : this.pluginContext.sessionId;
++      windowSurface = await WindowSurfaceRegistry.get(owner, windowId).wait(callContext.onCancel);
++    }
++    this.assertCallActive(callContext);
+     const instanceId = this.nextMountKey++;
+     const nativeTagId = nextWebviewNativeTagId++;
+     const nativeTag = `ohos.webview.${this.pluginContext.sessionId}.${nativeTagId}`;
+     const data: ManagedWebview = {
+       id: payload.id,
+       mountParentHandle: parentHandle,
++      mountWindowSurface: windowSurface,
+       mountKey: `ohos.webview.${instanceId}`,
+       nativeTag,
+       url: payload.url,
+@@ -846,6 +881,21 @@ class WebviewSurface {
+           console.error("WebView title notification failed: " + String(error));
+         }
+       },
++      onPageLoad: (url: string, started: boolean): void => {
++        if (eventOptions.pageLoad !== true) {
++          return;
++        }
++        try {
++          notifyNative(
++            this.pluginContext,
++            "page-load",
++            PAGE_LOAD_EVENT_TYPE,
++            new WebviewPageLoadEvent(payload.id, nativeTag, url, started) as ESObject,
++          );
++        } catch (error) {
++          console.error("WebView page-load notification failed: " + String(error));
++        }
++      },
+       onDownloadStart: (url: string, tempPath: string | null): WebviewDownloadStartResponse => {
+         return downloadStartDecision(this.pluginContext, payload.id, nativeTag, url, tempPath);
+       },
+@@ -869,7 +919,7 @@ class WebviewSurface {
+     if (payload.devtools) {
+       enableWebDebuggingIfAvailable();
+     }
+-    const node = new BuilderNode<[ManagedWebview]>(this.pluginContext.getUIContext());
++    const node = new BuilderNode<[ManagedWebview]>(windowSurface?.getUIContext() ?? this.pluginContext.getUIContext());
+     const entry = new WebviewEntry(data, node);
+     data.beginControllerAttach = (): boolean => entry.beginControllerAttach();
+     data.notifyNativeControllerAttached = (): void => {
+@@ -891,7 +941,9 @@ class WebviewSurface {
+       if (frameNode === null) {
+         throw new Error(`Unable to build WebView '${payload.id}': no FrameNode`);
+       }
+-      if (parentHandle !== null) {
++      if (windowSurface !== undefined) {
++        windowSurface.append(data.mountKey, frameNode);
++      } else if (parentHandle !== null) {
+         this.pluginContext.getFrameNode(parentHandle).appendChild(frameNode);
+       } else {
+         this.pluginContext.appendChild(data.mountKey, frameNode, (): void => {
+@@ -1024,7 +1076,9 @@ class WebviewSurface {
+     entry.failController(`WebView '${id}' was removed before its controller attached`);
+     if (detachNode) {
+       const parentHandle = entry.data.mountParentHandle;
+-      if (parentHandle !== null) {
++      if (entry.data.mountWindowSurface !== undefined) {
++        entry.data.mountWindowSurface.remove(entry.data.mountKey);
++      } else if (parentHandle !== null) {
+         const frameNode = entry.node.getFrameNode();
+         if (frameNode !== null) {
+           try {
+diff --git a/plugins/window/src/main/ets/ManagedWindows.ets b/plugins/window/src/main/ets/ManagedWindows.ets
+new file mode 100644
+index 0000000..5d60170
+--- /dev/null
++++ b/plugins/window/src/main/ets/ManagedWindows.ets
+@@ -0,0 +1,288 @@
++import window from "@ohos.window";
++import deviceInfo from "@ohos.deviceInfo";
++import { ApplicationWindows, BridgeCallContext, BridgePluginContext, BridgeTypedValue, WindowSurfaceRegistry } from "@ohos-rs/ability";
++
++export const MANAGED_REQUEST = "ohos.window.ManagedRequest";
++export const MANAGED_COMMAND = "ohos.window.ManagedCommand";
++
++interface ManagedRequest {
++  windowId: number;
++  title: string;
++  width: number;
++  height: number;
++  x: number;
++  y: number;
++  visible: boolean;
++  decorations: boolean;
++  resizable: boolean;
++  minimizable: boolean;
++  maximizable: boolean;
++  closable: boolean;
++  maximized: boolean;
++}
++
++interface ManagedCommand {
++  windowId: number;
++  operation: string;
++  value?: boolean;
++  text?: string;
++  x?: number;
++  y?: number;
++}
++
++class WindowNotification {
++  windowId: number;
++  kind: string;
++  x: number;
++  y: number;
++  width: number;
++  height: number;
++  scale: number;
++  focused: boolean;
++  visible: boolean;
++  maximized: boolean;
++  minimized: boolean;
++  constructor(windowId: number, kind: string, record?: ManagedRecord) {
++    this.windowId = windowId;
++    this.kind = kind;
++    this.x = record?.rect.left ?? 0;
++    this.y = record?.rect.top ?? 0;
++    this.width = record?.rect.width ?? 0;
++    this.height = record?.rect.height ?? 0;
++    this.scale = record?.scale ?? 1;
++    this.focused = record?.focused ?? false;
++    this.visible = record?.visible ?? false;
++    this.maximized = record?.status === window.WindowStatusType.MAXIMIZE;
++    this.minimized = record?.status === window.WindowStatusType.MINIMIZE;
++  }
++}
++
++class ManagedRecord {
++  readonly win: window.Window;
++  readonly request: ManagedRequest;
++  rect: window.Rect;
++  scale: number;
++  focused: boolean = false;
++  closeAuthorized: boolean = false;
++  visible: boolean;
++  status: window.WindowStatusType;
++  onRect?: (options: window.RectChangeOptions) => void;
++  onEvent?: (event: window.WindowEventType) => void;
++  onStatus?: (status: window.WindowStatusType) => void;
++  onClose?: () => Promise<boolean>;
++  constructor(win: window.Window, request: ManagedRequest) {
++    this.win = win;
++    this.request = request;
++    this.rect = win.getWindowProperties().windowRect;
++    this.scale = win.getUIContext().vp2px(1);
++    this.visible = request.visible;
++    this.status = win.getWindowStatus();
++    this.focused = win.isFocused();
++  }
++}
++
++/** Native windows are owned by a bridge session; logical IDs survive UIContext recreation. */
++export class ManagedWindows {
++  private readonly windows: Map<number, ManagedRecord> = new Map();
++  private readonly creating: Map<number, Promise<void>> = new Map();
++  private generation: number = 0;
++  private disposed: boolean = false;
++  private readonly context: BridgePluginContext;
++  private readonly owner: string;
++  private readonly application?: ApplicationWindows;
++
++  constructor(context: BridgePluginContext) {
++    this.context = context;
++    this.application = ApplicationWindows.find(context.sessionId);
++    this.owner = this.application === undefined ? WindowSurfaceRegistry.owner(context.sessionId, context.getRootFrameNode()) : context.sessionId;
++    this.application?.onClosed((id: number): void => {
++      const record = this.windows.get(id);
++      if (record !== undefined) { this.closed(record); }
++    });
++  }
++
++  async attach(payload: BridgeTypedValue, call: BridgeCallContext): Promise<void> {
++    if (payload.typeName !== MANAGED_REQUEST) { throw new Error("Invalid managed window request type"); }
++    const request = payload.value as ManagedRequest;
++    if (!Number.isSafeInteger(request.windowId) || request.windowId < 0 || request.width <= 0 || request.height <= 0) {
++      throw new Error("Invalid managed window ID or dimensions");
++    }
++    if (this.disposed) { throw new Error("Window host is disposed"); }
++    if (this.windows.has(request.windowId)) { return; }
++    const pending = this.creating.get(request.windowId);
++    if (pending !== undefined) { return await pending; }
++    const generation = this.generation;
++    const promise = this.create(request, call, generation);
++    this.creating.set(request.windowId, promise);
++    try { await promise; } finally { this.creating.delete(request.windowId); }
++  }
++
++  private assertCreationActive(call: BridgeCallContext, generation: number): void {
++    if (this.disposed || generation !== this.generation || !call.isActive()) {
++      throw new Error("Window creation was cancelled");
++    }
++  }
++
++  private async create(request: ManagedRequest, call: BridgeCallContext, generation: number): Promise<void> {
++    const main = request.windowId === 0;
++    const surface = this.application === undefined ? undefined : WindowSurfaceRegistry.get(this.owner, request.windowId);
++    let nativeWindow: window.Window | undefined;
++    let record: ManagedRecord | undefined;
++    try {
++      if (!main && this.application === undefined) { throw new Error("Independent windows require an application Ability host"); }
++      const host = main ? this.application?.get(0) : await this.application!.open(request.windowId, call.onCancel);
++      const win = host?.win ?? this.context.getWindow();
++      nativeWindow = win;
++      this.assertCreationActive(call, generation);
++      if (!main) {
++        await win.resize(request.width, request.height);
++        await win.moveWindowTo(request.x, request.y);
++      }
++      this.assertCreationActive(call, generation);
++      const desktop = deviceInfo.deviceType === "2in1" || deviceInfo.deviceType === "pc";
++      if (desktop) {
++        win.setWindowDecorVisible(request.decorations);
++        await win.setResizeByDragEnabled(request.resizable);
++        await win.setWindowTitle(request.title);
++        win.setWindowTitleButtonVisible(request.maximizable, request.minimizable, request.closable);
++        if (request.maximized) { await win.maximize(window.MaximizePresentation.EXIT_IMMERSIVE); }
++      }
++      this.assertCreationActive(call, generation);
++      record = new ManagedRecord(win, request);
++      this.windows.set(request.windowId, record);
++      this.subscribe(record, desktop);
++      if (request.visible) { await win.showWindow(); }
++      this.assertCreationActive(call, generation);
++      // A mounted ArkUI route is only one step of native creation. WebViews must
++      // not report success before window configuration/show has also succeeded.
++      surface?.markReady();
++      this.notify(record, "resized");
++    } catch (error) {
++      if (record !== undefined) { this.unsubscribe(record); }
++      this.windows.delete(request.windowId);
++      // Keep the failed result until logical-window destruction so a WebView
++      // submitted after this rejection receives the same error, rather than waiting.
++      surface?.dispose(new Error(String(error)));
++      if (!main && nativeWindow !== undefined) {
++        try { await this.application?.close(request.windowId); }
++        catch (failure) { console.error(`Window creation rollback failed: ${String(failure)}`); }
++      }
++      throw new Error(String(error));
++    }
++  }
++
++  private subscribe(record: ManagedRecord, desktop: boolean): void {
++    record.onRect = (options: window.RectChangeOptions): void => {
++      record.rect = options.rect;
++      this.notify(record, "resized");
++    };
++    record.onEvent = (event: window.WindowEventType): void => {
++      if (event === window.WindowEventType.WINDOW_ACTIVE) { record.focused = true; }
++      if (event === window.WindowEventType.WINDOW_INACTIVE) { record.focused = false; }
++      if (event === window.WindowEventType.WINDOW_SHOWN) { record.visible = true; }
++      if (event === window.WindowEventType.WINDOW_HIDDEN) { record.visible = false; }
++      if (event === window.WindowEventType.WINDOW_DESTROYED) { this.closed(record); return; }
++      this.notify(record, "focused");
++    };
++    record.onStatus = (status: window.WindowStatusType): void => {
++      record.status = status;
++      this.notify(record, "state");
++    };
++    record.win.on("windowRectChange", record.onRect);
++    record.win.on("windowEvent", record.onEvent);
++    if (desktop) {
++      record.win.on("windowStatusChange", record.onStatus);
++      record.onClose = async (): Promise<boolean> => {
++        this.notify(record, "close-requested");
++        return true; // Tauri decides whether to cancel or destroy this particular window.
++      };
++      record.win.on("windowWillClose", record.onClose);
++    }
++  }
++
++  private unsubscribe(record: ManagedRecord): void {
++    try { record.win.off("windowRectChange", record.onRect); } catch {}
++    try { record.win.off("windowEvent", record.onEvent); } catch {}
++    if (record.onClose !== undefined) { try { record.win.off("windowWillClose", record.onClose); } catch {} }
++    if (record.onStatus !== undefined) { try { record.win.off("windowStatusChange", record.onStatus); } catch {} }
++  }
++
++  private notify(record: ManagedRecord, kind: string): void {
++    if (this.disposed || this.windows.get(record.request.windowId) !== record) { return; }
++    this.dispatch(new WindowNotification(record.request.windowId, kind, record));
++  }
++
++  private dispatch(notification: WindowNotification): void {
++    if (this.disposed) { return; }
++    try {
++      this.context.invokeNativeSync("window-event", "ohos.window.WindowEvent", "ohos.window.Acknowledgement", notification as ESObject);
++    } catch (error) { console.error(`Native window event failed: ${String(error)}`); }
++  }
++
++  private closed(record: ManagedRecord): void {
++    if (this.windows.get(record.request.windowId) !== record) { return; }
++    // An application UIAbility is a peer logical window. Legacy single-Ability render
++    // recreation still preserves its owner until Tauri explicitly authorizes closure.
++    if (this.application !== undefined || record.closeAuthorized) { this.notify(record, "destroyed"); }
++    this.windows.delete(record.request.windowId);
++    this.unsubscribe(record);
++    WindowSurfaceRegistry.remove(this.owner, record.request.windowId);
++  }
++
++  async update(payload: BridgeTypedValue): Promise<void> {
++    if (payload.typeName !== MANAGED_COMMAND) { throw new Error("Invalid managed window command type"); }
++    const command = payload.value as ManagedCommand;
++    const pending = this.creating.get(command.windowId);
++    if (pending !== undefined) { await pending; }
++    const record = this.windows.get(command.windowId);
++    if (record === undefined && command.operation === "destroy") {
++      WindowSurfaceRegistry.remove(this.owner, command.windowId);
++      return;
++    }
++    if (record === undefined) { throw new Error(`Unknown managed window ${command.windowId}`); }
++    const win = record.win;
++    switch (command.operation) {
++      case "title": await win.setWindowTitle(command.text ?? ""); record.request.title = command.text ?? ""; break;
++      case "resize": await win.resize(command.x!, command.y!); break;
++      case "move": await win.moveWindowTo(command.x!, command.y!); break;
++      case "visible": if (command.value) { await win.showWindow(); } else { await win.minimize(); } break;
++      case "focus":
++        if (this.application !== undefined) { await this.application.focus(command.windowId); }
++        else { await win.showWindow(); }
++        break;
++      case "focusable": await win.setWindowFocusable(command.value!); break;
++      case "minimized":
++        if (command.value) { await win.minimize(); }
++        else if (this.application !== undefined) { await this.application.focus(command.windowId); }
++        else { await win.restore(); }
++        break;
++      case "maximized": if (command.value) { await win.maximize(window.MaximizePresentation.EXIT_IMMERSIVE); } else { await win.recover(); } break;
++      case "decorations": win.setWindowDecorVisible(command.value!); break;
++      case "resizable": await win.setResizeByDragEnabled(command.value!); break;
++      case "topmost": await win.setWindowTopmost(command.value!); break;
++      case "drag": await win.startMoving(); break;
++      case "background": win.setWindowBackgroundColor(command.text!); break;
++      case "destroy":
++        record.closeAuthorized = true;
++        if (this.application !== undefined) { await this.application.close(command.windowId); }
++        else { await win.destroyWindow(); }
++        this.closed(record);
++        return;
++      default: throw new Error(`Unsupported managed window operation '${command.operation}'`);
++    }
++  }
++
++  async dispose(): Promise<void> {
++    this.disposed = true;
++    this.generation += 1;
++    WindowSurfaceRegistry.clear(this.owner);
++    const records = Array.from(this.windows.values());
++    this.windows.clear();
++    for (const record of records) {
++      this.unsubscribe(record);
++      WindowSurfaceRegistry.remove(this.owner, record.request.windowId);
++      // UIAbility lifetime is owned by NativeApplication, not by plugin installation.
++      // Application shutdown terminates its hosts after plugin disposal.
++    }
++  }
++}
+diff --git a/plugins/window/src/main/ets/WindowPlugin.ets b/plugins/window/src/main/ets/WindowPlugin.ets
+index ca6b05b..25b9986 100644
+--- a/plugins/window/src/main/ets/WindowPlugin.ets
++++ b/plugins/window/src/main/ets/WindowPlugin.ets
+@@ -1,6 +1,8 @@
+ import window from "@ohos.window";
++import { ManagedWindows } from "./ManagedWindows";
+ import {
+   BridgeCallContext,
++  BridgeLifecycleEvent,
+   BridgePluginHookContext,
+   BridgeTypedValue,
+   BridgeContextRequirement,
+@@ -289,12 +291,33 @@ export class WindowPlugin extends AsyncPluginBase {
+   readonly id = "ohos.window";
+   readonly requires: BridgeContextRequirement[] = ["ui-context"];
+   private readonly windows: Map<number, window.Window> = new Map();
++  private managed?: ManagedWindows;
++
++  override onInstall(_context: BridgePluginHookContext): void {
++    this.managed = new ManagedWindows(this.getContext());
++  }
++
++  override async onLifecycle(event: BridgeLifecycleEvent, _context: BridgePluginHookContext): Promise<void> {
++    if (event.kind === "ui-context-ready" && this.managed === undefined) { this.managed = new ManagedWindows(this.getContext()); }
++    if (event.kind === "ui-context-destroy") {
++      const managed = this.managed;
++      this.managed = undefined;
++      await managed?.dispose();
++    }
++  }
+ 
+   async invokeAsync(
+     action: string,
+     payload: BridgeTypedValue,
+     context: BridgeCallContext,
+   ): Promise<BridgeTypedValue> {
++    if (action === "attach-managed-window" || action === "update-managed-window") {
++      const managed = this.managed;
++      if (managed === undefined) { throw new Error("Window UI context is unavailable"); }
++      if (action === "attach-managed-window") { await managed.attach(payload, context); }
++      else { await managed.update(payload); }
++      return { typeName: ACKNOWLEDGEMENT_TYPE, value: new WindowAcknowledgement(true) };
++    }
+     if (action === "get-avoid-area") {
+       const request = parseAvoidAreaRequest(payload);
+       try {
+@@ -310,26 +333,27 @@ export class WindowPlugin extends AsyncPluginBase {
+       const request = parseCreateRequest(payload);
+       let created: window.Window | undefined;
+       try {
+-        created = await context.getWindowStage().createSubWindow(request.name.trim());
++        const win: window.Window = await context.getWindowStage().createSubWindow(request.name.trim());
++        created = win;
+         this.assertCallActive(context);
+-        await created.moveWindowTo(request.x, request.y);
+-        await created.resize(request.width, request.height);
+-        created.setWindowDecorVisible(request.decorations);
++        await win.moveWindowTo(request.x, request.y);
++        await win.resize(request.width, request.height);
++        win.setWindowDecorVisible(request.decorations);
+         const backgroundColor = request.transparent
+           ? "#00000000"
+           : this.colorString(request.backgroundColor ?? 0xffffffff);
+-        created.setWindowBackgroundColor(backgroundColor);
+-        await created.showWindow();
++        win.setWindowBackgroundColor(backgroundColor);
++        await win.showWindow();
+         this.assertCallActive(context);
+-        const windowId = created.getWindowProperties().id;
++        const windowId = win.getWindowProperties().id;
+         if (!isWindowId(windowId)) {
+           throw new Error(`createSubWindow returned invalid window id '${windowId}'`);
+         }
+         const replaced = this.windows.get(windowId);
+-        if (replaced !== undefined && replaced !== created) {
++        if (replaced !== undefined && replaced !== win) {
+           await replaced.destroyWindow();
+         }
+-        this.windows.set(windowId, created);
++        this.windows.set(windowId, win);
+         return { typeName: CREATE_RESPONSE_TYPE, value: new WindowCreateResponse(windowId) };
+       } catch (error) {
+         if (created !== undefined) {
+@@ -517,6 +541,8 @@ export class WindowPlugin extends AsyncPluginBase {
+   }
+ 
+   override async onDispose(_context: BridgePluginHookContext): Promise<void> {
++    await this.managed?.dispose();
++    this.managed = undefined;
+     const windows = Array.from(this.windows.values());
+     this.windows.clear();
+     await Promise.all(

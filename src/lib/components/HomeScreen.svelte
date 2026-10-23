@@ -67,7 +67,7 @@
         app.loadCredentials(),
         app.loadForwards(),
         app.loadGroups(),
-        app.isMobile ? Promise.resolve([]) : app.loadSerialProfiles(),
+        app.capabilities().serial ? app.loadSerialProfiles() : Promise.resolve([]),
         app.loadTelnetProfiles(),
       ]);
       return {
@@ -79,9 +79,9 @@
         loadedTelnet,
       };
     },
-    loadDynamic: () => app.isMobile
-      ? Promise.resolve({ targets: [], errors: [] })
-      : app.discoverDynamicTargets(),
+    loadDynamic: () => app.capabilities().localDiscovery
+      ? app.discoverDynamicTargets()
+      : Promise.resolve({ targets: [], errors: [] }),
     applyStatic: (loaded) => {
       profiles = loaded.loadedProfiles;
       credentials = loaded.loadedCredentials;

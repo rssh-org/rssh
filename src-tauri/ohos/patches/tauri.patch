@@ -1,0 +1,702 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index fe427ec..f6e509e 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -73,5 +73,5 @@ tauri = { path = "./crates/tauri" }
+ tauri-plugin = { path = "./crates/tauri-plugin" }
+ tauri-utils = { path = "./crates/tauri-utils" }
+ cargo-mobile2 = { git = "https://github.com/tauri-apps/cargo-mobile2", branch = "feat/ohos" }
+-wry = { git = "https://github.com/tauri-apps/wry", branch = "feat/open-harmony" }
+-tao = { git = "https://github.com/tauri-apps/tao", branch = "feat/open-harmony" }
++wry = { path = "../wry" }
++tao = { path = "../tao" }
+diff --git a/crates/tauri-runtime-wry/src/lib.rs b/crates/tauri-runtime-wry/src/lib.rs
+index 2d51378..b12328e 100644
+--- a/crates/tauri-runtime-wry/src/lib.rs
++++ b/crates/tauri-runtime-wry/src/lib.rs
+@@ -2898,6 +2898,7 @@ impl<T: UserEvent> Wry<T> {
+ 
+     #[cfg(target_env = "ohos")]
+     {
++      wry::setup_ohos(args.app.clone()).map_err(|e| Error::CreateWebview(Box::new(e)))?;
+       event_loop_builder.with_openharmony_app(args.app);
+     }
+ 
+@@ -4006,6 +4007,12 @@ fn handle_user_message<T: UserEvent>(
+             }
+           },
+           WebviewMessage::WithWebview(f) => {
++            #[cfg(target_env = "ohos")]
++            {
++              f(Webview {
++                inner: webview.inner.clone(),
++              });
++            }
+             #[cfg(all(
+               any(
+                 target_os = "linux",
+@@ -5050,6 +5057,13 @@ You may have it installed on another user account, but it is not available for t
+     });
+   }
+ 
++  #[cfg(target_env = "ohos")]
++  {
++    use tao::platform::ohos::WindowExtOpenHarmony;
++    use wry::WebViewBuilderExtOhos;
++    webview_builder = webview_builder.with_ohos_window(window.ohos_window_id());
++  }
++
+   if let Some(user_agent) = webview_attributes.user_agent {
+     webview_builder = webview_builder.with_user_agent(&user_agent);
+   }
+diff --git a/crates/tauri-runtime-wry/src/webview.rs b/crates/tauri-runtime-wry/src/webview.rs
+index 82bdf43..a82069a 100644
+--- a/crates/tauri-runtime-wry/src/webview.rs
++++ b/crates/tauri-runtime-wry/src/webview.rs
+@@ -18,7 +18,9 @@ mod imp {
+ 
+ #[cfg(target_env = "ohos")]
+ mod imp {
+-  pub type Webview = ();
++  pub struct Webview {
++    pub inner: std::rc::Rc<wry::WebView>,
++  }
+ }
+ 
+ #[cfg(target_vendor = "apple")]
+diff --git a/crates/tauri-runtime/Cargo.toml b/crates/tauri-runtime/Cargo.toml
+index e3a5d34..5e5a3f3 100644
+--- a/crates/tauri-runtime/Cargo.toml
++++ b/crates/tauri-runtime/Cargo.toml
+@@ -50,7 +50,7 @@ webkit2gtk = { version = "=2.0", features = ["v2_40"] }
+ jni = "0.21"
+ 
+ [target.'cfg(target_env = "ohos")'.dependencies]
+-openharmony-ability = { git = "https://github.com/harmony-contrib/openharmony-ability.git" }
++openharmony-ability = { path = "../../../ability/crates/ability" }
+ 
+ [target.'cfg(all(target_vendor = "apple", not(target_os = "macos")))'.dependencies]
+ objc2 = "0.6"
+diff --git a/crates/tauri/Cargo.toml b/crates/tauri/Cargo.toml
+index cc13248..b809930 100644
+--- a/crates/tauri/Cargo.toml
++++ b/crates/tauri/Cargo.toml
+@@ -153,8 +153,8 @@ rustls = { version = "0.23", default-features = false, features = [
+ ], optional = true }
+ 
+ [target.'cfg(target_env = "ohos")'.dependencies]
+-openharmony-ability = { git = "https://github.com/harmony-contrib/openharmony-ability.git" }
+-openharmony-ability-derive = { git = "https://github.com/harmony-contrib/openharmony-ability.git" }
++openharmony-ability = { path = "../../../ability/crates/ability" }
++openharmony-ability-derive = { path = "../../../ability/crates/derive" }
+ 
+ # android
+ [target.'cfg(target_os = "android")'.dependencies]
+diff --git a/crates/tauri/scripts/ipc-protocol.js b/crates/tauri/scripts/ipc-protocol.js
+index 18dab7e..2d39ba7 100644
+--- a/crates/tauri/scripts/ipc-protocol.js
++++ b/crates/tauri/scripts/ipc-protocol.js
+@@ -14,7 +14,9 @@
+   const processIpcMessage = __RAW_process_ipc_message_fn__
+   const osName = __TEMPLATE_os_name__
+   const fetchChannelDataCommand = __TEMPLATE_fetch_channel_data_command__
+-  let customProtocolIpcFailed = false
++  // A platform may select the standard postMessage transport before the first call.
++  // OHOS cannot safely read request bodies with the pinned ArkWeb binding.
++  let customProtocolIpcBlocked = __TEMPLATE_custom_protocol_ipc_blocked__
+ 
+   // on Android we never use it because Android does not have support to reading the request body
+   const canUseCustomProtocol = osName !== 'android'
+@@ -23,7 +25,7 @@
+     const { cmd, callback, error, payload, options } = message
+ 
+     if (
+-      !customProtocolIpcFailed
++      !customProtocolIpcBlocked
+       && (canUseCustomProtocol || cmd === fetchChannelDataCommand)
+     ) {
+       const { contentType, data } = processIpcMessage(payload)
+@@ -63,7 +65,7 @@
+             )
+             // failed to use the custom protocol IPC (either the webview blocked a custom protocol or it was a CSP error)
+             // so we need to fallback to the postMessage interface
+-            customProtocolIpcFailed = true
++            customProtocolIpcBlocked = true
+             sendIpcMessage(message)
+           }
+         )
+@@ -75,7 +77,7 @@
+         error,
+         options: {
+           ...options,
+-          customProtocolIpcBlocked: customProtocolIpcFailed
++          customProtocolIpcBlocked: customProtocolIpcBlocked
+         },
+         payload,
+         __TAURI_INVOKE_KEY__
+diff --git a/crates/tauri/src/app.rs b/crates/tauri/src/app.rs
+index 31e0803..1134462 100644
+--- a/crates/tauri/src/app.rs
++++ b/crates/tauri/src/app.rs
+@@ -1563,6 +1563,7 @@ pub(crate) struct InvokeInitializationScript<'a> {
+   #[raw]
+   pub(crate) process_ipc_message_fn: &'a str,
+   pub(crate) os_name: &'a str,
++  pub(crate) custom_protocol_ipc_blocked: bool,
+   pub(crate) fetch_channel_data_command: &'a str,
+   pub(crate) invoke_key: &'a str,
+ }
+@@ -1597,6 +1598,7 @@ impl<R: Runtime> Builder<R> {
+       invoke_initialization_script: InvokeInitializationScript {
+         process_ipc_message_fn: crate::manager::webview::PROCESS_IPC_MESSAGE_FN,
+         os_name: std::env::consts::OS,
++        custom_protocol_ipc_blocked: cfg!(target_env = "ohos"),
+         fetch_channel_data_command: crate::ipc::channel::FETCH_CHANNEL_DATA_COMMAND,
+         invoke_key: &invoke_key.clone(),
+       }
+diff --git a/crates/tauri/src/plugin/mobile.rs b/crates/tauri/src/plugin/mobile.rs
+index ff7b7d5..b43bdb3 100644
+--- a/crates/tauri/src/plugin/mobile.rs
++++ b/crates/tauri/src/plugin/mobile.rs
+@@ -351,14 +351,22 @@ impl<R: Runtime> PluginHandle<R> {
+ 
+ #[cfg(target_env = "ohos")]
+ pub(crate) fn run_command<R: Runtime, C: AsRef<str>, F: FnOnce(PluginResponse) + Send + 'static>(
+-  _name: &str,
++  name: &str,
+   _handle: &AppHandle<R>,
+-  _command: C,
++  command: C,
+   _payload: serde_json::Value,
+   _handler: F,
+ ) -> Result<(), PluginInvokeError> {
+-  // TODO
+-  Ok(())
++  // HarmonyOS integrations are registered as Rust commands backed by Ability plugins.
++  // There is no Android/iOS plugin dispatcher here; every unhandled invoke must settle.
++  Err(PluginInvokeError::InvokeRejected(ErrorResponse {
++    code: Some("UNSUPPORTED_PLUGIN_COMMAND".into()),
++    message: Some(format!(
++      "Plugin command '{name}|{}' is not supported on OpenHarmony",
++      command.as_ref()
++    )),
++    data: (),
++  }))
+ }
+ 
+ #[cfg(target_os = "ios")]
+diff --git a/crates/tauri/src/test/mod.rs b/crates/tauri/src/test/mod.rs
+index a1428c3..9778249 100644
+--- a/crates/tauri/src/test/mod.rs
++++ b/crates/tauri/src/test/mod.rs
+@@ -168,6 +168,7 @@ pub fn mock_builder() -> Builder<MockRuntime> {
+   builder.invoke_initialization_script = crate::app::InvokeInitializationScript {
+     process_ipc_message_fn: crate::manager::webview::PROCESS_IPC_MESSAGE_FN,
+     os_name: std::env::consts::OS,
++    custom_protocol_ipc_blocked: cfg!(target_env = "ohos"),
+     fetch_channel_data_command: crate::ipc::channel::FETCH_CHANNEL_DATA_COMMAND,
+     invoke_key: INVOKE_KEY,
+   }
+diff --git a/crates/tauri/src/webview/mod.rs b/crates/tauri/src/webview/mod.rs
+index e1978c4..e3b1fab 100644
+--- a/crates/tauri/src/webview/mod.rs
++++ b/crates/tauri/src/webview/mod.rs
+@@ -152,6 +152,18 @@ pub struct PlatformWebview(tauri_runtime_wry::Webview);
+ 
+ #[cfg(feature = "wry")]
+ impl PlatformWebview {
++  /// Observe asynchronous ArkWeb controller creation, including its native window.
++  /// This registers a callback without blocking the UI thread. The callback may
++  /// execute on a worker thread, and receives retained failures for late observers.
++  #[cfg(target_env = "ohos")]
++  pub fn on_created(
++    &self,
++    callback: impl FnOnce(std::result::Result<(), String>) + Send + 'static,
++  ) {
++    use tauri_runtime_wry::wry::WebViewExtOhos;
++    self.0.inner.on_created(callback);
++  }
++
+   /// Returns [`webkit2gtk::WebView`] handle.
+   #[cfg(all(
+     any(
+diff --git a/crates/tauri/src/webview/webview_window.rs b/crates/tauri/src/webview/webview_window.rs
+index ebb842d..252a270 100644
+--- a/crates/tauri/src/webview/webview_window.rs
++++ b/crates/tauri/src/webview/webview_window.rs
+@@ -1998,6 +1998,47 @@ impl<R: Runtime> WebviewWindow<R> {
+   }
+ }
+ 
++/// Native window controls shared with HarmonyOS desktop windows.
++#[cfg(any(desktop, target_env = "ohos"))]
++impl<R: Runtime> WebviewWindow<R> {
++  /// Maximizes this window.
++  pub fn maximize(&self) -> crate::Result<()> {
++    self.window.maximize()
++  }
++
++  /// Un-maximizes this window.
++  pub fn unmaximize(&self) -> crate::Result<()> {
++    self.window.unmaximize()
++  }
++
++  /// Minimizes this window.
++  pub fn minimize(&self) -> crate::Result<()> {
++    self.window.minimize()
++  }
++
++  /// Un-minimizes this window.
++  pub fn unminimize(&self) -> crate::Result<()> {
++    self.window.unminimize()
++  }
++
++  /// Determines if this window should be [decorated].
++  ///
++  /// [decorated]: https://en.wikipedia.org/wiki/Window_(computing)#Window_decoration
++  pub fn set_decorations(&self, decorations: bool) -> crate::Result<()> {
++    self.window.set_decorations(decorations)
++  }
++
++  /// Determines if this window should always be on top of other windows.
++  pub fn set_always_on_top(&self, always_on_top: bool) -> crate::Result<()> {
++    self.window.set_always_on_top(always_on_top)
++  }
++
++  /// Starts dragging the window.
++  pub fn start_dragging(&self) -> crate::Result<()> {
++    self.window.start_dragging()
++  }
++}
++
+ /// Desktop window setters and actions.
+ #[cfg(desktop)]
+ impl<R: Runtime> WebviewWindow<R> {
+@@ -2055,33 +2096,6 @@ impl<R: Runtime> WebviewWindow<R> {
+     self.window.set_closable(closable)
+   }
+ 
+-  /// Maximizes this window.
+-  pub fn maximize(&self) -> crate::Result<()> {
+-    self.window.maximize()
+-  }
+-
+-  /// Un-maximizes this window.
+-  pub fn unmaximize(&self) -> crate::Result<()> {
+-    self.window.unmaximize()
+-  }
+-
+-  /// Minimizes this window.
+-  pub fn minimize(&self) -> crate::Result<()> {
+-    self.window.minimize()
+-  }
+-
+-  /// Un-minimizes this window.
+-  pub fn unminimize(&self) -> crate::Result<()> {
+-    self.window.unminimize()
+-  }
+-
+-  /// Determines if this window should be [decorated].
+-  ///
+-  /// [decorated]: https://en.wikipedia.org/wiki/Window_(computing)#Window_decoration
+-  pub fn set_decorations(&self, decorations: bool) -> crate::Result<()> {
+-    self.window.set_decorations(decorations)
+-  }
+-
+   /// Determines if this window should have shadow.
+   ///
+   /// ## Platform-specific
+@@ -2135,11 +2149,6 @@ impl<R: Runtime> WebviewWindow<R> {
+     self.window.set_always_on_bottom(always_on_bottom)
+   }
+ 
+-  /// Determines if this window should always be on top of other windows.
+-  pub fn set_always_on_top(&self, always_on_top: bool) -> crate::Result<()> {
+-    self.window.set_always_on_top(always_on_top)
+-  }
+-
+   /// Sets whether the window should be visible on all workspaces or virtual desktops.
+   pub fn set_visible_on_all_workspaces(
+     &self,
+@@ -2224,11 +2233,6 @@ impl<R: Runtime> WebviewWindow<R> {
+     self.window.set_ignore_cursor_events(ignore)
+   }
+ 
+-  /// Starts dragging the window.
+-  pub fn start_dragging(&self) -> crate::Result<()> {
+-    self.window.start_dragging()
+-  }
+-
+   /// Sets the overlay icon on the taskbar **Windows only**. Using `None` will remove the icon
+   ///
+   /// The overlay icon can be unique for each window.
+diff --git a/crates/tauri/src/window/mod.rs b/crates/tauri/src/window/mod.rs
+index ad3074d..ddbd411 100644
+--- a/crates/tauri/src/window/mod.rs
++++ b/crates/tauri/src/window/mod.rs
+@@ -1904,6 +1904,11 @@ impl<R: Runtime> Window<R> {
+ 
+   /// Bring the window to front and focus.
+   pub fn set_focus(&self) -> crate::Result<()> {
++    #[cfg(target_env = "ohos")]
++    return Err(crate::Error::Anyhow(anyhow::anyhow!(
++      "Programmatic native window focus is not supported on OpenHarmony"
++    )));
++    #[cfg(not(target_env = "ohos"))]
+     self.window.dispatcher.set_focus().map_err(Into::into)
+   }
+ 
+@@ -1951,6 +1956,55 @@ impl<R: Runtime> Window<R> {
+   }
+ }
+ 
++/// Native window controls shared with HarmonyOS desktop windows.
++#[cfg(any(desktop, target_env = "ohos"))]
++impl<R: Runtime> Window<R> {
++  /// Maximizes this window.
++  pub fn maximize(&self) -> crate::Result<()> {
++    self.window.dispatcher.maximize().map_err(Into::into)
++  }
++
++  /// Un-maximizes this window.
++  pub fn unmaximize(&self) -> crate::Result<()> {
++    self.window.dispatcher.unmaximize().map_err(Into::into)
++  }
++
++  /// Minimizes this window.
++  pub fn minimize(&self) -> crate::Result<()> {
++    self.window.dispatcher.minimize().map_err(Into::into)
++  }
++
++  /// Un-minimizes this window.
++  pub fn unminimize(&self) -> crate::Result<()> {
++    self.window.dispatcher.unminimize().map_err(Into::into)
++  }
++
++  /// Determines if this window should be [decorated].
++  ///
++  /// [decorated]: https://en.wikipedia.org/wiki/Window_(computing)#Window_decoration
++  pub fn set_decorations(&self, decorations: bool) -> crate::Result<()> {
++    self
++      .window
++      .dispatcher
++      .set_decorations(decorations)
++      .map_err(Into::into)
++  }
++
++  /// Determines if this window should always be on top of other windows.
++  pub fn set_always_on_top(&self, always_on_top: bool) -> crate::Result<()> {
++    self
++      .window
++      .dispatcher
++      .set_always_on_top(always_on_top)
++      .map_err(Into::into)
++  }
++
++  /// Starts dragging the window.
++  pub fn start_dragging(&self) -> crate::Result<()> {
++    self.window.dispatcher.start_dragging().map_err(Into::into)
++  }
++}
++
+ /// Desktop window setters and actions.
+ #[cfg(desktop)]
+ impl<R: Runtime> Window<R> {
+@@ -2024,37 +2078,6 @@ impl<R: Runtime> Window<R> {
+       .map_err(Into::into)
+   }
+ 
+-  /// Maximizes this window.
+-  pub fn maximize(&self) -> crate::Result<()> {
+-    self.window.dispatcher.maximize().map_err(Into::into)
+-  }
+-
+-  /// Un-maximizes this window.
+-  pub fn unmaximize(&self) -> crate::Result<()> {
+-    self.window.dispatcher.unmaximize().map_err(Into::into)
+-  }
+-
+-  /// Minimizes this window.
+-  pub fn minimize(&self) -> crate::Result<()> {
+-    self.window.dispatcher.minimize().map_err(Into::into)
+-  }
+-
+-  /// Un-minimizes this window.
+-  pub fn unminimize(&self) -> crate::Result<()> {
+-    self.window.dispatcher.unminimize().map_err(Into::into)
+-  }
+-
+-  /// Determines if this window should be [decorated].
+-  ///
+-  /// [decorated]: https://en.wikipedia.org/wiki/Window_(computing)#Window_decoration
+-  pub fn set_decorations(&self, decorations: bool) -> crate::Result<()> {
+-    self
+-      .window
+-      .dispatcher
+-      .set_decorations(decorations)
+-      .map_err(Into::into)
+-  }
+-
+   /// Determines if this window should have shadow.
+   ///
+   /// ## Platform-specific
+@@ -2121,15 +2144,6 @@ tauri::Builder::default()
+       .map_err(Into::into)
+   }
+ 
+-  /// Determines if this window should always be on top of other windows.
+-  pub fn set_always_on_top(&self, always_on_top: bool) -> crate::Result<()> {
+-    self
+-      .window
+-      .dispatcher
+-      .set_always_on_top(always_on_top)
+-      .map_err(Into::into)
+-  }
+-
+   /// Sets whether the window should be visible on all workspaces or virtual desktops.
+   ///
+   /// ## Platform-specific
+@@ -2261,11 +2275,6 @@ tauri::Builder::default()
+       .map_err(Into::into)
+   }
+ 
+-  /// Starts dragging the window.
+-  pub fn start_dragging(&self) -> crate::Result<()> {
+-    self.window.dispatcher.start_dragging().map_err(Into::into)
+-  }
+-
+   /// Starts resize-dragging the window.
+   pub fn start_resize_dragging(
+     &self,
+diff --git a/crates/tauri/src/window/plugin.rs b/crates/tauri/src/window/plugin.rs
+index 92c6cdf..f92fd37 100644
+--- a/crates/tauri/src/window/plugin.rs
++++ b/crates/tauri/src/window/plugin.rs
+@@ -119,6 +119,59 @@ mod commands {
+   }
+ }
+ 
++// These operations are also available to HarmonyOS PC windows. Keep desktop-only
++// integrations (taskbar, cursor, effects) in their own platform-gated command group.
++#[cfg(any(desktop, target_env = "ohos"))]
++mod window_management_commands {
++  use super::*;
++  use crate::command;
++
++  getter!(is_minimized, bool);
++  getter!(is_maximized, bool);
++  getter!(is_decorated, bool);
++  getter!(is_maximizable, bool);
++  getter!(is_minimizable, bool);
++  getter!(is_closable, bool);
++  getter!(is_always_on_top, bool);
++  setter!(maximize);
++  setter!(unmaximize);
++  setter!(minimize);
++  setter!(unminimize);
++  setter!(set_decorations, bool);
++  setter!(set_always_on_top, bool);
++  setter!(start_dragging);
++
++  #[command(root = "crate")]
++  pub async fn toggle_maximize<R: Runtime>(
++    window: Window<R>,
++    label: Option<String>,
++  ) -> crate::Result<()> {
++    let window = get_window(window, label)?;
++    if window.is_maximized()? {
++      window.unmaximize()?
++    } else {
++      window.maximize()?
++    };
++    Ok(())
++  }
++
++  #[command(root = "crate")]
++  pub async fn internal_toggle_maximize<R: Runtime>(
++    window: Window<R>,
++    label: Option<String>,
++  ) -> crate::Result<()> {
++    let window = get_window(window, label)?;
++    if window.is_resizable()? {
++      if window.is_maximized()? {
++        window.unmaximize()?
++      } else if window.is_maximizable()? {
++        window.maximize()?
++      };
++    }
++    Ok(())
++  }
++}
++
+ #[cfg(desktop)]
+ mod desktop_commands {
+   use tauri_runtime::ResizeDirection;
+@@ -131,28 +184,15 @@ mod desktop_commands {
+   };
+ 
+   getter!(is_fullscreen, bool);
+-  getter!(is_minimized, bool);
+-  getter!(is_maximized, bool);
+-  getter!(is_decorated, bool);
+-  getter!(is_maximizable, bool);
+-  getter!(is_minimizable, bool);
+-  getter!(is_closable, bool);
+   getter!(cursor_position, PhysicalPosition<f64>);
+-  getter!(is_always_on_top, bool);
+ 
+   setter!(center);
+   setter!(request_user_attention, Option<UserAttentionType>);
+   setter!(set_maximizable, bool);
+   setter!(set_minimizable, bool);
+   setter!(set_closable, bool);
+-  setter!(maximize);
+-  setter!(unmaximize);
+-  setter!(minimize);
+-  setter!(unminimize);
+-  setter!(set_decorations, bool);
+   setter!(set_shadow, bool);
+   setter!(set_effects, Option<WindowEffectsConfig>);
+-  setter!(set_always_on_top, bool);
+   setter!(set_always_on_bottom, bool);
+   setter!(set_fullscreen, bool);
+   setter!(set_simple_fullscreen, bool);
+@@ -162,7 +202,6 @@ mod desktop_commands {
+   setter!(set_cursor_icon, CursorIcon);
+   setter!(set_cursor_position, Position);
+   setter!(set_ignore_cursor_events, bool);
+-  setter!(start_dragging);
+   setter!(start_resize_dragging, ResizeDirection);
+   setter!(set_progress_bar, ProgressBarState);
+   setter!(set_badge_count, Option<i64>);
+@@ -201,36 +240,6 @@ mod desktop_commands {
+     let resources_table = webview.resources_table();
+     window.set_icon(value.into_img(&resources_table)?.as_ref().clone())
+   }
+-
+-  #[command(root = "crate")]
+-  pub async fn toggle_maximize<R: Runtime>(
+-    window: Window<R>,
+-    label: Option<String>,
+-  ) -> crate::Result<()> {
+-    let window = get_window(window, label)?;
+-    if window.is_maximized()? {
+-      window.unmaximize()?
+-    } else {
+-      window.maximize()?
+-    };
+-    Ok(())
+-  }
+-
+-  #[command(root = "crate")]
+-  pub async fn internal_toggle_maximize<R: Runtime>(
+-    window: Window<R>,
+-    label: Option<String>,
+-  ) -> crate::Result<()> {
+-    let window = get_window(window, label)?;
+-    if window.is_resizable()? {
+-      if window.is_maximized()? {
+-        window.unmaximize()?
+-      } else if window.is_maximizable()? {
+-        window.maximize()?
+-      };
+-    }
+-    Ok(())
+-  }
+ }
+ 
+ /// Initializes the plugin.
+@@ -271,6 +280,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
+       commands::is_visible,
+       commands::is_enabled,
+       commands::title,
++      #[cfg(not(target_env = "ohos"))]
+       commands::theme,
+       #[cfg(target_os = "android")]
+       commands::activity_name,
+@@ -283,16 +293,22 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
+       commands::hide,
+       commands::close,
+       commands::destroy,
++      #[cfg(not(target_env = "ohos"))]
+       commands::set_content_protected,
+       commands::set_size,
++      #[cfg(not(target_env = "ohos"))]
+       commands::set_min_size,
++      #[cfg(not(target_env = "ohos"))]
+       commands::set_max_size,
+       commands::set_position,
++      #[cfg(not(target_env = "ohos"))]
+       commands::set_size_constraints,
+       commands::set_focus,
+       commands::set_focusable,
++      #[cfg(not(target_env = "ohos"))]
+       commands::set_enabled,
+       commands::set_background_color,
++      #[cfg(not(target_env = "ohos"))]
+       commands::set_theme,
+       commands::current_monitor,
+       commands::primary_monitor,
+@@ -300,29 +316,29 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
+       commands::available_monitors,
+ 
+       #[cfg(desktop)] desktop_commands::is_fullscreen,
+-      #[cfg(desktop)] desktop_commands::is_minimized,
+-      #[cfg(desktop)] desktop_commands::is_maximized,
+-      #[cfg(desktop)] desktop_commands::is_decorated,
+-      #[cfg(desktop)] desktop_commands::is_maximizable,
+-      #[cfg(desktop)] desktop_commands::is_minimizable,
+-      #[cfg(desktop)] desktop_commands::is_closable,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::is_minimized,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::is_maximized,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::is_decorated,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::is_maximizable,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::is_minimizable,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::is_closable,
+ 
+       #[cfg(desktop)] desktop_commands::cursor_position,
+-      #[cfg(desktop)] desktop_commands::is_always_on_top,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::is_always_on_top,
+       // setters
+       #[cfg(desktop)] desktop_commands::center,
+       #[cfg(desktop)] desktop_commands::request_user_attention,
+       #[cfg(desktop)] desktop_commands::set_maximizable,
+       #[cfg(desktop)] desktop_commands::set_minimizable,
+       #[cfg(desktop)] desktop_commands::set_closable,
+-      #[cfg(desktop)] desktop_commands::maximize,
+-      #[cfg(desktop)] desktop_commands::unmaximize,
+-      #[cfg(desktop)] desktop_commands::minimize,
+-      #[cfg(desktop)] desktop_commands::unminimize,
+-      #[cfg(desktop)] desktop_commands::set_decorations,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::maximize,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::unmaximize,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::minimize,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::unminimize,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::set_decorations,
+       #[cfg(desktop)] desktop_commands::set_shadow,
+       #[cfg(desktop)] desktop_commands::set_effects,
+-      #[cfg(desktop)] desktop_commands::set_always_on_top,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::set_always_on_top,
+       #[cfg(desktop)] desktop_commands::set_always_on_bottom,
+       #[cfg(desktop)] desktop_commands::set_fullscreen,
+       #[cfg(desktop)] desktop_commands::set_simple_fullscreen,
+@@ -332,7 +348,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
+       #[cfg(desktop)] desktop_commands::set_cursor_icon,
+       #[cfg(desktop)] desktop_commands::set_cursor_position,
+       #[cfg(desktop)] desktop_commands::set_ignore_cursor_events,
+-      #[cfg(desktop)] desktop_commands::start_dragging,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::start_dragging,
+       #[cfg(desktop)] desktop_commands::start_resize_dragging,
+       #[cfg(desktop)] desktop_commands::set_badge_count,
+       #[cfg(target_os = "macos")]
+@@ -343,8 +359,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
+       #[cfg(desktop)] desktop_commands::set_icon,
+       #[cfg(desktop)] desktop_commands::set_visible_on_all_workspaces,
+       #[cfg(desktop)] desktop_commands::set_title_bar_style,
+-      #[cfg(desktop)] desktop_commands::toggle_maximize,
+-      #[cfg(desktop)] desktop_commands::internal_toggle_maximize,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::toggle_maximize,
++      #[cfg(any(desktop, target_env = "ohos"))] window_management_commands::internal_toggle_maximize,
+     ])
+     .build()
+ }

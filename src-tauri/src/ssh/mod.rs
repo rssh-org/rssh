@@ -29,9 +29,9 @@ pub(crate) mod test_support {
             db,
             lifecycle_sessions: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             pty_sessions: Mutex::new(HashMap::new()),
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             serial_sessions: Mutex::new(HashMap::new()),
             telnet_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),

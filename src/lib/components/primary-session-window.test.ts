@@ -40,7 +40,7 @@ describe("initializePrimarySessionWindow", () => {
     ]);
   });
 
-  it("releases resource panes and continues when reconciliation fails", async () => {
+  it("keeps resource panes closed when reconciliation fails so the owner can retry", async () => {
     const events: string[] = [];
 
     await expect(initializePrimarySessionWindow({
@@ -54,9 +54,9 @@ describe("initializePrimarySessionWindow", () => {
         return false;
       },
       openLocal: () => events.push("open local"),
-    })).resolves.toBeUndefined();
+    })).rejects.toThrow("backend unavailable");
 
-    expect(events).toEqual(["reconcile", "release", "load auto-open"]);
+    expect(events).toEqual(["reconcile"]);
   });
 
   it("does not read or apply the desktop local-terminal setting on mobile", async () => {
@@ -74,6 +74,21 @@ describe("initializePrimarySessionWindow", () => {
     });
 
     expect(events).toEqual(["reconcile", "release"]);
+  });
+
+  it("opens resources on a successful retry after a failed reconciliation", async () => {
+    const reconcile = vi.fn()
+      .mockRejectedValueOnce(new Error("close failed"))
+      .mockResolvedValueOnce(1);
+    const allowResourcePanes = vi.fn();
+    const openLocal = vi.fn();
+    const dependencies = { reconcile, allowResourcePanes, openLocal, loadAutoOpenLocal: async () => true };
+    await expect(initializePrimarySessionWindow(dependencies)).rejects.toThrow("close failed");
+    expect(allowResourcePanes).not.toHaveBeenCalled();
+    expect(openLocal).not.toHaveBeenCalled();
+    await initializePrimarySessionWindow(dependencies);
+    expect(allowResourcePanes).toHaveBeenCalledTimes(1);
+    expect(openLocal).toHaveBeenCalledTimes(1);
   });
 
   it("does nothing after its owner is cancelled", async () => {
