@@ -73,7 +73,7 @@ fn reconcile_sync_filter_for_group_delete(conn: &rusqlite::Connection, id: &str)
 pub fn list(db: &Db) -> AppResult<Vec<Group>> {
     let conn = db.lock()?;
     let mut stmt = conn.prepare(
-        "SELECT id, name, color, sort_order FROM groups ORDER BY sort_order ASC, name ASC",
+        "SELECT id, name, color, sort_order, terminal_waves_enabled FROM groups ORDER BY sort_order ASC, name ASC",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(Group {
@@ -81,6 +81,7 @@ pub fn list(db: &Db) -> AppResult<Vec<Group>> {
             name: row.get(1)?,
             color: row.get(2)?,
             sort_order: row.get(3)?,
+            terminal_waves_enabled: row.get(4)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -89,7 +90,7 @@ pub fn list(db: &Db) -> AppResult<Vec<Group>> {
 pub fn get(db: &Db, id: &str) -> AppResult<Group> {
     let conn = db.lock()?;
     conn.query_row(
-        "SELECT id, name, color, sort_order FROM groups WHERE id = ?1",
+        "SELECT id, name, color, sort_order, terminal_waves_enabled FROM groups WHERE id = ?1",
         params![id],
         |row| {
             Ok(Group {
@@ -97,6 +98,7 @@ pub fn get(db: &Db, id: &str) -> AppResult<Group> {
                 name: row.get(1)?,
                 color: row.get(2)?,
                 sort_order: row.get(3)?,
+                terminal_waves_enabled: row.get(4)?,
             })
         },
     )
@@ -107,9 +109,9 @@ pub fn insert_tx(conn: &rusqlite::Connection, g: &Group) -> AppResult<()> {
     validate_name(&g.name)?;
     let color = normalize_group_color(&g.color)?;
     conn.execute(
-        "INSERT INTO groups (id, name, color, sort_order) VALUES (?1, ?2, ?3, ?4) \
-         ON CONFLICT(id) DO UPDATE SET name=excluded.name, color=excluded.color, sort_order=excluded.sort_order",
-        params![g.id, g.name, color, g.sort_order],
+        "INSERT INTO groups (id, name, color, sort_order, terminal_waves_enabled) VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT(id) DO UPDATE SET name=excluded.name, color=excluded.color, sort_order=excluded.sort_order, terminal_waves_enabled=excluded.terminal_waves_enabled",
+        params![g.id, g.name, color, g.sort_order, g.terminal_waves_enabled],
     )?;
     Ok(())
 }
@@ -124,8 +126,8 @@ pub fn update(db: &Db, g: &Group) -> AppResult<()> {
     let color = normalize_group_color(&g.color)?;
     let conn = db.lock()?;
     conn.execute(
-        "UPDATE groups SET name=?1, color=?2, sort_order=?3 WHERE id=?4",
-        params![g.name, color, g.sort_order, g.id],
+        "UPDATE groups SET name=?1, color=?2, sort_order=?3, terminal_waves_enabled=?4 WHERE id=?5",
+        params![g.name, color, g.sort_order, g.terminal_waves_enabled, g.id],
     )?;
     Ok(())
 }
@@ -183,6 +185,7 @@ mod tests {
             name: name.into(),
             color: "#FF0000".into(),
             sort_order: 0,
+            terminal_waves_enabled: false,
         }
     }
 
@@ -200,6 +203,24 @@ mod tests {
             group_id: group_id.map(String::from),
             algorithms: Default::default(),
         }
+    }
+
+    #[test]
+    fn group_waves_survive_insert_update_and_upsert() {
+        let db = Db::open_in_memory().unwrap();
+        let mut group = mk_group("prod", "production");
+        group.terminal_waves_enabled = true;
+        insert(&db, &group).unwrap();
+        assert!(get(&db, "prod").unwrap().terminal_waves_enabled);
+        assert!(list(&db).unwrap()[0].terminal_waves_enabled);
+
+        group.terminal_waves_enabled = false;
+        update(&db, &group).unwrap();
+        assert!(!get(&db, "prod").unwrap().terminal_waves_enabled);
+
+        group.terminal_waves_enabled = true;
+        insert(&db, &group).unwrap();
+        assert!(get(&db, "prod").unwrap().terminal_waves_enabled);
     }
 
     #[test]

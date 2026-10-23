@@ -37,7 +37,10 @@ pub async fn serial_open(
     let sink: serial::SerialSink =
         std::sync::Arc::new(move |id: &str, out: serial::SerialOut| match out {
             serial::SerialOut::Data(b) => {
-                let _ = app.emit(&format!("serial:data:{id}"), b);
+                let _ = app.emit(
+                    &format!("serial:data:{id}"),
+                    crate::emitter::b64_payload(&b),
+                );
             }
             serial::SerialOut::Close => {
                 let _ = app.emit(&format!("serial:close:{id}"), ());

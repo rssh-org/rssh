@@ -45,6 +45,7 @@
         redDot?: boolean;
         onActivate: (e?: MouseEvent) => void;
         onClose?: () => void;
+        onContextMenu?: (e: MouseEvent) => void;
         onDragStart?: (e: DragEvent) => void;
         onDragOver?: (e: DragEvent) => void;
         onDrop?: (e: DragEvent) => void;
@@ -66,6 +67,7 @@
         redDot = false,
         onActivate,
         onClose,
+        onContextMenu,
         onDragStart,
         onDragOver,
         onDrop,
@@ -135,6 +137,7 @@
     class:rippling
     draggable={draggable ? "true" : undefined}
     onclick={(e) => onActivate(e)}
+    oncontextmenu={onContextMenu}
     ondragstart={onDragStart}
     ondragover={onDragOver}
     ondrop={onDrop}

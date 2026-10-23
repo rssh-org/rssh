@@ -77,6 +77,7 @@ export type SettingsPage =
 
 export interface Group {
   id: string; name: string; color: string; sort_order: number;
+  terminal_waves_enabled: boolean;
 }
 export type ConnectionKind = "ssh" | "forward" | "serial" | "telnet";
 export type ConnectionEditorIntent =
@@ -564,6 +565,22 @@ export function moveTab(fromIdx: number, toIdx: number) {
   _tabs = next;
 }
 
+export type TabCloseScope = "current" | "left" | "right" | "others" | "all";
+
+/** Only visible workspace tabs participate; closing a workspace disposes its panes. */
+export function tabCloseTargets(id: string, scope: TabCloseScope): string[] {
+  const visible = workspaceTabs();
+  const index = visible.findIndex(tab => tab.id === id);
+  if (index < 0) return [];
+  return visible.filter((tab, position) => tab.type !== "home" && (
+    scope === "all" ||
+    (scope === "current" && position === index) ||
+    (scope === "left" && position < index) ||
+    (scope === "right" && position > index) ||
+    (scope === "others" && position !== index)
+  )).map(tab => tab.id);
+}
+
 export function closeTab(id: string) {
   const tab = _tabs.find((candidate) => candidate.id === id);
   if (!tab || tab.type === "home") return;
@@ -868,6 +885,7 @@ export function connectSerialProfile(sp: SerialProfile) {
     label: sp.name,
     meta: {
       serialProfileId: sp.id,
+      groupId: sp.group_id ?? "",
       port: sp.port,
       baud_rate: String(sp.baud_rate),
       data_bits: String(sp.data_bits),
@@ -897,6 +915,7 @@ export function connectTelnetProfile(tp: TelnetProfile) {
     label: tp.name,
     meta: {
       profileId: tp.id,
+      groupId: tp.group_id ?? "",
       host: tp.host,
       port: String(tp.port),
       input_newline: tp.input_newline,

@@ -493,11 +493,12 @@ describe("connectTelnetProfile", () => {
       echo_mode: "off",
       backspace: "del",
       login_script: "send super-secret",
-      group_id: null,
+      group_id: "prod",
     });
 
     expect(app.tabs()[1].meta?.echo_mode).toBe("off");
     expect(app.tabs()[1].meta?.profileId).toBe("telnet-1");
+    expect(app.tabs()[1].meta?.groupId).toBe("prod");
     expect(app.tabs()[1].meta?.login_script).toBeUndefined();
   });
 
@@ -519,8 +520,30 @@ describe("connectTelnetProfile", () => {
     app.connectTelnetProfile(legacy);
 
     expect(app.tabs()[1].meta?.echo_mode).toBe("on");
+    expect(app.tabs()[1].meta?.groupId).toBe("");
   });
 });
+
+describe("connectSerialProfile", () => {
+  it.each(["prod", null])("snapshots the connection group %s with the port", async (groupId) => {
+    const app = await loadAppModule();
+    const profile = {
+      id: "serial-1", name: "console", port: "/dev/ttyUSB0",
+      baud_rate: 115200, data_bits: 8, parity: "none", stop_bits: 1,
+      flow_control: "none", xany: false, input_newline: "crlf", output_newline: "raw",
+      local_echo: false, backspace: "del", slow_send: false, input_mode: "text",
+      output_mode: "text", login_script: "", group_id: groupId,
+    };
+
+    app.connectSerialProfile(profile);
+    profile.group_id = "test";
+    profile.port = "/dev/ttyUSB1";
+
+    expect(app.tabs()[1].meta?.groupId).toBe(groupId ?? "");
+    expect(app.tabs()[1].meta?.port).toBe("/dev/ttyUSB0");
+  });
+});
+
 describe("command block split mode", () => {
   it("shares one in-flight load across terminals", async () => {
     let resolveSetting!: (value: unknown) => void;
@@ -782,5 +805,34 @@ describe("soft keyboard gate", () => {
     app.toggleSoftKeyboard();
     expect(activeCalls).toBe(1);
     expect(app.softKeyboardOpen()).toBe(true);
+  });
+});
+
+describe("tab bar bulk close targets", () => {
+  it("uses visible tab order, preserves Home and handles empty sides", async () => {
+    const app = await loadAppModule();
+    for (const id of ["a", "b", "c"]) app.addTab(local(id));
+    expect(app.tabCloseTargets("b", "left")).toEqual(["a"]);
+    expect(app.tabCloseTargets("b", "right")).toEqual(["c"]);
+    expect(app.tabCloseTargets("b", "others")).toEqual(["a", "c"]);
+    expect(app.tabCloseTargets("a", "left")).toEqual([]);
+    expect(app.tabCloseTargets("c", "right")).toEqual([]);
+    expect(app.tabCloseTargets("home", "current")).toEqual([]);
+    expect(app.tabCloseTargets("missing", "all")).toEqual([]);
+    app.moveTab(3, 1);
+    expect(app.tabCloseTargets("b", "left")).toEqual(["c", "a"]);
+  });
+
+  it("closes whole split workspaces without treating hidden panes as tabs", async () => {
+    const app = await loadAppModule();
+    app.addTab(local("a"));
+    app.addPane("a", "right", local("pane"));
+    app.addTab(local("b"));
+    expect(app.tabCloseTargets("b", "left")).toEqual(["a"]);
+    for (const id of app.tabCloseTargets("b", "left")) app.closeTab(id);
+    expect(app.tabs().map(tab => tab.id)).toEqual(["home", "b"]);
+    for (const id of app.tabCloseTargets("b", "all")) app.closeTab(id);
+    expect(app.tabs().map(tab => tab.id)).toEqual(["home"]);
+    expect(app.activeTabId()).toBe("home");
   });
 });

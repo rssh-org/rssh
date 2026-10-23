@@ -18,6 +18,8 @@
     import * as syncStatus from "../stores/sync.svelte.ts";
     import * as ai from "../ai/store.svelte.ts";
     import * as theme from "../themes/store.svelte.ts";
+    import {loadTerminalWaveColor, terminalWaveTheme} from "../terminal/environment-wave.ts";
+    import EnvironmentWave from "./EnvironmentWave.svelte";
     import TerminalKeybar from "./TerminalKeybar.svelte";
     import {registerRsshOscHandlers} from "../osc/handler.ts";
     import {registerClipboardOscHandler} from "../osc/clipboard.ts";
@@ -33,6 +35,7 @@
     } from "../terminal/limits.ts";
     import {createPaintScheduler, type PaintScheduler} from "../terminal/paint-scheduler.ts";
     import {createOutputFeeder, formatBacklogBytes, type OutputFeeder} from "../terminal/output-feeder.ts";
+    import {decodeStreamChunk} from "../terminal/stream-decode.ts";
     import {terminalRowHeight} from "../terminal/row-height.ts";
 
     import {extractBlockTexts, extractBlocksText} from "../terminal/block-content.ts";
@@ -99,6 +102,14 @@
         meta: Record<string, string>;
         onInitialConnectionFailure?: (tabId: string, error: unknown) => boolean;
     } = $props();
+
+    let waveColor = $state<string | null>(null);
+    let baseTermTheme = $state(theme.currentTermTheme());
+
+    $effect(() => {
+        const colors = terminalWaveTheme(baseTermTheme, !!waveColor);
+        if (terminal) terminal.options.theme = colors;
+    });
 
     let containerEl: HTMLDivElement;
     let paneEl: HTMLDivElement; // the .term-outer root — soft-keyboard inset target
@@ -516,7 +527,7 @@
             // fails. ClipboardItem receives the promise while the user gesture
             // is still active, so the async read does not break clipboard access.
             const pngPromise = app.loadCommandBlockRedaction(true)
-                .then((redaction) => renderBlocksToBlob(term, blocks, {}, fs, redaction))
+                .then((redaction) => renderBlocksToBlob(term, blocks, { theme: baseTermTheme }, fs, redaction))
                 .then((blob) => {
                     if (!blob) throw new Error("render produced no blob");
                     return blob;
@@ -985,9 +996,9 @@
     async function createSessionEventSubscription(sid: string): Promise<UnlistenFn> {
         const listeners: UnlistenFn[] = [];
         try {
-            listeners.push(await listen<number[]>(`${dataEvent}:${sid}`, (ev) => {
+            listeners.push(await listen<string>(`${dataEvent}:${sid}`, (ev) => {
                 if (!acceptsSessionEvent(sid)) return;
-                const raw = new Uint8Array(ev.payload);
+                const raw = decodeStreamChunk(ev.payload);
                 if (streamOpts) {
                     stageLoginScript(raw);
                     if (streamOpts.outputMode === "hex") {
@@ -1345,6 +1356,7 @@
     }
 
     function sendControlArrow(dir: app.ArrowDir, mod: number) {
+        if (!terminal) return;
         // DECCKM: bare arrows use SS3 in app-cursor mode, CSI otherwise.
         // Modified arrows always use CSI with params; SS3 has no param form.
         const appMode = terminal.modes.applicationCursorKeysMode;
@@ -1389,6 +1401,18 @@
     }
 
     onMount(async () => {
+        const focusBeforeInit = document.activeElement;
+        // Transparency is fixed when xterm opens. Capture the accent first;
+        // configuration edits only affect newly opened terminals.
+        let color: string | null = null;
+        try {
+            color = await loadTerminalWaveColor(tabType, meta);
+        } catch (error) {
+            if (!destroyed) console.warn("[terminal] environment group lookup failed:", error);
+        }
+        if (destroyed) return;
+        waveColor = color;
+        baseTermTheme = theme.currentTermTheme();
         const policy = terminalPolicy();
 
         terminal = new Terminal({
@@ -1405,7 +1429,8 @@
             // users cannot select at all in mouse mode. Match iTerm2's Option-drag.
             macOptionClickForcesSelection: true,
             */
-            theme: theme.currentTermTheme(),
+            theme: terminalWaveTheme(baseTermTheme, !!waveColor),
+            allowTransparency: !!waveColor,
             // xterm 6 draws its own scrollbar at overviewRuler.width||14 (=14px),
             // out of reach of the global ::-webkit-scrollbar; pin it to the app's 6px.
             overviewRuler: { width: 6 },
@@ -1413,7 +1438,7 @@
         // Listener fires immediately with current theme (already applied above)
         // and on every palette change. Keep the unsubscribe for onDestroy.
         unsubscribeTheme = theme.registerXtermThemeListener((t) => {
-            if (terminal) terminal.options.theme = t;
+            baseTermTheme = t;
         });
         fitAddon = new FitAddon();
         searchAddon = new SearchAddon();
@@ -1506,6 +1531,13 @@
         }
         // The handler consumes touch events only; mouse/wheel input keeps xterm's path.
         touchScrollCleanup = setupTouchScroll(containerEl, terminal);
+
+        // Metadata may resolve after activation; keep any focus the user moved meanwhile.
+        if (app.activeTabId() === tabId && !app.settingsActive()
+            && !showSearch && !app.snippetPickerOpen()
+            && (document.activeElement === focusBeforeInit || document.activeElement === document.body)) {
+            terminal.focus();
+        }
 
         app.registerTerminalControls(tabId, {
             getSelection: () => terminal.getSelection(),
@@ -1713,7 +1745,7 @@
         if (visible) foldStore?.enforceAutoFold();
     });
 
-    // Focus the terminal and expose its keyboard controller when it becomes active.
+    // Focus the terminal when it becomes active.
     // Double-rAF: the first frame lets the browser apply layout after
     // the pane switches from display:none → flex; the second frame
     // ensures the computed dimensions are stable before we fit.
@@ -1721,6 +1753,13 @@
         if (app.activeTabId() === tabId && !app.settingsActive()) {
             requestAnimationFrame(() => requestAnimationFrame(fitTerminal));
             terminal?.focus();
+        }
+    });
+
+    // The controller becomes ready after async initialization. Registering it
+    // must not refocus the terminal if the user has moved to another control.
+    $effect(() => {
+        if (app.activeTabId() === tabId && !app.settingsActive()) {
             // The keyboard button must control this pane's helper, never a
             // hidden pane that happened to mount later.
             if (softKeyboard) {
@@ -1794,7 +1833,7 @@
     });
 </script>
 
-<div class="term-outer" bind:this={paneEl}>
+<div class="term-outer" bind:this={paneEl} style="--term-bg: {baseTermTheme.background}">
     {#if showSearch}
         <div class="search-bar">
             <input
@@ -1833,6 +1872,7 @@
         </div>
     {/if}
     <div class="term-wrap" class:soft-keyboard={softKeyboardRequested} class:no-block-bar={!app.commandBlockBar()}>
+        {#if waveColor}<EnvironmentWave color={waveColor} />{/if}
         <div class="xterm-host" bind:this={containerEl}></div>
         {#if backlogBytes > BACKLOG_INDICATOR_BYTES}
             <div class="backlog-badge">
@@ -1909,6 +1949,8 @@
 <style>
     .term-outer {
         position: relative;
+        min-height: 0;
+        background: var(--term-bg);
         display: flex;
         flex-direction: column;
         width: 100%;
@@ -1916,19 +1958,16 @@
     }
 
     .term-wrap {
+        background: var(--term-bg);
         flex: 1;
         min-height: 0;
         position: relative;
     }
 
-    /* xterm.js paints theme.background into the row canvas, but the
-       .xterm-viewport scroll layer keeps its own background. When the
-       user turns off "terminal bg follows theme" and picks a preset
-       whose background differs from --bg, that viewport leaks a
-       frame-coloured ring around the rendered rows. Pin it to --term-bg
-       (kept in sync by themes/store.svelte.ts::writeTermVars). */
+    /* The opaque wrapper preserves the terminal palette. Transparent xterm
+       layers let the right-side accent sit behind glyphs without tinting them. */
     .term-wrap :global(.xterm-viewport) {
-        background-color: var(--term-bg) !important;
+        background-color: transparent !important;
     }
 
     .xterm-host {

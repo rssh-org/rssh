@@ -6,6 +6,8 @@
   import { toast } from "../stores/toast.svelte.ts";
   import { t, errMsg } from "../i18n/index.svelte.ts";
   import AppIcon from "./AppIcon.svelte";
+  import EnvironmentWave from "./EnvironmentWave.svelte";
+  import * as theme from "../themes/store.svelte.ts";
 
   let groups = $state<Group[]>([]);
   let adding = $state(false);
@@ -15,6 +17,8 @@
   let formName = $state("");
   let formColor = $state("#4A6CF7");
   let formOrder = $state(0);
+  let formWavesEnabled = $state(false);
+  let previewTheme = $derived(theme.currentTermTheme());
 
   let deleting = $state<string | null>(null);
 
@@ -30,6 +34,7 @@
     formName = "";
     formColor = "#4A6CF7";
     formOrder = 0;
+    formWavesEnabled = false;
   }
 
   function startEdit(g: Group) {
@@ -38,6 +43,7 @@
     formName = g.name;
     formColor = g.color;
     formOrder = g.sort_order;
+    formWavesEnabled = g.terminal_waves_enabled;
   }
 
   function cancelForm() {
@@ -52,6 +58,7 @@
       name: formName.trim(),
       color: formColor,
       sort_order: formOrder,
+      terminal_waves_enabled: formWavesEnabled,
     };
     try {
       await invoke("create_group", { group });
@@ -67,6 +74,7 @@
       name: formName.trim(),
       color: formColor,
       sort_order: formOrder,
+      terminal_waves_enabled: formWavesEnabled,
     };
     try {
       await invoke("update_group", { group });
@@ -86,6 +94,20 @@
   }
 </script>
 
+{#snippet backgroundFields()}
+  <label class="background-toggle">
+    <input type="checkbox" bind:checked={formWavesEnabled} />
+    {t("group.terminal_background")}
+  </label>
+  <p class="background-hint">{t("group.terminal_background_hint")}</p>
+  {#if formWavesEnabled}
+    <div class="terminal-preview" style:background={previewTheme.background} style:color={previewTheme.foreground}>
+      <div class="preview-content">{formName || t("group.name_placeholder")} ~ # <span>{t("group.preview")}</span></div>
+      <EnvironmentWave color={formColor} />
+    </div>
+  {/if}
+{/snippet}
+
 <div class="page">
   <div class="toolbar">
     <button class="btn btn-accent btn-sm" onclick={startAdd}>{t("group.new")}</button>
@@ -97,6 +119,7 @@
       <input type="text" bind:value={formName} placeholder={t("group.name_placeholder")} />
       <label>{t("common.color")}</label>
       <input type="color" bind:value={formColor} />
+      {@render backgroundFields()}
       <label>{t("group.sort_order")}</label>
       <input type="number" bind:value={formOrder} min="0" />
       <div class="form-actions">
@@ -113,6 +136,7 @@
         <input type="text" bind:value={formName} placeholder={t("group.name_placeholder")} />
         <label>{t("common.color")}</label>
         <input type="color" bind:value={formColor} />
+        {@render backgroundFields()}
         <label>{t("group.sort_order")}</label>
         <input type="number" bind:value={formOrder} min="0" />
         <div class="form-actions">
@@ -127,6 +151,9 @@
           <div class="item-text">
             <div class="item-name" title={g.name}>{g.name}</div>
             <div class="item-sub">{t("group.order", { n: g.sort_order })}</div>
+            {#if g.terminal_waves_enabled}
+              <div class="item-sub">{t("group.terminal_background")}: {g.color}</div>
+            {/if}
           </div>
         </div>
         <div class="item-actions">
@@ -160,6 +187,15 @@
 
 <style>
   .page { padding: 24px; }
+  .background-toggle { display: flex; align-items: center; gap: 8px; }
+  .background-hint { color: var(--text-sub); font-size: 12px; margin: 0; }
+  .terminal-preview {
+    position: relative;
+    overflow: hidden;
+    border-radius: 4px;
+    font-family: monospace;
+  }
+  .preview-content { position: relative; z-index: 1; padding: 12px 12px 20px; overflow-wrap: anywhere; }
   .toolbar { display: flex; justify-content: flex-end; margin-bottom: 16px; }
   .item-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
   .item-info { display: flex; align-items: center; gap: 10px; min-width: 0; }
