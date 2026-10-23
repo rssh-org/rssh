@@ -15,6 +15,7 @@
         groupColorOf: (tab: Tab) => string | null;
         onActivate: (item: NavItem, e?: MouseEvent) => void;
         onClose: (tabId: string) => void;
+        onContextMenu: (event: MouseEvent, tab: Tab) => void;
         onDragStart: (e: DragEvent, tabId: string) => void;
         onDragOver: (e: DragEvent, tabId: string) => void;
         onDrop: (e: DragEvent, tabId: string) => void;
@@ -26,7 +27,7 @@
         dragTabId, dropTabId, xferBadge = null,
         settingsRedDot = false,
         isActiveItem, isFocusedItem, groupColorOf,
-        onActivate, onClose,
+        onActivate, onClose, onContextMenu,
         onDragStart, onDragOver, onDrop, onDragEnd,
     }: Props = $props();
 
@@ -98,6 +99,7 @@
                 groupColor={itemTab ? groupColorOf(itemTab) : null}
                 showClose={t !== null}
                 onActivate={(e) => onActivate(item, e)}
+                onContextMenu={t ? (e) => onContextMenu(e, t) : undefined}
                 onClose={t ? () => onClose(t.id) : undefined}
                 onDragStart={t ? (e) => onDragStart(e, t.id) : undefined}
                 onDragOver={t ? (e) => { onDragOver(e, t.id); updateAutoScroll(e.clientX); } : undefined}

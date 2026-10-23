@@ -68,7 +68,7 @@
     let tabCycling = $state(false);
     let profiles = $state<Profile[]>([]);
     let groups = $state<Group[]>([]);
-    let menuCtx = $state<{ x: number; y: number; tab: Tab } | null>(null);
+    let menuCtx = $state<{ x: number; y: number; tab: Tab; tabBar?: boolean } | null>(null);
     let pinnedMenu = $state<{ x: number; y: number } | null>(null);
     let pinned = $state(false);
     let pendingPaneSources = $state<Record<string, string>>({});
@@ -113,20 +113,26 @@
 
     /* 关闭 tab 的唯一入口：所有关闭路径（快捷键 / 右键菜单 / tab 上的 × 按钮）都走这里。
        开了二次确认就先弹窗存住待关的 tab，否则直接关。home tab 不可关，跟 closeTab 一致。 */
-    let closingTab = $state<Tab | null>(null);
-    function requestCloseTab(id: string) {
-        const tab = app.tabs().find(t => t.id === id);
-        if (!tab || tab.type === "home") return;
-        if (app.confirmCloseTab()) { closingTab = tab; return; }
-        delete pendingPaneSources[id];
-        app.closeTab(id);
-    }
-    function confirmCloseTab() {
-        if (closingTab) {
-            delete pendingPaneSources[closingTab.id];
-            app.closeTab(closingTab.id);
+    let closingTabs = $state<Tab[]>([]);
+    function closeRequestedTabs(tabs: Tab[]) {
+        const ids = new Set(tabs.map(tab => tab.id));
+        for (const tab of app.tabs()) {
+            if (ids.has(tab.id) || (tab.workspaceId && ids.has(tab.workspaceId))) {
+                delete pendingPaneSources[tab.id];
+            }
         }
-        closingTab = null;
+        for (const tab of tabs) app.closeTab(tab.id);
+    }
+    function requestCloseTabs(ids: string[]) {
+        const tabs = app.tabs().filter(tab => ids.includes(tab.id) && tab.type !== "home");
+        if (!tabs.length) return;
+        if (app.confirmCloseTab()) { closingTabs = tabs; return; }
+        closeRequestedTabs(tabs);
+    }
+    function requestCloseTab(id: string) { requestCloseTabs([id]); }
+    function confirmCloseTab() {
+        closeRequestedTabs(closingTabs);
+        closingTabs = [];
     }
 
     /* ── 全局快捷键声明表 ── */
@@ -837,6 +843,28 @@
         menuCtx = {x: e.clientX, y: e.clientY, tab};
     }
 
+    function openTabBarMenu(e: MouseEvent, tab: Tab) {
+        e.preventDefault();
+        e.stopPropagation();
+        menuCtx = { x: e.clientX, y: e.clientY, tab, tabBar: true };
+    }
+
+    function buildTabBarMenu(tab: Tab): CtxMenuItem[][] {
+        const closeItem = (scope: app.TabCloseScope, label: string): CtxMenuItem => ({
+            label,
+            disabled: app.tabCloseTargets(tab.id, scope).length === 0,
+            onClick: () => requestCloseTabs(app.tabCloseTargets(tab.id, scope)),
+        });
+        return [
+            [{ label: t("tab.context.clone"), onClick: () => cloneTab(tab), disabled: tab.type === "home" }],
+            [closeItem("current", t("tab.context.close")),
+             closeItem("right", t("tab.context.close_right")),
+             closeItem("left", t("tab.context.close_left")),
+             closeItem("others", t("tab.context.close_others")),
+             closeItem("all", t("tab.context.close_all"))],
+        ];
+    }
+
     /** Detect 10-digit Unix seconds or 13-digit Unix ms timestamp. */
     function tryParseTimestamp(s: string): Date | null {
         const t = s.trim();
@@ -1204,7 +1232,7 @@
     <TabContextMenu
         x={menuCtx.x}
         y={menuCtx.y}
-        sections={buildMenu(menuCtx.tab)}
+        sections={menuCtx.tabBar ? buildTabBarMenu(menuCtx.tab) : buildMenu(menuCtx.tab)}
         onClose={closeCtxMenu}
     />
 {/if}
@@ -1266,6 +1294,7 @@
                         groupColor={tab ? tabGroupColor(tab) : null}
                         showClose={tab !== null}
                         onActivate={(e) => activateNavItem(item, e)}
+                        onContextMenu={tab ? (e) => openTabBarMenu(e, tab) : undefined}
                         onClose={tab ? () => requestCloseTab(tab.id) : undefined}
                         onDragStart={tab ? (e) => handleDragStart(e, tab.id) : undefined}
                         onDragOver={tab ? (e) => handleDragOver(e, tab.id) : undefined}
@@ -1306,6 +1335,7 @@
             isFocusedItem={isFocusedItem}
             groupColorOf={tabGroupColor}
             onActivate={activateNavItem}
+            onContextMenu={openTabBarMenu}
             onClose={(id) => requestCloseTab(id)}
             onDragStart={handleDragStart}
             onDragOver={handleDragOver}
@@ -1495,14 +1525,14 @@
     {/if}
 
     <!-- 关闭 tab 二次确认。Tauri webview 不支持原生 confirm()，沿用 ChatPanel/AiSettings
-         同款自定义 modal。只有开启「关闭标签页前确认」后 requestCloseTab 才会挂起 closingTab。 -->
-    {#if closingTab}
-        <Modal onClose={() => (closingTab = null)} class="stack"
+         同款自定义 modal。只有开启「关闭标签页前确认」后 关闭请求才会挂起 closingTabs。 -->
+    {#if closingTabs.length}
+        <Modal onClose={() => (closingTabs = [])} class="stack"
                aria-labelledby="close-tab-title" aria-describedby="close-tab-body">
             <h3 id="close-tab-title" class="dialog-title">{t("tab.close_confirm_title")}</h3>
-            <div id="close-tab-body" class="dialog-body">{t("tab.close_confirm_body", { label: closingTab.label })}</div>
+            <div id="close-tab-body" class="dialog-body">{closingTabs.length === 1 ? t("tab.close_confirm_body", { label: closingTabs[0].label }) : t("tab.close_many_confirm_body", { count: closingTabs.length })}</div>
             <div class="modal-actions">
-                <button class="btn btn-sm" onclick={() => (closingTab = null)}>{t("common.cancel")}</button>
+                <button class="btn btn-sm" onclick={() => (closingTabs = [])}>{t("common.cancel")}</button>
                 <button class="btn btn-sm btn-primary" onclick={confirmCloseTab}>{t("tab.context.close")}</button>
             </div>
         </Modal>

@@ -695,3 +695,32 @@ describe("soft keyboard gate", () => {
     expect(app.softKeyboardOpen()).toBe(true);
   });
 });
+
+describe("tab bar bulk close targets", () => {
+  it("uses visible tab order, preserves Home and handles empty sides", async () => {
+    const app = await loadAppModule();
+    for (const id of ["a", "b", "c"]) app.addTab(local(id));
+    expect(app.tabCloseTargets("b", "left")).toEqual(["a"]);
+    expect(app.tabCloseTargets("b", "right")).toEqual(["c"]);
+    expect(app.tabCloseTargets("b", "others")).toEqual(["a", "c"]);
+    expect(app.tabCloseTargets("a", "left")).toEqual([]);
+    expect(app.tabCloseTargets("c", "right")).toEqual([]);
+    expect(app.tabCloseTargets("home", "current")).toEqual([]);
+    expect(app.tabCloseTargets("missing", "all")).toEqual([]);
+    app.moveTab(3, 1);
+    expect(app.tabCloseTargets("b", "left")).toEqual(["c", "a"]);
+  });
+
+  it("closes whole split workspaces without treating hidden panes as tabs", async () => {
+    const app = await loadAppModule();
+    app.addTab(local("a"));
+    app.addPane("a", "right", local("pane"));
+    app.addTab(local("b"));
+    expect(app.tabCloseTargets("b", "left")).toEqual(["a"]);
+    for (const id of app.tabCloseTargets("b", "left")) app.closeTab(id);
+    expect(app.tabs().map(tab => tab.id)).toEqual(["home", "b"]);
+    for (const id of app.tabCloseTargets("b", "all")) app.closeTab(id);
+    expect(app.tabs().map(tab => tab.id)).toEqual(["home"]);
+    expect(app.activeTabId()).toBe("home");
+  });
+});
