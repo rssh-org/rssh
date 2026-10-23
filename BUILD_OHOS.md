@@ -1,5 +1,12 @@
 # RSSH 鸿蒙构建
 
+RSSH 鸿蒙手机端和电脑端均已在[华为应用市场](https://appgallery.huawei.com/app/detail?id=com.rssh.app&channelId=SHARE&source=appshare)上线。
+日常使用可打开商店链接，或在对应设备的**华为应用市场搜索「RSSH」安装**，
+后续更新也通过应用市场获取。
+手机和电脑使用各自的 HAP，由商店按设备分发。
+
+以下内容面向源码开发、打包和发布维护；从应用市场安装不需要配置 SDK 或签名。
+
 鸿蒙 GUI 复用 `src-tauri/src/lib.rs` 和现有业务模块，通过单独的 Cargo
 workspace 使用固定的 Tauri/Wry/Tao OHOS 分支及 ability 1.0 beta 插件框架。
 macOS / Windows / Linux、Android、iOS、CLI 和 headless 继续使用根 `src-tauri/Cargo.toml` / `Cargo.lock` 的官方依赖。
@@ -7,7 +14,7 @@ macOS / Windows / Linux、Android、iOS、CLI 和 headless 继续使用根 `src-
 ## 环境
 
 - DevEco Studio 与完整 HarmonyOS SDK（含 `native/`、hvigor、ohpm）。
-- Rust stable、Node.js 18+、npm、Git、Bash。
+- Rust stable、Node.js 20+、npm、Git、Bash。
 - `ohrs` 固定为 1.5.0。无需替换系统或 npm 的 Tauri CLI。
 
 ```bash
@@ -98,11 +105,10 @@ src-tauri/gen/ohos/build/outputs/default/RSSH.app
 一致。准备脚本仅更新派生锁文件中 RSSH 自身的版本，依赖版本仍由已提交的
 OHOS 锁文件固定。组装时临时应用版本信息，结束或失败后恢复源 AppScope 文件。
 
-商店发布前需递增 `versionCode`，通过环境变量传入：
-
-```bash
-OHOS_VERSION_CODE=3 ./build-ohos.sh
-```
+商店发布前先查询 AppGallery Connect 中已经提交的版本，将环境变量
+`OHOS_VERSION_CODE` 设为比这些版本都大的正整数，再运行 `./build-ohos.sh`。
+手机和电脑 HAP 使用同一个版本代码；不要将仓库 AppScope 中的默认值
+当作当前商店版本或下次发布版本。
 
 未传入时沿用 AppScope 中的值，不会自动递增。当前 GitHub 发布流程没有
 鸿蒙签名打包任务，正式 HAP 和 App Pack 需在已配置签名的 DevEco 环境中构建。
@@ -143,8 +149,8 @@ Rust 编译条件统一为 `linux` / `macos` / `windows` / `android` / `ios` /
 
 ### 从旧通用 HAP 升级
 
-本轮默认 `versionCode` 从 1 升为 2；应用包名、主 Ability 名、应用级数据目录
-保持不变。原型电脑版的模块名由 `entry` 改成 `desktop`，必须使用更高版本号，
+此节仅针对早期使用单一 HAP 的开发原型。拆分时应用包名、主 Ability 名、
+应用级数据目录保持不变；原型电脑版的模块名由 `entry` 改成 `desktop`，必须使用更高版本号，
 避免同版本 entry 唯一性冲突。不要先卸载或清数据来掩盖升级问题；覆盖安装、
 原连接配置和密钥保留需要在设备上验收。若安装失败，保留错误信息与现有数据。
 参见[官方安装更新一致性规则](https://raw.githubusercontent.com/openharmony/docs/master/zh-cn/application-dev/quick-start/install-and-update-consistency-verification.md)。
@@ -217,13 +223,13 @@ URI 的文件描述符流式写入；中途失败可能保留部分文件，不�
 GET/HEAD，其它方法返回 501，避免进入上游异步请求体读取中生命周期不安全
 的缓冲区路径；普通 HTTP/HTTPS 请求不受此限制。
 
-设备验收重点（本轮交由用户执行）：
+后续版本的设备回归重点：
 
 - **首先验收升级**：在原手机与电脑应用上覆盖安装对应 HAP，确认名称／图标正常，
   原连接、密码／密钥、主题／语言仍可用。电脑安装后应为 `desktop` 模块，手机为 `entry`。
 - 冷启动、退出重开均能连接 SSH，终端有输出、输入和中文粘贴正常。
 - 调整窗口宽度跨过 640px，设置导航、侧栏偏好和终端按键条随宽度切换；
-  放宽后软键盘入口仍可点击，已有终端连接不重建。
+  窄于 640px 时显示终端辅助键盘及软键盘按钮，宽屏隐藏这些入口，已有终端连接不重建。
 - 窄窗口锁定 Ctrl/Alt 后拉宽，普通字符恢复普通输入；关闭后台终端标签后，
   当前终端的 Esc、Tab、方向键仍发送到正确会话。
 - 触摸长按选字后使用外接鼠标/键盘，右键、首个输入字符和中文输入均正常；
@@ -231,6 +237,8 @@ GET/HEAD，其它方法返回 501，避免进入上游异步请求体读取中�
 - 电脑端独立窗口、最大化/还原、主窗置顶；关闭任一窗口不影响其它窗口会话。
   关闭最初窗口、最小化剩余窗口后点击桌面图标，应唤回原窗口，不能新建重复窗口；
   窗口聚焦与取消最小化也应唤回相同 UIAbility 实例。
+- 电脑端在首页、设置、终端及新窗口之间切换后，系统最近任务列表中的应用名
+  始终为 RSSH；页面和会话名称仍显示在应用内的标签上。
 - 电脑端键鼠输入、快捷键、SSH 分屏，以及本地终端能力探测结果。
 - 电脑端多选上传、包含中文与特殊字符的嵌套目录上传/下载。
 - 串口：未插设备时可进入编辑器并刷新；授权拒绝后可重试，授权期间关闭
@@ -254,7 +262,7 @@ GET/HEAD，其它方法返回 501，避免进入上游异步请求体读取中�
 - 重启后的偏好设置。原型版本的主题、语言等 UI 偏好不迁移。
 - 横屏布局、后台切回后的终端会话与文件传输。
 
-### 人工安装验收
+### 开发包的模拟器安装验收
 
 先启动需要验收的模拟器，用 SDK 的 `hdc list targets` 查询设备 ID，再分别
 安装对应 HAP（以下命令从仓库根目录运行，将设备 ID 占位符替换为实际值）：

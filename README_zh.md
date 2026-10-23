@@ -12,7 +12,7 @@
 
 [![Release](https://img.shields.io/github/v/release/rssh-org/rssh)](https://github.com/rssh-org/rssh/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/rssh-org/rssh/total)](https://github.com/rssh-org/rssh/releases)
-![Platforms](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux%20·%20Android·%20iOS-555)
+![Platforms](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux%20·%20Android%20·%20iOS%20·%20HarmonyOS-555)
 [![License](https://img.shields.io/github/license/rssh-org/rssh)](LICENSE)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/rssh-org/rssh)
 
@@ -22,7 +22,7 @@
   <img src="https://rssh.ofcoder.com/img_ai_panel.png" alt="RSSH —— AI 面板读终端上下文，提议命令待批准" height="180"> 
 </p>
 
-<p align="center"><b><a href="https://github.com/rssh-org/rssh/releases">⬇️ 下载最新版</a></b> &nbsp;·&nbsp; <a href="https://github.com/rssh-org/docs/blob/main/article_zh.md">为什么是 RSSH？</a></p>
+<p align="center"><b><a href="#安装">⬇️ 下载最新版</a></b> &nbsp;·&nbsp; <a href="https://github.com/rssh-org/docs/blob/main/article_zh.md">为什么是 RSSH？</a></p>
 
 ---
 
@@ -79,19 +79,21 @@
 - **多会话工作台（桌面端）** —— 实时预览已连接终端，并向选中的会话广播内容
 - **SFTP** —— 远程文件浏览和上传/下载
 - **端口转发** —— 本地、远程和动态（SOCKS5），命名配置，实时流量统计
-- **本地终端（桌面端）** —— 自动识别 zsh/bash/PowerShell
+- **本地终端（桌面端）** —— 系统支持时打开本地 Shell
 - **会话录制** —— asciicast v2 格式，变速回放
 - **连接与凭据** —— SQLite 存储，可从 `~/.ssh/config` 导入
 - **安全与同步** —— Secret 使用 ChaCha20-Poly1305 本地加密，系统可用时由钥匙串保管主密钥；可选择远程同步范围，并加密备份到你自己的 GitHub 仓库或 WebDAV 服务器
 - **片段** —— 可复用命令快捷键（Cmd+E）
-- **移动端** —— 虚拟键盘栏（Ctrl/Alt/方向键/Tab/Esc）、安全区、栈式导航
+- **响应式布局** —— 窄窗口显示辅助键盘栏（Ctrl/Alt/方向键/Tab/Esc）和紧凑导航；所有平台都按窗口宽度调整布局
 - **IDE 插件** —— 在 JetBrains IDE 的工具窗口里运行 RSSH（共享数据目录）
+
+本地终端、串口控制、SSH Agent 和 Docker/Kubernetes 动态发现，按宿主实际提供的系统接口、权限和工具开放。
 
 ## 安装
 
-从 [Releases](https://github.com/rssh-org/rssh/releases) 下载：
+macOS、Windows、Linux 和 Android 安装包从 [Releases](https://github.com/rssh-org/rssh/releases) 下载；iOS 从 App Store 安装；**鸿蒙手机端和电脑端均已在华为应用市场上线**。
 
-| 平台                  | 文件                                       | 备注                     |
+| 平台                  | 文件 / 商店                                | 备注                     |
 |---------------------|------------------------------------------|------------------------|
 | macOS Apple Silicon | `rssh-{ver}-macos-aarch64.dmg`           |                        |
 | macOS Intel         | `rssh-{ver}-macos-x86_64.dmg`            |                        |
@@ -104,6 +106,10 @@
 | Android (arm64)     | `rssh-{ver}-android-arm64.apk`           | 64 位手机，体积约 1/3      |
 | Android             | `rssh-{ver}-android-universal.apk`       | 全 ABI（含模拟器）         |
 | iOS                 |                                          | AppStore，由 [@paradoxie](https://github.com/paradoxie) 维护 |
+| 鸿蒙手机             | [华为应用市场](https://appgallery.huawei.com/app/detail?id=com.rssh.app&channelId=SHARE&source=appshare) | 在手机上搜索 **RSSH**     |
+| 鸿蒙电脑             | [华为应用市场](https://appgallery.huawei.com/app/detail?id=com.rssh.app&channelId=SHARE&source=appshare) | 在电脑上搜索 **RSSH**     |
+
+鸿蒙手机端和电脑端要求 HarmonyOS 5 及以上，使用独立安装包，由应用市场按设备分发。直接在对应设备的应用市场安装和更新即可。
 
 ### IntelliJ / JetBrains 插件
 
@@ -122,7 +128,7 @@
 
 ## 开发
 
-参见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+参见 [CONTRIBUTING.md](CONTRIBUTING.md)。鸿蒙构建与签名说明见 [BUILD_OHOS.md](BUILD_OHOS.md)。
 
 ## 协议
 
