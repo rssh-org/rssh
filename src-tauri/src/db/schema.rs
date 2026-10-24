@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppResult;
 
-const SCHEMA_VERSION: u32 = 32;
+const SCHEMA_VERSION: u32 = 33;
 
 fn column_exists(conn: &Connection, table: &str, col: &str) -> AppResult<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
@@ -692,6 +692,23 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
         }
     }
 
+    if version < 33 && table_exists(conn, "settings")? {
+        conn.execute_batch(
+            "INSERT INTO settings (key, value) VALUES (
+                 'startup_action',
+                 CASE
+                     WHEN (SELECT value FROM settings WHERE key = 'session_restore.enabled') = 'true'
+                         THEN 'restore'
+                     WHEN (SELECT value FROM settings WHERE key = 'open_local_on_startup') = 'true'
+                         THEN 'local'
+                     ELSE 'home'
+                 END
+             ) ON CONFLICT(key) DO NOTHING;
+             DELETE FROM settings
+             WHERE key IN ('session_restore.enabled', 'open_local_on_startup');",
+        )?;
+    }
+
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -701,6 +718,175 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
+    fn startup_settings_fixture(restore: Option<&str>, local: Option<&str>) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             PRAGMA user_version = 32;",
+        )
+        .unwrap();
+        for (key, value) in [
+            ("session_restore.enabled", restore),
+            ("open_local_on_startup", local),
+        ] {
+            if let Some(value) = value {
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES (?1, ?2)",
+                    params![key, value],
+                )
+                .unwrap();
+            }
+        }
+        conn
+    }
+
+    #[test]
+    fn migration_33_defaults_new_databases_to_home() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+
+        let action: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'startup_action'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(action, "home");
+    }
+
+    #[test]
+    fn migration_33_combines_startup_flags_and_preserves_the_snapshot() {
+        let cases = [
+            (None, None, "home"),
+            (None, Some("false"), "home"),
+            (None, Some("true"), "local"),
+            (Some("false"), None, "home"),
+            (Some("false"), Some("false"), "home"),
+            (Some("false"), Some("true"), "local"),
+            (Some("true"), None, "restore"),
+            (Some("true"), Some("false"), "restore"),
+            (Some("true"), Some("true"), "restore"),
+        ];
+        let snapshot = r#"{"version":1,"terminals":[{"type":"local"}],"active":0}"#;
+        for (restore, local, expected) in cases {
+            let conn = startup_settings_fixture(restore, local);
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('session_restore.snapshot', ?1)",
+                [snapshot],
+            )
+            .unwrap();
+
+            migrate(&conn).unwrap();
+            migrate(&conn).unwrap();
+
+            let settings: Vec<(String, String)> = conn
+                .prepare("SELECT key, value FROM settings ORDER BY key")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(
+                settings,
+                vec![
+                    ("session_restore.snapshot".into(), snapshot.into()),
+                    ("startup_action".into(), expected.into()),
+                ],
+                "restore={restore:?}, local={local:?}",
+            );
+            let version: u32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, SCHEMA_VERSION);
+        }
+    }
+
+    #[test]
+    fn migration_33_preserves_existing_startup_actions_and_later_user_changes() {
+        for current in ["home", "local", "restore", "", "unknown"] {
+            let conn = startup_settings_fixture(Some("true"), Some("true"));
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('startup_action', ?1)",
+                [current],
+            )
+            .unwrap();
+
+            migrate(&conn).unwrap();
+
+            let action: String = conn
+                .query_row(
+                    "SELECT value FROM settings WHERE key = 'startup_action'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(action, current);
+            let count: u32 = conn
+                .query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+
+            conn.execute(
+                "UPDATE settings SET value = 'local' WHERE key = 'startup_action'",
+                [],
+            )
+            .unwrap();
+            migrate(&conn).unwrap();
+            let action: String = conn
+                .query_row(
+                    "SELECT value FROM settings WHERE key = 'startup_action'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(action, "local");
+        }
+    }
+
+    #[test]
+    fn migration_33_rolls_back_if_legacy_key_cleanup_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rssh.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO settings (key, value) VALUES
+                 ('session_restore.enabled', 'true'),
+                 ('open_local_on_startup', 'true');
+             CREATE TRIGGER reject_startup_cleanup
+             BEFORE DELETE ON settings WHEN OLD.key = 'open_local_on_startup'
+             BEGIN SELECT RAISE(ABORT, 'cleanup failed'); END;
+             PRAGMA user_version = 32;",
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(crate::db::Db::open(dir.path()).is_err());
+
+        let conn = Connection::open(path).unwrap();
+        let settings: Vec<(String, String)> = conn
+            .prepare("SELECT key, value FROM settings ORDER BY key")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            settings,
+            vec![
+                ("open_local_on_startup".into(), "true".into()),
+                ("session_restore.enabled".into(), "true".into()),
+            ],
+        );
+        let version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 32);
+    }
+
     #[test]
     fn migration_32_preserves_groups_and_defaults_group_waves_to_disabled() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -723,7 +909,7 @@ mod tests {
         let version: u32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 32);
+        assert_eq!(version, SCHEMA_VERSION);
         assert!(!super::column_exists(&conn, "groups", "terminal_background").unwrap());
     }
 
@@ -790,7 +976,7 @@ mod tests {
         let version: u32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 32);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
@@ -833,7 +1019,7 @@ mod tests {
             let version: u32 = conn
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 32);
+            assert_eq!(version, SCHEMA_VERSION);
         }
     }
     use super::*;

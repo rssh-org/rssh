@@ -2,9 +2,12 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import * as app from "../stores/app.svelte.ts";
+  import * as startup from "../stores/startup.svelte.ts";
+  import type { StartupAction } from "../stores/startup.svelte.ts";
   import * as transfers from "../stores/transfers.svelte.ts";
   import { isMac } from "../stores/keymap.svelte.ts";
-  import { t } from "../i18n/index.svelte.ts";
+  import { t, errMsg } from "../i18n/index.svelte.ts";
+  import { toast } from "../stores/toast.svelte.ts";
   import Select from "./Select.svelte";
   import Modal from "./Modal.svelte";
 
@@ -15,8 +18,8 @@
   /** 用户选了 Custom 但还没填路径的瞬态标记 —— 不持久化。
    *  避免把占位字符串写进 local_shell 设置导致重启坏 shell。 */
   let pendingCustom = $state(false);
-  /** Auto-open one local terminal on startup — default off (unset reads as off). */
-  let openLocalOnStartup = $state(false);
+  let startupAction = $state<StartupAction | null>(null);
+  let startupBusy = $state(false);
   let verboseLog = $state(true);
   let connectTimeout = $state(10);
   let copyOnSelect = $state(false);
@@ -30,6 +33,11 @@
     { value: "paste", label: t("settings.shell.right_click_paste") },
     { value: "copyPaste", label: t("settings.shell.right_click_copy_paste") },
   ]);
+  let startupOptions = $derived([
+    { value: "restore", label: t("settings.shell.startup_restore") },
+    ...(shells.length ? [{ value: "local", label: t("settings.shell.startup_local") }] : []),
+    { value: "home", label: t("settings.shell.startup_home") },
+  ]);
   /** SFTP 并发上限。main.ts 启动时 loadMaxConcurrent 已写过 store，
    *  这里 onMount 再读一次显示当前值。 */
   let sftpMaxConcurrent = $state(transfers.maxConcurrent());
@@ -40,13 +48,12 @@
   let customMode = $derived(pendingCustom || (selectedShell !== "" && !shells.includes(selectedShell)));
 
   onMount(async () => {
+    await loadStartup();
     if (app.capabilities().localPty) {
-      try { shells = await invoke<string[]>("list_shells"); } catch { shells = []; }
       selectedShell = await invoke<string | null>("get_setting", { key: "local_shell" }) ?? "";
       if (selectedShell && !shells.includes(selectedShell)) {
         customPath = selectedShell;
       }
-      openLocalOnStartup = (await invoke<string | null>("get_setting", { key: "open_local_on_startup" })) === "true";
     }
     verboseLog = (await invoke<string | null>("get_setting", { key: "verbose_log" })) !== "false";
     const ts = await invoke<string | null>("get_setting", { key: "connect_timeout" });
@@ -97,8 +104,31 @@
     await invoke("set_setting", { key: "verbose_log", value: String(verboseLog) });
   }
 
-  async function saveOpenLocalOnStartup() {
-    await invoke("set_setting", { key: "open_local_on_startup", value: String(openLocalOnStartup) });
+  async function loadStartup() {
+    if (startupBusy) return;
+    startupBusy = true;
+    try {
+      const [action, availableShells] = await Promise.all([startup.action(), startup.availableShells()]);
+      shells = availableShells;
+      startupAction = action === "local" && !shells.length ? "home" : action;
+    } catch (error) {
+      startupAction = null;
+      toast.error(errMsg(error));
+    } finally {
+      startupBusy = false;
+    }
+  }
+
+  async function saveStartup(action: StartupAction) {
+    startupBusy = true;
+    try {
+      await startup.setAction(action);
+    } catch (error) {
+      toast.error(errMsg(error));
+    } finally {
+      startupBusy = false;
+      await loadStartup();
+    }
   }
 
   async function saveTimeout() {
@@ -150,10 +180,14 @@
   }
 </script>
 
+<svelte:window onfocus={loadStartup} />
+
 <div class="page">
   {#if app.capabilities().localPty}
     <div class="section-label" id="local-shell-label">{t("settings.shell.local_shell")}</div>
-    <div class="card surface-raised shell-card">
+  {/if}
+  <div class="card surface-raised shell-card">
+    {#if app.capabilities().localPty}
       <div class="shell-hint">
         {t("settings.shell.pick_hint")}
       </div>
@@ -192,49 +226,63 @@
         </div>
       </div>
       <div class="card-divider"></div>
-      <div class="cmd-block-head">
-        <div class="cmd-block-head-body">
-          <div class="cmd-block-title" class:on={openLocalOnStartup} class:off={!openLocalOnStartup}>{t("settings.shell.open_local_on_startup")}</div>
-          <div class="cmd-block-desc">{t("settings.shell.open_local_on_startup_desc")}</div>
-        </div>
-        <label class="switch">
-          <input type="checkbox" bind:checked={openLocalOnStartup} onchange={saveOpenLocalOnStartup} />
-          <span class="slider"></span>
-        </label>
+    {/if}
+    <div class="cmd-block-head action-row">
+      <div class="cmd-block-head-body">
+        <label for="startup-action" class="cmd-block-title">{t("settings.shell.startup_action")}</label>
+        {#if startupAction === "restore"}
+          <div class="cmd-block-desc">{t("settings.shell.startup_restore_desc")}</div>
+        {/if}
+      </div>
+      <div class="action-select">
+        <Select id="startup-action" bind:value={startupAction} options={startupOptions}
+          disabled={startupBusy || startupAction === null}
+          placeholder={startupBusy ? t("common.loading") : ""}
+          onchange={(value) => saveStartup(value as StartupAction)} />
       </div>
     </div>
-  {/if}
-
-  <div class="section-label">{t("settings.shell.connection_timeout")}</div>
-  <div class="timeout-row">
-    <label>{t("settings.shell.timeout_label")}</label>
-    <input type="number" bind:value={connectTimeout} min="1" max="300" onblur={saveTimeout}
-      onkeydown={(e) => { if (e.key === "Enter") saveTimeout(); }} />
-    <span class="timeout-hint">{t("settings.shell.timeout_hint")}</span>
   </div>
 
-  <div class="section-label">{t("settings.shell.sftp_concurrent")}</div>
-  <div class="timeout-row">
-    <label>{t("settings.shell.sftp_concurrent_label")}</label>
-    <input type="number" bind:value={sftpMaxConcurrent}
-      min={sftpBounds.min} max={sftpBounds.max}
-      onblur={saveSftpMaxConcurrent}
-      onkeydown={(e) => { if (e.key === "Enter") saveSftpMaxConcurrent(); }} />
-    <span class="timeout-hint">{t("settings.shell.sftp_concurrent_hint", {
-      min: sftpBounds.min, max: sftpBounds.max, def: sftpBounds.def,
-    })}</span>
-  </div>
-
-  <div class="section-label">{t("settings.shell.connection_logging")}</div>
-  <div class="switch-card">
-    <div class="switch-card-body">
-      <div class="switch-card-title" class:on={verboseLog} class:off={!verboseLog}>{t("settings.shell.verbose_log")}</div>
-      <div class="switch-card-desc">{t("settings.shell.verbose_log_desc")}</div>
+  <div class="section-label">{t("settings.shell.connection_settings")}</div>
+  <div class="card surface-raised connection-card">
+    <div class="cmd-block-head">
+      <div class="cmd-block-head-body">
+        <label for="connect-timeout" class="cmd-block-title">{t("settings.shell.timeout_label")}</label>
+        <div id="connect-timeout-hint" class="cmd-block-desc">{t("settings.shell.timeout_hint")}</div>
+      </div>
+      <input id="connect-timeout" type="number" bind:value={connectTimeout} min="1" max="300"
+        aria-describedby="connect-timeout-hint" onblur={saveTimeout}
+        onkeydown={(e) => { if (e.key === "Enter") saveTimeout(); }} />
     </div>
-    <label class="switch">
-      <input type="checkbox" bind:checked={verboseLog} onchange={saveVerbose} />
-      <span class="slider"></span>
-    </label>
+
+    <div class="card-divider"></div>
+
+    <div class="cmd-block-head">
+      <div class="cmd-block-head-body">
+        <label for="sftp-concurrent" class="cmd-block-title">{t("settings.shell.sftp_concurrent_label")}</label>
+        <div id="sftp-concurrent-hint" class="cmd-block-desc">{t("settings.shell.sftp_concurrent_hint", {
+          min: sftpBounds.min, max: sftpBounds.max, def: sftpBounds.def,
+        })}</div>
+      </div>
+      <input id="sftp-concurrent" type="number" bind:value={sftpMaxConcurrent}
+        min={sftpBounds.min} max={sftpBounds.max} aria-describedby="sftp-concurrent-hint"
+        onblur={saveSftpMaxConcurrent}
+        onkeydown={(e) => { if (e.key === "Enter") saveSftpMaxConcurrent(); }} />
+    </div>
+
+    <div class="card-divider"></div>
+
+    <div class="cmd-block-head">
+      <div class="cmd-block-head-body">
+        <label for="ssh-connection-log" class="cmd-block-title" class:on={verboseLog} class:off={!verboseLog}>{t("settings.shell.verbose_log")}</label>
+        <div id="ssh-connection-log-hint" class="cmd-block-desc">{t("settings.shell.verbose_log_desc")}</div>
+      </div>
+      <label class="switch">
+        <input id="ssh-connection-log" type="checkbox" bind:checked={verboseLog}
+          aria-describedby="ssh-connection-log-hint" onchange={saveVerbose} />
+        <span class="slider"></span>
+      </label>
+    </div>
   </div>
 
   <div class="section-label">{t("settings.shell.interaction")}</div>
@@ -267,12 +315,12 @@
 
     <div class="card-divider"></div>
 
-    <div class="cmd-block-head">
+    <div class="cmd-block-head action-row">
       <div class="cmd-block-head-body">
         <label for="rca-select" class="cmd-block-title">{t("settings.shell.right_click")}</label>
         <div class="cmd-block-desc">{t("settings.shell.right_click_desc")}</div>
       </div>
-      <div class="rca-select">
+      <div class="action-select">
         <Select id="rca-select" bind:value={rightClickAction}
                 options={rightClickOptions}
                 onchange={(v) => saveRightClickAction(v as app.RightClickAction)} />
@@ -317,6 +365,7 @@
   /* 卡片：复用全局 .card.surface-raised，本地只加 padding + 内布局，
      跟 SyncScreen / AiSettings 同款。 */
   .shell-card,
+  .connection-card,
   .mouse-card {
     padding: 18px;
     display: flex;
@@ -415,18 +464,15 @@
   .custom-input:focus { outline: none; color: var(--text); }
   .custom-input::placeholder { color: var(--text-dim); opacity: 0.6; }
 
-  .timeout-row {
-    display: flex; align-items: center; gap: 10px;
-  }
-  .timeout-row input[type="number"] {
+  .connection-card input[type="number"] {
     width: 80px;
+    flex-shrink: 0;
   }
 
-  /* 右键动作的下拉框：定宽，靠右，不被卡片行压缩。 */
-  .rca-select { width: 260px; flex-shrink: 0; }
-  .timeout-hint {
-    font-size: 11px; color: var(--text-dim);
-  }
+  /* 动作下拉框：定宽靠右，窄窗口换行并限制在卡片内。 */
+  .action-row { flex-wrap: wrap; }
+  .action-row .cmd-block-head-body { flex-basis: 180px; }
+  .action-select { width: 260px; max-width: 100%; flex-shrink: 0; margin-left: auto; }
 
   /* 交互卡片的行布局（title/desc + 控件），分隔线分隔多行。
      类名沿用 .cmd-block-* —— 命令块卡片已迁到 CommandBlockSettings，这里复用同款行结构。 */
@@ -437,6 +483,7 @@
   }
   .cmd-block-head-body {
     flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 4px;

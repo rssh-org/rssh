@@ -11,8 +11,9 @@ function deferred<T>() {
 }
 
 describe("initializePrimarySessionWindow", () => {
-  it("releases resource panes before reading and applying auto-open", async () => {
+  it("reconciles before releasing resource panes and awaiting the startup action", async () => {
     const reconcile = deferred<void>();
+    const startupAction = deferred<void>();
     const events: string[] = [];
     const initializing = initializePrimarySessionWindow({
       reconcile: () => {
@@ -20,113 +21,82 @@ describe("initializePrimarySessionWindow", () => {
         return reconcile.promise;
       },
       allowResourcePanes: () => events.push("release"),
-      loadAutoOpenLocal: async () => {
-        events.push("load auto-open");
-        return true;
+      runStartupAction: () => {
+        events.push("startup");
+        return startupAction.promise;
       },
-      openLocal: () => events.push("open local"),
-    });
+    }).then(() => events.push("complete"));
 
     await Promise.resolve();
     expect(events).toEqual(["reconcile"]);
 
     reconcile.resolve();
+    await vi.waitFor(() => expect(events).toEqual(["reconcile", "release", "startup"]));
+    startupAction.resolve();
     await initializing;
-    expect(events).toEqual([
-      "reconcile",
-      "release",
-      "load auto-open",
-      "open local",
-    ]);
+    expect(events).toEqual(["reconcile", "release", "startup", "complete"]);
   });
 
-  it("keeps resource panes closed when reconciliation fails so the owner can retry", async () => {
-    const events: string[] = [];
-
-    await expect(initializePrimarySessionWindow({
-      reconcile: async () => {
-        events.push("reconcile");
-        throw new Error("backend unavailable");
-      },
-      allowResourcePanes: () => events.push("release"),
-      loadAutoOpenLocal: async () => {
-        events.push("load auto-open");
-        return false;
-      },
-      openLocal: () => events.push("open local"),
-    })).rejects.toThrow("backend unavailable");
-
-    expect(events).toEqual(["reconcile"]);
-  });
-
-  it("does not read or apply the desktop local-terminal setting on mobile", async () => {
-    const events: string[] = [];
-
-    await initializePrimarySessionWindow({
-      canOpenLocal: false,
-      reconcile: async () => events.push("reconcile"),
-      allowResourcePanes: () => events.push("release"),
-      loadAutoOpenLocal: async () => {
-        events.push("load auto-open");
-        return true;
-      },
-      openLocal: () => events.push("open local"),
-    });
-
-    expect(events).toEqual(["reconcile", "release"]);
-  });
-
-  it("opens resources on a successful retry after a failed reconciliation", async () => {
+  it("releases resources and runs startup only after a successful reconciliation retry", async () => {
     const reconcile = vi.fn()
       .mockRejectedValueOnce(new Error("close failed"))
       .mockResolvedValueOnce(1);
     const allowResourcePanes = vi.fn();
-    const openLocal = vi.fn();
-    const dependencies = { reconcile, allowResourcePanes, openLocal, loadAutoOpenLocal: async () => true };
+    const runStartupAction = vi.fn(async () => {});
+    const dependencies = { reconcile, allowResourcePanes, runStartupAction };
+
     await expect(initializePrimarySessionWindow(dependencies)).rejects.toThrow("close failed");
     expect(allowResourcePanes).not.toHaveBeenCalled();
-    expect(openLocal).not.toHaveBeenCalled();
+    expect(runStartupAction).not.toHaveBeenCalled();
+
     await initializePrimarySessionWindow(dependencies);
-    expect(allowResourcePanes).toHaveBeenCalledTimes(1);
-    expect(openLocal).toHaveBeenCalledTimes(1);
+    expect(allowResourcePanes).toHaveBeenCalledOnce();
+    expect(runStartupAction).toHaveBeenCalledOnce();
   });
 
-  it("does nothing after its owner is cancelled", async () => {
+  it("propagates unexpected startup action failures to the startup error handler", async () => {
+    const allowResourcePanes = vi.fn();
+    await expect(initializePrimarySessionWindow({
+      reconcile: async () => {},
+      allowResourcePanes,
+      runStartupAction: async () => { throw new Error("unexpected startup failure"); },
+    })).rejects.toThrow("unexpected startup failure");
+    expect(allowResourcePanes).toHaveBeenCalledOnce();
+  });
+
+  it("does nothing when its owner is already cancelled", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const reconcile = vi.fn(async () => {});
+    const allowResourcePanes = vi.fn();
+    const runStartupAction = vi.fn(async () => {});
+
+    await initializePrimarySessionWindow({
+      signal: controller.signal,
+      reconcile, allowResourcePanes, runStartupAction,
+    });
+
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(allowResourcePanes).not.toHaveBeenCalled();
+    expect(runStartupAction).not.toHaveBeenCalled();
+  });
+
+  it("does not release resources or run startup after cancellation during reconciliation", async () => {
     const reconcile = deferred<void>();
     const controller = new AbortController();
-    const events: string[] = [];
+    const allowResourcePanes = vi.fn();
+    const runStartupAction = vi.fn(async () => {});
     const initializing = initializePrimarySessionWindow({
       signal: controller.signal,
       reconcile: () => reconcile.promise,
-      allowResourcePanes: () => events.push("release"),
-      loadAutoOpenLocal: async () => true,
-      openLocal: () => events.push("open local"),
+      allowResourcePanes, runStartupAction,
     });
 
     controller.abort();
     reconcile.resolve();
     await initializing;
 
-    expect(events).toEqual([]);
-  });
-
-  it("does not auto-open after cancellation during the settings read", async () => {
-    const autoOpen = deferred<boolean>();
-    const controller = new AbortController();
-    const events: string[] = [];
-    const initializing = initializePrimarySessionWindow({
-      signal: controller.signal,
-      reconcile: async () => {},
-      allowResourcePanes: () => events.push("release"),
-      loadAutoOpenLocal: () => autoOpen.promise,
-      openLocal: () => events.push("open local"),
-    });
-
-    await vi.waitFor(() => expect(events).toEqual(["release"]));
-    controller.abort();
-    autoOpen.resolve(true);
-    await initializing;
-
-    expect(events).toEqual(["release"]);
+    expect(allowResourcePanes).not.toHaveBeenCalled();
+    expect(runStartupAction).not.toHaveBeenCalled();
   });
 });

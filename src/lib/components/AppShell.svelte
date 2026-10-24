@@ -4,6 +4,7 @@
     import {getCurrentWindow} from "@tauri-apps/api/window";
     import type {Profile, Tab, Group} from "../stores/app.svelte.ts";
     import * as app from "../stores/app.svelte.ts";
+    import * as startupSettings from "../stores/startup.svelte.ts";
     import * as layout from "../stores/layout.svelte.ts";
     import * as updates from "../stores/updates.svelte.ts";
     import * as syncStatus from "../stores/sync.svelte.ts";
@@ -87,12 +88,9 @@
         try {
             await initializePrimarySessionWindow({
                 signal: startup.signal,
-                canOpenLocal: app.capabilities().localPty,
                 reconcile: () => invoke("reconcile_sessions", { activeIds: [] }),
                 allowResourcePanes: () => { resourcePanesAllowed = true; },
-                loadAutoOpenLocal: async () =>
-                    await invoke<string | null>("get_setting", { key: "open_local_on_startup" }) === "true",
-                openLocal: addLocalTab,
+                runStartupAction: () => startupSettings.run(startup.signal),
             });
         } catch (error) {
             if (!startup.signal.aborted) startupError = errMsg(error);
@@ -101,6 +99,11 @@
         }
     }
     let navigationLoad = 0;
+    function persistSessionSnapshot() {
+        if (bypassStartupReconcile || !startupSettings.ready()) return;
+        void startupSettings.persist(startupSettings.snapshot());
+    }
+    $effect(persistSessionSnapshot);
     $effect(() => {
         const tabs = app.tabs();
         for (const paneId of Object.keys(pendingPaneSources)) {
@@ -1253,7 +1256,7 @@
     }
 </script>
 
-<svelte:window onkeydown={handleKeydown}/>
+<svelte:window onkeydown={handleKeydown} onfocus={persistSessionSnapshot}/>
 
 {#if app.snippetPickerOpen()}
     <SnippetPicker />
