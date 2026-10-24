@@ -7,16 +7,13 @@ import { toast } from "./toast.svelte.ts";
 // serial login scripts, editor content and connector commands may contain secrets.
 type SavedTerminal = { type: "ssh" | "telnet" | "serial"; profileId: string } | { type: "local" };
 interface Snapshot { version: 1; terminals: SavedTerminal[]; active: number }
-// Keep the existing storage namespaces, independent of window width.
-function settingsKey() {
-  const capabilities = app.capabilities();
-  return `session_restore.${capabilities.localPty || capabilities.serial ? "desktop" : "mobile"}`;
-}
+const enabledKey = "session_restore.enabled";
+const snapshotKey = "session_restore.snapshot";
 let _ready = $state(false);
 let writes = Promise.resolve();
 
 export async function enabled(): Promise<boolean> {
-  return await invoke<string | null>("get_setting", { key: `${settingsKey()}.enabled` }) === "true";
+  return await invoke<string | null>("get_setting", { key: enabledKey }) === "true";
 }
 export function ready() { return _ready; }
 
@@ -33,10 +30,9 @@ function queueWrite(operation: () => Promise<void>): Promise<void> {
 }
 
 export async function setEnabled(value: boolean) {
-  const key = settingsKey();
   await queueWrite(async () => {
-    await invoke("set_setting", { key: `${key}.enabled`, value: String(value) });
-    if (!value) await invoke("set_setting", { key: `${key}.snapshot`, value: "" });
+    await invoke("set_setting", { key: enabledKey, value: String(value) });
+    if (!value) await invoke("set_setting", { key: snapshotKey, value: "" });
   });
   if (value) await persist(snapshot());
 }
@@ -66,7 +62,7 @@ export async function persist(value: string): Promise<void> {
   if (!_ready) return;
   await queueWrite(async () => {
     if (await enabled()) {
-      await invoke("set_setting", { key: `${settingsKey()}.snapshot`, value });
+      await invoke("set_setting", { key: snapshotKey, value });
     }
   }).catch(report);
 }
@@ -96,7 +92,7 @@ export async function restore(signal?: AbortSignal): Promise<boolean> {
   let failed = false;
   try {
     if (!await enabled() || signal?.aborted) return false;
-    const saved = parse(await invoke<string | null>("get_setting", { key: `${settingsKey()}.snapshot` }));
+    const saved = parse(await invoke<string | null>("get_setting", { key: snapshotKey }));
     if (!saved || signal?.aborted) return false;
     const types = new Set(saved.terminals.map((entry) => entry.type));
     const [ssh, telnet, serial] = await Promise.all([

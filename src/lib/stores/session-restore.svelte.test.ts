@@ -4,7 +4,7 @@ const invoke = vi.hoisted(() => vi.fn());
 const capabilities = vi.hoisted(() => ({ localPty: true, serial: true }));
 vi.mock("./runtime.svelte.ts", () => ({ capabilities: () => capabilities }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-const key = "session_restore.desktop";
+const key = "session_restore";
 let settings: Map<string, string>;
 
 beforeEach(() => {
@@ -273,14 +273,13 @@ describe("session restoration", () => {
     expect(app.activeTabId()).toBe(app.tabs()[2].id);
   });
 
-  it("restores SSH/Telnet on hosts without PTY/serial capabilities, independently of UA", async () => {
+  it("uses the shared snapshot on hosts without PTY/serial capabilities", async () => {
     capabilities.localPty = false;
     capabilities.serial = false;
-    settings.set("session_restore.mobile.enabled", "true");
-    settings.set("session_restore.mobile.snapshot", JSON.stringify({ version: 1, terminals: [
+    saved([
       { type: "local" }, { type: "serial", profileId: "s1" },
       { type: "ssh", profileId: "ssh1" }, { type: "telnet", profileId: "telnet1" },
-    ], active: 2 }));
+    ], 2);
     const { app, restore } = await modules();
     expect(await restore.restore()).toBe(false);
     expect(app.tabs().map((tab) => tab.type)).toEqual(["home", "ssh", "telnet"]);
