@@ -243,36 +243,46 @@
     </div>
   </div>
 
-  <div class="section-label">{t("settings.shell.connection_timeout")}</div>
-  <div class="timeout-row">
-    <label>{t("settings.shell.timeout_label")}</label>
-    <input type="number" bind:value={connectTimeout} min="1" max="300" onblur={saveTimeout}
-      onkeydown={(e) => { if (e.key === "Enter") saveTimeout(); }} />
-    <span class="timeout-hint">{t("settings.shell.timeout_hint")}</span>
-  </div>
-
-  <div class="section-label">{t("settings.shell.sftp_concurrent")}</div>
-  <div class="timeout-row">
-    <label>{t("settings.shell.sftp_concurrent_label")}</label>
-    <input type="number" bind:value={sftpMaxConcurrent}
-      min={sftpBounds.min} max={sftpBounds.max}
-      onblur={saveSftpMaxConcurrent}
-      onkeydown={(e) => { if (e.key === "Enter") saveSftpMaxConcurrent(); }} />
-    <span class="timeout-hint">{t("settings.shell.sftp_concurrent_hint", {
-      min: sftpBounds.min, max: sftpBounds.max, def: sftpBounds.def,
-    })}</span>
-  </div>
-
-  <div class="section-label">{t("settings.shell.connection_logging")}</div>
-  <div class="switch-card">
-    <div class="switch-card-body">
-      <div class="switch-card-title" class:on={verboseLog} class:off={!verboseLog}>{t("settings.shell.verbose_log")}</div>
-      <div class="switch-card-desc">{t("settings.shell.verbose_log_desc")}</div>
+  <div class="section-label">{t("settings.shell.connection_settings")}</div>
+  <div class="card surface-raised connection-card">
+    <div class="cmd-block-head">
+      <div class="cmd-block-head-body">
+        <label for="connect-timeout" class="cmd-block-title">{t("settings.shell.timeout_label")}</label>
+        <div id="connect-timeout-hint" class="cmd-block-desc">{t("settings.shell.timeout_hint")}</div>
+      </div>
+      <input id="connect-timeout" type="number" bind:value={connectTimeout} min="1" max="300"
+        aria-describedby="connect-timeout-hint" onblur={saveTimeout}
+        onkeydown={(e) => { if (e.key === "Enter") saveTimeout(); }} />
     </div>
-    <label class="switch">
-      <input type="checkbox" bind:checked={verboseLog} onchange={saveVerbose} />
-      <span class="slider"></span>
-    </label>
+
+    <div class="card-divider"></div>
+
+    <div class="cmd-block-head">
+      <div class="cmd-block-head-body">
+        <label for="sftp-concurrent" class="cmd-block-title">{t("settings.shell.sftp_concurrent_label")}</label>
+        <div id="sftp-concurrent-hint" class="cmd-block-desc">{t("settings.shell.sftp_concurrent_hint", {
+          min: sftpBounds.min, max: sftpBounds.max, def: sftpBounds.def,
+        })}</div>
+      </div>
+      <input id="sftp-concurrent" type="number" bind:value={sftpMaxConcurrent}
+        min={sftpBounds.min} max={sftpBounds.max} aria-describedby="sftp-concurrent-hint"
+        onblur={saveSftpMaxConcurrent}
+        onkeydown={(e) => { if (e.key === "Enter") saveSftpMaxConcurrent(); }} />
+    </div>
+
+    <div class="card-divider"></div>
+
+    <div class="cmd-block-head">
+      <div class="cmd-block-head-body">
+        <label for="ssh-connection-log" class="cmd-block-title" class:on={verboseLog} class:off={!verboseLog}>{t("settings.shell.verbose_log")}</label>
+        <div id="ssh-connection-log-hint" class="cmd-block-desc">{t("settings.shell.verbose_log_desc")}</div>
+      </div>
+      <label class="switch">
+        <input id="ssh-connection-log" type="checkbox" bind:checked={verboseLog}
+          aria-describedby="ssh-connection-log-hint" onchange={saveVerbose} />
+        <span class="slider"></span>
+      </label>
+    </div>
   </div>
 
   <div class="section-label">{t("settings.shell.interaction")}</div>
@@ -355,6 +365,7 @@
   /* 卡片：复用全局 .card.surface-raised，本地只加 padding + 内布局，
      跟 SyncScreen / AiSettings 同款。 */
   .shell-card,
+  .connection-card,
   .mouse-card {
     padding: 18px;
     display: flex;
@@ -453,20 +464,15 @@
   .custom-input:focus { outline: none; color: var(--text); }
   .custom-input::placeholder { color: var(--text-dim); opacity: 0.6; }
 
-  .timeout-row {
-    display: flex; align-items: center; gap: 10px;
-  }
-  .timeout-row input[type="number"] {
+  .connection-card input[type="number"] {
     width: 80px;
+    flex-shrink: 0;
   }
 
   /* 动作下拉框：定宽靠右，窄窗口换行并限制在卡片内。 */
   .action-row { flex-wrap: wrap; }
-  .action-row .cmd-block-head-body { flex-basis: 180px; min-width: 0; }
+  .action-row .cmd-block-head-body { flex-basis: 180px; }
   .action-select { width: 260px; max-width: 100%; flex-shrink: 0; margin-left: auto; }
-  .timeout-hint {
-    font-size: 11px; color: var(--text-dim);
-  }
 
   /* 交互卡片的行布局（title/desc + 控件），分隔线分隔多行。
      类名沿用 .cmd-block-* —— 命令块卡片已迁到 CommandBlockSettings，这里复用同款行结构。 */
@@ -477,6 +483,7 @@
   }
   .cmd-block-head-body {
     flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 4px;
