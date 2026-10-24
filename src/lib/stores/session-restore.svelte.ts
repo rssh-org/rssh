@@ -47,10 +47,10 @@ function reference(tab: app.Tab): SavedTerminal | null {
 export function snapshot(): string {
   const terminals: SavedTerminal[] = [];
   let active = -1;
-  for (const tab of app.tabs()) {
+  for (const tab of app.workspaceTabs()) {
     const saved = reference(tab);
     if (!saved) continue;
-    if (tab.id === app.activeTabId()) active = terminals.length;
+    if (tab.id === app.activeWorkspaceId()) active = terminals.length;
     terminals.push(saved);
   }
   return JSON.stringify({ version: 1, terminals, active } satisfies Snapshot);

@@ -69,7 +69,7 @@ describe("session restoration", () => {
     expect(app.tabs()[4].meta).not.toHaveProperty("login_script");
   });
 
-  it("persists only profile references, including split panes, without secret metadata or unsupported tabs", async () => {
+  it("persists only root profile references without split panes, secret metadata or unsupported tabs", async () => {
     const { app, restore } = await modules();
     app.addTab({ id: "ssh", type: "ssh", label: "Secret label", meta: { profileId: "ssh1", password: "secret", host: "host" } });
     app.addPane("ssh", "right", { id: "telnet", type: "telnet", label: "Telnet", meta: { profileId: "telnet1", login_script: "secret" } });
@@ -81,10 +81,32 @@ describe("session restoration", () => {
     app.setActivePane("telnet");
     const snapshot = restore.snapshot();
     expect(JSON.parse(snapshot)).toEqual({ version: 1, terminals: [
-      { type: "ssh", profileId: "ssh1" }, { type: "telnet", profileId: "telnet1" },
+      { type: "ssh", profileId: "ssh1" },
       { type: "serial", profileId: "serial1" },
-    ], active: 1 });
+    ], active: 0 });
     expect(snapshot).not.toContain("secret");
+  });
+
+  it("restores only workspace roots and selects the root of the focused split pane", async () => {
+    const { app, restore } = await modules();
+    app.addTab({ id: "telnet", type: "telnet", label: "Telnet", meta: { profileId: "telnet1" } });
+    app.addTab({ id: "ssh", type: "ssh", label: "SSH", meta: { profileId: "ssh1" } });
+    app.addPane("ssh", "right", { id: "split-local", type: "local", label: "Local pane" });
+    app.addPane("ssh", "bottom", { id: "split-telnet", type: "telnet", label: "Telnet pane", meta: { profileId: "telnet1" } });
+    app.addTab({ id: "local", type: "local", label: "Local" });
+    app.setActiveWorkspace("ssh");
+    app.setActivePane("split-telnet");
+    settings.set(`${key}.enabled`, "true");
+    settings.set(`${key}.snapshot`, restore.snapshot());
+
+    vi.resetModules();
+    const restarted = await modules();
+    await restarted.restore.restore();
+    expect(restarted.app.tabs().map((tab) => tab.type)).toEqual(["home", "telnet", "ssh", "local"]);
+    expect(restarted.app.activeTabId()).toBe(restarted.app.tabs()[2].id);
+    for (const tab of restarted.app.workspaceTabs()) {
+      expect(restarted.app.paneIdsForWorkspace(tab.id)).toEqual([tab.id]);
+    }
   });
 
   it("clears saved sessions when disabled and does not persist while disabled", async () => {
