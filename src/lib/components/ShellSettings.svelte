@@ -2,7 +2,8 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import * as app from "../stores/app.svelte.ts";
-  import * as sessionRestore from "../stores/session-restore.svelte.ts";
+  import * as startup from "../stores/startup.svelte.ts";
+  import type { StartupAction } from "../stores/startup.svelte.ts";
   import * as transfers from "../stores/transfers.svelte.ts";
   import { isMac } from "../stores/keymap.svelte.ts";
   import { t, errMsg } from "../i18n/index.svelte.ts";
@@ -17,10 +18,8 @@
   /** 用户选了 Custom 但还没填路径的瞬态标记 —— 不持久化。
    *  避免把占位字符串写进 local_shell 设置导致重启坏 shell。 */
   let pendingCustom = $state(false);
-  /** Auto-open one local terminal on startup — default off (unset reads as off). */
-  let openLocalOnStartup = $state(false);
-  let restoreEnabled = $state<boolean | null>(null);
-  let restoreBusy = $state(false);
+  let startupAction = $state<StartupAction | null>(null);
+  let startupBusy = $state(false);
   let verboseLog = $state(true);
   let connectTimeout = $state(10);
   let copyOnSelect = $state(false);
@@ -34,6 +33,11 @@
     { value: "paste", label: t("settings.shell.right_click_paste") },
     { value: "copyPaste", label: t("settings.shell.right_click_copy_paste") },
   ]);
+  let startupOptions = $derived([
+    { value: "restore", label: t("settings.shell.startup_restore") },
+    ...(shells.length ? [{ value: "local", label: t("settings.shell.startup_local") }] : []),
+    { value: "home", label: t("settings.shell.startup_home") },
+  ]);
   /** SFTP 并发上限。main.ts 启动时 loadMaxConcurrent 已写过 store，
    *  这里 onMount 再读一次显示当前值。 */
   let sftpMaxConcurrent = $state(transfers.maxConcurrent());
@@ -43,16 +47,13 @@
    *  pendingCustom（点了 Custom 没填）或 selectedShell 不在 shells 里都算 custom。 */
   let customMode = $derived(pendingCustom || (selectedShell !== "" && !shells.includes(selectedShell)));
 
-  onMount(() => { void loadRestore(); });
-
   onMount(async () => {
+    await loadStartup();
     if (app.capabilities().localPty) {
-      try { shells = await invoke<string[]>("list_shells"); } catch { shells = []; }
       selectedShell = await invoke<string | null>("get_setting", { key: "local_shell" }) ?? "";
       if (selectedShell && !shells.includes(selectedShell)) {
         customPath = selectedShell;
       }
-      openLocalOnStartup = (await invoke<string | null>("get_setting", { key: "open_local_on_startup" })) === "true";
     }
     verboseLog = (await invoke<string | null>("get_setting", { key: "verbose_log" })) !== "false";
     const ts = await invoke<string | null>("get_setting", { key: "connect_timeout" });
@@ -103,34 +104,30 @@
     await invoke("set_setting", { key: "verbose_log", value: String(verboseLog) });
   }
 
-  async function saveOpenLocalOnStartup() {
-    await invoke("set_setting", { key: "open_local_on_startup", value: String(openLocalOnStartup) });
-  }
-
-  async function loadRestore() {
-    if (restoreBusy) return;
-    restoreBusy = true;
+  async function loadStartup() {
+    if (startupBusy) return;
+    startupBusy = true;
     try {
-      restoreEnabled = await sessionRestore.enabled();
+      const [action, availableShells] = await Promise.all([startup.action(), startup.availableShells()]);
+      shells = availableShells;
+      startupAction = action === "local" && !shells.length ? "home" : action;
     } catch (error) {
-      restoreEnabled = null;
+      startupAction = null;
       toast.error(errMsg(error));
     } finally {
-      restoreBusy = false;
+      startupBusy = false;
     }
   }
 
-  async function saveRestore(event: Event) {
-    const input = event.currentTarget as HTMLInputElement;
-    restoreBusy = true;
+  async function saveStartup(action: StartupAction) {
+    startupBusy = true;
     try {
-      await sessionRestore.setEnabled(input.checked);
+      await startup.setAction(action);
     } catch (error) {
       toast.error(errMsg(error));
     } finally {
-      restoreBusy = false;
-      await loadRestore();
-      input.checked = restoreEnabled === true;
+      startupBusy = false;
+      await loadStartup();
     }
   }
 
@@ -183,19 +180,18 @@
   }
 </script>
 
-<svelte:window onfocus={loadRestore} />
+<svelte:window onfocus={loadStartup} />
 
 <div class="page">
-  <div class="switch-card">
-    <div class="switch-card-body">
-      <div class="switch-card-title" id="restore-sessions-label">{t("settings.shell.restore_sessions")}</div>
-      <div class="switch-card-desc">{t("settings.shell.restore_sessions_desc")}</div>
-    </div>
-    <label class="switch">
-      <input type="checkbox" checked={restoreEnabled === true} aria-labelledby="restore-sessions-label"
-        disabled={restoreBusy || restoreEnabled === null} onchange={saveRestore} />
-      <span class="slider"></span>
-    </label>
+  <div class="card surface-raised startup-card">
+    <label for="startup-action" class="cmd-block-title">{t("settings.shell.startup_action")}</label>
+    <Select id="startup-action" bind:value={startupAction} options={startupOptions}
+      disabled={startupBusy || startupAction === null}
+      placeholder={startupBusy ? t("common.loading") : ""}
+      onchange={(value) => saveStartup(value as StartupAction)} />
+    {#if startupAction === "restore"}
+      <div class="shell-hint">{t("settings.shell.startup_restore_desc")}</div>
+    {/if}
   </div>
   {#if app.capabilities().localPty}
     <div class="section-label" id="local-shell-label">{t("settings.shell.local_shell")}</div>
@@ -236,17 +232,6 @@
             </span>
           </label>
         </div>
-      </div>
-      <div class="card-divider"></div>
-      <div class="cmd-block-head">
-        <div class="cmd-block-head-body">
-          <div class="cmd-block-title" class:on={openLocalOnStartup} class:off={!openLocalOnStartup}>{t("settings.shell.open_local_on_startup")}</div>
-          <div class="cmd-block-desc">{t("settings.shell.open_local_on_startup_desc")}</div>
-        </div>
-        <label class="switch">
-          <input type="checkbox" bind:checked={openLocalOnStartup} onchange={saveOpenLocalOnStartup} />
-          <span class="slider"></span>
-        </label>
       </div>
     </div>
   {/if}
@@ -362,6 +347,7 @@
 
   /* 卡片：复用全局 .card.surface-raised，本地只加 padding + 内布局，
      跟 SyncScreen / AiSettings 同款。 */
+  .startup-card,
   .shell-card,
   .mouse-card {
     padding: 18px;

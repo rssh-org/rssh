@@ -7,34 +7,40 @@ import { toast } from "./toast.svelte.ts";
 // serial login scripts, editor content and connector commands may contain secrets.
 type SavedTerminal = { type: "ssh" | "telnet" | "serial"; profileId: string } | { type: "local" };
 interface Snapshot { version: 1; terminals: SavedTerminal[]; active: number }
-const enabledKey = "session_restore.enabled";
+export type StartupAction = "restore" | "local" | "home";
+const actionKey = "startup_action";
 const snapshotKey = "session_restore.snapshot";
 let _ready = $state(false);
 let writes = Promise.resolve();
 
-export async function enabled(): Promise<boolean> {
-  return await invoke<string | null>("get_setting", { key: enabledKey }) === "true";
+export async function action(): Promise<StartupAction> {
+  const value = await invoke<string | null>("get_setting", { key: actionKey });
+  return value === "restore" || value === "local" ? value : "home";
 }
 export function ready() { return _ready; }
 
+export async function availableShells(): Promise<string[]> {
+  return app.capabilities().localPty ? invoke<string[]>("list_shells") : [];
+}
+
 function report(error: unknown) {
-  console.warn("[session-restore]", error);
+  console.warn("[startup]", error);
   toast.error(errMsg(error));
 }
 
 function queueWrite(operation: () => Promise<void>): Promise<void> {
-  // Keep preference reads and their writes together, including disable + clear.
+  // Keep action reads and their writes together, including switching away + clear.
   const next = writes.then(operation);
-  writes = next.catch((error) => console.warn("[session-restore] write failed:", error));
+  writes = next.catch((error) => console.warn("[startup] write failed:", error));
   return next;
 }
 
-export async function setEnabled(value: boolean) {
+export async function setAction(value: StartupAction) {
   await queueWrite(async () => {
-    await invoke("set_setting", { key: enabledKey, value: String(value) });
-    if (!value) await invoke("set_setting", { key: snapshotKey, value: "" });
+    await invoke("set_setting", { key: actionKey, value });
+    if (value !== "restore") await invoke("set_setting", { key: snapshotKey, value: "" });
   });
-  if (value) await persist(snapshot());
+  if (value === "restore") await persist(snapshot());
 }
 
 function reference(tab: app.Tab): SavedTerminal | null {
@@ -60,7 +66,7 @@ export async function persist(value: string): Promise<void> {
   // Only a primary window whose startup reads succeeded may replace the snapshot.
   if (!_ready) return;
   await queueWrite(async () => {
-    if (await enabled()) {
+    if (await action() === "restore") {
       await invoke("set_setting", { key: snapshotKey, value });
     }
   }).catch(report);
@@ -85,14 +91,20 @@ function parse(raw: string | null): Snapshot | null {
   return { version: 1, terminals, active: Number.isInteger(data.active) ? data.active : -1 };
 }
 
-/** Returns whether a local terminal was restored (avoids startup duplication). */
-export async function restore(signal?: AbortSignal): Promise<boolean> {
-  let localRestored = false;
+export async function run(signal?: AbortSignal): Promise<void> {
   let failed = false;
   try {
-    if (!await enabled() || signal?.aborted) return false;
+    const selectedAction = await action();
+    if (selectedAction === "home" || signal?.aborted || app.tabs().length !== 1) return;
+    if (selectedAction === "local") {
+      const shells = await availableShells();
+      if (shells.length && await action() === "local" && !signal?.aborted && app.tabs().length === 1) {
+        app.addTab({ id: `local:${crypto.randomUUID()}`, type: "local", label: "Local" });
+      }
+      return;
+    }
     const saved = parse(await invoke<string | null>("get_setting", { key: snapshotKey }));
-    if (!saved || signal?.aborted) return false;
+    if (!saved || signal?.aborted) return;
     const types = new Set(saved.terminals.map((entry) => entry.type));
     const [ssh, telnet, serial] = await Promise.all([
       types.has("ssh") ? app.loadProfiles() : [],
@@ -100,15 +112,14 @@ export async function restore(signal?: AbortSignal): Promise<boolean> {
       types.has("serial") && app.capabilities().serial ? invoke<app.SerialProfile[]>("list_serial_profiles") : [],
     ]);
     // The preference or the user's tabs may have changed while profiles loaded.
-    const stillEnabled = await enabled();
-    if (!stillEnabled || signal?.aborted || app.tabs().length !== 1) return false;
+    const stillRestoring = await action() === "restore";
+    if (!stillRestoring || signal?.aborted || app.tabs().length !== 1) return;
     let activeId = "home";
     const restoredIds: string[] = [];
     saved.terminals.forEach((entry, index) => {
       const before = app.tabs().length;
       if (entry.type === "local" && app.capabilities().localPty) {
         app.addTab({ id: `local:${crypto.randomUUID()}`, type: "local", label: "Local" });
-        localRestored = true;
       } else if (entry.type === "ssh") {
         const profile = ssh.find((profile) => profile.id === entry.profileId);
         if (profile) app.addTab({
@@ -138,5 +149,4 @@ export async function restore(signal?: AbortSignal): Promise<boolean> {
   } finally {
     _ready = !failed && !signal?.aborted;
   }
-  return localRestored;
 }
