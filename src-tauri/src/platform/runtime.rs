@@ -79,7 +79,7 @@ impl TerminalRuntimePolicy {
             image_storage_limit_mb: 128,
             image_pixel_limit: 16_000_000,
             output_backlog_limit_bytes: 128 * 1024 * 1024,
-            gpu_render_default: true,
+            gpu_render_default: false,
         }
     }
 

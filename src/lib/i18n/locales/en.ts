@@ -181,7 +181,7 @@ const en = {
   "settings.appearance.term.bg_follow": "Terminal background follows theme",
   "settings.appearance.term.bg_follow_desc": "When on, the terminal background uses the app's theme color so the chrome and terminal blend. When off, the selected scheme keeps its own background.",
   "settings.appearance.term.gpu_render": "GPU terminal rendering",
-  "settings.appearance.term.gpu_render_desc": "Can make heavy terminal output smoother. Turn it off if text displays incorrectly or long-press selection is difficult. The default varies by platform, and you can change it at any time.",
+  "settings.appearance.term.gpu_render_desc": "Off by default. Enabling it may make heavy terminal output smoother. Turn it off if input lags, text displays incorrectly, or long-press selection is difficult.",
   "settings.appearance.terminal_font": "Terminal font",
   "settings.appearance.font.default": "Default",
   "settings.appearance.font.search": "Search fonts…",
