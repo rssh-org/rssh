@@ -19,6 +19,8 @@
   let pendingCustom = $state(false);
   /** Auto-open one local terminal on startup — default off (unset reads as off). */
   let openLocalOnStartup = $state(false);
+  let restoreEnabled = $state<boolean | null>(null);
+  let loadingRestore = $state(false);
   let savingRestore = $state(false);
   let verboseLog = $state(true);
   let connectTimeout = $state(10);
@@ -41,6 +43,8 @@
   /** 用户当前选中的是 Custom 还是某个内置 shell。
    *  pendingCustom（点了 Custom 没填）或 selectedShell 不在 shells 里都算 custom。 */
   let customMode = $derived(pendingCustom || (selectedShell !== "" && !shells.includes(selectedShell)));
+
+  onMount(() => { void loadRestore(); });
 
   onMount(async () => {
     if (app.capabilities().localPty) {
@@ -104,6 +108,19 @@
     await invoke("set_setting", { key: "open_local_on_startup", value: String(openLocalOnStartup) });
   }
 
+  async function loadRestore() {
+    if (loadingRestore || savingRestore) return;
+    loadingRestore = true;
+    try {
+      restoreEnabled = await sessionRestore.enabled();
+    } catch (error) {
+      restoreEnabled = null;
+      toast.error(errMsg(error));
+    } finally {
+      loadingRestore = false;
+    }
+  }
+
   async function saveRestore(event: Event) {
     const input = event.currentTarget as HTMLInputElement;
     savingRestore = true;
@@ -112,8 +129,9 @@
     } catch (error) {
       toast.error(errMsg(error));
     } finally {
-      input.checked = sessionRestore.enabled();
       savingRestore = false;
+      await loadRestore();
+      input.checked = restoreEnabled === true;
     }
   }
 
@@ -166,6 +184,8 @@
   }
 </script>
 
+<svelte:window onfocus={loadRestore} />
+
 <div class="page">
   <div class="switch-card">
     <div class="switch-card-body">
@@ -173,8 +193,8 @@
       <div class="switch-card-desc">{t("settings.shell.restore_sessions_desc")}</div>
     </div>
     <label class="switch">
-      <input type="checkbox" checked={sessionRestore.enabled()} aria-labelledby="restore-sessions-label"
-        disabled={savingRestore || !sessionRestore.ready()} onchange={saveRestore} />
+      <input type="checkbox" checked={restoreEnabled === true} aria-labelledby="restore-sessions-label"
+        disabled={savingRestore || loadingRestore || restoreEnabled === null} onchange={saveRestore} />
       <span class="slider"></span>
     </label>
   </div>

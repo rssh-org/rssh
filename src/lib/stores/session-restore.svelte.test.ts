@@ -38,12 +38,17 @@ function saved(terminals: unknown[], active = -1) {
   settings.set(`${key}.enabled`, "true");
   settings.set(`${key}.snapshot`, JSON.stringify({ version: 1, terminals, active }));
 }
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
 describe("session restoration", () => {
   it("defaults off without fetching profiles or reopening tabs", async () => {
     const { app, restore } = await modules();
     expect(await restore.restore()).toBe(false);
-    expect(restore.enabled()).toBe(false);
+    expect(await restore.enabled()).toBe(false);
     expect(restore.ready()).toBe(true);
     expect(app.tabs()).toHaveLength(1);
     expect(invoke).not.toHaveBeenCalledWith("list_profiles");
@@ -87,7 +92,7 @@ describe("session restoration", () => {
     const { restore } = await modules();
     await restore.restore();
     await restore.setEnabled(false);
-    restore.persist(restore.snapshot());
+    await restore.persist(restore.snapshot());
     expect(settings.get(`${key}.enabled`)).toBe("false");
     expect(settings.get(`${key}.snapshot`)).toBe("");
   });
@@ -109,18 +114,40 @@ describe("session restoration", () => {
       ? Promise.reject(new Error("offline")) : implementation(command, args));
     const { restore } = await modules();
     await restore.restore();
-    restore.persist(restore.snapshot());
+    expect(restore.ready()).toBe(false);
+    await restore.persist(restore.snapshot());
     expect(settings.get(`${key}.snapshot`)).toBe(original);
   });
 
   it("does not reopen connections after startup cancellation", async () => {
     saved([{ type: "local" }]);
+    const original = settings.get(`${key}.snapshot`);
     const controller = new AbortController();
     controller.abort();
     const { app, restore } = await modules();
     expect(await restore.restore(controller.signal)).toBe(false);
     expect(app.tabs()).toHaveLength(1);
     expect(restore.ready()).toBe(false);
+    await restore.persist(restore.snapshot());
+    expect(settings.get(`${key}.snapshot`)).toBe(original);
+  });
+
+  it("does not reopen saved connections when disabled during profile loading", async () => {
+    saved([{ type: "ssh", profileId: "ssh1" }]);
+    const { app, restore } = await modules();
+    const blocked = deferred();
+    const implementation = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command, args) => {
+      if (command === "list_profiles") await blocked.promise;
+      return implementation(command, args);
+    });
+    const startup = restore.restore();
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("list_profiles"));
+    await restore.setEnabled(false);
+    blocked.resolve();
+    expect(await startup).toBe(false);
+    expect(app.tabs().map((tab) => tab.id)).toEqual(["home"]);
+    expect(settings.get(`${key}.snapshot`)).toBe("");
   });
 
   it("does not take over connections opened manually during startup", async () => {
@@ -135,9 +162,106 @@ describe("session restoration", () => {
     const { restore } = await modules();
     await restore.restore();
     await restore.setEnabled(true);
-    restore.persist("first");
-    restore.persist("second");
-    await vi.waitFor(() => expect(settings.get(`${key}.snapshot`)).toBe("second"));
+    await Promise.all([restore.persist("first"), restore.persist("second")]);
+    expect(settings.get(`${key}.snapshot`)).toBe("second");
+  });
+
+  it("reads the current enabled preference instead of caching it", async () => {
+    const { restore } = await modules();
+    expect(await restore.enabled()).toBe(false);
+    settings.set(`${key}.enabled`, "true");
+    expect(await restore.enabled()).toBe(true);
+    settings.set(`${key}.enabled`, "false");
+    expect(await restore.enabled()).toBe(false);
+  });
+
+  it("observes preference changes from a secondary window before saving primary tabs", async () => {
+    const primary = await modules();
+    await primary.restore.restore();
+    primary.app.addTab({ id: "primary", type: "local", label: "Primary" });
+    vi.resetModules();
+    const secondary = await modules();
+    secondary.app.addTab({ id: "secondary", type: "local", label: "Secondary" });
+
+    await secondary.restore.setEnabled(true);
+    expect(secondary.restore.ready()).toBe(false);
+    await secondary.restore.persist(secondary.restore.snapshot());
+    expect(settings.get(`${key}.snapshot`)).toBeUndefined();
+    await primary.restore.persist(primary.restore.snapshot());
+    expect(settings.get(`${key}.snapshot`)).toBe(primary.restore.snapshot());
+
+    await secondary.restore.setEnabled(false);
+    await primary.restore.persist(primary.restore.snapshot());
+    expect(settings.get(`${key}.snapshot`)).toBe("");
+  });
+
+  it("saves existing primary tabs when restoration is enabled", async () => {
+    const { app, restore } = await modules();
+    await restore.restore();
+    app.addTab({ id: "local", type: "local", label: "Local" });
+    await restore.setEnabled(true);
+    expect(settings.get(`${key}.snapshot`)).toBe(restore.snapshot());
+  });
+
+  it("checks the preference when a queued snapshot starts writing", async () => {
+    saved([{ type: "local" }]);
+    const { restore } = await modules();
+    await restore.restore();
+    const blocked = deferred();
+    const implementation = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command, args) => {
+      if (command === "set_setting" && args.key === `${key}.snapshot` && args.value === "first") {
+        await blocked.promise;
+      }
+      return implementation(command, args);
+    });
+    const first = restore.persist("first");
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("set_setting", {
+      key: `${key}.snapshot`, value: "first",
+    }));
+    const second = restore.persist("second");
+    settings.set(`${key}.enabled`, "false");
+    blocked.resolve();
+    await Promise.all([first, second]);
+    expect(settings.get(`${key}.snapshot`)).toBe("first");
+    expect(invoke).not.toHaveBeenCalledWith("set_setting", { key: `${key}.snapshot`, value: "second" });
+  });
+
+  it("keeps the snapshot cleared when disable follows a pending save", async () => {
+    saved([{ type: "local" }]);
+    const { restore } = await modules();
+    await restore.restore();
+    const blocked = deferred();
+    const implementation = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command, args) => {
+      if (command === "set_setting" && args.key === `${key}.snapshot` && args.value === "pending") {
+        await blocked.promise;
+      }
+      return implementation(command, args);
+    });
+    const pending = restore.persist("pending");
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith("set_setting", {
+      key: `${key}.snapshot`, value: "pending",
+    }));
+    const disable = restore.setEnabled(false);
+    const later = restore.persist("later");
+    blocked.resolve();
+    await Promise.all([pending, disable, later]);
+    expect(settings.get(`${key}.enabled`)).toBe("false");
+    expect(settings.get(`${key}.snapshot`)).toBe("");
+    expect(invoke).not.toHaveBeenCalledWith("set_setting", { key: `${key}.snapshot`, value: "later" });
+  });
+
+  it("preserves the snapshot when a preference read fails and saves after recovery", async () => {
+    saved([{ type: "local" }]);
+    const original = settings.get(`${key}.snapshot`);
+    const { restore } = await modules();
+    await restore.restore();
+    invoke.mockRejectedValueOnce(new Error("settings unavailable"));
+    await restore.persist("failed");
+    expect(settings.get(`${key}.snapshot`)).toBe(original);
+    await restore.persist("recovered");
+    expect(settings.get(`${key}.snapshot`)).toBe("recovered");
   });
 
   it("keeps saved ordering even when MRU reordering is enabled", async () => {

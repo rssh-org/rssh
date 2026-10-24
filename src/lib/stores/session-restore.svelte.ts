@@ -12,11 +12,12 @@ function settingsKey() {
   const capabilities = app.capabilities();
   return `session_restore.${capabilities.localPty || capabilities.serial ? "desktop" : "mobile"}`;
 }
-let _enabled = $state(false);
 let _ready = $state(false);
 let writes = Promise.resolve();
 
-export function enabled() { return _enabled; }
+export async function enabled(): Promise<boolean> {
+  return await invoke<string | null>("get_setting", { key: `${settingsKey()}.enabled` }) === "true";
+}
 export function ready() { return _ready; }
 
 function report(error: unknown) {
@@ -24,17 +25,20 @@ function report(error: unknown) {
   toast.error(errMsg(error));
 }
 
-function write(setting: string, value: string): Promise<void> {
-  // Serialize writes so an older snapshot cannot overwrite a newer one.
-  const next = writes.then(() => invoke<void>("set_setting", { key: setting, value }));
+function queueWrite(operation: () => Promise<void>): Promise<void> {
+  // Keep preference reads and their writes together, including disable + clear.
+  const next = writes.then(operation);
   writes = next.catch((error) => console.warn("[session-restore] write failed:", error));
   return next;
 }
 
 export async function setEnabled(value: boolean) {
-  await write(`${settingsKey()}.enabled`, String(value));
-  _enabled = value;
-  if (!value) await write(`${settingsKey()}.snapshot`, "");
+  const key = settingsKey();
+  await queueWrite(async () => {
+    await invoke("set_setting", { key: `${key}.enabled`, value: String(value) });
+    if (!value) await invoke("set_setting", { key: `${key}.snapshot`, value: "" });
+  });
+  if (value) await persist(snapshot());
 }
 
 function reference(tab: app.Tab): SavedTerminal | null {
@@ -57,19 +61,14 @@ export function snapshot(): string {
   return JSON.stringify({ version: 1, terminals, active } satisfies Snapshot);
 }
 
-export function persist(value: string) {
-  if (_ready && _enabled) void write(`${settingsKey()}.snapshot`, value).catch(report);
-}
-
-/** Secondary windows read the preference but never restore or save their tabs. */
-export async function initializeSecondaryWindow() {
-  try {
-    _enabled = await invoke<string | null>("get_setting", { key: `${settingsKey()}.enabled` }) === "true";
-  } catch (error) {
-    report(error);
-  } finally {
-    _ready = true;
-  }
+export async function persist(value: string): Promise<void> {
+  // Only a primary window whose startup reads succeeded may replace the snapshot.
+  if (!_ready) return;
+  await queueWrite(async () => {
+    if (await enabled()) {
+      await invoke("set_setting", { key: `${settingsKey()}.snapshot`, value });
+    }
+  }).catch(report);
 }
 
 function parse(raw: string | null): Snapshot | null {
@@ -94,9 +93,9 @@ function parse(raw: string | null): Snapshot | null {
 /** Returns whether a local terminal was restored (avoids startup duplication). */
 export async function restore(signal?: AbortSignal): Promise<boolean> {
   let localRestored = false;
+  let failed = false;
   try {
-    _enabled = await invoke<string | null>("get_setting", { key: `${settingsKey()}.enabled` }) === "true";
-    if (!_enabled || signal?.aborted) return false;
+    if (!await enabled() || signal?.aborted) return false;
     const saved = parse(await invoke<string | null>("get_setting", { key: `${settingsKey()}.snapshot` }));
     if (!saved || signal?.aborted) return false;
     const types = new Set(saved.terminals.map((entry) => entry.type));
@@ -105,8 +104,9 @@ export async function restore(signal?: AbortSignal): Promise<boolean> {
       types.has("telnet") ? invoke<app.TelnetProfile[]>("list_telnet_profiles") : [],
       types.has("serial") && app.capabilities().serial ? invoke<app.SerialProfile[]>("list_serial_profiles") : [],
     ]);
-    // Do not take over tabs the user opened while the backend was loading.
-    if (signal?.aborted || app.tabs().length !== 1) return false;
+    // The preference or the user's tabs may have changed while profiles loaded.
+    const stillEnabled = await enabled();
+    if (!stillEnabled || signal?.aborted || app.tabs().length !== 1) return false;
     let activeId = "home";
     const restoredIds: string[] = [];
     saved.terminals.forEach((entry, index) => {
@@ -138,10 +138,10 @@ export async function restore(signal?: AbortSignal): Promise<boolean> {
       app.moveTab(app.tabs().findIndex((tab) => tab.id === id), index + 1);
     });
   } catch (error) {
-    _enabled = false; // Preserve the last snapshot when startup reads fail.
+    failed = true; // Preserve the last snapshot when startup reads fail.
     report(error);
   } finally {
-    if (!signal?.aborted) _ready = true;
+    _ready = !failed && !signal?.aborted;
   }
   return localRestored;
 }

@@ -103,10 +103,11 @@
         }
     }
     let navigationLoad = 0;
-    $effect(() => {
-        if (bypassStartupReconcile || !sessionRestore.ready() || !sessionRestore.enabled()) return;
-        sessionRestore.persist(sessionRestore.snapshot());
-    });
+    function persistSessionSnapshot() {
+        if (bypassStartupReconcile || !sessionRestore.ready()) return;
+        void sessionRestore.persist(sessionRestore.snapshot());
+    }
+    $effect(persistSessionSnapshot);
     $effect(() => {
         const tabs = app.tabs();
         for (const paneId of Object.keys(pendingPaneSources)) {
@@ -272,8 +273,6 @@
         // backend resource. Otherwise reconcile([]) can race that new session.
         if (!bypassStartupReconcile) {
             void initializeResources();
-        } else {
-            void sessionRestore.initializeSecondaryWindow();
         }
         consumeCloneQuery();
         consumeAiHandoff();
@@ -1261,7 +1260,7 @@
     }
 </script>
 
-<svelte:window onkeydown={handleKeydown}/>
+<svelte:window onkeydown={handleKeydown} onfocus={persistSessionSnapshot}/>
 
 {#if app.snippetPickerOpen()}
     <SnippetPicker />
