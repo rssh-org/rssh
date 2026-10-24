@@ -344,8 +344,11 @@ describe("term gpu render setting", () => {
   });
 
   it("reads the loaded host policy when no explicit GPU setting exists", async () => {
+    terminalPolicyMock.mockImplementation(() => {
+      throw new Error("Host terminal runtime policy is not loaded");
+    });
     const theme = await loadStore();
-    await theme.init();
+    await expect(theme.init()).resolves.toBeUndefined();
     terminalPolicyMock.mockReturnValue({ gpuRenderDefault: false });
     expect(theme.termGpuRender()).toBe(false);
     const seen: boolean[] = [];

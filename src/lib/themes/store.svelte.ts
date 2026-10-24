@@ -345,10 +345,10 @@ function applyXtermGpu(fn: XtermGpuListener, on: boolean): boolean {
   }
 }
 
-function notifyXtermGpu(on = termGpuRender()): boolean {
+function notifyXtermGpu(on?: boolean): boolean {
   let ready = true;
   for (const fn of _xtermGpuListeners) {
-    if (!applyXtermGpu(fn, on)) ready = false;
+    if (!applyXtermGpu(fn, on ?? termGpuRender())) ready = false;
   }
   return ready;
 }
