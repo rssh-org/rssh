@@ -183,19 +183,11 @@
 <svelte:window onfocus={loadStartup} />
 
 <div class="page">
-  <div class="card surface-raised startup-card">
-    <label for="startup-action" class="cmd-block-title">{t("settings.shell.startup_action")}</label>
-    <Select id="startup-action" bind:value={startupAction} options={startupOptions}
-      disabled={startupBusy || startupAction === null}
-      placeholder={startupBusy ? t("common.loading") : ""}
-      onchange={(value) => saveStartup(value as StartupAction)} />
-    {#if startupAction === "restore"}
-      <div class="shell-hint">{t("settings.shell.startup_restore_desc")}</div>
-    {/if}
-  </div>
   {#if app.capabilities().localPty}
     <div class="section-label" id="local-shell-label">{t("settings.shell.local_shell")}</div>
-    <div class="card surface-raised shell-card">
+  {/if}
+  <div class="card surface-raised shell-card">
+    {#if app.capabilities().localPty}
       <div class="shell-hint">
         {t("settings.shell.pick_hint")}
       </div>
@@ -233,8 +225,23 @@
           </label>
         </div>
       </div>
+      <div class="card-divider"></div>
+    {/if}
+    <div class="cmd-block-head action-row">
+      <div class="cmd-block-head-body">
+        <label for="startup-action" class="cmd-block-title">{t("settings.shell.startup_action")}</label>
+        {#if startupAction === "restore"}
+          <div class="cmd-block-desc">{t("settings.shell.startup_restore_desc")}</div>
+        {/if}
+      </div>
+      <div class="action-select">
+        <Select id="startup-action" bind:value={startupAction} options={startupOptions}
+          disabled={startupBusy || startupAction === null}
+          placeholder={startupBusy ? t("common.loading") : ""}
+          onchange={(value) => saveStartup(value as StartupAction)} />
+      </div>
     </div>
-  {/if}
+  </div>
 
   <div class="section-label">{t("settings.shell.connection_timeout")}</div>
   <div class="timeout-row">
@@ -298,12 +305,12 @@
 
     <div class="card-divider"></div>
 
-    <div class="cmd-block-head">
+    <div class="cmd-block-head action-row">
       <div class="cmd-block-head-body">
         <label for="rca-select" class="cmd-block-title">{t("settings.shell.right_click")}</label>
         <div class="cmd-block-desc">{t("settings.shell.right_click_desc")}</div>
       </div>
-      <div class="rca-select">
+      <div class="action-select">
         <Select id="rca-select" bind:value={rightClickAction}
                 options={rightClickOptions}
                 onchange={(v) => saveRightClickAction(v as app.RightClickAction)} />
@@ -347,7 +354,6 @@
 
   /* 卡片：复用全局 .card.surface-raised，本地只加 padding + 内布局，
      跟 SyncScreen / AiSettings 同款。 */
-  .startup-card,
   .shell-card,
   .mouse-card {
     padding: 18px;
@@ -454,8 +460,10 @@
     width: 80px;
   }
 
-  /* 右键动作的下拉框：定宽，靠右，不被卡片行压缩。 */
-  .rca-select { width: 260px; flex-shrink: 0; }
+  /* 动作下拉框：定宽靠右，窄窗口换行并限制在卡片内。 */
+  .action-row { flex-wrap: wrap; }
+  .action-row .cmd-block-head-body { flex-basis: 180px; min-width: 0; }
+  .action-select { width: 260px; max-width: 100%; flex-shrink: 0; margin-left: auto; }
   .timeout-hint {
     font-size: 11px; color: var(--text-dim);
   }
