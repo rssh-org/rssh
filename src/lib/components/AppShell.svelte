@@ -885,16 +885,30 @@
     function buildTabBarMenu(tab: Tab): CtxMenuItem[][] {
         const closeItem = (scope: app.TabCloseScope, label: string): CtxMenuItem => ({
             label,
+            shortcut: scope === "current" ? keymap.format("tab.close") : undefined,
             disabled: app.tabCloseTargets(tab.id, scope).length === 0,
             onClick: () => requestCloseTabs(app.tabCloseTargets(tab.id, scope)),
         });
+        const tabActions: CtxMenuItem[] = [{
+            label: t("tab.context.clone"),
+            shortcut: tab.type === "home" ? undefined : keymap.format("tab.clone"),
+            onClick: () => cloneTab(tab),
+            disabled: tab.type === "home",
+        }];
+        if (canOpenTabInNewWindow(tab)) {
+            tabActions.push({
+                label: t("tab.context.open_new_window"),
+                shortcut: keymap.format("tab.openNewWindow"),
+                onClick: () => openInNewWindow(tab),
+            });
+        }
         return [
-            [{ label: t("tab.context.clone"), onClick: () => cloneTab(tab), disabled: tab.type === "home" }],
             [closeItem("current", t("tab.context.close")),
              closeItem("right", t("tab.context.close_right")),
              closeItem("left", t("tab.context.close_left")),
              closeItem("others", t("tab.context.close_others")),
              closeItem("all", t("tab.context.close_all"))],
+            tabActions,
         ];
     }
 
@@ -1087,16 +1101,6 @@
             ]);
         }
 
-        sections.push([
-            {
-                label: t("tab.context.clone"),
-                shortcut: tab.type === "home" ? undefined : keymap.format("tab.clone"),
-                disabled: tab.type === "home",
-                onClick: () => cloneTab(tab),
-            },
-            {label: t("tab.context.close"), shortcut: keymap.format("tab.close"), onClick: () => requestCloseTab(tab.id)},
-        ]);
-
         // AI 排障入口（ssh/local/serial/telnet tab 才有，且需要已经连上 = 有 sessionId）
         if (app.isAiCapableTabType(tab.type)) {
             const sid = app.sessionIdForTab(tab.id);
@@ -1126,27 +1130,12 @@
                 },
             ]);
         }
-        if (canOpenTabInNewWindow(tab)) {
-            sections.push([
-                {
-                    label: t("tab.context.open_new_window"),
-                    shortcut: keymap.format("tab.openNewWindow"),
-                    onClick: () => openInNewWindow(tab),
-                },
-            ]);
-        }
-
-
         return sections;
     }
     function openPaneContextMenu(e: MouseEvent, tabId: string) {
         if (isTouchContextMenu(e)) return;
         const tab = app.tabs().find((candidate) => candidate.id === tabId);
         if (tab) openCtxMenu(e, tab);
-    }
-    function openRouteContextMenu(e: MouseEvent, tab: Tab | undefined) {
-        if (!tab) return;
-        openCtxMenu(e, tab);
     }
 
     function handleInitialConnectionFailure(tabId: string, error: unknown): boolean {
@@ -1521,7 +1510,6 @@
                         class="pane"
                         class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId()}
                         role="presentation"
-                        oncontextmenu={(event) => openRouteContextMenu(event, tab)}
                     >
                         {#await loadEditPane() then { default: EditPane }}
                             <EditPane tabId={tab.id} active={tab.id === app.activeWorkspaceId() && !app.settingsActive()} />
@@ -1536,7 +1524,6 @@
                         class="pane"
                         class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId() && resourcePanesAllowed}
                         role="presentation"
-                        oncontextmenu={(event) => openRouteContextMenu(event, tab)}
                     >
                         {#if resourcePanesAllowed}
                             <ForwardPane tabId={tab.id} meta={tab.meta ?? {}}/>
@@ -1549,7 +1536,7 @@
                         <SettingsLayout/>
                     </div>
                 {:else if activeRouteTab?.type === "home"}
-                    <div class="pane visible" role="presentation" oncontextmenu={(event) => openRouteContextMenu(event, activeRouteTab)}>
+                    <div class="pane visible" role="presentation">
                         <HomeScreen/>
                     </div>
                 {/if}
