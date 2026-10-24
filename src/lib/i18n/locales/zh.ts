@@ -184,6 +184,7 @@ const zh: Messages = {
   "settings.appearance.term.bg_follow_desc": "开启时，终端背景使用主题背景色，与应用外观融为一体；关闭时，保留所选配色方案自身的背景。",
   "settings.appearance.term.gpu_render": "终端 GPU 渲染",
   "settings.appearance.term.gpu_render_desc": "默认关闭。开启后可能让大量终端输出更流畅；如遇输入延迟、字形显示异常或长按选字不便，可关闭。",
+  "settings.appearance.term.gpu_render_failed": "无法启用终端 GPU 渲染，已保持关闭。",
   "settings.appearance.terminal_font": "终端字体",
   "settings.appearance.font.default": "默认",
   "settings.appearance.font.search": "搜索字体…",
