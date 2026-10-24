@@ -14,6 +14,9 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 beforeEach(() => {
+  // resetModules discards the store, but its real autosave timers would still
+  // call the shared invoke mock during later tests. Own every test's clock.
+  vi.useFakeTimers();
   invokeMock.mockReset();
   invokeMock.mockResolvedValue(null);
   unlistenMock.mockReset();
@@ -27,6 +30,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -294,9 +298,9 @@ describe("tab lifecycle", () => {
       "ai_session_prepare_stop",
       { tabId: "tab-a", instanceId: "instance-a" },
     ));
-    expect(invokeMock.mock.calls.some(
+    expect(invokeMock.mock.calls.filter(
       ([command]) => command === "ai_conversation_save_timeline",
-    )).toBe(false);
+    )).toEqual([]);
 
     resolveClear();
     await Promise.all([clearing, closing]);

@@ -871,6 +871,48 @@ mod tests {
     }
 
     #[test]
+    fn group_waves_import_defaults_and_boolean_exports() {
+        let (db, ss, dir) = fixture();
+        let legacy = json!({
+            "id": "legacy", "name": "Legacy", "color": "#FF0000", "sort_order": 0
+        });
+        let enabled = json!({
+            "id": "enabled", "name": "Enabled", "color": "#00FF00", "sort_order": 1,
+            "terminal_waves_enabled": true
+        });
+        let disabled = json!({
+            "id": "disabled", "name": "Disabled", "color": "#0000FF", "sort_order": 2,
+            "terminal_waves_enabled": false
+        });
+        merge_import(
+            &db,
+            &ss,
+            dir.path(),
+            &json!({
+                "groups": [legacy.clone(), enabled.clone(), disabled.clone()]
+            }),
+        )
+        .unwrap();
+        let mut expected_legacy = legacy;
+        expected_legacy["terminal_waves_enabled"] = json!(false);
+        let expected = json!([expected_legacy, enabled, disabled]);
+
+        for mode in [
+            ExportMode::LocalBackup,
+            ExportMode::RemotePush(read_sync_prefs(&db).unwrap()),
+        ] {
+            let exported = build_payload(&db, &ss, dir.path(), &mode).unwrap();
+            assert_eq!(exported["groups"], expected);
+            let (restored, restored_ss, restored_dir) = fixture();
+            merge_import(&restored, &restored_ss, restored_dir.path(), &exported).unwrap();
+            assert_eq!(
+                serde_json::to_value(group::list(&restored).unwrap()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn merge_keeps_local_only_rows() {
         let (db, ss, dir) = fixture();
         // local-only credential + profile

@@ -12,6 +12,7 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
 
 use crate::state::AppState;
@@ -19,6 +20,15 @@ use crate::state::AppState;
 /// Returns `true` if the event was handed off (ws send queued), `false` once the
 /// connection is gone — lets `Host::emit` surface failure to prompt paths.
 type Sink = Arc<dyn Fn(&str, serde_json::Value) -> bool + Send + Sync>;
+
+/// Wire encoding for terminal byte streams (`ssh:data` / `pty:data` /
+/// `telnet:data` / `serial:data`): base64 text, never a JSON number array —
+/// the array form inflates every byte ~4x in the IPC payload and forces
+/// per-element JSON parsing on the webview. One definition here keeps the
+/// desktop Tauri sinks and the headless ws sinks byte-identical.
+pub fn b64_payload(bytes: &[u8]) -> String {
+    STANDARD.encode(bytes)
+}
 
 #[derive(Clone)]
 pub enum Host {
@@ -71,6 +81,14 @@ impl Host {
         }
     }
 
+    /// Terminal byte streams (`ssh:data` / `pty:data` / `telnet:data` /
+    /// `serial:data`) travel as base64 text, never a JSON number array (see
+    /// [`b64_payload`]). Both hosts share one wire shape (a JSON string), so
+    /// desktop and headless stay identical.
+    pub fn emit_bytes(&self, event: &str, bytes: &[u8]) -> tauri::Result<()> {
+        self.emit(event, b64_payload(bytes))
+    }
+
     /// Replaces `app.state::<AppState>()`.
     pub fn state(&self) -> StateRef<'_> {
         match self {
@@ -82,26 +100,58 @@ impl Host {
         }
     }
 
+    /// Preserve the host's artifact workflow policy independently of window support.
+    pub fn allows_diagnosis_downloads(&self) -> bool {
+        match self {
+            Self::Tauri(_) => crate::platform::runtime::allows_diagnosis_downloads(),
+            Self::Headless { .. } => true,
+        }
+    }
+
+    /// Check before proposing approval; unsupported hosts must not leave a
+    /// useless approval card waiting for user input.
+    pub async fn ensure_local_analysis_available(&self) -> Result<(), String> {
+        match self {
+            #[cfg(any(windows, macos, linux, ohos))]
+            Host::Tauri(_) => {
+                crate::platform::window::ensure_app_window_available(
+                    crate::platform::window::AppWindowPurpose::LocalAnalysis,
+                )
+                .await
+            }
+            #[cfg(not(any(windows, macos, linux, ohos)))]
+            Host::Tauri(_) => Err("Additional windows are unavailable on this device".into()),
+            Host::Headless { .. } => {
+                Err("Local analysis windows are unavailable in headless mode".into())
+            }
+        }
+    }
+
     /// Spawn a standalone analysis window (the `analyze_locally` AI tool).
-    /// Desktop-Tauri only; headless has no native windows, so it reports an
-    /// error the tool surfaces to the model (same as the mobile path).
-    #[cfg(desktop)]
-    pub fn open_app_window(
+    /// The native boundary rechecks capabilities after approval, so OHOS
+    /// phone/tablet builds cannot bypass it by invoking the tool directly.
+    pub async fn open_app_window(
         &self,
         label: &str,
         title: &str,
         init_script: &str,
     ) -> Result<(), String> {
         match self {
+            #[cfg(any(windows, macos, linux, ohos))]
             Host::Tauri(app) => {
-                use tauri::{WebviewUrl, WebviewWindowBuilder};
-                WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
-                    .title(title)
-                    .inner_size(1200.0, 800.0)
-                    .initialization_script(init_script)
-                    .build()
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
+                crate::platform::window::open_app_window(
+                    app,
+                    label,
+                    title,
+                    init_script,
+                    crate::platform::window::AppWindowPurpose::LocalAnalysis,
+                )
+                .await
+            }
+            #[cfg(not(any(windows, macos, linux, ohos)))]
+            Host::Tauri(_) => {
+                let _ = (label, title, init_script);
+                Err("Additional windows are unavailable on this device".into())
             }
             Host::Headless { .. } => Err("multi-window unavailable in headless mode".to_string()),
         }

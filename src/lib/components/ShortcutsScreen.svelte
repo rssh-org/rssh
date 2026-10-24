@@ -14,6 +14,7 @@
     type Surface,
   } from "../keyboard/keymap.ts";
   import * as keymap from "../stores/keymap.svelte.ts";
+  import { capabilities } from "../stores/runtime.svelte.ts";
 
   onMount(() => { keymap.init(); });
 
@@ -22,7 +23,8 @@
     { surface: "global", title: t("shortcuts.section.global") },
     { surface: "terminal", title: t("shortcuts.section.terminal") },
   ]);
-  const actionsBySurface = (s: Surface) => ACTIONS.filter((a) => a.surface === s);
+  const actionsBySurface = (s: Surface) => ACTIONS.filter((a) =>
+    a.surface === s && (a.id !== "tab.openNewWindow" || capabilities().multiWindow));
 
   // Fixed, non-customizable shortcuts — shown read-only for discoverability.
   // (Stateful interactions / "any key" handlers; they aren't key→action data.)

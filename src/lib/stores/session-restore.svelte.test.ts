@@ -1,6 +1,8 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.hoisted(() => vi.fn());
+const capabilities = vi.hoisted(() => ({ localPty: true, serial: true }));
+vi.mock("./runtime.svelte.ts", () => ({ capabilities: () => capabilities }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 const key = "session_restore.desktop";
 let settings: Map<string, string>;
@@ -8,6 +10,8 @@ let settings: Map<string, string>;
 beforeEach(() => {
   vi.resetModules();
   settings = new Map();
+  capabilities.localPty = true;
+  capabilities.serial = true;
   vi.stubGlobal("navigator", { userAgent: "node" });
   const storage = new Map<string, string>();
   vi.stubGlobal("localStorage", {
@@ -145,8 +149,9 @@ describe("session restoration", () => {
     expect(app.activeTabId()).toBe(app.tabs()[2].id);
   });
 
-  it("restores mobile SSH/Telnet while excluding desktop local and serial terminals", async () => {
-    vi.stubGlobal("navigator", { userAgent: "Android" });
+  it("restores SSH/Telnet on hosts without PTY/serial capabilities, independently of UA", async () => {
+    capabilities.localPty = false;
+    capabilities.serial = false;
     settings.set("session_restore.mobile.enabled", "true");
     settings.set("session_restore.mobile.snapshot", JSON.stringify({ version: 1, terminals: [
       { type: "local" }, { type: "serial", profileId: "s1" },
@@ -157,5 +162,14 @@ describe("session restoration", () => {
     expect(app.tabs().map((tab) => tab.type)).toEqual(["home", "ssh", "telnet"]);
     expect(invoke).not.toHaveBeenCalledWith("list_serial_profiles");
     expect(app.activeTabId()).toBe(app.tabs()[1].id);
+  });
+
+  it("does not fetch or restore serial profiles on a PTY-only host", async () => {
+    capabilities.serial = false;
+    saved([{ type: "local" }, { type: "serial", profileId: "serial1" }], 0);
+    const { app, restore } = await modules();
+    expect(await restore.restore()).toBe(true);
+    expect(app.tabs().map((tab) => tab.type)).toEqual(["home", "local"]);
+    expect(invoke).not.toHaveBeenCalledWith("list_serial_profiles");
   });
 });

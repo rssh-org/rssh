@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppResult;
 
-const SCHEMA_VERSION: u32 = 30;
+const SCHEMA_VERSION: u32 = 32;
 
 fn column_exists(conn: &Connection, table: &str, col: &str) -> AppResult<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
@@ -667,6 +667,31 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
         )?;
     }
 
+    if version < 31
+        && table_exists(conn, "groups")?
+        && !column_exists(conn, "groups", "terminal_background")?
+    {
+        conn.execute_batch("ALTER TABLE groups ADD COLUMN terminal_background TEXT DEFAULT NULL;")?;
+    }
+
+    if version < 32 && table_exists(conn, "groups")? {
+        // Some development v31 databases already contain the boolean flag.
+        let needs_wave_flag = !column_exists(conn, "groups", "terminal_waves_enabled")?;
+        if needs_wave_flag {
+            conn.execute_batch(
+                "ALTER TABLE groups ADD COLUMN terminal_waves_enabled INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        if column_exists(conn, "groups", "terminal_background")? {
+            if needs_wave_flag {
+                conn.execute_batch(
+                    "UPDATE groups SET terminal_waves_enabled = (terminal_background IS NOT NULL);",
+                )?;
+            }
+            conn.execute_batch("ALTER TABLE groups DROP COLUMN terminal_background;")?;
+        }
+    }
+
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -676,6 +701,141 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn migration_32_preserves_groups_and_defaults_group_waves_to_disabled() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL, sort_order INTEGER NOT NULL);
+            INSERT INTO groups VALUES ('prod', 'Production', '#FF0000', 1);
+            PRAGMA user_version = 30;").unwrap();
+        super::migrate(&conn).unwrap();
+        super::migrate(&conn).unwrap();
+        let group: (String, bool) = conn
+            .query_row(
+                "SELECT name, terminal_waves_enabled FROM groups WHERE id = 'prod'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(group, ("Production".into(), false));
+        assert!(conn
+            .execute("UPDATE groups SET terminal_waves_enabled = NULL", [])
+            .is_err());
+        let version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 32);
+        assert!(!super::column_exists(&conn, "groups", "terminal_background").unwrap());
+    }
+
+    #[test]
+    fn migration_32_converts_legacy_wave_colors_to_flags() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE groups (
+                 id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL,
+                 sort_order INTEGER NOT NULL, terminal_background TEXT DEFAULT NULL
+             );
+             INSERT INTO groups VALUES
+                 ('off', 'Disabled', '#112233', 1, NULL),
+                 ('on', 'Enabled', '#445566', 2, '#AABBCC');
+             CREATE TABLE profiles (id TEXT PRIMARY KEY, group_id TEXT REFERENCES groups(id));
+             INSERT INTO profiles VALUES ('ssh', 'on');
+             PRAGMA user_version = 31;",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+
+        let groups: Vec<(String, String, String, i32, bool)> = conn
+            .prepare("SELECT id, name, color, sort_order, terminal_waves_enabled FROM groups ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            groups,
+            vec![
+                ("off".into(), "Disabled".into(), "#112233".into(), 1, false),
+                ("on".into(), "Enabled".into(), "#445566".into(), 2, true),
+            ]
+        );
+        let profile_group: String = conn
+            .query_row(
+                "SELECT group_id FROM profiles WHERE id = 'ssh'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(profile_group, "on");
+        assert!(!column_exists(&conn, "groups", "terminal_background").unwrap());
+        assert!(conn
+            .execute("UPDATE groups SET terminal_waves_enabled = NULL", [])
+            .is_err());
+        conn.execute(
+            "INSERT INTO groups (id, name, color, sort_order) VALUES ('new', 'New', '#778899', 3)",
+            [],
+        )
+        .unwrap();
+        let enabled: bool = conn
+            .query_row(
+                "SELECT terminal_waves_enabled FROM groups WHERE id = 'new'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!enabled);
+        let version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 32);
+    }
+
+    #[test]
+    fn migration_32_preserves_existing_wave_flags() {
+        // Also cover a database where both columns are present: the flag wins.
+        for legacy_column in [false, true] {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE groups (
+                     id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL,
+                     sort_order INTEGER NOT NULL,
+                     terminal_waves_enabled INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO groups VALUES
+                     ('off', 'Disabled', '#112233', 1, 0),
+                     ('on', 'Enabled', '#445566', 2, 1);
+                 PRAGMA user_version = 31;",
+            )
+            .unwrap();
+            if legacy_column {
+                conn.execute_batch(
+                    "ALTER TABLE groups ADD COLUMN terminal_background TEXT DEFAULT NULL;
+                     UPDATE groups SET terminal_background = '#AABBCC' WHERE id = 'off';",
+                )
+                .unwrap();
+            }
+
+            migrate(&conn).unwrap();
+            migrate(&conn).unwrap();
+
+            let flags: Vec<bool> = conn
+                .prepare("SELECT terminal_waves_enabled FROM groups ORDER BY id")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(flags, vec![false, true]);
+            assert!(!column_exists(&conn, "groups", "terminal_background").unwrap());
+            let version: u32 = conn
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 32);
+        }
+    }
     use super::*;
 
     #[test]

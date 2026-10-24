@@ -1,5 +1,6 @@
 use tauri::{AppHandle, Emitter, State};
 
+use crate::emitter::b64_payload;
 use crate::error::{locked, AppError, AppResult};
 use crate::models::{ConnectorSpec, DynamicDiscoveryPlatform};
 use crate::state::{AppState, SessionKind, SessionOwner};
@@ -26,7 +27,7 @@ pub fn pty_spawn(
     // server builds a different sink over the same `pty::spawn`.
     let sink: pty::PtySink = std::sync::Arc::new(move |id: &str, out: pty::PtyOut| match out {
         pty::PtyOut::Data(b) => {
-            let _ = app.emit(&format!("pty:data:{id}"), b);
+            let _ = app.emit(&format!("pty:data:{id}"), b64_payload(&b));
         }
         pty::PtyOut::Close => {
             let _ = app.emit(&format!("pty:close:{id}"), ());
@@ -124,7 +125,7 @@ pub fn pty_spawn_connector(
     )?;
     let sink: pty::PtySink = std::sync::Arc::new(move |id: &str, out: pty::PtyOut| match out {
         pty::PtyOut::Data(b) => {
-            let _ = app.emit(&format!("pty:data:{id}"), b);
+            let _ = app.emit(&format!("pty:data:{id}"), b64_payload(&b));
         }
         pty::PtyOut::Close => {
             let _ = app.emit(&format!("pty:close:{id}"), ());

@@ -1,12 +1,14 @@
 //! Session 生命周期管理：前端 reconcile + 窗口销毁清理。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tauri::State;
 
 use crate::error::{locked, AppError, AppResult};
+use crate::resource::{CleanupHandle, PendingOperation, ResourceCleanup};
 use crate::state::AppState;
+use crate::state::ResourceState;
 use crate::state::{AiSessionRecord, SessionKind, SessionOwner, SessionPhase, SessionRecord};
 
 /// 前端启动 / 重连后调用：把不在 `active_ids` 列表里的所有 session 全部清掉。
@@ -14,7 +16,7 @@ use crate::state::{AiSessionRecord, SessionKind, SessionOwner, SessionPhase, Ses
 /// `active_ids` 是前端当前持有的所有 ID（不区分 ssh / sftp / forward —
 /// UUID 不会撞）。返回被清理的总数。
 #[tauri::command]
-pub fn reconcile_sessions(
+pub async fn reconcile_sessions(
     window: tauri::Window,
     state: State<'_, AppState>,
     active_ids: Vec<String>,
@@ -24,6 +26,7 @@ pub fn reconcile_sessions(
         &SessionOwner::Window(window.label().to_owned()),
         active_ids,
     )
+    .await
 }
 
 /// Resolve a frontend-reserved session identity. Pre-reservation lets the UI
@@ -48,6 +51,40 @@ pub struct ResourceReservation<'a> {
     nonce: uuid::Uuid,
     kind: SessionKind,
     armed: bool,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct AtomicCleanupProbe {
+    failures: std::sync::atomic::AtomicUsize,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl AtomicCleanupProbe {
+    fn close(&self) -> AppResult<()> {
+        use std::sync::atomic::Ordering;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self
+            .failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            Err(AppError::pty(
+                "serial_op_failed",
+                serde_json::json!({"err": "native close refused"}),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+impl crate::resource::Cleanup for AtomicCleanupProbe {
+    fn close(&self) -> crate::resource::CleanupFuture<'_> {
+        Box::pin(async move { AtomicCleanupProbe::close(self) })
+    }
 }
 
 pub struct AiOwnerReservation<'a> {
@@ -378,7 +415,7 @@ fn close_owned_ai(
             }
             // An explicit close already owns the cleanup task. Leave its
             // tombstone alone; owner shutdown must not reopen the ABA window.
-            SessionPhase::Closed => {}
+            SessionPhase::Closing | SessionPhase::Closed => {}
         }
     }
     drop(sessions);
@@ -462,7 +499,7 @@ pub(crate) fn register_prompt_waiter<T>(
     let pending = registry.get(resource_id).is_some_and(|record| {
         record.kind == SessionKind::Ssh
             && &record.owner == owner
-            && record.phase == SessionPhase::Pending
+            && record.phase() == SessionPhase::Pending
     });
     if !pending {
         return Err(AppError::not_found(
@@ -493,9 +530,9 @@ pub(crate) fn register_prompt_waiter<T>(
 
 pub enum ReadySession {
     Ssh(crate::ssh::client::SessionHandle),
-    #[cfg(desktop)]
+    #[cfg(any(windows, macos, linux, ohos))]
     Pty(crate::terminal::pty::PtyHandle),
-    #[cfg(desktop)]
+    #[cfg(any(windows, macos, linux, ohos))]
     Serial(crate::terminal::serial::SerialHandle),
     Telnet(crate::terminal::telnet::TelnetHandle),
     Sftp(std::sync::Arc<crate::ssh::sftp::SftpHandle>),
@@ -511,15 +548,23 @@ impl ReadySession {
     fn kind(&self) -> SessionKind {
         match self {
             Self::Ssh(_) => SessionKind::Ssh,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             Self::Pty(_) => SessionKind::Pty,
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             Self::Serial(_) => SessionKind::Serial,
             Self::Telnet(_) => SessionKind::Telnet,
             Self::Sftp(_) => SessionKind::Sftp,
             Self::Forward(_) => SessionKind::Forward,
             #[cfg(test)]
             Self::CleanupProbe { kind, .. } => *kind,
+        }
+    }
+
+    fn cleanup(&self) -> Option<CleanupHandle> {
+        match self {
+            #[cfg(any(windows, macos, linux, ohos))]
+            Self::Serial(handle) => crate::terminal::serial::cleanup(handle),
+            _ => None,
         }
     }
 
@@ -531,8 +576,10 @@ impl ReadySession {
             Self::CleanupProbe { cleaned, .. } => {
                 cleaned.store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            #[cfg(desktop)]
-            Self::Pty(_) | Self::Serial(_) => {}
+            #[cfg(any(windows, macos, linux, ohos))]
+            Self::Pty(_) => {}
+            #[cfg(any(windows, macos, linux, ohos))]
+            Self::Serial(_) => {}
             Self::Telnet(_) | Self::Sftp(_) => {}
         }
     }
@@ -543,6 +590,36 @@ impl ResourceReservation<'_> {
         &self.session_id
     }
 
+    /// Register cancellation before beginning an asynchronous native open. The
+    /// same registry lock orders registration against close and activation.
+    pub fn pending_operation(&self) -> AppResult<PendingOperation> {
+        let mut registry = locked(&self.state.lifecycle_sessions)?;
+        let record = registry.get_mut(&self.session_id).ok_or_else(|| {
+            AppError::not_found(
+                "session_reservation_lost",
+                serde_json::json!({ "id": self.session_id }),
+            )
+        })?;
+        if record.nonce != self.nonce
+            || record.kind != self.kind
+            || record.phase() != SessionPhase::Pending
+        {
+            return Err(AppError::not_found(
+                "session_reservation_lost",
+                serde_json::json!({ "id": self.session_id }),
+            ));
+        }
+        if matches!(record.state, ResourceState::Pending(Some(_))) {
+            return Err(AppError::other(
+                "session_registry_inconsistent",
+                serde_json::json!({ "id": self.session_id }),
+            ));
+        }
+        let (operation, pending) = PendingOperation::new();
+        record.state = ResourceState::Pending(Some(pending));
+        Ok(operation)
+    }
+
     #[cfg(test)]
     pub fn ensure_pending(&self) -> AppResult<()> {
         let registry = locked(&self.state.lifecycle_sessions)?;
@@ -550,7 +627,7 @@ impl ResourceReservation<'_> {
             Some(record)
                 if record.nonce == self.nonce
                     && record.kind == self.kind
-                    && record.phase == SessionPhase::Pending =>
+                    && record.phase() == SessionPhase::Pending =>
             {
                 Ok(())
             }
@@ -586,7 +663,7 @@ impl ResourceReservation<'_> {
         };
         if record.nonce != self.nonce
             || record.kind != self.kind
-            || record.phase != SessionPhase::Pending
+            || record.phase() != SessionPhase::Pending
         {
             drop(registry);
             handle.close();
@@ -596,7 +673,7 @@ impl ResourceReservation<'_> {
             ));
         }
         insert_ready_handle(self.state, &self.session_id, handle)?;
-        record.phase = SessionPhase::Ready;
+        record.state = ResourceState::Ready;
         self.armed = false;
         Ok(())
     }
@@ -652,9 +729,9 @@ fn insert_ready_handle(state: &AppState, session_id: &str, handle: ReadySession)
             sessions.insert(session_id.to_owned(), handle);
             Ok(())
         }
-        #[cfg(desktop)]
+        #[cfg(any(windows, macos, linux, ohos))]
         ReadySession::Pty(handle) => insert_unique(&state.pty_sessions, session_id, handle),
-        #[cfg(desktop)]
+        #[cfg(any(windows, macos, linux, ohos))]
         ReadySession::Serial(handle) => insert_unique(&state.serial_sessions, session_id, handle),
         ReadySession::Telnet(handle) => insert_unique(&state.telnet_sessions, session_id, handle),
         ReadySession::Sftp(handle) => insert_unique(&state.sftp_sessions, session_id, handle),
@@ -679,8 +756,12 @@ impl Drop for ResourceReservation<'_> {
             return;
         };
         if let Some(record) = registry.get_mut(&self.session_id) {
-            if record.nonce == self.nonce && record.phase == SessionPhase::Pending {
-                record.phase = SessionPhase::Closed;
+            if record.nonce == self.nonce && record.phase() == SessionPhase::Pending {
+                if let Ok((_, Some(cleanup))) =
+                    begin_resource_close(self.state, &self.session_id, record)
+                {
+                    cleanup.start();
+                }
             }
         }
     }
@@ -706,7 +787,7 @@ pub fn reserve_resource<'a>(
             nonce,
             kind,
             owner,
-            phase: SessionPhase::Pending,
+            state: ResourceState::Pending(None),
             parent: None,
         },
     );
@@ -744,7 +825,7 @@ pub fn reserve_sftp_child<'a>(
     let parent = registry
         .get(parent_id)
         .ok_or_else(|| AppError::not_found("ssh_session_not_found_msg", serde_json::json!({})))?;
-    if parent.kind != SessionKind::Ssh || parent.phase != SessionPhase::Ready {
+    if parent.kind != SessionKind::Ssh || parent.phase() != SessionPhase::Ready {
         return Err(AppError::not_found(
             "ssh_session_not_found_msg",
             serde_json::json!({}),
@@ -780,7 +861,7 @@ pub fn reserve_sftp_child<'a>(
             nonce,
             kind: SessionKind::Sftp,
             owner,
-            phase: SessionPhase::Pending,
+            state: ResourceState::Pending(None),
             parent: Some(parent_id.to_owned()),
         },
     );
@@ -805,9 +886,9 @@ pub enum OwnedAiTarget {
         handle: crate::ssh::client::SshHandle,
         profile_id: String,
     },
-    #[cfg(desktop)]
+    #[cfg(any(windows, macos, linux, ohos))]
     PtyShellPath(String),
-    #[cfg(desktop)]
+    #[cfg(any(windows, macos, linux, ohos))]
     Serial,
     Telnet,
 }
@@ -822,7 +903,7 @@ pub fn owned_ready_ai_target(
     let record = registry
         .get(id)
         .ok_or_else(|| AppError::not_found("session_not_found", serde_json::json!({ "id": id })))?;
-    if record.kind != kind || record.phase != SessionPhase::Ready {
+    if record.kind != kind || record.phase() != SessionPhase::Ready {
         return Err(AppError::not_found(
             "session_not_found",
             serde_json::json!({ "id": id }),
@@ -851,7 +932,7 @@ pub fn owned_ready_ai_target(
                     serde_json::json!({ "id": id }),
                 )
             }),
-        #[cfg(desktop)]
+        #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Pty => locked(&state.pty_sessions)?
             .get(id)
             .map(|session| OwnedAiTarget::PtyShellPath(session.shell_path().to_owned()))
@@ -861,7 +942,7 @@ pub fn owned_ready_ai_target(
                     serde_json::json!({ "id": id }),
                 )
             }),
-        #[cfg(desktop)]
+        #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Serial => locked(&state.serial_sessions)?
             .contains_key(id)
             .then_some(OwnedAiTarget::Serial)
@@ -896,11 +977,11 @@ fn take_ready_handle(
         SessionKind::Ssh => locked(&state.sessions)?
             .remove(session_id)
             .map(ReadySession::Ssh),
-        #[cfg(desktop)]
+        #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Pty => locked(&state.pty_sessions)?
             .remove(session_id)
             .map(ReadySession::Pty),
-        #[cfg(desktop)]
+        #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Serial => locked(&state.serial_sessions)?
             .remove(session_id)
             .map(ReadySession::Serial),
@@ -927,6 +1008,8 @@ fn close_removed(mut removed: Vec<ReadySession>) {
     }
 }
 
+/// Ensure a transport is closed. Missing or already released resources are
+/// successful no-ops; retained records still enforce their owner and kind.
 pub fn close_resource(
     state: &AppState,
     session_id: &str,
@@ -936,10 +1019,54 @@ pub fn close_resource(
     if expected_kind == SessionKind::Ssh {
         return close_ssh_tree(state, session_id, expected_owner);
     }
+    let (removed, cleanup) =
+        take_closed_resource(state, session_id, expected_kind, expected_owner)?;
+    if let Some(handle) = removed {
+        handle.close();
+    }
+    if let Some(cleanup) = cleanup {
+        cleanup.start();
+    }
+    close_waiters_for_resource(state, session_id, expected_owner)?;
+    Ok(())
+}
+
+/// Close an exclusive transport and wait until its native port is released.
+/// Pending opens acknowledge completion only after their own cancellation
+/// cleanup; Ready handles are taken under the same lock that validates owner.
+pub async fn close_resource_and_wait(
+    state: &AppState,
+    session_id: &str,
+    expected_kind: SessionKind,
+    expected_owner: &SessionOwner,
+) -> AppResult<()> {
+    if expected_kind == SessionKind::Ssh {
+        return close_ssh_tree(state, session_id, expected_owner);
+    }
+    let (removed, cleanup) =
+        take_closed_resource(state, session_id, expected_kind, expected_owner)?;
+    let waiter_result = close_waiters_for_resource(state, session_id, expected_owner);
+    if let Some(handle) = removed {
+        handle.close();
+    }
+    if let Some(cleanup) = cleanup {
+        cleanup.finish().await?;
+    }
+
+    waiter_result
+}
+
+fn take_closed_resource(
+    state: &AppState,
+    session_id: &str,
+    expected_kind: SessionKind,
+    expected_owner: &SessionOwner,
+) -> AppResult<(Option<ReadySession>, Option<Arc<ResourceCleanup>>)> {
     let mut registry = locked(&state.lifecycle_sessions)?;
-    let record = registry.get_mut(session_id).ok_or_else(|| {
-        AppError::not_found("session_not_found", serde_json::json!({ "id": session_id }))
-    })?;
+    let Some(record) = registry.get_mut(session_id) else {
+        // A frontend may cancel before its opening command was dispatched.
+        return Ok((None, None));
+    };
     if record.kind != expected_kind {
         return Err(AppError::config(
             "session_kind_mismatch",
@@ -952,31 +1079,39 @@ pub fn close_resource(
             serde_json::json!({ "id": session_id }),
         ));
     }
-    if record.phase == SessionPhase::Closed {
-        return Err(AppError::not_found(
-            "session_not_found",
-            serde_json::json!({ "id": session_id }),
-        ));
-    }
-    let removed = if record.phase == SessionPhase::Ready {
-        Some(
-            take_ready_handle(state, session_id, record.kind)?.ok_or_else(|| {
+    begin_resource_close(state, session_id, record)
+}
+
+fn begin_resource_close(
+    state: &AppState,
+    session_id: &str,
+    record: &mut SessionRecord,
+) -> AppResult<(Option<ReadySession>, Option<Arc<ResourceCleanup>>)> {
+    let cleanup = match &mut record.state {
+        ResourceState::Closing(cleanup) => return Ok((None, Some(cleanup.clone()))),
+        ResourceState::Pending(operation) => operation.take().map(ResourceCleanup::pending),
+        ResourceState::Ready => {
+            let handle = take_ready_handle(state, session_id, record.kind)?.ok_or_else(|| {
                 AppError::other(
                     "session_registry_inconsistent",
-                    serde_json::json!({ "id": session_id }),
+                    serde_json::json!({"id": session_id}),
                 )
-            })?,
-        )
-    } else {
-        None
+            })?;
+            match handle.cleanup() {
+                Some(cleanup) => Some(ResourceCleanup::ready(cleanup)),
+                None => {
+                    record.state = ResourceState::Closed;
+                    return Ok((Some(handle), None));
+                }
+            }
+        }
+        ResourceState::Closed => None,
     };
-    record.phase = SessionPhase::Closed;
-    drop(registry);
-    if let Some(handle) = removed {
-        handle.close();
-    }
-    close_waiters_for_resource(state, session_id, expected_owner)?;
-    Ok(())
+    record.state = match &cleanup {
+        Some(cleanup) => ResourceState::Closing(cleanup.clone()),
+        None => ResourceState::Closed,
+    };
+    Ok((None, cleanup))
 }
 
 pub fn close_ssh_tree(
@@ -985,9 +1120,9 @@ pub fn close_ssh_tree(
     expected_owner: &SessionOwner,
 ) -> AppResult<()> {
     let mut registry = locked(&state.lifecycle_sessions)?;
-    let parent = registry.get(session_id).ok_or_else(|| {
-        AppError::not_found("session_not_found", serde_json::json!({ "id": session_id }))
-    })?;
+    let Some(parent) = registry.get(session_id) else {
+        return Ok(());
+    };
     if parent.kind != SessionKind::Ssh {
         return Err(AppError::config(
             "session_kind_mismatch",
@@ -1000,58 +1135,36 @@ pub fn close_ssh_tree(
             serde_json::json!({ "id": session_id }),
         ));
     }
-    if parent.phase == SessionPhase::Closed {
-        return Err(AppError::not_found(
-            "session_not_found",
-            serde_json::json!({ "id": session_id }),
-        ));
-    }
-
     let child_ids: Vec<String> = registry
         .iter()
         .filter(|(_, record)| {
-            record.parent.as_deref() == Some(session_id) && record.phase != SessionPhase::Closed
+            record.parent.as_deref() == Some(session_id) && record.phase() != SessionPhase::Closed
         })
         .map(|(id, _)| id.clone())
         .collect();
     let mut removed = Vec::new();
-    for child_id in child_ids {
-        let child = registry
-            .get_mut(&child_id)
-            .expect("child came from registry");
-        if child.kind != SessionKind::Sftp {
+    let mut cleanups = Vec::new();
+    for id in child_ids
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(session_id))
+    {
+        let record = registry.get_mut(id).expect("resource was validated");
+        if id != session_id && record.kind != SessionKind::Sftp {
             return Err(AppError::other(
                 "session_registry_inconsistent",
-                serde_json::json!({ "id": child_id }),
+                serde_json::json!({"id": id}),
             ));
         }
-        if child.phase == SessionPhase::Ready {
-            removed.push(
-                take_ready_handle(state, &child_id, SessionKind::Sftp)?.ok_or_else(|| {
-                    AppError::other(
-                        "session_registry_inconsistent",
-                        serde_json::json!({ "id": child_id }),
-                    )
-                })?,
-            );
-        }
-        child.phase = SessionPhase::Closed;
+        let (handle, cleanup) = begin_resource_close(state, id, record)?;
+        removed.extend(handle);
+        cleanups.extend(cleanup);
     }
-
-    let parent = registry.get_mut(session_id).expect("parent was validated");
-    if parent.phase == SessionPhase::Ready {
-        removed.push(
-            take_ready_handle(state, session_id, SessionKind::Ssh)?.ok_or_else(|| {
-                AppError::other(
-                    "session_registry_inconsistent",
-                    serde_json::json!({ "id": session_id }),
-                )
-            })?,
-        );
-    }
-    parent.phase = SessionPhase::Closed;
     drop(registry);
     close_removed(removed);
+    for cleanup in cleanups {
+        cleanup.start();
+    }
     close_waiters_for_resource(state, session_id, expected_owner)?;
     Ok(())
 }
@@ -1060,13 +1173,13 @@ fn remove_owned_resources(
     state: &AppState,
     owner: &SessionOwner,
     active_ids: Option<&HashSet<String>>,
-) -> AppResult<(usize, Vec<ReadySession>)> {
+) -> AppResult<(usize, Vec<ReadySession>, Vec<Arc<ResourceCleanup>>)> {
     let mut registry = locked(&state.lifecycle_sessions)?;
     let mut ids: Vec<String> = registry
         .iter()
         .filter(|(id, record)| {
             record.owner == *owner
-                && record.phase != SessionPhase::Closed
+                && record.phase() != SessionPhase::Closed
                 && active_ids.is_none_or(|active| !active.contains(*id))
         })
         .map(|(id, _)| id.clone())
@@ -1084,7 +1197,7 @@ fn remove_owned_resources(
         .iter()
         .filter(|(id, record)| {
             !ids.contains(id)
-                && record.phase != SessionPhase::Closed
+                && record.phase() != SessionPhase::Closed
                 && record
                     .parent
                     .as_ref()
@@ -1094,37 +1207,43 @@ fn remove_owned_resources(
         .collect();
     ids.extend(child_ids);
     let mut removed = Vec::new();
+    let mut cleanups = Vec::new();
     for id in &ids {
         let record = registry.get_mut(id).expect("id came from registry");
-        if record.phase == SessionPhase::Ready {
-            removed.push(take_ready_handle(state, id, record.kind)?.ok_or_else(|| {
-                AppError::other(
-                    "session_registry_inconsistent",
-                    serde_json::json!({ "id": id }),
-                )
-            })?);
-        }
-        record.phase = SessionPhase::Closed;
+        let (handle, cleanup) = begin_resource_close(state, id, record)?;
+        removed.extend(handle);
+        cleanups.extend(cleanup);
     }
-    Ok((ids.len(), removed))
+    Ok((ids.len(), removed, cleanups))
 }
 
-pub fn reconcile_owner(
+pub async fn reconcile_owner(
     state: &AppState,
     owner: &SessionOwner,
     active_ids: Vec<String>,
 ) -> AppResult<usize> {
     let active: HashSet<String> = active_ids.into_iter().collect();
-    let (closed, removed) = remove_owned_resources(state, owner, Some(&active))?;
+    let (closed, removed, cleanups) = remove_owned_resources(state, owner, Some(&active))?;
     close_removed(removed);
-    Ok(closed
-        + close_owned_ai(state, owner, Some(&active))?
-        + close_owned_waiters(state, owner, Some(&active))?)
+    // The application owns recovery even if the requesting WebView disappears.
+    // The caller still waits for release before opening replacement resources.
+    for cleanup in &cleanups {
+        cleanup.start();
+    }
+    let closed_ai = close_owned_ai(state, owner, Some(&active));
+    let closed_waiters = close_owned_waiters(state, owner, Some(&active));
+    futures_util::future::try_join_all(cleanups.iter().map(|cleanup| cleanup.finish())).await?;
+    Ok(closed + closed_ai? + closed_waiters?)
 }
 
 pub fn close_owner(state: &AppState, owner: &SessionOwner) {
     match remove_owned_resources(state, owner, None) {
-        Ok((_, removed)) => close_removed(removed),
+        Ok((_, removed, cleanups)) => {
+            close_removed(removed);
+            for cleanup in cleanups {
+                cleanup.start();
+            }
+        }
         Err(error) => log::warn!("close owner sessions failed: {error}"),
     }
     if let Err(error) = close_owned_ai(state, owner, None) {
@@ -1135,12 +1254,12 @@ pub fn close_owner(state: &AppState, owner: &SessionOwner) {
     }
 }
 
-pub fn reconcile_sessions_impl(
+pub async fn reconcile_sessions_impl(
     state: &AppState,
     owner: &SessionOwner,
     active_ids: Vec<String>,
 ) -> AppResult<usize> {
-    reconcile_owner(state, owner, active_ids)
+    reconcile_owner(state, owner, active_ids).await
 }
 
 pub fn close_window_sessions(state: &AppState, window_label: &str) {
@@ -1265,9 +1384,9 @@ mod tests {
             secret_store,
             lifecycle_sessions: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             pty_sessions: Mutex::new(HashMap::new()),
-            #[cfg(desktop)]
+            #[cfg(any(windows, macos, linux, ohos))]
             serial_sessions: Mutex::new(HashMap::new()),
             telnet_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
@@ -1513,8 +1632,542 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn session_close_is_idempotent_before_dispatch_and_after_failed_open() {
+        for kind in [SessionKind::Ssh, SessionKind::Telnet] {
+            let state = empty_state();
+            let owner = SessionOwner::Window("rssh-clone".into());
+            let id = "550e8400-e29b-41d4-a716-446655440130";
+
+            // The pane can disappear while its event listeners are being wired,
+            // before the opening command has reserved anything in the backend.
+            close_resource(&state, id, kind, &owner).unwrap();
+            close_resource_and_wait(&state, id, kind, &owner)
+                .await
+                .unwrap();
+            assert!(state.lifecycle_sessions.lock().unwrap().is_empty());
+
+            let reservation = reserve_resource(&state, id, kind, owner.clone()).unwrap();
+            // A rejected open (for example SSH TCP timeout) drops its reservation
+            // before the frontend requests its defensive cleanup.
+            drop(reservation);
+            close_resource(&state, id, kind, &owner).unwrap();
+            close_resource(&state, id, kind, &owner).unwrap();
+            close_resource_and_wait(&state, id, kind, &owner)
+                .await
+                .unwrap();
+            assert_eq!(
+                state.lifecycle_sessions.lock().unwrap()[id].phase(),
+                SessionPhase::Closed
+            );
+            assert!(
+                reserve_resource(&state, id, kind, owner).is_err(),
+                "closed identities must stay retired"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn idempotent_close_keeps_owner_and_kind_checks_for_closed_records() {
+        for kind in [SessionKind::Ssh, SessionKind::Telnet] {
+            let state = empty_state();
+            let owner = SessionOwner::Window("main".into());
+            let other = SessionOwner::Window("rssh-clone".into());
+            let id = "550e8400-e29b-41d4-a716-446655440131";
+            drop(reserve_resource(&state, id, kind, owner.clone()).unwrap());
+            assert_eq!(
+                close_resource(&state, id, kind, &other).unwrap_err().code(),
+                "session_owner_mismatch"
+            );
+            assert_eq!(
+                close_resource_and_wait(&state, id, kind, &other)
+                    .await
+                    .unwrap_err()
+                    .code(),
+                "session_owner_mismatch"
+            );
+            let other_kind = if kind == SessionKind::Ssh {
+                SessionKind::Telnet
+            } else {
+                SessionKind::Ssh
+            };
+            assert_eq!(
+                close_resource(&state, id, other_kind, &owner)
+                    .unwrap_err()
+                    .code(),
+                "session_kind_mismatch"
+            );
+            assert_eq!(
+                close_resource_and_wait(&state, id, other_kind, &owner)
+                    .await
+                    .unwrap_err()
+                    .code(),
+                "session_kind_mismatch"
+            );
+        }
+    }
+
     #[test]
-    fn reconcile_is_scoped_to_one_owner() {
+    fn failed_clone_cleanup_does_not_cancel_the_source_window_connection() {
+        let state = empty_state();
+        let source_owner = SessionOwner::Window("main".into());
+        let clone_owner = SessionOwner::Window("rssh-clone".into());
+        let source = reserve_resource(
+            &state,
+            "550e8400-e29b-41d4-a716-446655440132",
+            SessionKind::Ssh,
+            source_owner,
+        )
+        .unwrap();
+        let failed_id = "550e8400-e29b-41d4-a716-446655440133";
+        drop(reserve_resource(&state, failed_id, SessionKind::Ssh, clone_owner.clone()).unwrap());
+        close_resource(&state, failed_id, SessionKind::Ssh, &clone_owner).unwrap();
+        let retry = reserve_resource(
+            &state,
+            "550e8400-e29b-41d4-a716-446655440134",
+            SessionKind::Ssh,
+            clone_owner,
+        )
+        .unwrap();
+        source.ensure_pending().unwrap();
+        retry.ensure_pending().unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_cleanup_retains_the_resource_for_close_and_owner_retry() {
+        use std::sync::atomic::Ordering;
+
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440110";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let probe = Arc::new(AtomicCleanupProbe::default());
+        probe.failures.store(2, Ordering::SeqCst);
+        operation
+            .retain_cleanup(CleanupHandle::new(probe.clone()))
+            .unwrap();
+        operation.complete(probe.close()); // Native open failed and its first cleanup failed too.
+
+        let error = close_resource_and_wait(&state, id, SessionKind::Telnet, &owner)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "serial_op_failed");
+        assert_eq!(
+            state.lifecycle_sessions.lock().unwrap()[id].phase(),
+            SessionPhase::Closing
+        );
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+        assert!(!state.telnet_sessions.lock().unwrap().contains_key(id));
+        assert_eq!(
+            close_resource_and_wait(
+                &state,
+                id,
+                SessionKind::Telnet,
+                &SessionOwner::Window("other".into())
+            )
+            .await
+            .unwrap_err()
+            .code(),
+            "session_owner_mismatch"
+        );
+
+        let error = close_resource_and_wait(&state, id, SessionKind::Telnet, &owner)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "serial_op_failed");
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+        close_owner(&state, &owner);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.lifecycle_sessions.lock().unwrap()[id].phase() != SessionPhase::Closed {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 3);
+        drop(reservation);
+    }
+
+    #[tokio::test]
+    async fn aborted_open_is_cleaned_by_reservation_drop_without_another_close() {
+        use std::sync::atomic::Ordering;
+
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440111";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let probe = Arc::new(AtomicCleanupProbe::default());
+        operation
+            .retain_cleanup(CleanupHandle::new(probe.clone()))
+            .unwrap();
+        drop(operation);
+        drop(reservation);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.lifecycle_sessions.lock().unwrap()[id].phase() != SessionPhase::Closed {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_pending_closes_join_the_same_cleanup() {
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440109";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let first = close_resource_and_wait(&state, id, SessionKind::Telnet, &owner);
+        tokio::pin!(first);
+        tokio::select! {
+            biased;
+            result = &mut first => panic!("first close skipped cleanup: {result:?}"),
+            _ = operation.cancelled() => {},
+        }
+        let second = close_resource_and_wait(&state, id, SessionKind::Telnet, &owner);
+        tokio::pin!(second);
+        tokio::select! {
+            biased;
+            result = &mut second => panic!("second close skipped cleanup: {result:?}"),
+            _ = std::future::ready(()) => {},
+        }
+        operation.complete(Ok(()));
+        first.await.unwrap();
+        second.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_close_waits_for_cleanup_after_notifying_cancellation() {
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440101";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let close = close_resource_and_wait(&state, id, SessionKind::Telnet, &owner);
+        tokio::pin!(close);
+
+        tokio::select! {
+            biased;
+            result = &mut close => panic!("close completed before native cleanup: {result:?}"),
+            _ = operation.cancelled() => {},
+        }
+        assert_eq!(
+            reservation.ensure_pending().unwrap_err().code(),
+            "session_reservation_lost"
+        );
+        // The resource is Closing until cleanup acknowledges completion.
+        // A second poll must still wait for the operation guard.
+        tokio::select! {
+            biased;
+            result = &mut close => panic!("close skipped its cleanup barrier: {result:?}"),
+            _ = std::future::ready(()) => {},
+        }
+        operation.complete(Ok(()));
+        close.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_close_preserves_the_native_cleanup_error_code_and_parameters() {
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440107";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let close = close_resource_and_wait(&state, id, SessionKind::Telnet, &owner);
+        tokio::pin!(close);
+        tokio::select! {
+            biased;
+            result = &mut close => panic!("close completed before native cleanup: {result:?}"),
+            _ = operation.cancelled() => {},
+        }
+        let failure = AppError::pty(
+            "serial_op_failed",
+            serde_json::json!({ "err": "native close refused", "port": "uart-7" }),
+        );
+        let expected = serde_json::to_value(&failure).unwrap();
+        operation.complete(Err(failure));
+        let error = close.await.unwrap_err();
+        assert!(matches!(&error, AppError::Pty(_)));
+        assert_eq!(error.code(), "serial_op_failed");
+        assert_eq!(serde_json::to_value(&error).unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn aborted_open_before_resource_registration_needs_no_native_cleanup() {
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440108";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let close = close_resource_and_wait(&state, id, SessionKind::Telnet, &owner);
+        tokio::pin!(close);
+        tokio::select! {
+            biased;
+            result = &mut close => panic!("close completed before native cleanup: {result:?}"),
+            _ = operation.cancelled() => {},
+        }
+        // The contract requires registration before external effects. No
+        // registered resource means this task stopped before native dispatch.
+        drop(operation);
+        close.await.unwrap();
+        assert_eq!(
+            state.lifecycle_sessions.lock().unwrap()[id].phase(),
+            SessionPhase::Closed
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_close_validates_owner_and_kind_before_cancelling() {
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let other = SessionOwner::Window("other".into());
+        let id = "550e8400-e29b-41d4-a716-446655440102";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        assert_eq!(
+            close_resource_and_wait(&state, id, SessionKind::Telnet, &other)
+                .await
+                .unwrap_err()
+                .code(),
+            "session_owner_mismatch"
+        );
+        assert_eq!(
+            close_resource_and_wait(&state, id, SessionKind::Sftp, &owner)
+                .await
+                .unwrap_err()
+                .code(),
+            "session_kind_mismatch"
+        );
+        tokio::select! {
+            biased;
+            _ = operation.cancelled() => panic!("foreign owner or kind cancelled the operation"),
+            _ = std::future::ready(()) => {},
+        }
+        reservation.ensure_pending().unwrap();
+        operation.complete(Ok(()));
+    }
+
+    #[tokio::test]
+    async fn reconcile_waits_for_a_cancelled_open_to_release_its_resource() {
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440120";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let reconcile = reconcile_owner(&state, &owner, Vec::new());
+        tokio::pin!(reconcile);
+        tokio::select! {
+            biased;
+            result = &mut reconcile => panic!("reconcile passed the pending open: {result:?}"),
+            _ = operation.cancelled() => {},
+        }
+        assert_eq!(
+            state.lifecycle_sessions.lock().unwrap()[id].phase(),
+            SessionPhase::Closing
+        );
+        operation.complete(Ok(()));
+        assert_eq!(reconcile.await.unwrap(), 1);
+        assert_eq!(
+            state.lifecycle_sessions.lock().unwrap()[id].phase(),
+            SessionPhase::Closed
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_reconcile_reports_the_error_and_keeps_recovering_after_owner_disappears() {
+        use std::sync::atomic::Ordering;
+
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440121";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let probe = Arc::new(AtomicCleanupProbe::default());
+        probe.failures.store(3, Ordering::SeqCst);
+        operation
+            .retain_cleanup(CleanupHandle::new(probe.clone()))
+            .unwrap();
+        drop(operation);
+        assert_eq!(
+            reconcile_owner(&state, &owner, Vec::new())
+                .await
+                .unwrap_err()
+                .code(),
+            "serial_op_failed"
+        );
+        close_owner(&state, &owner);
+        drop(reservation);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while state.lifecycle_sessions.lock().unwrap()[id].phase() != SessionPhase::Closed {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn reconcile_reports_a_failed_close_while_another_open_still_awaits_cancellation() {
+        use std::sync::atomic::Ordering;
+
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let failing = reserve_resource(
+            &state,
+            "550e8400-e29b-41d4-a716-446655440122",
+            SessionKind::Telnet,
+            owner.clone(),
+        )
+        .unwrap();
+        let opening = reserve_resource(
+            &state,
+            "550e8400-e29b-41d4-a716-446655440123",
+            SessionKind::Telnet,
+            owner.clone(),
+        )
+        .unwrap();
+        let failure = failing.pending_operation().unwrap();
+        let pending = opening.pending_operation().unwrap();
+        let probe = Arc::new(AtomicCleanupProbe::default());
+        probe.failures.store(usize::MAX, Ordering::SeqCst);
+        failure
+            .retain_cleanup(CleanupHandle::new(probe.clone()))
+            .unwrap();
+        drop(failure);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            reconcile_owner(&state, &owner, Vec::new()),
+        )
+        .await;
+        // Settle both workers even when this assertion catches a regression.
+        probe.failures.store(0, Ordering::SeqCst);
+        pending.complete(Ok(()));
+        reconcile_owner(&state, &owner, Vec::new()).await.unwrap();
+        assert_eq!(
+            result
+                .expect("a pending permission must not hide another close failure")
+                .unwrap_err()
+                .code(),
+            "serial_op_failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_pending_close_path_notifies_the_registered_operation() {
+        for action in ["close", "owner", "drop"] {
+            let state = empty_state();
+            let owner = SessionOwner::Window("main".into());
+            let id = "550e8400-e29b-41d4-a716-446655440103";
+            let reservation =
+                reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+            let operation = reservation.pending_operation().unwrap();
+            let mut reservation = Some(reservation);
+            match action {
+                "close" => close_resource(&state, id, SessionKind::Telnet, &owner).unwrap(),
+                "owner" => close_owner(&state, &owner),
+                "drop" => drop(reservation.take()),
+                _ => unreachable!(),
+            }
+            tokio::select! {
+                biased;
+                _ = operation.cancelled() => {},
+                _ = std::future::ready(()) => panic!("{action} did not cancel its pending operation"),
+            }
+            operation.complete(Ok(()));
+        }
+    }
+
+    #[test]
+    fn cancelled_reservation_cannot_register_a_new_pending_operation() {
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440104";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        close_resource(&state, id, SessionKind::Telnet, &owner).unwrap();
+        let error = match reservation.pending_operation() {
+            Ok(_) => panic!("registered an operation after cancellation"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "session_reservation_lost");
+    }
+
+    #[tokio::test]
+    async fn late_activation_cannot_release_the_pending_close_barrier_before_cleanup() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440105";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let close = close_resource_and_wait(&state, id, SessionKind::Telnet, &owner);
+        tokio::pin!(close);
+        tokio::select! {
+            biased;
+            result = &mut close => panic!("close completed before pending open: {result:?}"),
+            _ = operation.cancelled() => {},
+        }
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let error = reservation
+            .activate(ReadySession::CleanupProbe {
+                kind: SessionKind::Telnet,
+                cleaned: cleaned.clone(),
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "session_reservation_lost");
+        assert!(cleaned.load(Ordering::SeqCst));
+        operation.complete(Ok(()));
+        close.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ready_close_takes_the_activated_handle_instead_of_waiting_on_old_open() {
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let id = "550e8400-e29b-41d4-a716-446655440106";
+        let reservation = reserve_resource(&state, id, SessionKind::Telnet, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (_, handle) = crate::terminal::telnet::open(
+            id.into(),
+            "127.0.0.1",
+            listener.local_addr().unwrap().port(),
+            80,
+            24,
+            "crlf",
+            Arc::new(|_, _| {}),
+        )
+        .unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        reservation.activate(ReadySession::Telnet(handle)).unwrap();
+        assert!(state.telnet_sessions.lock().unwrap().contains_key(id));
+
+        // Keep the old opening guard alive: Ready owns a handle now, so close
+        // must release that handle rather than waiting on the obsolete guard.
+        close_resource_and_wait(&state, id, SessionKind::Telnet, &owner)
+            .await
+            .unwrap();
+        assert!(!state.telnet_sessions.lock().unwrap().contains_key(id));
+        assert_eq!(
+            state
+                .lifecycle_sessions
+                .lock()
+                .unwrap()
+                .get(id)
+                .unwrap()
+                .phase(),
+            SessionPhase::Closed
+        );
+        operation.complete(Ok(()));
+    }
+
+    #[tokio::test]
+    async fn reconcile_is_scoped_to_one_owner() {
         let state = empty_state();
         let owner_a = SessionOwner::Window("a".into());
         let owner_b = SessionOwner::Window("b".into());
@@ -1533,7 +2186,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(reconcile_owner(&state, &owner_a, Vec::new()).unwrap(), 1);
+        assert_eq!(
+            reconcile_owner(&state, &owner_a, Vec::new()).await.unwrap(),
+            1
+        );
 
         assert_eq!(
             a.ensure_pending().unwrap_err().code(),
@@ -1630,7 +2286,7 @@ mod tests {
                 .unwrap()
                 .get("550e8400-e29b-41d4-a716-446655440021")
                 .unwrap()
-                .phase,
+                .phase(),
             SessionPhase::Closed
         );
     }
@@ -2166,7 +2822,7 @@ mod tests {
                 nonce: uuid::Uuid::new_v4(),
                 kind: SessionKind::Telnet,
                 owner: other.clone(),
-                phase: SessionPhase::Ready,
+                state: ResourceState::Ready,
                 parent: None,
             },
         );

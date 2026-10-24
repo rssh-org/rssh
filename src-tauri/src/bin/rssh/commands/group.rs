@@ -22,10 +22,20 @@ pub fn cmd_list_groups(conn: &CliCtx) -> AppResult<()> {
         return Ok(());
     }
 
-    println!("{:<24} {:<9} ORDER", "NAME", "COLOR");
+    println!("{:<24} {:<9} ORDER WAVES", "NAME", "COLOR");
     println!("{}", "-".repeat(42));
     for group in groups {
-        println!("{:<24} {:<9} {}", group.name, group.color, group.sort_order);
+        println!(
+            "{:<24} {:<9} {} {}",
+            group.name,
+            group.color,
+            group.sort_order,
+            if group.terminal_waves_enabled {
+                "on"
+            } else {
+                "off"
+            }
+        );
     }
     Ok(())
 }
@@ -34,11 +44,13 @@ pub fn cmd_add_group(conn: &CliCtx) -> AppResult<()> {
     let name = prompt("Name: ");
     let color = prompt_default("Color (#RRGGBB)", "#4A6CF7");
     let sort_order = prompt_default("Sort order", "0");
+    let terminal_waves_enabled = confirm("Show group-color terminal waves", false);
     let group = Group {
         id: uuid::Uuid::new_v4().to_string(),
         name,
         color,
         sort_order: parse_sort_order(&sort_order)?,
+        terminal_waves_enabled,
     };
     rssh_lib::db::group::insert(conn, &group)?;
     println!("Group '{}' created.", group.name);
@@ -56,6 +68,10 @@ pub fn cmd_edit_group(conn: &CliCtx, name: &str) -> AppResult<()> {
     updated.color = prompt_default("Color (#RRGGBB)", &current.color);
     let sort_order = prompt_default("Sort order", &current.sort_order.to_string());
     updated.sort_order = parse_sort_order(&sort_order)?;
+    updated.terminal_waves_enabled = confirm(
+        "Show group-color terminal waves",
+        current.terminal_waves_enabled,
+    );
 
     rssh_lib::db::group::update(conn, &updated)?;
     println!("Group '{}' updated.", updated.name);

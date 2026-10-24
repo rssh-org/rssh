@@ -12,7 +12,7 @@
 
 [![Release](https://img.shields.io/github/v/release/rssh-org/rssh)](https://github.com/rssh-org/rssh/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/rssh-org/rssh/total)](https://github.com/rssh-org/rssh/releases)
-![Platforms](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux%20·%20Android·%20iOS-555)
+![Platforms](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux%20·%20Android%20·%20iOS%20·%20HarmonyOS-555)
 [![License](https://img.shields.io/github/license/rssh-org/rssh)](LICENSE)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/rssh-org/rssh)
 
@@ -22,7 +22,7 @@
   <img src="https://rssh.ofcoder.com/img_ai_panel.png" alt="RSSH — the AI panel reads the terminal and proposes commands for approval" height="180">  
 </p>
 
-<p align="center"><b><a href="https://github.com/rssh-org/rssh/releases/latest">⬇️ Download latest</a></b> &nbsp;·&nbsp; <a href="https://github.com/rssh-org/docs/blob/main/article_en.md">Why RSSH?</a></p>
+<p align="center"><b><a href="#install">⬇️ Download latest</a></b> &nbsp;·&nbsp; <a href="https://github.com/rssh-org/docs/blob/main/article_en.md">Why RSSH?</a></p>
 
 ---
 
@@ -79,19 +79,21 @@ Keys stay in your local OS keyserver; connection configs are encrypted into your
 - **Multi-session Workbench (desktop)** -- live terminal previews and selection-aware broadcast across connected sessions
 - **SFTP** -- remote file browser and upload/download
 - **Port Forwarding** -- local, remote and dynamic (SOCKS5), named configs, real-time stats
-- **Local Terminal (desktop)** -- auto-detect zsh/bash/PowerShell
+- **Local Terminal (desktop)** -- open a local shell when supported by the system
 - **Session Recording** -- asciicast v2 format, variable-speed playback
 - **Connections & Credentials** -- SQLite storage, import from `~/.ssh/config`
 - **Security & Sync** -- secrets encrypted locally with ChaCha20-Poly1305, master key in the platform keychain when available, selective remote sync, encrypted backup to your own GitHub repo or WebDAV server
 - **Snippets** -- reusable command shortcuts (Cmd+E)
-- **Mobile** -- virtual keybar (Ctrl/Alt/arrows/Tab/Esc), safe area, stack navigation
+- **Responsive Layout** -- narrow windows show a virtual keybar (Ctrl/Alt/arrows/Tab/Esc) and compact navigation; the layout follows window width on every platform
 - **IDE Plugin** -- run RSSH inside JetBrains IDEs in a tool window (shared data dir)
+
+Local shells, serial controls, SSH agents and Docker/Kubernetes discovery depend on the host's available APIs, permissions and tools.
 
 ## Install
 
-Download from [Releases](https://github.com/rssh-org/rssh/releases):
+Download macOS, Windows, Linux and Android installers from [Releases](https://github.com/rssh-org/rssh/releases). iOS is available on the App Store; **HarmonyOS phone and PC editions are now available on Huawei AppGallery**.
 
-| Platform            | File                                     | Notes                        |
+| Platform            | File / Store                             | Notes                        |
 |---------------------|------------------------------------------|------------------------------|
 | macOS Apple Silicon | `rssh-{ver}-macos-aarch64.dmg`           |                              |
 | macOS Intel         | `rssh-{ver}-macos-x86_64.dmg`            |                              |
@@ -104,6 +106,10 @@ Download from [Releases](https://github.com/rssh-org/rssh/releases):
 | Android (arm64)     | `rssh-{ver}-android-arm64.apk`           | 64-bit phones, 3x smaller    |
 | Android             | `rssh-{ver}-android-universal.apk`       | All ABIs (emulators too)     |
 | iOS                 |                                          | AppStore, by [@paradoxie](https://github.com/paradoxie) |
+| HarmonyOS phone     | [Huawei AppGallery](https://appgallery.huawei.com/app/detail?id=com.rssh.app&channelId=SHARE&source=appshare) | Search **RSSH** on your phone |
+| HarmonyOS PC        | [Huawei AppGallery](https://appgallery.huawei.com/app/detail?id=com.rssh.app&channelId=SHARE&source=appshare) | Search **RSSH** on your PC    |
+
+The HarmonyOS phone and PC editions require HarmonyOS 5 or later and have separate installation packages. AppGallery delivers the package for your device; install and update directly from the store.
 
 ### IntelliJ / JetBrains plugin
 
@@ -124,7 +130,7 @@ title bar stops the embedded server.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). For HarmonyOS builds and signing, see [BUILD_OHOS.md](BUILD_OHOS.md).
 
 ## License
 

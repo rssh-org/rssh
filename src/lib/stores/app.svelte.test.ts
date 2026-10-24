@@ -9,9 +9,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 // module load (loadPos). Node has no localStorage, so give the import an
 // in-memory stub. Fresh per test to avoid cross-test leakage.
 //
-// app.svelte.ts also reads navigator.userAgent at module load (isMobile).
-// Node < 21 has no navigator global, so stub a desktop UA — the MRU tests
-// don't exercise mobile behavior, any string is fine.
+// Some imported platform helpers read navigator at module load. The MRU tests
+// do not exercise platform behavior, so a neutral value is sufficient.
 beforeEach(() => {
   invokeMock.mockReset();
   invokeMock.mockResolvedValue(null);
@@ -37,6 +36,44 @@ async function loadAppModule() {
 }
 
 const local = (id: string) => ({ id, type: "local" as const, label: id });
+
+describe("sidebar layout preferences", () => {
+  it.each([
+    "Mozilla/5.0 (Phone; OpenHarmony 5.0)",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15)",
+  ])("selects by width and preserves both preferences while resizing: %s", async (userAgent) => {
+    vi.stubGlobal("navigator", { userAgent });
+    const viewport = Object.assign(new EventTarget(), { innerWidth: 900 });
+    vi.stubGlobal("window", viewport);
+    localStorage.setItem("sidebar.position.desktop", "left");
+    localStorage.setItem("sidebar.position.mobile", "right");
+    const app = await loadAppModule();
+    const layout = await import("./layout.svelte.ts");
+    const stop = layout.observeViewport();
+    const write = vi.spyOn(localStorage, "setItem");
+    invokeMock.mockClear();
+
+    expect(app.sidebarPosition()).toBe("left");
+    viewport.innerWidth = 400;
+    viewport.dispatchEvent(new Event("resize"));
+    expect(app.sidebarPosition()).toBe("right");
+    expect(write).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    app.setSidebarPosition("top");
+    expect(localStorage.getItem("sidebar.position.mobile")).toBe("top");
+    expect(localStorage.getItem("sidebar.position.desktop")).toBe("left");
+    write.mockClear();
+
+    viewport.innerWidth = 900;
+    viewport.dispatchEvent(new Event("resize"));
+    expect(app.sidebarPosition()).toBe("left");
+    expect(write).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalled();
+    stop();
+    write.mockRestore();
+  });
+});
 
 describe("recent Home connections", () => {
   it("records every saved or discovered GUI connection through addTab", async () => {
@@ -456,11 +493,12 @@ describe("connectTelnetProfile", () => {
       echo_mode: "off",
       backspace: "del",
       login_script: "send super-secret",
-      group_id: null,
+      group_id: "prod",
     });
 
     expect(app.tabs()[1].meta?.echo_mode).toBe("off");
     expect(app.tabs()[1].meta?.profileId).toBe("telnet-1");
+    expect(app.tabs()[1].meta?.groupId).toBe("prod");
     expect(app.tabs()[1].meta?.login_script).toBeUndefined();
   });
 
@@ -482,8 +520,30 @@ describe("connectTelnetProfile", () => {
     app.connectTelnetProfile(legacy);
 
     expect(app.tabs()[1].meta?.echo_mode).toBe("on");
+    expect(app.tabs()[1].meta?.groupId).toBe("");
   });
 });
+
+describe("connectSerialProfile", () => {
+  it.each(["prod", null])("snapshots the connection group %s with the port", async (groupId) => {
+    const app = await loadAppModule();
+    const profile = {
+      id: "serial-1", name: "console", port: "/dev/ttyUSB0",
+      baud_rate: 115200, data_bits: 8, parity: "none", stop_bits: 1,
+      flow_control: "none", xany: false, input_newline: "crlf", output_newline: "raw",
+      local_echo: false, backspace: "del", slow_send: false, input_mode: "text",
+      output_mode: "text", login_script: "", group_id: groupId,
+    };
+
+    app.connectSerialProfile(profile);
+    profile.group_id = "test";
+    profile.port = "/dev/ttyUSB1";
+
+    expect(app.tabs()[1].meta?.groupId).toBe(groupId ?? "");
+    expect(app.tabs()[1].meta?.port).toBe("/dev/ttyUSB0");
+  });
+});
+
 describe("command block split mode", () => {
   it("shares one in-flight load across terminals", async () => {
     let resolveSetting!: (value: unknown) => void;
@@ -567,8 +627,83 @@ describe("command block line limit", () => {
   });
 });
 
-describe("mobile key modifier lock", () => {
-  // Two ways to arm a modifier on the mobile keybar:
+describe("terminal control routing", () => {
+  function controls() {
+    return {
+      getSelection: vi.fn(() => ""),
+      paste: vi.fn(),
+      writeControl: vi.fn(),
+      sendArrow: vi.fn(),
+      sendText: vi.fn(),
+      focus: vi.fn(),
+    };
+  }
+
+  it("closing a hidden pane leaves the active pane's control keys connected", async () => {
+    const app = await loadAppModule();
+    const a = controls();
+    const b = controls();
+    app.addTab(local("a"));
+    app.addTab(local("b"));
+    app.registerTerminalControls("a", a);
+    app.registerTerminalControls("b", b);
+    app.setActiveTab("a");
+
+    app.unregisterTerminalControls("b");
+    app.sendToTerminal("\x1b");
+    app.sendArrow("A", 5);
+
+    expect(a.writeControl).toHaveBeenCalledWith("\x1b");
+    expect(a.sendArrow).toHaveBeenCalledWith("A", 5);
+    expect(b.writeControl).not.toHaveBeenCalled();
+    expect(b.sendArrow).not.toHaveBeenCalled();
+  });
+
+  it("routes to the newly active pane without registering again and keeps raw controls separate from text", async () => {
+    const app = await loadAppModule();
+    const a = controls();
+    const b = controls();
+    app.addTab(local("a"));
+    app.addTab(local("b"));
+    app.registerTerminalControls("a", a);
+    app.registerTerminalControls("b", b);
+    app.setActiveTab("a");
+    app.sendToTerminal("\t");
+
+    app.setActiveTab("b");
+    app.sendToTerminal("\x1b");
+    app.sendArrow("D", 0);
+    app.sendTextToActiveTerminal("line\n");
+
+    expect(a.writeControl).toHaveBeenCalledExactlyOnceWith("\t");
+    expect(a.sendArrow).not.toHaveBeenCalled();
+    expect(b.writeControl).toHaveBeenCalledExactlyOnceWith("\x1b");
+    expect(b.sendArrow).toHaveBeenCalledExactlyOnceWith("D", 0);
+    expect(b.sendText).toHaveBeenCalledExactlyOnceWith("line\n");
+  });
+
+  it("sends nothing when the active route has no registered terminal", async () => {
+    const app = await loadAppModule();
+    const a = controls();
+    app.addTab(local("a"));
+    app.registerTerminalControls("a", a);
+    app.setActiveTab("home");
+    app.sendToTerminal("\x1b");
+    app.sendArrow("B", 0);
+    app.sendTextToActiveTerminal("line\n");
+
+    app.setActiveTab("a");
+    app.unregisterTerminalControls("a");
+    app.sendToTerminal("\x1b");
+    app.sendArrow("B", 0);
+    expect(a.writeControl).not.toHaveBeenCalled();
+    expect(a.sendArrow).not.toHaveBeenCalled();
+    expect(a.sendText).not.toHaveBeenCalled();
+  });
+});
+
+describe("terminal key modifier lock", () => {
+  // Two ways to arm a modifier on the compact keybar:
   //  - short tap (setCtrl): one-shot — arms for the NEXT key, then clears
   //  - long-press (lockCtrl): sticky — stays armed across many keys until tapped off
   // The distinction lives entirely in clearModifiers: it clears one-shot arms but
@@ -670,5 +805,34 @@ describe("soft keyboard gate", () => {
     app.toggleSoftKeyboard();
     expect(activeCalls).toBe(1);
     expect(app.softKeyboardOpen()).toBe(true);
+  });
+});
+
+describe("tab bar bulk close targets", () => {
+  it("uses visible tab order, preserves Home and handles empty sides", async () => {
+    const app = await loadAppModule();
+    for (const id of ["a", "b", "c"]) app.addTab(local(id));
+    expect(app.tabCloseTargets("b", "left")).toEqual(["a"]);
+    expect(app.tabCloseTargets("b", "right")).toEqual(["c"]);
+    expect(app.tabCloseTargets("b", "others")).toEqual(["a", "c"]);
+    expect(app.tabCloseTargets("a", "left")).toEqual([]);
+    expect(app.tabCloseTargets("c", "right")).toEqual([]);
+    expect(app.tabCloseTargets("home", "current")).toEqual([]);
+    expect(app.tabCloseTargets("missing", "all")).toEqual([]);
+    app.moveTab(3, 1);
+    expect(app.tabCloseTargets("b", "left")).toEqual(["c", "a"]);
+  });
+
+  it("closes whole split workspaces without treating hidden panes as tabs", async () => {
+    const app = await loadAppModule();
+    app.addTab(local("a"));
+    app.addPane("a", "right", local("pane"));
+    app.addTab(local("b"));
+    expect(app.tabCloseTargets("b", "left")).toEqual(["a"]);
+    for (const id of app.tabCloseTargets("b", "left")) app.closeTab(id);
+    expect(app.tabs().map(tab => tab.id)).toEqual(["home", "b"]);
+    for (const id of app.tabCloseTargets("b", "all")) app.closeTab(id);
+    expect(app.tabs().map(tab => tab.id)).toEqual(["home"]);
+    expect(app.activeTabId()).toBe("home");
   });
 });

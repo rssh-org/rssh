@@ -5,8 +5,10 @@
     import type {Profile, Tab, Group} from "../stores/app.svelte.ts";
     import * as app from "../stores/app.svelte.ts";
     import * as sessionRestore from "../stores/session-restore.svelte.ts";
+    import * as layout from "../stores/layout.svelte.ts";
     import * as updates from "../stores/updates.svelte.ts";
     import * as syncStatus from "../stores/sync.svelte.ts";
+    import * as serial from "../stores/serial.svelte.ts";
     import HomeScreen from "./HomeScreen.svelte";
     import TerminalSplitLayout from "./TerminalSplitLayout.svelte";
     import ForwardPane from "./ForwardPane.svelte";
@@ -34,6 +36,7 @@
     import {toast} from "../stores/toast.svelte.ts";
     import {readText as readClipboard, writeText as writeClipboard} from "../clipboard.ts";
     import {initializePrimarySessionWindow} from "./primary-session-window.ts";
+    import {isTouchContextMenu} from "../input.ts";
     import {
         defaultPanelWidth,
         fitPanelWidths,
@@ -69,12 +72,36 @@
     let tabCycling = $state(false);
     let profiles = $state<Profile[]>([]);
     let groups = $state<Group[]>([]);
-    let menuCtx = $state<{ x: number; y: number; tab: Tab } | null>(null);
+    let menuCtx = $state<{ x: number; y: number; tab: Tab; tabBar?: boolean } | null>(null);
     let pinnedMenu = $state<{ x: number; y: number } | null>(null);
     let pinned = $state(false);
     let pendingPaneSources = $state<Record<string, string>>({});
     const bypassStartupReconcile = !!window.__rssh_clone || !!window.__rssh_ai_handoff;
     let resourcePanesAllowed = $state(bypassStartupReconcile);
+    const startup = new AbortController();
+    let startupError = $state("");
+    let startupRunning = $state(false);
+    async function initializeResources() {
+        if (startupRunning || startup.signal.aborted) return;
+        startupRunning = true;
+        startupError = "";
+        try {
+            await initializePrimarySessionWindow({
+                signal: startup.signal,
+                canOpenLocal: app.capabilities().localPty,
+                reconcile: () => invoke("reconcile_sessions", { activeIds: [] }),
+                allowResourcePanes: () => { resourcePanesAllowed = true; },
+                restoreSessions: () => sessionRestore.restore(startup.signal),
+                loadAutoOpenLocal: async () =>
+                    await invoke<string | null>("get_setting", { key: "open_local_on_startup" }) === "true",
+                openLocal: addLocalTab,
+            });
+        } catch (error) {
+            if (!startup.signal.aborted) startupError = errMsg(error);
+        } finally {
+            startupRunning = false;
+        }
+    }
     let navigationLoad = 0;
     $effect(() => {
         if (bypassStartupReconcile || !sessionRestore.ready() || !sessionRestore.enabled()) return;
@@ -105,6 +132,7 @@
     }
 
     function togglePin() {
+        if (!app.capabilities().windowPin) return;
         pinned = !pinned;
         getCurrentWindow().setAlwaysOnTop(pinned).catch(e => {
             console.error("setAlwaysOnTop failed:", e);
@@ -118,20 +146,26 @@
 
     /* 关闭 tab 的唯一入口：所有关闭路径（快捷键 / 右键菜单 / tab 上的 × 按钮）都走这里。
        开了二次确认就先弹窗存住待关的 tab，否则直接关。home tab 不可关，跟 closeTab 一致。 */
-    let closingTab = $state<Tab | null>(null);
-    function requestCloseTab(id: string) {
-        const tab = app.tabs().find(t => t.id === id);
-        if (!tab || tab.type === "home") return;
-        if (app.confirmCloseTab()) { closingTab = tab; return; }
-        delete pendingPaneSources[id];
-        app.closeTab(id);
-    }
-    function confirmCloseTab() {
-        if (closingTab) {
-            delete pendingPaneSources[closingTab.id];
-            app.closeTab(closingTab.id);
+    let closingTabs = $state<Tab[]>([]);
+    function closeRequestedTabs(tabs: Tab[]) {
+        const ids = new Set(tabs.map(tab => tab.id));
+        for (const tab of app.tabs()) {
+            if (ids.has(tab.id) || (tab.workspaceId && ids.has(tab.workspaceId))) {
+                delete pendingPaneSources[tab.id];
+            }
         }
-        closingTab = null;
+        for (const tab of tabs) app.closeTab(tab.id);
+    }
+    function requestCloseTabs(ids: string[]) {
+        const tabs = app.tabs().filter(tab => ids.includes(tab.id) && tab.type !== "home");
+        if (!tabs.length) return;
+        if (app.confirmCloseTab()) { closingTabs = tabs; return; }
+        closeRequestedTabs(tabs);
+    }
+    function requestCloseTab(id: string) { requestCloseTabs([id]); }
+    function confirmCloseTab() {
+        closeRequestedTabs(closingTabs);
+        closingTabs = [];
     }
 
     /* ── 全局快捷键声明表 ── */
@@ -167,7 +201,7 @@
                 handler: () => {
                     const tab = app.activeTab();
                     // serial excluded: the port is exclusive, a second window would fail.
-                    if (!tab || !canOpenTabInNewWindow(tab) || app.isMobile) return false;
+                    if (!tab || !canOpenTabInNewWindow(tab)) return false;
                     openInNewWindow(tab);
                 },
             },
@@ -233,21 +267,11 @@
     }
 
     onMount(() => {
-        const startup = new AbortController();
         keymap.init();
         // Crash recovery must settle before any pane can create a replacement
         // backend resource. Otherwise reconcile([]) can race that new session.
         if (!bypassStartupReconcile) {
-            void initializePrimarySessionWindow({
-                signal: startup.signal,
-                canOpenLocal: !app.isMobile,
-                reconcile: () => invoke("reconcile_sessions", { activeIds: [] }),
-                allowResourcePanes: () => { resourcePanesAllowed = true; },
-                restoreSessions: () => sessionRestore.restore(startup.signal),
-                loadAutoOpenLocal: async () =>
-                    await invoke<string | null>("get_setting", { key: "open_local_on_startup" }) === "true",
-                openLocal: addLocalTab,
-            });
+            void initializeResources();
         } else {
             void sessionRestore.initializeSecondaryWindow();
         }
@@ -257,7 +281,9 @@
         // Plugin registry: manifest rows + on-disk root (for iframe entry URLs).
         // A failed load (e.g. plain-browser dev without the shim server) only
         // means no plugins — never block startup on it.
-        void plugins.load().catch((e) => console.warn("[plugins] registry load failed:", e));
+        if (app.capabilities().plugins) {
+            void plugins.load().catch((e) => console.warn("[plugins] registry load failed:", e));
+        }
 
         const detachKeydown = attachShortcuts(shortcutsTable());
         const detachKeyup = attachKeyup((e) => {
@@ -287,6 +313,7 @@
         const data = window.__rssh_ai_handoff;
         if (!data) return;
         delete window.__rssh_ai_handoff;
+        if (!app.capabilities().localPty) return;
         let payload: { local_path: string; task: string };
         try {
             payload = JSON.parse(data);
@@ -353,6 +380,7 @@
     }
 
     function openInNewWindow(tab: Tab) {
+        if (!canOpenTabInNewWindow(tab)) return;
         invoke("open_tab_in_new_window", {
             clone: JSON.stringify({type: tab.type, label: tab.label, meta: tab.meta}),
         }).catch(e => console.error("open_tab_in_new_window failed:", e));
@@ -379,17 +407,20 @@
 
 
     $effect(() => {
+        if (!app.capabilities().windowControls) return;
         const workspace = app.workspaceTabs().find((tab) => tab.id === app.activeWorkspaceId())
             ?? app.tabs().find((tab) => tab.id === "home");
         const pane = app.tabs().find((tab) => tab.id === app.activePaneId());
+        let title = "RSSH";
         if (app.settingsActive()) {
-            getCurrentWindow().setTitle("Settings");
+            title = "Settings";
         } else if (workspace || pane) {
             const terminalTitle = app.terminalTitle(app.activePaneId());
-            getCurrentWindow().setTitle(terminalTitle || (workspace && app.tabLabel(workspace)) || (pane && app.tabLabel(pane)) || "RSSH");
-        } else {
-            getCurrentWindow().setTitle("RSSH");
+            title = terminalTitle || (workspace && app.tabLabel(workspace)) || (pane && app.tabLabel(pane)) || "RSSH";
         }
+        void invoke("set_app_window_title", { title }).catch((error) => {
+            console.warn("Failed to update window title", error);
+        });
         // The Transfers popover does not touch the window title — it is an
         // overlay, not a route.
     });
@@ -502,8 +533,7 @@
     let aiPanelWidth = $derived(ai.panelWidth(aiTabId));
     let sftpPanelWidth = $derived(app.sftpPanelWidthForTab(app.activePaneId()));
     let contentEl = $state<HTMLDivElement | null>(null);
-    let contentWidth = $state(window.innerWidth);
-    let viewportWidth = $state(window.innerWidth);
+    let contentWidth = $state(layout.viewportWidth());
     let panelFitPriorityByTab = $state<Record<string, PanelFitPriority>>({});
 
     $effect(() => {
@@ -511,7 +541,6 @@
         if (!el) return;
         const sync = () => {
             contentWidth = el.getBoundingClientRect().width;
-            viewportWidth = window.innerWidth;
         };
         sync();
         const observer = new ResizeObserver(sync);
@@ -531,7 +560,7 @@
         containerWidth: contentWidth,
         mainMinWidth: mainPanelMinWidth,
         panelMinWidth,
-        defaultWidth: defaultPanelWidth(viewportWidth),
+        defaultWidth: defaultPanelWidth(layout.viewportWidth()),
         pluginVisible: pluginSideVisible,
         pluginWidth: plugins.sideWidth(app.activePaneId()),
         aiVisible,
@@ -541,7 +570,7 @@
         containerWidth: pluginSideFitted.remainingContainerWidth,
         mainMinWidth: mainPanelMinWidth,
         panelMinWidth,
-        defaultWidth: defaultPanelWidth(viewportWidth),
+        defaultWidth: defaultPanelWidth(layout.viewportWidth()),
         aiVisible,
         sftpVisible,
         aiWidth: aiPanelWidth,
@@ -707,7 +736,8 @@
     let navSections = $derived<{ header: NavItem[]; middle: NavItem[]; footer: NavItem[] }>({
         header: [
             {kind: "tab" as const, tab: {id: "home", type: "home", label: app.tabLabel(app.tabs().find((tab) => tab.id === "home")!)} },
-            ...(app.isMobile ? [] : [{kind: "new-tab" as const}, {kind: "new-edit" as const}]),
+            ...(app.capabilities().localPty ? [{kind: "new-tab" as const}] : []),
+            {kind: "new-edit" as const},
             // Horizontal strip would burst sideways with N pinned profiles — collapse
             // them into one star button that pops a menu. Vertical sidebar keeps the list.
             ...(isHorizontal
@@ -716,9 +746,8 @@
         ],
         middle: app.workspaceTabs().map(t => ({kind: "tab" as const, tab: t})),
         footer: [
-            // Downloads (transfer queue) is now reachable on mobile too — SFTP
-            // single-file transfer runs through it. pin-window stays desktop-only.
-            ...(app.isMobile ? [{kind: "downloads" as const}] : [{kind: "pin-window" as const}, {kind: "downloads" as const}]),
+            ...(app.capabilities().windowPin ? [{kind: "pin-window" as const}] : []),
+            {kind: "downloads" as const},
             {kind: "settings" as const},
         ],
     });
@@ -828,6 +857,7 @@
     }
 
     function addLocalTab() {
+        if (!app.capabilities().localPty) return;
         const id = `local:${crypto.randomUUID()}`;
         app.addTab({id, type: "local", label: "Local"});
         closeDrawer();
@@ -843,6 +873,51 @@
     function openCtxMenu(e: MouseEvent, tab: Tab) {
         e.preventDefault();
         menuCtx = {x: e.clientX, y: e.clientY, tab};
+        if (tab.type === "serial") void loadSerialCapabilities();
+    }
+
+    async function loadSerialCapabilities() {
+        await serial.load();
+        const state = serial.state();
+        if (state.kind === "error") {
+            toast.error(t("serial.capabilities_failed", {error: errMsg(state.error)}));
+        }
+    }
+
+    function openTabBarMenu(e: MouseEvent, tab: Tab) {
+        e.preventDefault();
+        e.stopPropagation();
+        menuCtx = { x: e.clientX, y: e.clientY, tab, tabBar: true };
+    }
+
+    function buildTabBarMenu(tab: Tab): CtxMenuItem[][] {
+        const closeItem = (scope: app.TabCloseScope, label: string): CtxMenuItem => ({
+            label,
+            shortcut: scope === "current" ? keymap.format("tab.close") : undefined,
+            disabled: app.tabCloseTargets(tab.id, scope).length === 0,
+            onClick: () => requestCloseTabs(app.tabCloseTargets(tab.id, scope)),
+        });
+        const tabActions: CtxMenuItem[] = [{
+            label: t("tab.context.clone"),
+            shortcut: tab.type === "home" ? undefined : keymap.format("tab.clone"),
+            onClick: () => cloneTab(tab),
+            disabled: tab.type === "home",
+        }];
+        if (canOpenTabInNewWindow(tab)) {
+            tabActions.push({
+                label: t("tab.context.open_new_window"),
+                shortcut: keymap.format("tab.openNewWindow"),
+                onClick: () => openInNewWindow(tab),
+            });
+        }
+        return [
+            [closeItem("current", t("tab.context.close")),
+             closeItem("right", t("tab.context.close_right")),
+             closeItem("left", t("tab.context.close_left")),
+             closeItem("others", t("tab.context.close_others")),
+             closeItem("all", t("tab.context.close_all"))],
+            tabActions,
+        ];
     }
 
     /** Detect 10-digit Unix seconds or 13-digit Unix ms timestamp. */
@@ -872,12 +947,16 @@
     }
 
     function canOpenTabInNewWindow(tab: Tab): boolean {
-        return app.isTerminalTabType(tab.type) && tab.type !== "serial";
+        return app.capabilities().multiWindow && app.isTerminalTabType(tab.type) && tab.type !== "serial";
+    }
+
+    function canSplitTab(tab: Tab): boolean {
+        return !layout.compact() && app.isTerminalTabType(tab.type) && tab.type !== "serial";
     }
     type SplitSide = "left" | "right" | "top" | "bottom";
 
     function splitCurrentPane(tab: Tab, side: SplitSide) {
-        if (!app.isTerminalTabType(tab.type) || tab.type === "serial") return;
+        if (!canSplitTab(tab)) return;
         const workspaceId = tab.workspaceId ?? tab.id;
         if (!app.isTerminalWorkspace(workspaceId)) return;
         if (tab.paneOf) app.setActivePane(tab.id);
@@ -989,51 +1068,46 @@
                     onClick: () => { app.setActivePane(tab.id); app.openSnippetPicker(); },
                 },
             ];
-            // Tab context menu is a desktop right-click affordance; on mobile
-            // SFTP opens from the keybar instead.
-            if (!app.isMobile) {
-                items.push({
-                    label: t("tab.context.sftp"),
-                    shortcut: keymap.format("term.sftp"),
-                    disabled: !isSsh,
-                    onClick: () => { app.setActivePane(tab.id); app.openSftp(); },
-                });
-            }
+            items.push({
+                label: t("tab.context.sftp"),
+                shortcut: keymap.format("term.sftp"),
+                disabled: !isSsh,
+                onClick: () => { app.setActivePane(tab.id); app.openSftp(); },
+            });
             sections.push(items);
         }
 
-        // Serial control lines: DTR/RTS assert/deassert + break. Runtime ops on
-        // the open port (MCU reset, bootloader entry, break-to-debugger). Greyed
-        // out until the session exists (briefly during connect / after unplug).
+        // Control lines require both an open session and native signal support.
         if (tab.type === "serial") {
             const sid = app.sessionIdForTab(tab.id);
+            const capabilities = serial.capabilities();
+            const state = serial.state();
+            const disabled = !sid || !capabilities?.signals;
             const ctl = (cmd: string, extra: Record<string, unknown> = {}) => () =>
                 void invoke(cmd, {sessionId: sid, ...extra}).catch((e) => toast.error(errMsg(e)));
+            const status: CtxMenuItem[] = [];
+            if (state.kind === "error") {
+                status.push({label: t("serial.capabilities_retry"), onClick: () => void loadSerialCapabilities()});
+            } else if (!capabilities) {
+                status.push({label: t("serial.capabilities_loading"), disabled: true, onClick: () => {}});
+            } else if (!capabilities.signals) {
+                status.push({label: t("serial.signals_unsupported"), disabled: true, onClick: () => {}});
+            }
             sections.push([
                 {
                     label: t("serial.ctl"),
-                    disabled: !sid,
                     onClick: () => {},
                     submenu: [
-                        {label: t("serial.ctl.dtr_assert"), disabled: !sid, onClick: ctl("serial_set_dtr", {level: true})},
-                        {label: t("serial.ctl.dtr_deassert"), disabled: !sid, onClick: ctl("serial_set_dtr", {level: false})},
-                        {label: t("serial.ctl.rts_assert"), disabled: !sid, onClick: ctl("serial_set_rts", {level: true})},
-                        {label: t("serial.ctl.rts_deassert"), disabled: !sid, onClick: ctl("serial_set_rts", {level: false})},
-                        {label: t("serial.ctl.break"), disabled: !sid, onClick: ctl("serial_send_break")},
+                        ...status,
+                        {label: t("serial.ctl.dtr_assert"), disabled, onClick: ctl("serial_set_dtr", {level: true})},
+                        {label: t("serial.ctl.dtr_deassert"), disabled, onClick: ctl("serial_set_dtr", {level: false})},
+                        {label: t("serial.ctl.rts_assert"), disabled, onClick: ctl("serial_set_rts", {level: true})},
+                        {label: t("serial.ctl.rts_deassert"), disabled, onClick: ctl("serial_set_rts", {level: false})},
+                        {label: t("serial.ctl.break"), disabled, onClick: ctl("serial_send_break")},
                     ],
                 },
             ]);
         }
-
-        sections.push([
-            {
-                label: t("tab.context.clone"),
-                shortcut: tab.type === "home" ? undefined : keymap.format("tab.clone"),
-                disabled: tab.type === "home",
-                onClick: () => cloneTab(tab),
-            },
-            {label: t("tab.context.close"), shortcut: keymap.format("tab.close"), onClick: () => requestCloseTab(tab.id)},
-        ]);
 
         // AI 排障入口（ssh/local/serial/telnet tab 才有，且需要已经连上 = 有 sessionId）
         if (app.isAiCapableTabType(tab.type)) {
@@ -1048,13 +1122,9 @@
             ]);
         }
 
-        // Split panes + multi-window: one desktop-only terminal section.
-        // canOpenTabInNewWindow already excludes serial (panes would fight the
-        // exclusive port), so a single guard covers both items. Split follows
-        // the old directional open-new-window submenu idiom: the parent click
-        // runs the common default (split right, VS Code/iTerm style), the four
-        // directions live one hover away.
-        if (canOpenTabInNewWindow(tab) && !app.isMobile) {
+        // Splitting is a frontend layout operation and does not require
+        // native multi-window support. Serial ports remain exclusive.
+        if (canSplitTab(tab)) {
             sections.push([
                 {
                     label: t("tab.context.split"),
@@ -1066,25 +1136,14 @@
                         {label: t("tab.context.split.right"), onClick: () => splitCurrentPane(tab, "right")},
                     ],
                 },
-                {
-                    label: t("tab.context.open_new_window"),
-                    shortcut: keymap.format("tab.openNewWindow"),
-                    onClick: () => openInNewWindow(tab),
-                },
             ]);
         }
-
-
         return sections;
     }
     function openPaneContextMenu(e: MouseEvent, tabId: string) {
-        if (app.isMobile) return;
+        if (isTouchContextMenu(e)) return;
         const tab = app.tabs().find((candidate) => candidate.id === tabId);
         if (tab) openCtxMenu(e, tab);
-    }
-    function openRouteContextMenu(e: MouseEvent, tab: Tab | undefined) {
-        if (app.isMobile || !tab) return;
-        openCtxMenu(e, tab);
     }
 
     function handleInitialConnectionFailure(tabId: string, error: unknown): boolean {
@@ -1212,7 +1271,7 @@
     <TabContextMenu
         x={menuCtx.x}
         y={menuCtx.y}
-        sections={buildMenu(menuCtx.tab)}
+        sections={menuCtx.tabBar ? buildTabBarMenu(menuCtx.tab) : buildMenu(menuCtx.tab)}
         onClose={closeCtxMenu}
     />
 {/if}
@@ -1274,6 +1333,7 @@
                         groupColor={tab ? tabGroupColor(tab) : null}
                         showClose={tab !== null}
                         onActivate={(e) => activateNavItem(item, e)}
+                        onContextMenu={tab ? (e) => openTabBarMenu(e, tab) : undefined}
                         onClose={tab ? () => requestCloseTab(tab.id) : undefined}
                         onDragStart={tab ? (e) => handleDragStart(e, tab.id) : undefined}
                         onDragOver={tab ? (e) => handleDragOver(e, tab.id) : undefined}
@@ -1314,6 +1374,7 @@
             isFocusedItem={isFocusedItem}
             groupColorOf={tabGroupColor}
             onActivate={activateNavItem}
+            onContextMenu={openTabBarMenu}
             onClose={(id) => requestCloseTab(id)}
             onDragStart={handleDragStart}
             onDragOver={handleDragOver}
@@ -1357,6 +1418,7 @@
                     activeTabId={app.activePaneId()}
                     onResizeStart={startPluginSideResize}
                     onResetWidth={resetPluginSideWidth}
+                    onClose={() => plugins.closeSide(app.activePaneId())}
                 />
             {/if}
         {:else if kind === "ai"}
@@ -1408,6 +1470,14 @@
             {@render sideAside(kind, "left")}
         {/each}
         <div class="main-area">
+            {#if startupError}
+                <div class="startup-error" role="alert">
+                    <span>{t("session.reconcile_failed")}: {startupError}</span>
+                    <button class="btn" onclick={initializeResources} disabled={startupRunning}>
+                        {t("common.retry")}
+                    </button>
+                </div>
+            {/if}
             <!-- 插件横条区：终端上/下边缘，per-tab keep-alive，无匹配插件不占位 -->
             {#if resourcePanesAllowed && pluginHostOk && pluginStripPlugins.length > 0 && pluginStripTabs.length > 0 && pluginStripPos === "top"}
                 <PluginStrip
@@ -1416,6 +1486,7 @@
                     plugins={pluginStripPlugins}
                     tabs={pluginStripTabs}
                     activeTabId={app.activePaneId()}
+                    onClose={() => plugins.closeStrip(app.activePaneId())}
                 />
             {/if}
             <div class="terminal-region">
@@ -1447,7 +1518,6 @@
                         class="pane"
                         class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId()}
                         role="presentation"
-                        oncontextmenu={(event) => openRouteContextMenu(event, tab)}
                     >
                         {#await loadEditPane() then { default: EditPane }}
                             <EditPane tabId={tab.id} active={tab.id === app.activeWorkspaceId() && !app.settingsActive()} />
@@ -1462,7 +1532,6 @@
                         class="pane"
                         class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId() && resourcePanesAllowed}
                         role="presentation"
-                        oncontextmenu={(event) => openRouteContextMenu(event, tab)}
                     >
                         {#if resourcePanesAllowed}
                             <ForwardPane tabId={tab.id} meta={tab.meta ?? {}}/>
@@ -1475,7 +1544,7 @@
                         <SettingsLayout/>
                     </div>
                 {:else if activeRouteTab?.type === "home"}
-                    <div class="pane visible" role="presentation" oncontextmenu={(event) => openRouteContextMenu(event, activeRouteTab)}>
+                    <div class="pane visible" role="presentation">
                         <HomeScreen/>
                     </div>
                 {/if}
@@ -1487,6 +1556,7 @@
                     plugins={pluginStripPlugins}
                     tabs={pluginStripTabs}
                     activeTabId={app.activePaneId()}
+                    onClose={() => plugins.closeStrip(app.activePaneId())}
                 />
             {/if}
         </div>
@@ -1503,14 +1573,14 @@
     {/if}
 
     <!-- 关闭 tab 二次确认。Tauri webview 不支持原生 confirm()，沿用 ChatPanel/AiSettings
-         同款自定义 modal。只有开启「关闭标签页前确认」后 requestCloseTab 才会挂起 closingTab。 -->
-    {#if closingTab}
-        <Modal onClose={() => (closingTab = null)} class="stack"
+         同款自定义 modal。只有开启「关闭标签页前确认」后 关闭请求才会挂起 closingTabs。 -->
+    {#if closingTabs.length}
+        <Modal onClose={() => (closingTabs = [])} class="stack"
                aria-labelledby="close-tab-title" aria-describedby="close-tab-body">
             <h3 id="close-tab-title" class="dialog-title">{t("tab.close_confirm_title")}</h3>
-            <div id="close-tab-body" class="dialog-body">{t("tab.close_confirm_body", { label: closingTab.label })}</div>
+            <div id="close-tab-body" class="dialog-body">{closingTabs.length === 1 ? t("tab.close_confirm_body", { label: closingTabs[0].label }) : t("tab.close_many_confirm_body", { count: closingTabs.length })}</div>
             <div class="modal-actions">
-                <button class="btn btn-sm" onclick={() => (closingTab = null)}>{t("common.cancel")}</button>
+                <button class="btn btn-sm" onclick={() => (closingTabs = [])}>{t("common.cancel")}</button>
                 <button class="btn btn-sm btn-primary" onclick={confirmCloseTab}>{t("tab.context.close")}</button>
             </div>
         </Modal>
@@ -1652,6 +1722,17 @@
     /* 终端区——所有 .pane 挂在 .terminal-region（绝对定位由它提供 position:
        relative），插件横条区作为兄弟节点贴其上/下边缘。min-width: 0 让 flex
        能把它压到 0（窄屏 AI 接管时）。 */
+    .startup-error {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px;
+        flex-wrap: wrap;
+        overflow-wrap: anywhere;
+        color: var(--text);
+        background: var(--bg);
+        border-bottom: 1px solid var(--divider);
+    }
     .main-area {
         display: flex;
         flex-direction: column;

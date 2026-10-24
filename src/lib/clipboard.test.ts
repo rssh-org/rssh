@@ -1,59 +1,57 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const invokeMock = vi.fn();
-
+const { invokeMock, host } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
+  host: { nativeClipboard: true },
+}));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("./stores/runtime.svelte.ts", () => ({ capabilities: () => host }));
 
-beforeEach(() => {
+beforeEach(() => { host.nativeClipboard = true; });
+afterEach(() => {
   invokeMock.mockReset();
   vi.unstubAllGlobals();
 });
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
-
 describe("text clipboard", () => {
-  it("uses the desktop commands and preserves failures", async () => {
-    vi.stubGlobal("navigator", { userAgent: "Macintosh" });
-    invokeMock.mockRejectedValue(new Error("clipboard unavailable"));
-    vi.resetModules();
+  it.each(["Macintosh", "Android 15", "iPhone", "OpenHarmony 5.0"])(
+    "uses the native adapter when the host provides it, regardless of %s", async (userAgent) => {
+      const browserRead = vi.fn();
+      const browserWrite = vi.fn();
+      vi.stubGlobal("navigator", { userAgent, clipboard: { readText: browserRead, writeText: browserWrite } });
+      invokeMock.mockImplementation(async (command) => command === "clipboard_read" ? "clipboard text" : undefined);
+      const clipboard = await import("./clipboard.ts");
+      await expect(clipboard.readText()).resolves.toBe("clipboard text");
+      await clipboard.writeText("hello");
+      expect(invokeMock).toHaveBeenCalledWith("clipboard_read");
+      expect(invokeMock).toHaveBeenCalledWith("clipboard_write", { text: "hello" });
+      expect(browserRead).not.toHaveBeenCalled();
+      expect(browserWrite).not.toHaveBeenCalled();
+    },
+  );
+
+  it("preserves the WebView/browser clipboard path on hosts without a native adapter", async () => {
+    host.nativeClipboard = false;
+    const readText = vi.fn().mockResolvedValue("browser text");
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { userAgent: "Macintosh", clipboard: { readText, writeText } });
     const clipboard = await import("./clipboard.ts");
-
-    await expect(clipboard.readText()).rejects.toThrow("clipboard unavailable");
-    await expect(clipboard.writeText("hello")).rejects.toThrow("clipboard unavailable");
-    expect(invokeMock).toHaveBeenCalledWith("clipboard_read");
-    expect(invokeMock).toHaveBeenCalledWith("clipboard_write", { text: "hello" });
-  });
-
-  it("uses the browser clipboard on mobile", async () => {
-    const readText = vi.fn(async () => "mobile text");
-    const writeText = vi.fn(async () => undefined);
-    vi.stubGlobal("navigator", {
-      userAgent: "Mozilla/5.0 (Linux; Android 15)",
-      clipboard: { readText, writeText },
-    });
-    vi.resetModules();
-    const clipboard = await import("./clipboard.ts");
-
-    await expect(clipboard.readText()).resolves.toBe("mobile text");
-    await expect(clipboard.writeText("hello")).resolves.toBeUndefined();
+    await expect(clipboard.readText()).resolves.toBe("browser text");
+    await clipboard.writeText("hello");
     expect(writeText).toHaveBeenCalledWith("hello");
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it("turns synchronous browser clipboard failures into rejected promises", async () => {
-    vi.stubGlobal("navigator", {
-      userAgent: "Mozilla/5.0 (iPhone)",
-      clipboard: {
-        readText: () => { throw new Error("read denied"); },
-        writeText: () => { throw new Error("write denied"); },
-      },
-    });
-    vi.resetModules();
+  it.each([true, false])("preserves failures for nativeClipboard=%s", async (nativeClipboard) => {
+    host.nativeClipboard = nativeClipboard;
+    const failure = new Error("clipboard unavailable");
+    invokeMock.mockRejectedValue(failure);
+    vi.stubGlobal("navigator", { clipboard: {
+      readText: vi.fn().mockRejectedValue(failure),
+      writeText: vi.fn().mockRejectedValue(failure),
+    } });
     const clipboard = await import("./clipboard.ts");
-
-    await expect(clipboard.readText()).rejects.toThrow("read denied");
-    await expect(clipboard.writeText("hello")).rejects.toThrow("write denied");
+    await expect(clipboard.readText()).rejects.toThrow("clipboard unavailable");
+    await expect(clipboard.writeText("hello")).rejects.toThrow("clipboard unavailable");
   });
 });

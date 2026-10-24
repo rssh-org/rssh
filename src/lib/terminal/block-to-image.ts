@@ -32,6 +32,8 @@ import {
 } from "./command-block-redaction";
 
 export interface RenderOptions {
+  /** 导出使用的主题，默认沿用终端当前主题。 */
+  theme?: ITheme;
   /** 彩色竖线宽度 px。默认 4。 */
   barWidth?: number;
   /** 竖线和文字之间的间距 px。默认 10。 */
@@ -79,7 +81,7 @@ export async function renderBlocksToBlob(
   if (document.fonts?.ready) {
     await document.fonts.ready;
   }
-  const extracted = extractImageRows(term, blocks, foldStore);
+  const extracted = extractImageRows(term, blocks, foldStore, opts.theme);
   const rows = redaction ? redactImageRows(extracted, redaction) : extracted;
   if (rows.length === 0) return null;
   return renderRowsToBlob(rows, term, opts);
@@ -270,12 +272,12 @@ export function extractImageRows(
   term: Terminal,
   blocks: ReadonlyArray<CommandBlock>,
   foldStore?: FoldLookup,
+  theme: ITheme = term.options.theme ?? {},
 ): ImageRow[] {
   const sorted = [...blocks]
     .filter((b) => !b.start.isDisposed)
     .sort((a, b) => a.id - b.id);
   if (sorted.length === 0) return [];
-  const theme: ITheme = term.options.theme ?? {};
   const out: ImageRow[] = [];
   for (const block of sorted) {
     const lines = resolveBlockLines(term, block, foldStore);
@@ -423,7 +425,7 @@ async function renderRowsToBlob(
   const lineHeightMul = term.options.lineHeight ?? 1.0;
   // 1.3 是经验值——xterm 自身行距偏紧，截图里稍宽一点视觉更舒服
   const lineHeight = Math.round(fontSize * Math.max(lineHeightMul, 1.0) * 1.3);
-  const theme: ITheme = term.options.theme ?? {};
+  const theme: ITheme = opts.theme ?? term.options.theme ?? {};
   const bgColor = defaultBg(theme);
 
   const outerPad = opts.outerPad ?? 14;

@@ -750,6 +750,76 @@ async fn open_tunnel_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    #[tokio::test]
+    async fn connection_log_uses_base64_stream_payload() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (app, mut events) = crate::ssh::test_support::headless_host();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let owner = crate::state::SessionOwner::Headless(uuid::Uuid::new_v4());
+        let state = app.state();
+        let _reservation = crate::commands::lifecycle::reserve_resource(
+            &state,
+            &session_id,
+            crate::state::SessionKind::Ssh,
+            owner.clone(),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let params = ConnectParams {
+            session_id: session_id.clone(),
+            profile: Profile {
+                id: "profile".into(),
+                name: "test".into(),
+                host: "127.0.0.1".into(),
+                port,
+                credential_id: "credential".into(),
+                bastion_profile_id: None,
+                init_command: None,
+                group_id: None,
+                algorithms: Default::default(),
+            },
+            credential: Credential {
+                id: "credential".into(),
+                name: "test".into(),
+                username: "test".into(),
+                credential_type: crate::models::CredentialType::None,
+                secret: None,
+                save_to_remote: false,
+            },
+            bastion_chain: Vec::new(),
+            cols: 80,
+            rows: 24,
+            app: app.clone(),
+            owner,
+            recording_path: None,
+            log_session_id: Some(session_id.clone()),
+            prompt_session_id: Some(session_id.clone()),
+            known_hosts_path: dir.path().join("known_hosts"),
+            timeout_secs: 1,
+        };
+
+        // Close the peer before the SSH handshake: connect still emits its real
+        // progress log, without requiring an SSH daemon or touching user files.
+        let (result, ()) = timeout(Duration::from_secs(5), async {
+            tokio::join!(connect(params), async {
+                let (stream, _) = listener.accept().await.unwrap();
+                drop(stream);
+            })
+        })
+        .await
+        .expect("connection should fail promptly");
+        assert!(result.is_err());
+
+        let (event, payload) = events.try_recv().unwrap();
+        assert_eq!(event, format!("ssh:data:{session_id}"));
+        let encoded = payload.as_str().expect("terminal data must be base64 text");
+        let expected = format!("\x1b[90m[ssh] TCP connecting to 127.0.0.1:{port} ...\x1b[0m\r\n");
+        assert_eq!(STANDARD.decode(encoded).unwrap(), expected.as_bytes());
+        assert!(events.try_recv().is_err());
+    }
 
     // ── map_connect_error ──────────────────────────────────────────
 
@@ -949,7 +1019,7 @@ pub async fn connect(params: ConnectParams) -> AppResult<ConnectResult> {
             let app2 = app.clone();
             Arc::new(move |msg: String| {
                 let line = format!("\x1b[90m[ssh] {msg}\x1b[0m\r\n");
-                let _ = app2.emit(&format!("ssh:data:{sid}"), line.into_bytes());
+                let _ = app2.emit_bytes(&format!("ssh:data:{sid}"), line.as_bytes());
             })
         }
         None => null_logger(),
@@ -1056,13 +1126,13 @@ async fn session_task(
                 if let Some(ref mut rec) = recorder {
                     let _ = rec.record(&data);
                 }
-                let _ = app.emit(&data_event, data.to_vec());
+                let _ = app.emit_bytes(&data_event, &data);
             }
             Event::Ssh(Some(ChannelMsg::ExtendedData { data, .. })) => {
                 if let Some(ref mut rec) = recorder {
                     let _ = rec.record(&data);
                 }
-                let _ = app.emit(&data_event, data.to_vec());
+                let _ = app.emit_bytes(&data_event, &data);
             }
             Event::Ssh(Some(ChannelMsg::Eof | ChannelMsg::Close)) | Event::Ssh(None) => {
                 break;

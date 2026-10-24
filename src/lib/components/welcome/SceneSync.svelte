@@ -15,7 +15,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { t } from "../../i18n/index.svelte.ts";
-  import { isIOS } from "../../platform.ts";
   import NextButton from "./NextButton.svelte";
 
   let { onNext }: { onNext: () => void } = $props();
@@ -185,9 +184,14 @@
       <div class="node-label-sm">{t("welcome.scene.sync.platform_linux")}</div>
     </div>
     <div class="node platform p-and"  style="--pf: #4cb88a;">
-      <div class="pf-tile">{isIOS ? "i" : "A"}</div>
+      <div class="pf-tile" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="6" y="2" width="12" height="20" rx="2" />
+          <path d="M10 18h4" />
+        </svg>
+      </div>
       <div class="node-label-sm">
-        {t(isIOS ? "welcome.scene.sync.platform_ios" : "welcome.scene.sync.platform_android")}
+        iOS<br />Android<br />HarmonyOS
       </div>
     </div>
 

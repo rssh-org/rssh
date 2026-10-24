@@ -1,9 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   paletteToColor,
   resolveFg,
   resolveBg,
   extractImageRows,
+  renderBlocksToBlob,
   redactImageRows,
   type ImageCell,
   type ImageRow,
@@ -299,6 +300,70 @@ describe("extractImageRows", () => {
     ]);
     const rows = extractImageRows(term, [fakeBlock(1, "#abc", 0, 1)]);
     expect(rows.map((row) => row.isWrapped)).toEqual([false, true]);
+  });
+});
+
+describe("renderBlocksToBlob theme", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each([false, true])("paints opaque defaults, inverse text and underline (override: %s)", async (override) => {
+    const rectangles: { color: string; height: number }[] = [];
+    const text: { color: string; text: string }[] = [];
+    const blob = new Blob(["png"], { type: "image/png" });
+    const context = {
+      fillStyle: "",
+      font: "",
+      textBaseline: "",
+      measureText: () => ({ width: 8 }),
+      scale() {},
+      beginPath() {},
+      moveTo() {},
+      lineTo() {},
+      quadraticCurveTo() {},
+      closePath() {},
+      fill() {},
+      fillRect(_x: number, _y: number, _width: number, height: number) {
+        rectangles.push({ color: this.fillStyle, height });
+      },
+      fillText(value: string) {
+        text.push({ color: this.fillStyle, text: value });
+      },
+    };
+    vi.stubGlobal("document", {
+      fonts: { ready: Promise.resolve() },
+      createElement: () => ({
+        getContext: () => context,
+        toBlob: (callback: BlobCallback) => callback(blob),
+      }),
+    });
+    const sourceTheme = Object.freeze({
+      ...THEME,
+      background: override ? "#11111100" : THEME.background,
+    });
+    const term = fakeTerm([fakeLine([
+      { ch: "N", width: 1 },
+      { ch: "I", width: 1, inverse: true, underline: true },
+      { ch: "C", width: 1, fg: "#ff0000", bg: "#00ff00" },
+    ])]);
+    const sourceOptions = Object.freeze({ theme: sourceTheme });
+    term.options = sourceOptions;
+    Object.freeze(term);
+
+    expect(await renderBlocksToBlob(term, [fakeBlock(1, "#abc", 0, 0)],
+      override ? { theme: THEME } : {})).toBe(blob);
+
+    expect(rectangles[0].color).toBe(THEME.background);
+    expect(rectangles.some(rect => rect.color === THEME.foreground && rect.height > 1)).toBe(true);
+    expect(text).toEqual([
+      { text: "N", color: THEME.foreground },
+      { text: "I", color: THEME.background },
+      { text: "C", color: "rgb(255,0,0)" },
+    ]);
+    expect(rectangles.filter(rect => rect.height === 1)).toEqual([
+      { color: THEME.background, height: 1 },
+    ]);
+    expect(term.options).toBe(sourceOptions);
+    expect(term.options.theme).toBe(sourceTheme);
   });
 });
 

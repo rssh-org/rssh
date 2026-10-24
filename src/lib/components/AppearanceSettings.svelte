@@ -2,6 +2,7 @@
     import { onMount } from "svelte";
     import { invoke } from "@tauri-apps/api/core";
     import * as app from "../stores/app.svelte.ts";
+    import * as layout from "../stores/layout.svelte.ts";
     import * as ai from "../ai/store.svelte.ts";
     import * as theme from "../themes/store.svelte.ts";
     import type { PaletteId } from "../themes/palettes.ts";
@@ -10,6 +11,7 @@
     import FontSelect from "./FontSelect.svelte";
     import Modal from "./Modal.svelte";
     import { t } from "../i18n/index.svelte.ts";
+    import { toast } from "../stores/toast.svelte.ts";
 
     const SCHEMES_URL = "https://github.com/mbadolato/iTerm2-Color-Schemes/tree/master/windowsterminal";
     function openSchemesUrl() {
@@ -25,10 +27,9 @@
         { value: "bottom", labelKey: "settings.appearance.pos.bottom" },
     ] as const;
 
-    // "bottom" collides with MobileKeybar on mobile — block the choice there,
-    // don't leave the user to discover the clash after picking.
+    // The compact terminal toolbar already occupies the bottom edge.
     function disabled(value: app.SidebarPosition): boolean {
-        return app.isMobile && value === "bottom";
+        return layout.compact() && value === "bottom";
     }
 
     function pick(value: app.SidebarPosition) {
@@ -127,9 +128,23 @@
     }
 
     // ─── Terminal GPU rendering (WebGL addon vs DOM renderer) ────────
-    let gpuRender = $state<boolean>(theme.termGpuRender());
-    async function saveGpuRender() {
-        await theme.setTermGpuRender(gpuRender);
+    let gpuRender = $derived(theme.termGpuRender());
+    let gpuSaving = $state(false);
+    async function saveGpuRender(event: Event) {
+        const input = event.currentTarget as HTMLInputElement;
+        const requested = input.checked;
+        input.checked = gpuRender;
+        if (gpuSaving) return;
+        gpuSaving = true;
+        try {
+            await theme.setTermGpuRender(requested);
+        } catch (error) {
+            console.warn("[terminal] GPU rendering could not be enabled:", error);
+            toast.error(t("settings.appearance.term.gpu_render_failed"));
+        } finally {
+            input.checked = theme.termGpuRender();
+            gpuSaving = false;
+        }
     }
 
     // ─── Theme: terminal font ────────────────────────────────────────
@@ -260,7 +275,8 @@
                 <div class="switch-card-desc">{t("settings.appearance.term.gpu_render_desc")}</div>
             </div>
             <label class="switch">
-                <input type="checkbox" bind:checked={gpuRender} onchange={saveGpuRender} />
+                <input type="checkbox" checked={gpuRender} onchange={saveGpuRender}
+                       disabled={gpuSaving} aria-label={t("settings.appearance.term.gpu_render")} />
                 <span class="slider"></span>
             </label>
         </div>

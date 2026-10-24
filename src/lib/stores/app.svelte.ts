@@ -2,7 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import * as ai from "../ai/store.svelte.ts";
 import * as pluginStore from "../plugins/store.svelte.ts";
 import { errMsg, t } from "../i18n/index.svelte.ts";
-import { isIOS, isMobile } from "../platform.ts";
+import { capabilities } from "./runtime.svelte.ts";
+import * as layout from "./layout.svelte.ts";
 import type {
   CommandBlockRedactionRule as RedactionRule,
   CommandBlockRedactionSettings as RedactionSettings,
@@ -23,7 +24,7 @@ import { createSidePanelState } from "./panel-state.svelte.ts";
 /* ═══════════════════════════════════════════════════════
    Platform
    ═══════════════════════════════════════════════════════ */
-export { isIOS, isMobile };
+export { capabilities };
 
 /* ═══════════════════════════════════════════════════════
    Types
@@ -76,6 +77,7 @@ export type SettingsPage =
 
 export interface Group {
   id: string; name: string; color: string; sort_order: number;
+  terminal_waves_enabled: boolean;
 }
 export type ConnectionKind = "ssh" | "forward" | "serial" | "telnet";
 export type ConnectionEditorIntent =
@@ -505,9 +507,7 @@ export function addTab(tab: Tab) {
   }
   // Plugin panels follow the manager's per-area auto-open toggles. Local
   // shell tabs run exec as a child process, same capability class as ssh.
-  // Mobile stays out of v1: the panels have no touch close affordance yet
-  // (desktop closes via Esc) — same scope the old desktop-only menu had.
-  if (!isMobile && (rootTab.type === "ssh" || rootTab.type === "local")) {
+  if (capabilities().plugins && (rootTab.type === "ssh" || rootTab.type === "local")) {
     pluginStore.openForNewTab(rootTab.id);
   }
   // MRU on: new tab is the most-recently-focused → front of the session region.
@@ -563,6 +563,22 @@ export function moveTab(fromIdx: number, toIdx: number) {
   const [tab] = next.splice(fromIdx, 1);
   next.splice(toIdx, 0, tab);
   _tabs = next;
+}
+
+export type TabCloseScope = "current" | "left" | "right" | "others" | "all";
+
+/** Only visible workspace tabs participate; closing a workspace disposes its panes. */
+export function tabCloseTargets(id: string, scope: TabCloseScope): string[] {
+  const visible = workspaceTabs();
+  const index = visible.findIndex(tab => tab.id === id);
+  if (index < 0) return [];
+  return visible.filter((tab, position) => tab.type !== "home" && (
+    scope === "all" ||
+    (scope === "current" && position === index) ||
+    (scope === "left" && position < index) ||
+    (scope === "right" && position > index) ||
+    (scope === "others" && position !== index)
+  )).map(tab => tab.id);
 }
 
 export function closeTab(id: string) {
@@ -638,31 +654,32 @@ export function settingsBack() {
   else _settingsPage = "menu";
 }
 
-/* ─── Sidebar position (per-device) ─── */
+/* ─── Sidebar position (wide / compact layout) ─── */
 export type SidebarPosition = "left" | "right" | "top" | "bottom";
-const _SB_KEY_DESKTOP = "sidebar.position.desktop";
-const _SB_KEY_MOBILE = "sidebar.position.mobile";
+// Keep the existing storage keys so users retain their two layout preferences.
+const _SB_KEY_WIDE = "sidebar.position.desktop";
+const _SB_KEY_COMPACT = "sidebar.position.mobile";
 function _loadSidebarPos(key: string, fallback: SidebarPosition): SidebarPosition {
   const v = localStorage.getItem(key);
   return v === "left" || v === "right" || v === "top" || v === "bottom" ? v : fallback;
 }
-let _sidebarPosDesktop = $state<SidebarPosition>(_loadSidebarPos(_SB_KEY_DESKTOP, "top"));
-let _sidebarPosMobile = $state<SidebarPosition>(_loadSidebarPos(_SB_KEY_MOBILE, "top"));
+let _sidebarPosWide = $state<SidebarPosition>(_loadSidebarPos(_SB_KEY_WIDE, "top"));
+let _sidebarPosCompact = $state<SidebarPosition>(_loadSidebarPos(_SB_KEY_COMPACT, "top"));
 export function sidebarPosition(): SidebarPosition {
-  return isMobile ? _sidebarPosMobile : _sidebarPosDesktop;
+  return layout.compact() ? _sidebarPosCompact : _sidebarPosWide;
 }
 export function setSidebarPosition(pos: SidebarPosition) {
-  if (isMobile) {
-    _sidebarPosMobile = pos;
-    safeSetItem(_SB_KEY_MOBILE, pos);
+  if (layout.compact()) {
+    _sidebarPosCompact = pos;
+    safeSetItem(_SB_KEY_COMPACT, pos);
   } else {
-    _sidebarPosDesktop = pos;
-    safeSetItem(_SB_KEY_DESKTOP, pos);
+    _sidebarPosWide = pos;
+    safeSetItem(_SB_KEY_WIDE, pos);
   }
 }
 
-/* ─── Mobile key modifiers (sticky Ctrl/Alt) ─── */
-// Two arming modes on the mobile keybar:
+/* ─── Terminal key modifiers (sticky Ctrl/Alt) ─── */
+// Two arming modes on the terminal keybar:
 //  - one-shot (setCtrl, a short tap): arms for the next key only
 //  - lock (lockCtrl, a long-press): stays armed across keys until tapped off
 // clearModifiers clears one-shot arms but leaves locks — so a locked Ctrl keeps
@@ -684,7 +701,7 @@ export function clearModifiers() {
   if (!_altLocked) _altActive = false;
 }
 
-/* ─── Mobile soft keyboard gate ─── */
+/* ─── Active terminal soft keyboard controller ─── */
 // The system keyboard opens ONLY from the keybar's keyboard button — terminal
 // taps never pop it (issue #225). The pane owns show/hide (it holds the hidden
 // helper textarea); the store just routes the toggle and mirrors the open state
@@ -704,24 +721,17 @@ export function unregisterSoftKeyboardToggle(fn: () => void) {
 }
 export function toggleSoftKeyboard() { _softKeyboardToggle?.(); }
 
-/* ─── Send to active terminal ─── */
-let _terminalWriter: ((text: string) => void) | null = null;
-export function registerTerminalWriter(fn: (text: string) => void) { _terminalWriter = fn; }
-export function unregisterTerminalWriter() { _terminalWriter = null; }
-export function sendToTerminal(text: string) { _terminalWriter?.(text); }
-
 /** Arrow keys need DECCKM-aware encoding (CSI vs SS3). The terminal owner
- *  holds that state, so it registers an encoder-sender here. */
+ *  holds that state and encodes the sequence before sending it. */
 export type ArrowDir = "A" | "B" | "C" | "D";
-let _terminalArrowSender: ((dir: ArrowDir, mod: number) => void) | null = null;
-export function registerTerminalArrowSender(fn: (dir: ArrowDir, mod: number) => void) { _terminalArrowSender = fn; }
-export function unregisterTerminalArrowSender() { _terminalArrowSender = null; }
-export function sendArrow(dir: ArrowDir, mod: number) { _terminalArrowSender?.(dir, mod); }
 
-/* ─── Per-tab terminal copy/paste controls ─── */
+/* ─── Per-tab terminal controls ─── */
 interface TerminalControls {
   getSelection(): string;
   paste(text: string): void;
+  /** Raw control sequences (Esc/Tab); distinct from line-oriented user text. */
+  writeControl(text: string): void;
+  sendArrow(dir: ArrowDir, mod: number): void;
   /** Inject user text as input (snippet / broadcast). The pane applies its own
    *  transport rules — serial EOL transform + slow-send — so callers here stay
    *  transport-agnostic. NOT for control bytes (arrows/Esc/Tab): those are raw,
@@ -742,6 +752,12 @@ export function registerTerminalControls(tabId: string, controls: TerminalContro
 }
 export function unregisterTerminalControls(tabId: string) {
   _terminalControls.delete(tabId);
+}
+export function sendToTerminal(text: string) {
+  _terminalControls.get(_activeTabId)?.writeControl(text);
+}
+export function sendArrow(dir: ArrowDir, mod: number) {
+  _terminalControls.get(_activeTabId)?.sendArrow(dir, mod);
 }
 export function terminalGetSelection(tabId: string): string {
   return _terminalControls.get(tabId)?.getSelection() ?? "";
@@ -869,6 +885,7 @@ export function connectSerialProfile(sp: SerialProfile) {
     label: sp.name,
     meta: {
       serialProfileId: sp.id,
+      groupId: sp.group_id ?? "",
       port: sp.port,
       baud_rate: String(sp.baud_rate),
       data_bits: String(sp.data_bits),
@@ -898,6 +915,7 @@ export function connectTelnetProfile(tp: TelnetProfile) {
     label: tp.name,
     meta: {
       profileId: tp.id,
+      groupId: tp.group_id ?? "",
       host: tp.host,
       port: String(tp.port),
       input_newline: tp.input_newline,
@@ -1299,13 +1317,9 @@ export async function loadForwards(): Promise<Forward[]> {
   return invoke<Forward[]>("list_forwards");
 }
 export async function loadSerialProfiles(): Promise<SerialProfile[]> {
-  // Desktop-only: the command isn't registered on mobile. Degrade to [] rather
-  // than rejecting, so callers (e.g. HomeScreen's Promise.all) don't break on mobile.
-  // On desktop the command IS registered, so a failure is a real problem (DB /
-  // serialization) — log it so it's diagnosable instead of silently showing "no
-  // profiles". Mobile stays quiet (expected "not registered").
+  if (!capabilities().serial) return [];
   return invoke<SerialProfile[]>("list_serial_profiles").catch((e) => {
-    if (!isMobile) console.warn("[serial] list_serial_profiles failed:", e);
+    console.warn("[serial] list_serial_profiles failed:", e);
     return [];
   });
 }

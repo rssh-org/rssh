@@ -12,12 +12,7 @@ export async function initializePrimarySessionWindow(
   dependencies: PrimarySessionWindowDependencies,
 ): Promise<void> {
   if (dependencies.signal?.aborted) return;
-  try {
-    await dependencies.reconcile();
-  } catch {
-    // Startup reconciliation is best-effort. A backend error must not leave
-    // every resource-owning pane permanently unmounted.
-  }
+  await dependencies.reconcile();
   if (dependencies.signal?.aborted) return;
   dependencies.allowResourcePanes();
   let restoredLocal = false;
