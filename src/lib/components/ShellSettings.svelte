@@ -20,8 +20,7 @@
   /** Auto-open one local terminal on startup — default off (unset reads as off). */
   let openLocalOnStartup = $state(false);
   let restoreEnabled = $state<boolean | null>(null);
-  let loadingRestore = $state(false);
-  let savingRestore = $state(false);
+  let restoreBusy = $state(false);
   let verboseLog = $state(true);
   let connectTimeout = $state(10);
   let copyOnSelect = $state(false);
@@ -109,27 +108,27 @@
   }
 
   async function loadRestore() {
-    if (loadingRestore || savingRestore) return;
-    loadingRestore = true;
+    if (restoreBusy) return;
+    restoreBusy = true;
     try {
       restoreEnabled = await sessionRestore.enabled();
     } catch (error) {
       restoreEnabled = null;
       toast.error(errMsg(error));
     } finally {
-      loadingRestore = false;
+      restoreBusy = false;
     }
   }
 
   async function saveRestore(event: Event) {
     const input = event.currentTarget as HTMLInputElement;
-    savingRestore = true;
+    restoreBusy = true;
     try {
       await sessionRestore.setEnabled(input.checked);
     } catch (error) {
       toast.error(errMsg(error));
     } finally {
-      savingRestore = false;
+      restoreBusy = false;
       await loadRestore();
       input.checked = restoreEnabled === true;
     }
@@ -194,7 +193,7 @@
     </div>
     <label class="switch">
       <input type="checkbox" checked={restoreEnabled === true} aria-labelledby="restore-sessions-label"
-        disabled={savingRestore || loadingRestore || restoreEnabled === null} onchange={saveRestore} />
+        disabled={restoreBusy || restoreEnabled === null} onchange={saveRestore} />
       <span class="slider"></span>
     </label>
   </div>

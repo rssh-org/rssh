@@ -97,6 +97,36 @@ describe("session restoration", () => {
     expect(settings.get(`${key}.snapshot`)).toBe("");
   });
 
+  it("records existing terminal tabs without filtering them by host capabilities", async () => {
+    const { app, restore } = await modules();
+    app.addTab({ id: "local", type: "local", label: "Local" });
+    app.addTab({ id: "serial", type: "serial", label: "Serial", meta: { serialProfileId: "serial1" } });
+    capabilities.localPty = false;
+    capabilities.serial = false;
+
+    expect(JSON.parse(restore.snapshot())).toEqual({ version: 1, terminals: [
+      { type: "local" }, { type: "serial", profileId: "serial1" },
+    ], active: 1 });
+  });
+
+  it("round-trips more than 100 tabs without losing the active terminal", async () => {
+    const { app, restore } = await modules();
+    for (let index = 0; index < 101; index++) {
+      app.addTab({ id: `local:${index}`, type: "local", label: "Local" });
+    }
+    const snapshot = restore.snapshot();
+    expect(JSON.parse(snapshot).terminals).toHaveLength(101);
+    settings.set(`${key}.enabled`, "true");
+    settings.set(`${key}.snapshot`, snapshot);
+
+    vi.resetModules();
+    const restarted = await modules();
+    expect(await restarted.restore.restore()).toBe(true);
+    expect(restarted.app.tabs()).toHaveLength(102);
+    expect(restarted.app.activeTabId()).toBe(restarted.app.tabs()[101].id);
+    expect(restarted.restore.snapshot()).toBe(snapshot);
+  });
+
   it.each(["bad JSON", '{"version":2,"terminals":[]}', '{"version":1,"terminals":[{"type":"ssh"}]}'])
     ("handles invalid snapshots: %s", async (snapshot) => {
       settings.set(`${key}.enabled`, "true");

@@ -11,38 +11,6 @@ function deferred<T>() {
 }
 
 describe("initializePrimarySessionWindow", () => {
-  it("restores sessions only after a failed reconciliation is retried successfully", async () => {
-    const reconcile = vi.fn().mockRejectedValueOnce(new Error("backend unavailable")).mockResolvedValueOnce(undefined);
-    const allowResourcePanes = vi.fn();
-    const restoreSessions = vi.fn(async () => true);
-    const dependencies = {
-      reconcile, allowResourcePanes, restoreSessions,
-      loadAutoOpenLocal: async () => false,
-      openLocal: vi.fn(),
-    };
-
-    await expect(initializePrimarySessionWindow(dependencies)).rejects.toThrow("backend unavailable");
-    expect(allowResourcePanes).not.toHaveBeenCalled();
-    expect(restoreSessions).not.toHaveBeenCalled();
-
-    await initializePrimarySessionWindow(dependencies);
-    expect(allowResourcePanes).toHaveBeenCalledOnce();
-    expect(restoreSessions).toHaveBeenCalledOnce();
-  });
-
-  it("restores only after reconciliation, including on mobile", async () => {
-    const events: string[] = [];
-    await initializePrimarySessionWindow({
-      canOpenLocal: false,
-      reconcile: async () => { events.push("reconcile"); },
-      allowResourcePanes: () => events.push("release"),
-      restoreSessions: async () => { events.push("restore"); return false; },
-      loadAutoOpenLocal: async () => { events.push("auto-open"); return true; },
-      openLocal: () => events.push("local"),
-    });
-    expect(events).toEqual(["reconcile", "release", "restore"]);
-  });
-
   it("does not duplicate a restored local terminal", async () => {
     const loadAutoOpenLocal = vi.fn(async () => true);
     const openLocal = vi.fn();
@@ -54,7 +22,19 @@ describe("initializePrimarySessionWindow", () => {
     expect(openLocal).not.toHaveBeenCalled();
   });
 
-  it("releases resource panes before reading and applying auto-open", async () => {
+  it("propagates unexpected restore failures to the startup error handler", async () => {
+    const loadAutoOpenLocal = vi.fn(async () => true);
+    const openLocal = vi.fn();
+    await expect(initializePrimarySessionWindow({
+      reconcile: async () => {}, allowResourcePanes: () => {},
+      restoreSessions: async () => { throw new Error("unexpected restore failure"); },
+      loadAutoOpenLocal, openLocal,
+    })).rejects.toThrow("unexpected restore failure");
+    expect(loadAutoOpenLocal).not.toHaveBeenCalled();
+    expect(openLocal).not.toHaveBeenCalled();
+  });
+
+  it("releases resource panes before restoring sessions and applying auto-open", async () => {
     const reconcile = deferred<void>();
     const events: string[] = [];
     const initializing = initializePrimarySessionWindow({
@@ -63,6 +43,7 @@ describe("initializePrimarySessionWindow", () => {
         return reconcile.promise;
       },
       allowResourcePanes: () => events.push("release"),
+      restoreSessions: async () => { events.push("restore"); return false; },
       loadAutoOpenLocal: async () => {
         events.push("load auto-open");
         return true;
@@ -78,6 +59,7 @@ describe("initializePrimarySessionWindow", () => {
     expect(events).toEqual([
       "reconcile",
       "release",
+      "restore",
       "load auto-open",
       "open local",
     ]);
@@ -92,6 +74,7 @@ describe("initializePrimarySessionWindow", () => {
         throw new Error("backend unavailable");
       },
       allowResourcePanes: () => events.push("release"),
+      restoreSessions: async () => { events.push("restore"); return false; },
       loadAutoOpenLocal: async () => {
         events.push("load auto-open");
         return false;
@@ -102,13 +85,14 @@ describe("initializePrimarySessionWindow", () => {
     expect(events).toEqual(["reconcile"]);
   });
 
-  it("does not read or apply the desktop local-terminal setting on mobile", async () => {
+  it("restores sessions without reading or applying auto-open when local PTY is unavailable", async () => {
     const events: string[] = [];
 
     await initializePrimarySessionWindow({
       canOpenLocal: false,
       reconcile: async () => events.push("reconcile"),
       allowResourcePanes: () => events.push("release"),
+      restoreSessions: async () => { events.push("restore"); return false; },
       loadAutoOpenLocal: async () => {
         events.push("load auto-open");
         return true;
@@ -116,21 +100,24 @@ describe("initializePrimarySessionWindow", () => {
       openLocal: () => events.push("open local"),
     });
 
-    expect(events).toEqual(["reconcile", "release"]);
+    expect(events).toEqual(["reconcile", "release", "restore"]);
   });
 
-  it("opens resources on a successful retry after a failed reconciliation", async () => {
+  it("restores sessions and opens local only after a successful reconciliation retry", async () => {
     const reconcile = vi.fn()
       .mockRejectedValueOnce(new Error("close failed"))
       .mockResolvedValueOnce(1);
     const allowResourcePanes = vi.fn();
+    const restoreSessions = vi.fn(async () => false);
     const openLocal = vi.fn();
-    const dependencies = { reconcile, allowResourcePanes, openLocal, loadAutoOpenLocal: async () => true };
+    const dependencies = { reconcile, allowResourcePanes, restoreSessions, openLocal, loadAutoOpenLocal: async () => true };
     await expect(initializePrimarySessionWindow(dependencies)).rejects.toThrow("close failed");
     expect(allowResourcePanes).not.toHaveBeenCalled();
+    expect(restoreSessions).not.toHaveBeenCalled();
     expect(openLocal).not.toHaveBeenCalled();
     await initializePrimarySessionWindow(dependencies);
     expect(allowResourcePanes).toHaveBeenCalledTimes(1);
+    expect(restoreSessions).toHaveBeenCalledTimes(1);
     expect(openLocal).toHaveBeenCalledTimes(1);
   });
 
@@ -142,6 +129,7 @@ describe("initializePrimarySessionWindow", () => {
       signal: controller.signal,
       reconcile: () => reconcile.promise,
       allowResourcePanes: () => events.push("release"),
+      restoreSessions: async () => { events.push("restore"); return false; },
       loadAutoOpenLocal: async () => true,
       openLocal: () => events.push("open local"),
     });
@@ -161,6 +149,7 @@ describe("initializePrimarySessionWindow", () => {
       signal: controller.signal,
       reconcile: async () => {},
       allowResourcePanes: () => events.push("release"),
+      restoreSessions: async () => false,
       loadAutoOpenLocal: () => autoOpen.promise,
       openLocal: () => events.push("open local"),
     });

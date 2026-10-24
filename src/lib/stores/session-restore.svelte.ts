@@ -38,9 +38,8 @@ export async function setEnabled(value: boolean) {
 }
 
 function reference(tab: app.Tab): SavedTerminal | null {
-  if (tab.type === "local") return app.capabilities().localPty ? { type: "local" } : null;
+  if (tab.type === "local") return { type: "local" };
   if (tab.type !== "ssh" && tab.type !== "telnet" && tab.type !== "serial") return null;
-  if (tab.type === "serial" && !app.capabilities().serial) return null;
   const profileId = tab.type === "serial" ? tab.meta?.serialProfileId : tab.meta?.profileId;
   return profileId ? { type: tab.type, profileId } : null;
 }
@@ -50,7 +49,7 @@ export function snapshot(): string {
   let active = -1;
   for (const tab of app.tabs()) {
     const saved = reference(tab);
-    if (!saved || terminals.length >= 100) continue;
+    if (!saved) continue;
     if (tab.id === app.activeTabId()) active = terminals.length;
     terminals.push(saved);
   }
@@ -71,7 +70,7 @@ function parse(raw: string | null): Snapshot | null {
   if (!raw) return null;
   const data = JSON.parse(raw);
   if (data?.version !== 1 || !Array.isArray(data.terminals)) return null;
-  const terminals = data.terminals.slice(0, 100).map((value: unknown): SavedTerminal | null => {
+  const terminals = data.terminals.map((value: unknown): SavedTerminal | null => {
     if (!value || typeof value !== "object") return null;
     const entry = value as Record<string, unknown>;
     if (entry.type === "local") return { type: "local" };
