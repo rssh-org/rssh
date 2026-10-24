@@ -44,6 +44,7 @@
     import {setupTerminalSoftKeyboard} from "../terminal/soft-keyboard.ts";
     import {registerBracketedPasteProvider, unregisterBracketedPasteProvider} from "../terminal/bracketed-paste.ts";
     import {setupXtermIme229Workaround} from "../terminal/xterm-ime-229-workaround.ts";
+    import {disposeWebglAddon} from "../terminal/webgl-addon.ts";
     import {createReservedSessionAttempt} from "../terminal/reserved-session-attempt.ts";
     import {sessionCleanupScope} from "../stores/session-cleanup.svelte.ts";
     import {renderBlocksToBlob} from "../terminal/block-to-image.ts";
@@ -1396,8 +1397,9 @@
     let webglAddon: WebglAddon | null = null;
 
     function disposeWebgl(): void {
-        webglAddon?.dispose();
+        const addon = webglAddon;
         webglAddon = null;
+        disposeWebglAddon(addon);
     }
 
     onMount(async () => {
@@ -1454,28 +1456,24 @@
             pixelLimit: policy.imagePixelLimit,
         }));
         terminal.open(containerEl);
-        // GPU renderer: the default DomRenderer rebuilds DOM spans per paint
-        // and drowns on flood output. WebGL draws from a texture atlas — the
-        // "GPU acceleration" every modern terminal ships. Any failure (old
-        // GPU, RDP, WebView without WebGL2) falls back to the DomRenderer.
-        // The user's live renderer preference is shared across hosts.
-        // Toggling mid-session swaps renderers in place.
+        // Apply the user's renderer preference across hosts. The settings
+        // action validates WebGL before enabling and swaps renderers in place.
         unsubscribeGpu = theme.registerXtermGpuListener(on => {
             if (!on) {
                 disposeWebgl();
                 return;
             }
             if (webglAddon) return;
+            let addon: WebglAddon | undefined;
             try {
-                const addon = new WebglAddon();
-                addon.onContextLoss(() => {
-                    console.warn("[terminal] WebGL context lost — falling back to DOM renderer");
-                    disposeWebgl();
-                });
+                addon = new WebglAddon();
                 terminal.loadAddon(addon);
                 webglAddon = addon;
             } catch (e) {
-                console.warn("[terminal] WebGL renderer unavailable, using DOM:", e);
+                // loadAddon registers the candidate before activation, which
+                // can fail. Release it and let the settings action roll back.
+                disposeWebglAddon(addon);
+                throw e;
             }
         });
         ime229WorkaroundCleanup = setupXtermIme229Workaround({
