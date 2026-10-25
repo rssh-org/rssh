@@ -51,6 +51,11 @@ import type {
 } from "./types.ts";
 import { isRawDeviceKind } from "./types.ts";
 import { bracketedPasteEnabled } from "../terminal/bracketed-paste.ts";
+import { alternateScreenActive, flushTerminalOutput } from "../terminal/alternate-screen.ts";
+
+const ALTERNATE_SCREEN_ERROR = "Command was not executed: the target terminal is in alternate screen mode "
+  + "(for example, Vim, less, or top). Ask the user to exit the full-screen application and return to "
+  + "the normal command prompt before retrying. Do not send shell commands or exit keystrokes to that application.";
 
 /** DECSET 2004 bracketed-paste markers. When the target shell has enabled
  *  bracketed paste, a paste is wrapped so zsh/bash/PowerShell treat it as one
@@ -1388,6 +1393,17 @@ export async function executeCommand(
   target_kind: AiTargetKind,
   target_session_id: string,
 ): Promise<void> {
+  return executePtyCommand(session, cardId, execution, target_kind, target_session_id);
+}
+
+async function executePtyCommand(
+  session: SessionInstanceRef,
+  cardId: string,
+  execution: PtyExecution,
+  target_kind: AiTargetKind,
+  target_session_id: string,
+  blockedReason?: string,
+): Promise<void> {
   // Re-entrancy guard: a command card must never be pasted twice. A
   // CommandConfirmDialog remount can lose its local `executing` flag and fire
   // approve() again; without this, the command
@@ -1433,6 +1449,7 @@ export async function executeCommand(
   });
   let finish!: (output: string, exit_code: number, timed_out: boolean) => Promise<void>;
   let deliver!: () => Promise<void>;
+  let transportStarted = false;
 
   const exec: Execution = {
     key: executionKey,
@@ -1455,7 +1472,7 @@ export async function executeCommand(
       // A serial/telnet peer is not a shell. Injecting ETX while closing the UI
       // can reboot or reconfigure a bare device; raw teardown only detaches and
       // reports interruption. Shell transports retain the explicit Ctrl+C path.
-      if (!isRawDeviceKind(exec.targetKind)) {
+      if (transportStarted && !isRawDeviceKind(exec.targetKind)) {
         const ctrlC = Array.from(new TextEncoder().encode("\x03"));
         void invoke(writeCmd, { sessionId: target_session_id, data: ctrlC })
             .catch((err) => console.warn("[ai] terminate Ctrl+C failed:", err));
@@ -1536,6 +1553,9 @@ export async function executeCommand(
     return exec.done;
   };
 
+  // A refusal is a recorded result, so retries never start transport later.
+  if (blockedReason) return finish(blockedReason, -1, false);
+
   try {
     const unlisten = await listen<string>(dataEvent, (e) => {
       if (exec.status !== "running") return;
@@ -1562,6 +1582,21 @@ export async function executeCommand(
     throw new CommandSetupError(e);
   }
 
+  // listen() can resolve before xterm parses queued output (in headless it is
+  // local bookkeeping). Drain received output before authorizing the write.
+  const pendingOutput = flushTerminalOutput(session.tabId, () => exec.status === "running");
+  if (pendingOutput) {
+    // Cancel/close must settle the command even if parsing is still pending.
+    const ready = await Promise.race([pendingOutput, done.then(() => false)]);
+    if (exec.status !== "running") return done;
+    if (!ready) {
+      return finish("Command was not executed: the target terminal was closed or replaced.", -1, false);
+    }
+  }
+  if (alternateScreenActive(session.tabId)) {
+    return finish(ALTERNATE_SCREEN_ERROR, -1, false);
+  }
+
   // \r (not \n) is the cross-platform PTY/serial Enter byte: ConPTY/PowerShell
   // only accepts \r; Unix cooked PTY translates \r → \n via ICRNL. Telnet is
   // different: its handle owns the profile's line discipline, so delegate line
@@ -1576,6 +1611,7 @@ export async function executeCommand(
     // markers it'd be part of the paste buffer and never execute).
     const bp = bracketedPasteEnabled(session.tabId);
     const body = bp ? `${PASTE_START}${execution.full_cmd}${PASTE_END}` : execution.full_cmd;
+    transportStarted = true;
     if (target_kind === "telnet") {
       await invoke("telnet_write_line", { sessionId: target_session_id, text: body });
     } else {
@@ -1994,6 +2030,23 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
     );
     _pendingByTab[tab] = proposed;
     pushChat(tab, { kind: "command", cmd: proposed, at: Date.now() });
+    const kind = _targetKindByTab[tab];
+    const targetId = _sessionByTab[tab]?.target_id;
+    if (proposed.kind === "run_command" && kind && targetId) {
+      void (async () => {
+        const output = flushTerminalOutput(tab, () =>
+          isTabLive(tab, generation) && _pendingByTab[tab]?.id === proposed.id);
+        if (output && !await output) return;
+        // The approval/card or actor can finish while the output is parsing.
+        if (!isTabLive(tab, generation)
+          || _sessionByTab[tab]?.instance_id !== session.instanceId
+          || _pendingByTab[tab]?.id !== proposed.id
+          || !acceptsContextEvent(session, e.payload)
+          || !alternateScreenActive(tab)) return;
+        commandApprovals.markAttempted(session, proposed.id);
+        await executePtyCommand(session, proposed.id, proposed.execution, kind, targetId, ALTERNATE_SCREEN_ERROR);
+      })().catch((error) => console.error("[ai] alternate-screen refusal delivery failed:", error));
+    }
   });
 
   await addListener<WebToolProposal>(`ai:web_tool_proposed:${tab}`, (e) => {

@@ -35,6 +35,7 @@
     } from "../terminal/limits.ts";
     import {createPaintScheduler, type PaintScheduler} from "../terminal/paint-scheduler.ts";
     import {createOutputFeeder, formatBacklogBytes, type OutputFeeder} from "../terminal/output-feeder.ts";
+    import {resetTerminalConnection} from "../terminal/connection-reset.ts";
     import {decodeStreamChunk} from "../terminal/stream-decode.ts";
     import {terminalRowHeight} from "../terminal/row-height.ts";
 
@@ -43,6 +44,7 @@
     import {setupTouchScroll} from "../terminal/touch-scroll.ts";
     import {setupTerminalSoftKeyboard} from "../terminal/soft-keyboard.ts";
     import {registerBracketedPasteProvider, unregisterBracketedPasteProvider} from "../terminal/bracketed-paste.ts";
+    import {registerAlternateScreenProvider, unregisterAlternateScreenProvider} from "../terminal/alternate-screen.ts";
     import {setupXtermIme229Workaround} from "../terminal/xterm-ime-229-workaround.ts";
     import {disposeWebglAddon} from "../terminal/webgl-addon.ts";
     import {createReservedSessionAttempt} from "../terminal/reserved-session-attempt.ts";
@@ -236,6 +238,7 @@
     // component flow; ReservedSessionAttempt owns the finer Pending/Ready state.
     let connectGeneration = 0;
     let destroyed = false;
+    const terminalLifetime = new AbortController();
     let disconnected = $state(false);
     // Initial split panes are removed when their first connect attempt fails;
     // reconnect attempts must never trigger that cleanup.
@@ -1124,6 +1127,11 @@
         earlyLoginBytes = 0;
         decoder = new TextDecoder("utf-8");
 
+        // A disconnected full-screen program cannot send DECRST anymore.
+        // Restore terminal modes before wiring any bytes from its replacement.
+        if (outputFeeder && !await resetTerminalConnection(terminal, outputFeeder, terminalLifetime.signal)) return false;
+        if (!isCurrent()) return false;
+
         if (tabType === "serial") {
             try {
                 const opened = await reservedSessionAttempt.open((reservedId) =>
@@ -1551,6 +1559,9 @@
         // AI-driven pastes the same way xterm wraps manual ones. See
         // bracketed-paste.ts.
         registerBracketedPasteProvider(tabId, () => terminal?.modes.bracketedPasteMode ?? false);
+        registerAlternateScreenProvider(tabId,
+            () => terminal?.buffer.active.type === "alternate",
+            outputFeeder);
         // Copy-on-select (left-button mouseup) + right-click action (capture
         // phase — required so preventDefault can suppress the native menu before
         // xterm/WebView handle the event). See onSelectMouseUp / onTerminalContextMenu.
@@ -1775,6 +1786,7 @@
         const pendingPassphraseId = passphrasePromptSessionId;
         const pendingHostKeyId = hostKeyPromptSessionId;
         destroyed = true;
+        terminalLifetime.abort();
         connectGeneration += 1;
         disconnected = true;
         sessionId = null;
@@ -1824,6 +1836,7 @@
         blockTracker?.dispose();
         app.unregisterTerminalControls(tabId);
         unregisterBracketedPasteProvider(tabId);
+        unregisterAlternateScreenProvider(tabId);
         app.unregisterSession(tabId);
         app.clearTerminalConnectionStatus(tabId);
         highlightDecorator?.dispose();
