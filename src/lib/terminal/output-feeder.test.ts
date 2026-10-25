@@ -69,6 +69,99 @@ describe("createOutputFeeder", () => {
         expect(f.pendingBytes()).toBe(0);
     });
 
+    it("flush waits for accepted output without waiting for later pushes", async () => {
+        const w = stubWrite();
+        const f = createOutputFeeder({ write: w.write, maxPendingBytes: 1024 });
+        f.push("a");
+        f.push("b");
+        const completed: boolean[] = [];
+        const first = f.flush().then((parsed) => { completed.push(parsed); });
+        f.push("c");
+        const second = f.flush().then((parsed) => { completed.push(parsed); });
+        await Promise.resolve();
+        expect(completed).toEqual([]);
+        w.drain();
+        await Promise.resolve();
+        expect(completed).toEqual([]);
+        w.drain();
+        await first;
+        expect(completed).toEqual([true]);
+        expect(f.pendingBytes()).toBe(1);
+        w.drain();
+        await second;
+        expect(completed).toEqual([true, true]);
+        expect(await f.flush()).toBe(true);
+    });
+
+    it.each(["dropPending", "capacity"])("flush settles discarded chunks after the in-flight write (%s)", async (discard) => {
+        const w = stubWrite();
+        const f = createOutputFeeder({ write: w.write, maxPendingBytes: 3 });
+        f.push("a");
+        f.push("bb");
+        const completed: boolean[] = [];
+        const flushed = f.flush().then((parsed) => { completed.push(parsed); });
+        if (discard === "dropPending") f.dropPending();
+        f.push("cc"); // Capacity eviction also discards the queued "bb".
+        await Promise.resolve();
+        expect(completed).toEqual([]);
+        w.drain();
+        await flushed;
+        expect(completed).toEqual([true]);
+        expect(w.written).toEqual(["a", "cc"]);
+        expect(f.pendingBytes()).toBe(2);
+        w.drain();
+    });
+
+    it("flush includes zero-byte writes without letting the next chunk overtake them", async () => {
+        const w = stubWrite();
+        const f = createOutputFeeder({ write: w.write, maxPendingBytes: 1024 });
+        f.push("");
+        f.push("next");
+        const flushed = f.flush();
+        expect(w.written).toEqual([""]);
+        w.drain();
+        expect(w.written).toEqual(["", "next"]);
+        w.drain();
+        expect(await flushed).toBe(true);
+    });
+
+    it("dispose releases every pending flush as cancelled", async () => {
+        const w = stubWrite();
+        const f = createOutputFeeder({ write: w.write, maxPendingBytes: 1024 });
+        f.push("a");
+        const first = f.flush();
+        f.push("b");
+        const second = f.flush();
+        f.dispose();
+        expect(await first).toBe(false);
+        expect(await second).toBe(false);
+        expect(await f.flush()).toBe(false);
+        w.drain();
+        expect(w.written).toEqual(["a"]);
+    });
+
+    it("flush observes a split alternate-screen transition in real xterm", async () => {
+        const term = new Terminal({ allowProposedApi: true });
+        const f = createOutputFeeder({
+            write: (data, cb) => term.write(data, cb),
+            maxPendingBytes: 1024,
+        });
+        try {
+            f.push("previous output\r\n");
+            f.push("\x1b[?10");
+            f.push("49h");
+            expect(term.buffer.active.type).toBe("normal");
+            expect(await f.flush()).toBe(true);
+            expect(term.buffer.active.type).toBe("alternate");
+            f.push("\x1b[?1049l");
+            expect(await f.flush()).toBe(true);
+            expect(term.buffer.active.type).toBe("normal");
+        } finally {
+            f.dispose();
+            term.dispose();
+        }
+    });
+
     it("dropPending clears the queue; the in-flight chunk finishes cleanly", () => {
         const w = stubWrite();
         const f = createOutputFeeder({ write: w.write, maxPendingBytes: 1024 });

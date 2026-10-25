@@ -498,6 +498,24 @@ impl Actor {
 
         let (outcome, ack) = self.wait_command_outcome(&cmd_id).await?;
         let output = match outcome {
+            CommandOutcome::Result {
+                exit_code,
+                output,
+                timed_out,
+                early_terminated,
+            } if exit_code != 0 || timed_out || early_terminated => {
+                // A frontend refusal or incomplete probe says nothing about
+                // installed tools. Consume the report without poisoning the
+                // cache so the next file operation can probe again.
+                let redacted = sanitize::redact(&output, &self.cfg.redact_rules);
+                let reason = sanitize::truncate(&redacted, self.cfg.max_output_bytes).text;
+                Self::complete_action(ack, Ok(()));
+                return Err(AppError::other(
+                    "caps_probe_aborted",
+                    json!({ "reason": reason, "exit_code": exit_code,
+                        "timed_out": timed_out, "early_terminated": early_terminated }),
+                ));
+            }
             CommandOutcome::Result { output, .. } => output,
             CommandOutcome::Rejected { reason } => {
                 Self::complete_action(ack, Ok(()));
@@ -1051,6 +1069,151 @@ impl Actor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::session::{PendingSession, SessionConfig, UserAction};
+    use tokio::sync::{mpsc, oneshot};
+
+    type ProbeEvents = mpsc::UnboundedReceiver<(String, serde_json::Value)>;
+
+    fn probe_session() -> (PendingSession, ProbeEvents) {
+        let (host, events) = crate::ssh::test_support::headless_host();
+        let cfg = SessionConfig {
+            tab_id: "caps-test".into(),
+            target_id: "target".into(),
+            skill: "general".into(),
+            system_prompt: String::new(),
+            user_skills_cache: Vec::new(),
+            model: "test".into(),
+            provider: "test".into(),
+            // These tests drive the probe directly and never call the LLM.
+            client: Box::new(crate::ai::llm::OpenAiCompletionsClient::new(
+                String::new(),
+                "http://127.0.0.1:1".into(),
+            )),
+            redact_rules: Vec::new(),
+            blacklist: sanitize::Blacklist::default(),
+            max_output_bytes: sanitize::DEFAULT_MAX_OUTPUT_BYTES,
+            ssh_handle: None,
+            data_dir: Default::default(),
+            shell_kind: Default::default(),
+            db: host.state().db.clone(),
+            conversation_id: "conversation".into(),
+            target_key: "local".into(),
+            initial_history: Vec::new(),
+            initial_audit: Default::default(),
+        };
+        (super::super::start(cfg, host).unwrap(), events)
+    }
+
+    async fn probe_with_result(
+        pending: &mut PendingSession,
+        events: &mut ProbeEvents,
+        outcome: CommandOutcome,
+    ) -> AppResult<RemoteCapabilities> {
+        let action_tx = pending.info().action_tx.clone();
+        let respond = async {
+            let (event, payload) = events.recv().await.unwrap();
+            assert_eq!(event, "ai:internal_command:caps-test");
+            let command_id = payload["id"].as_str().unwrap().to_owned();
+            let (ack, receipt) = oneshot::channel();
+            let action = match outcome {
+                CommandOutcome::Result {
+                    exit_code,
+                    output,
+                    timed_out,
+                    early_terminated,
+                } => UserAction::CommandResult {
+                    command_id,
+                    exit_code,
+                    output,
+                    timed_out,
+                    early_terminated,
+                    ack: Some(ack),
+                },
+                CommandOutcome::Rejected { reason } => UserAction::RejectCommand {
+                    command_id,
+                    reason,
+                    ack: Some(ack),
+                },
+            };
+            action_tx.send(action).unwrap();
+            // A failed probe still consumes its result. Rejecting this delivery
+            // would leave the frontend retrying an already-consumed command.
+            receipt.await.unwrap().unwrap();
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(pending.actor.ensure_remote_caps(), respond)
+        })
+        .await
+        .expect("probe and processing acknowledgement must finish");
+        result
+    }
+
+    #[tokio::test]
+    async fn remote_caps_failed_probe_retries_without_caching_missing_tools() {
+        let (mut pending, mut events) = probe_session();
+        let refusal = "Command was not executed: the target terminal is in alternate screen mode";
+        for (exit_code, timed_out, early_terminated, output) in [
+            (-1, false, false, refusal),
+            (1, false, false, "probe failed"),
+            (0, true, false, "py3=1 perl=1 diff=1"),
+            (0, false, true, "py3=1 perl=1 diff=1"),
+        ] {
+            let error = probe_with_result(
+                &mut pending,
+                &mut events,
+                CommandOutcome::Result {
+                    exit_code,
+                    output: output.into(),
+                    timed_out,
+                    early_terminated,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code(), "caps_probe_aborted");
+            assert!(error.to_string().contains(output));
+            assert_eq!(pending.actor.remote_caps, None);
+        }
+
+        let error = probe_with_result(
+            &mut pending,
+            &mut events,
+            CommandOutcome::Rejected {
+                reason: "user cancelled".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("user cancelled"));
+        assert_eq!(pending.actor.remote_caps, None);
+
+        let caps = probe_with_result(
+            &mut pending,
+            &mut events,
+            CommandOutcome::Result {
+                exit_code: 0,
+                output: "py3=1 perl=0 diff=1".into(),
+                timed_out: false,
+                early_terminated: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            caps,
+            RemoteCapabilities {
+                python3: true,
+                perl: false,
+                diff: true
+            }
+        );
+        assert_eq!(pending.actor.remote_caps, Some(caps));
+        assert_eq!(pending.actor.ensure_remote_caps().await.unwrap(), caps);
+        assert!(
+            events.try_recv().is_err(),
+            "cached success must not probe again"
+        );
+    }
 
     // ─── shell_quote ────────────────────────────────────────────────
 

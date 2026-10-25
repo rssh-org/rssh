@@ -5,6 +5,7 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { errMsg, setLocale } from "../i18n/index.svelte.ts";
 import { createReservedSessionAttempt } from "../terminal/reserved-session-attempt.ts";
+import { resetTerminalConnection } from "../terminal/connection-reset.ts";
 
 const source = readFileSync(join(process.cwd(), "src/lib/components/TerminalPane.svelte"), "utf8");
 const start = source.indexOf("async function connectAndWire()");
@@ -20,7 +21,10 @@ describe("terminal connection errors", () => {
   ])("renders a coded $tabType error as a readable message", async ({ tabType, code, params, message }) => {
     setLocale("en");
     const error = `__rssh_err__|${JSON.stringify({ code, params })}`;
-    const terminal = { write: vi.fn(), cols: 80, rows: 24 };
+    const terminal = {
+      write: vi.fn((_data: string, callback?: () => void) => callback?.()),
+      cols: 80, rows: 24, buffer: { normal: { cursorX: 0, cursorY: 0 } },
+    };
     const reportInitialConnectionFailure = vi.fn();
     const invoke = vi.fn().mockRejectedValue(error);
     const reservedSessionAttempt = createReservedSessionAttempt({
@@ -34,6 +38,8 @@ describe("terminal connection errors", () => {
       tabType, isLocal: tabType === "local", isPtyConnector: false,
       tabId: "new-tab", meta: { profileId: "profile-1" },
       terminal, invoke, reportInitialConnectionFailure, errMsg,
+      outputFeeder: { flush: async () => true }, resetTerminalConnection,
+      terminalLifetime: new AbortController(),
     }) as () => Promise<boolean>;
 
     await expect(connect()).resolves.toBe(false);

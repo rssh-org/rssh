@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Terminal } from "@xterm/xterm";
+import { createOutputFeeder } from "./output-feeder.ts";
 
 beforeEach(() => vi.resetModules());
 
@@ -48,5 +49,39 @@ describe("alternate-screen providers", () => {
     modes.registerAlternateScreenProvider("target", () => true);
     modes.registerAlternateScreenProvider("target", () => false);
     expect(modes.alternateScreenActive("target")).toBe(false);
+  });
+
+  it("includes output received while an earlier flush was pending", async () => {
+    const modes = await import("./alternate-screen.ts");
+    const writes: (() => void)[] = [];
+    const output = createOutputFeeder({ write: (_data, cb) => writes.push(cb), maxPendingBytes: 100 });
+    modes.registerAlternateScreenProvider("target", () => false, output);
+    output.push("first");
+    const done = vi.fn();
+    const pending = modes.flushTerminalOutput("target")!.then(done);
+    output.push("later alternate-screen switch");
+    writes.shift()!();
+    await Promise.resolve();
+    expect(done).not.toHaveBeenCalled();
+    writes.shift()!();
+    await pending;
+    expect(done).toHaveBeenCalledWith(true);
+    output.dispose();
+  });
+
+  it.each(["closed", "replaced", "cancelled"])("does not authorize a %s caller after parsing", async kind => {
+    const modes = await import("./alternate-screen.ts");
+    let parsed!: () => void;
+    let needed = true;
+    const output = createOutputFeeder({ write: (_data, cb) => { parsed = cb; }, maxPendingBytes: 100 });
+    modes.registerAlternateScreenProvider("target", () => false, output);
+    output.push("first");
+    const pending = modes.flushTerminalOutput("target", () => needed);
+    if (kind === "closed") modes.unregisterAlternateScreenProvider("target");
+    if (kind === "replaced") modes.registerAlternateScreenProvider("target", () => false, output);
+    if (kind === "cancelled") needed = false;
+    parsed();
+    expect(await pending).toBe(false);
+    output.dispose();
   });
 });

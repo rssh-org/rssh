@@ -15,6 +15,7 @@
 interface QueuedChunk {
     data: Uint8Array | string;
     size: number;
+    sequence: number;
 }
 
 // Backlog is accounted in bytes. `String.length` counts UTF-16 code units, so
@@ -29,6 +30,9 @@ function chunkSize(data: Uint8Array | string): number {
 
 export interface OutputFeeder {
     push(data: Uint8Array | string): void;
+    /** Wait for chunks accepted so far to be parsed or explicitly discarded.
+     * Later pushes do not extend the wait; disposal returns false. */
+    flush(): Promise<boolean>;
     /** Bytes not yet parsed by the terminal: queued + the one in flight. */
     pendingBytes(): number;
     /** Discard everything queued. The in-flight chunk (≤1) still parses. */
@@ -53,16 +57,28 @@ export function createOutputFeeder(opts: OutputFeederOptions): OutputFeeder {
     const setTimer = opts.setTimer ?? ((h, ms) => setTimeout(h, ms));
     const clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h));
     const queue: QueuedChunk[] = [];
+    const waiters: { sequence: number; resolve: (complete: boolean) => void }[] = [];
     let queuedBytes = 0;
-    let inflightBytes = 0;              // the single chunk inside write()
+    let sequence = 0;
+    let inflight: QueuedChunk | null = null;
     let quiesceMs = 0;
     let quiesceTimer: ReturnType<typeof setTimeout> | null = null;
     let disposed = false;
 
+    function settleWaiters() {
+        // Queue order is monotonic even after dropping old chunks. The first
+        // outstanding write therefore bounds every flush that can complete.
+        const pendingSequence = inflight?.sequence ?? queue[0]?.sequence ?? sequence + 1;
+        while (waiters.length && (disposed || waiters[0].sequence < pendingSequence)) {
+            waiters.shift()!.resolve(!disposed);
+        }
+    }
+
     function writeChunk(chunk: QueuedChunk) {
-        inflightBytes = chunk.size;
+        inflight = chunk;
         opts.write(chunk.data, () => {
-            inflightBytes = 0;
+            inflight = null;
+            settleWaiters();
             feedNext();
         });
     }
@@ -85,28 +101,34 @@ export function createOutputFeeder(opts: OutputFeederOptions): OutputFeeder {
                 quiesceTimer = setTimer(() => { quiesceTimer = null; }, quiesceMs);
                 return;
             }
-            const chunk = { data, size: chunkSize(data) };
+            const chunk = { data, size: chunkSize(data), sequence: ++sequence };
             // Memory cap: drop OLDEST whole chunks. Flood output is garbage
             // the user is about to interrupt anyway; the seam may mis-render
             // one line. Acceptable.
             while (queue.length > 0
-                && queuedBytes + inflightBytes + chunk.size > opts.maxPendingBytes) {
+                && queuedBytes + (inflight?.size ?? 0) + chunk.size > opts.maxPendingBytes) {
                 const oldest = queue.shift()!;
                 queuedBytes -= oldest.size;
             }
-            if (queue.length === 0 && inflightBytes === 0) {
+            if (queue.length === 0 && inflight === null) {
                 writeChunk(chunk);      // idle: straight through, no timer
                 return;
             }
             queue.push(chunk);
             queuedBytes += chunk.size;
         },
+        flush() {
+            if (disposed) return Promise.resolve(false);
+            if (!inflight && queue.length === 0) return Promise.resolve(true);
+            return new Promise((resolve) => { waiters.push({ sequence, resolve }); });
+        },
         pendingBytes() {
-            return queuedBytes + inflightBytes;
+            return queuedBytes + (inflight?.size ?? 0);
         },
         dropPending() {
             queue.length = 0;
             queuedBytes = 0;
+            settleWaiters();
         },
         armQuiescentDrop(windowMs) {
             if (disposed) return;
@@ -118,6 +140,8 @@ export function createOutputFeeder(opts: OutputFeederOptions): OutputFeeder {
             disposed = true;
             queue.length = 0;
             queuedBytes = 0;
+            inflight = null;
+            settleWaiters();
             if (quiesceTimer !== null) {
                 clearTimer(quiesceTimer);
                 quiesceTimer = null;
