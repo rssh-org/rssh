@@ -37,14 +37,14 @@
     // 慢失败的老请求不可能把过期的 previousId 盖到新选择上。
     let activating = $state(false);
 
-    /** 协议卡 —— 表单顶部的类型选择（对应动态发现的 Docker/kubectl 卡）。
-     * 副行文案走 i18n，卡标题是专有名词不翻译。 */
-    const PROTOCOL_CARDS: { protocol: LlmProtocol; label: string; subKey: string }[] = [
+    /** Four peer configuration types. API protocol names remain untranslated;
+     * the subscription title and descriptions follow the current locale. */
+    const PROTOCOL_CARDS: { protocol: LlmProtocol; label: string; subKey: string }[] = $derived([
         { protocol: "deepseek-thinking", label: "DeepSeek Thinking", subKey: "ai.settings.protocol.sub.deepseek" },
         { protocol: "openai-completions", label: "OpenAI Completions", subKey: "ai.settings.protocol.sub.openai" },
         { protocol: "anthropic-messages", label: "Anthropic Messages", subKey: "ai.settings.protocol.sub.anthropic" },
-        { protocol: "codex-subscription", label: "Codex Subscription", subKey: "ai.settings.protocol.sub.codex" },
-    ];
+        { protocol: "codex-subscription", label: t("ai.settings.protocol.codex"), subKey: "ai.settings.protocol.sub.codex" },
+    ]);
 
     /** endpoint 快捷填充 —— 对应凭证页的 ~/.ssh/id_rsa / id_ed25519 chips。 */
     const ENDPOINT_CHIPS: Record<LlmProtocol, { label: string; url: string }[]> = {
@@ -550,7 +550,7 @@
     <div class="section-label">{t("ai.settings.section.provider")}</div>
     <!-- Provider 管理 + BYOK 警告合在一个 .card.surface-raised。
          交互照动态发现：顶部"新建"，列表行（active 单选 / 编辑 / 删除二次确认），
-         新建或编辑时渲染内联表单 AiProviderForm（三协议卡 + endpoint chips）。 -->
+         新建或编辑时渲染内联表单 AiProviderForm（四种平级配置类型）。 -->
     <div class="warn">
         <AppIcon name="warning" size={16} />
         <div class="warn-body">
