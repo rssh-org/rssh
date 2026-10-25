@@ -75,8 +75,10 @@ it("cancels while output is parsing without sending shell input or Ctrl+C", asyn
   const screen = await import("../terminal/alternate-screen.ts");
   let drained!: (ready: boolean) => void;
   const pending = new Promise<boolean>(resolve => { drained = resolve; });
-  screen.registerAlternateScreenProvider(session.tabId, () => false, { flush: () => pending, pendingBytes: () => 1 });
+  const flush = vi.fn(() => pending);
+  screen.registerAlternateScreenProvider(session.tabId, () => false, { flush, pendingBytes: () => 1 });
   const running = ai.executeCommand(session, "cancel", execution, "ssh", "target");
+  await vi.waitFor(() => expect(flush).toHaveBeenCalled());
   await ai.terminateCommand(session, "cancel");
   await running;
   expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_command_result"]);

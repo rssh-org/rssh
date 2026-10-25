@@ -69,7 +69,7 @@ describe("createOutputFeeder", () => {
         expect(f.pendingBytes()).toBe(0);
     });
 
-    it("flush waits for accepted output without waiting for later pushes", async () => {
+    it("concurrent flushes wait for all output, including later pushes", async () => {
         const w = stubWrite();
         const f = createOutputFeeder({ write: w.write, maxPendingBytes: 1024 });
         f.push("a");
@@ -84,16 +84,16 @@ describe("createOutputFeeder", () => {
         await Promise.resolve();
         expect(completed).toEqual([]);
         w.drain();
-        await first;
-        expect(completed).toEqual([true]);
+        await Promise.resolve();
+        expect(completed).toEqual([]);
         expect(f.pendingBytes()).toBe(1);
         w.drain();
-        await second;
+        await Promise.all([first, second]);
         expect(completed).toEqual([true, true]);
         expect(await f.flush()).toBe(true);
     });
 
-    it.each(["dropPending", "capacity"])("flush settles discarded chunks after the in-flight write (%s)", async (discard) => {
+    it.each(["dropPending", "capacity"])("flush skips discarded chunks but waits for retained output (%s)", async (discard) => {
         const w = stubWrite();
         const f = createOutputFeeder({ write: w.write, maxPendingBytes: 3 });
         f.push("a");
@@ -105,11 +105,13 @@ describe("createOutputFeeder", () => {
         await Promise.resolve();
         expect(completed).toEqual([]);
         w.drain();
-        await flushed;
-        expect(completed).toEqual([true]);
+        await Promise.resolve();
+        expect(completed).toEqual([]);
         expect(w.written).toEqual(["a", "cc"]);
         expect(f.pendingBytes()).toBe(2);
         w.drain();
+        await flushed;
+        expect(completed).toEqual([true]);
     });
 
     it("flush includes zero-byte writes without letting the next chunk overtake them", async () => {
@@ -162,15 +164,17 @@ describe("createOutputFeeder", () => {
         }
     });
 
-    it("dropPending clears the queue; the in-flight chunk finishes cleanly", () => {
+    it("dropPending clears the queue; flush still waits for the in-flight chunk", async () => {
         const w = stubWrite();
         const f = createOutputFeeder({ write: w.write, maxPendingBytes: 1024 });
         f.push("aa");      // in flight
         f.push("bb");      // queued
         f.push("cc");      // queued
+        const flushed = f.flush();
         f.dropPending();
         expect(f.pendingBytes()).toBe(2);   // only the in-flight "aa"
         w.drain();
+        expect(await flushed).toBe(true);
         expect(w.written).toEqual(["aa"]);  // queued data never written
     });
 

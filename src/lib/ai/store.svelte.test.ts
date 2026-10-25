@@ -2115,7 +2115,7 @@ describe("executeCommand", () => {
       screen.registerAlternateScreenProvider(guardedSession.tabId, () => true);
 
       await ai.executeCommand(guardedSession, "blocked", guardedExecution, kind, "target");
-      expect(listenMock).not.toHaveBeenCalled();
+      expect(unlistenMock).toHaveBeenCalledOnce();
       expect(invokeMock.mock.calls).toEqual([["ai_command_result", {
         ...guardedSession, toolCallId: "blocked", exitCode: -1,
         output: expect.stringContaining("alternate screen mode"),
@@ -2126,7 +2126,7 @@ describe("executeCommand", () => {
     },
   );
 
-  it("rechecks alternate screen after asynchronous listener registration", async () => {
+  it("checks alternate screen after asynchronous listener registration", async () => {
     vi.resetModules();
     const ai = await import("./store.svelte.ts");
     const screen = await import("../terminal/alternate-screen.ts");
@@ -2154,6 +2154,7 @@ describe("executeCommand", () => {
       .rejects.toThrow("delivery failed");
     expect(ai.commandExecutionStatus(guardedSession, "retry")).toBe("delivery_failed");
     alternate = false;
+    listenMock.mockClear();
 
     await ai.executeCommand(guardedSession, "retry", guardedExecution, "local", "target");
     expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_command_result", "ai_command_result"]);

@@ -84,4 +84,24 @@ describe("alternate-screen providers", () => {
     expect(await pending).toBe(false);
     output.dispose();
   });
+
+  it.each(["idle", "drained"])("waits for output received after an %s flush resolves", async state => {
+    const modes = await import("./alternate-screen.ts");
+    const writes: (() => void)[] = [];
+    const output = createOutputFeeder({ write: (_data, cb) => writes.push(cb), maxPendingBytes: 100 });
+    modes.registerAlternateScreenProvider("target", () => false, output);
+    if (state === "drained") output.push("first");
+    const done = vi.fn();
+    const pending = modes.flushTerminalOutput("target")!.then(done);
+    if (state === "drained") writes.shift()!();
+    // The parser is idle, but the waiting caller has not resumed yet.
+    output.push("later alternate-screen switch");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(done).not.toHaveBeenCalled();
+    writes.shift()!();
+    await pending;
+    expect(done).toHaveBeenCalledWith(true);
+    output.dispose();
+  });
 });

@@ -1553,23 +1553,8 @@ async function executePtyCommand(
     return exec.done;
   };
 
-  const waitForOutput = async (pending: Promise<boolean>): Promise<boolean> => {
-    // Cancel/close must settle the command even if parsing is still pending.
-    const ready = await Promise.race([pending, done.then(() => false)]);
-    if (exec.status !== "running") return false;
-    if (!ready) {
-      await finish("Command was not executed: the target terminal was closed or replaced.", -1, false);
-    }
-    return ready;
-  };
-
   // A refusal is a recorded result, so retries never start transport later.
   if (blockedReason) return finish(blockedReason, -1, false);
-  const initialOutput = flushTerminalOutput(session.tabId, () => exec.status === "running");
-  if (initialOutput && !await waitForOutput(initialOutput)) return done;
-  if (alternateScreenActive(session.tabId)) {
-    return finish(ALTERNATE_SCREEN_ERROR, -1, false);
-  }
 
   try {
     const unlisten = await listen<string>(dataEvent, (e) => {
@@ -1598,9 +1583,16 @@ async function executePtyCommand(
   }
 
   // listen() can resolve before xterm parses queued output (in headless it is
-  // local bookkeeping). Flush newly received bytes before the final check.
-  const latestOutput = flushTerminalOutput(session.tabId, () => exec.status === "running");
-  if (latestOutput && !await waitForOutput(latestOutput)) return done;
+  // local bookkeeping). Drain received output before authorizing the write.
+  const pendingOutput = flushTerminalOutput(session.tabId, () => exec.status === "running");
+  if (pendingOutput) {
+    // Cancel/close must settle the command even if parsing is still pending.
+    const ready = await Promise.race([pendingOutput, done.then(() => false)]);
+    if (exec.status !== "running") return done;
+    if (!ready) {
+      return finish("Command was not executed: the target terminal was closed or replaced.", -1, false);
+    }
+  }
   if (alternateScreenActive(session.tabId)) {
     return finish(ALTERNATE_SCREEN_ERROR, -1, false);
   }

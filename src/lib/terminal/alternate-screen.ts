@@ -39,8 +39,8 @@ export function flushTerminalOutput(
   return (async () => {
     do {
       if (!await output.flush() || providers.get(tabId) !== provider || !stillNeeded()) return false;
-      // A snapshot flush does not include output received while it waited.
-      // Do not authorize against a mode while newer bytes are still queued.
+      // More output may arrive after the parser goes idle, before this await
+      // resumes. Do not authorize while those newer bytes are still queued.
     } while (output.pendingBytes() > 0);
     return true;
   })();
