@@ -500,7 +500,7 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
     // never reach the mirror, whose first move is clearing local config —
     // same rule as every array category's as_array gate.
     if let Some(ai) = data.get("ai").filter(|v| v.is_object()) {
-        if let Err(e) = crate::ai::commands::import_ai_settings(db, ss, ai) {
+        if let Err(e) = crate::ai::commands::import_ai_settings(db, ss, data_dir, ai) {
             errors.push(ImportError {
                 kind: "ai_settings",
                 name: None,
@@ -1888,6 +1888,197 @@ mod tests {
         assert!(prov.get("api_key").is_none(), "missing key not emitted");
         assert_eq!(prov["name"], "GLM");
         assert_eq!(prov["protocol"], "openai-completions");
+    }
+
+    #[test]
+    fn codex_config_exports_never_include_device_credentials() {
+        let (db, ss, dir) = fixture();
+        let id = "provider-codex";
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: id.into(),
+                name: "My subscription".into(),
+                protocol: crate::ai::codex_auth::PROTOCOL.into(),
+                model: "account-model".into(),
+                endpoint: crate::ai::codex_auth::ENDPOINT.into(),
+            },
+        )
+        .unwrap();
+        crate::db::settings::set(&db, "ai_provider", id).unwrap();
+        ss.set(
+            &crate::ai::codex_auth::credential_key(id),
+            r#"{"access_token":"device-access","refresh_token":"device-refresh"}"#,
+        )
+        .unwrap();
+        // Even a leftover BYOK secret from an older protocol must not ride
+        // along with a subscription row, including in a local full backup.
+        ss.set(
+            &crate::secret::setting_key("ai_provider-codex_key"),
+            "legacy-api-secret",
+        )
+        .unwrap();
+        let expected = json!({
+            "active_provider": id,
+            "providers": [{
+                "provider": id,
+                "name": "My subscription",
+                "protocol": crate::ai::codex_auth::PROTOCOL,
+                "model": "account-model",
+                "endpoint": crate::ai::codex_auth::ENDPOINT,
+            }],
+        });
+        assert_eq!(
+            crate::ai::commands::export_ai_settings(&db, &ss, true).unwrap(),
+            expected,
+        );
+        for mode in [
+            ExportMode::LocalBackup,
+            ExportMode::RemotePush(read_sync_prefs(&db).unwrap()),
+        ] {
+            let payload = build_payload(&db, &ss, dir.path(), &mode).unwrap();
+            assert_eq!(payload["ai"], expected);
+            let serialized = payload.to_string();
+            for secret in ["device-access", "device-refresh", "legacy-api-secret"] {
+                assert!(!serialized.contains(secret), "export leaked {secret}");
+            }
+        }
+        let before =
+            build_fingerprint_payload(&db, &ss, dir.path(), read_sync_prefs(&db).unwrap()).unwrap();
+        ss.set(
+            &crate::ai::codex_auth::credential_key(id),
+            r#"{"access_token":"refreshed-access","refresh_token":"refreshed-refresh"}"#,
+        )
+        .unwrap();
+        let after =
+            build_fingerprint_payload(&db, &ss, dir.path(), read_sync_prefs(&db).unwrap()).unwrap();
+        assert_eq!(before, after, "token refresh is not a configuration update");
+    }
+
+    #[test]
+    fn codex_config_import_preserves_device_grant_and_ignores_remote_secrets() {
+        let (db, ss, dir) = fixture();
+        let id = "provider-codex";
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: id.into(),
+                name: "Local name".into(),
+                protocol: crate::ai::codex_auth::PROTOCOL.into(),
+                model: "old-model".into(),
+                endpoint: crate::ai::codex_auth::ENDPOINT.into(),
+            },
+        )
+        .unwrap();
+        let local_grant = r#"{"access_token":"local-access","refresh_token":"local-refresh"}"#;
+        let credential_key = crate::ai::codex_auth::credential_key(id);
+        ss.set(&credential_key, local_grant).unwrap();
+        let data = json!({
+            "ai": {
+                "active_provider": id,
+                "providers": [{
+                    "provider": id,
+                    "name": "Synced name",
+                    "protocol": crate::ai::codex_auth::PROTOCOL,
+                    "model": "new-model",
+                    "endpoint": "https://untrusted.example/capture",
+                    "api_key": "remote-api-key",
+                    "access_token": "remote-access",
+                    "refresh_token": "remote-refresh",
+                    "oauth": {"access_token": "nested-access", "refresh_token": "nested-refresh"},
+                }],
+            },
+        });
+        merge_import(&db, &ss, dir.path(), &data).unwrap();
+        let row = crate::db::ai_provider::get(&db, id).unwrap().unwrap();
+        assert_eq!(row.name, "Synced name");
+        assert_eq!(row.model, "new-model");
+        assert_eq!(row.endpoint, crate::ai::codex_auth::ENDPOINT);
+        assert_eq!(
+            ss.get(&credential_key).unwrap().as_deref(),
+            Some(local_grant)
+        );
+        assert_eq!(
+            ss.inner.lock().unwrap().len(),
+            1,
+            "only the local grant remains"
+        );
+    }
+
+    #[test]
+    fn codex_config_on_a_new_device_requires_its_own_login() {
+        let (db, ss, dir) = fixture();
+        let id = "provider-codex";
+        let data = json!({
+            "ai": {
+                "active_provider": id,
+                "providers": [{
+                    "provider": id,
+                    "name": "My subscription",
+                    "protocol": crate::ai::codex_auth::PROTOCOL,
+                    "model": "account-model",
+                    "api_key": "remote-api-key",
+                    "access_token": "remote-access",
+                    "refresh_token": "remote-refresh",
+                }],
+            },
+        });
+        merge_import(&db, &ss, dir.path(), &data).unwrap();
+        assert!(crate::db::ai_provider::get(&db, id).unwrap().is_some());
+        assert_eq!(
+            crate::db::settings::get(&db, "ai_provider")
+                .unwrap()
+                .as_deref(),
+            Some(id),
+        );
+        assert!(!crate::ai::codex_auth::has_credentials(&ss, id).unwrap());
+        assert!(ss.inner.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sync_removing_or_replacing_codex_provider_clears_its_local_grant() {
+        for providers in [
+            json!([]),
+            json!([{
+                "provider": "provider-codex",
+                "name": "BYOK instead",
+                "protocol": "openai-completions",
+                "model": "api-model",
+                "endpoint": "https://api.example/v1",
+                "api_key": "new-byok-key",
+            }]),
+        ] {
+            let (db, ss, dir) = fixture();
+            let id = "provider-codex";
+            crate::db::ai_provider::upsert(
+                &db,
+                &crate::db::ai_provider::ProviderRow {
+                    id: id.into(),
+                    name: "Local subscription".into(),
+                    protocol: crate::ai::codex_auth::PROTOCOL.into(),
+                    model: "account-model".into(),
+                    endpoint: crate::ai::codex_auth::ENDPOINT.into(),
+                },
+            )
+            .unwrap();
+            let credential_key = crate::ai::codex_auth::credential_key(id);
+            ss.set(&credential_key, "local-grant").unwrap();
+            let replaced = !providers.as_array().unwrap().is_empty();
+            merge_import(
+                &db,
+                &ss,
+                dir.path(),
+                &json!({
+                    "ai": { "providers": providers },
+                }),
+            )
+            .unwrap();
+            assert!(!crate::ai::codex_auth::has_credentials(&ss, id).unwrap());
+            let byok_key = ss
+                .get(&crate::secret::setting_key("ai_provider-codex_key"))
+                .unwrap();
+            assert_eq!(byok_key.as_deref(), replaced.then_some("new-byok-key"));
+        }
     }
 
     #[test]

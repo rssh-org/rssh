@@ -1,21 +1,23 @@
-//! BYOK LLM 客户端（流式）。
+//! LLM HTTP 客户端（流式），包含 API key 与 Codex 订阅授权。
 //!
 //! 决议 #5：手写 reqwest + 自解析 SSE，零额外 SDK 依赖。
 //!
-//! 三种协议类型，一协议一文件，互不共享请求/解析逻辑：
+//! 一协议一文件，互不共享请求/解析逻辑：
 //! - `deepseek.rs`     —— DeepSeek Thinking（含 reasoning_content 回传）
 //! - `protocol.rs`     —— OpenAI Completions（OpenAI / GLM / vLLM / Groq …）
 //! - `anthropic.rs`    —— Anthropic Messages
+//! - `codex.rs`        —— Codex subscription Responses
 //!
 //! DeepSeek 与 OpenAI 协议曾共用一套实现，导致 DeepSeek 特有的思考链
 //! 回传逻辑长在共享层：换协议 resume 对话时会把 reasoning_content 发给
 //! 不认识它的服务端。拆分后思考链语义只存在于 deepseek.rs —— 结构上
 //! 消灭跨协议泄漏。
 //!
-//! `build_client` 按 provider 行的 protocol 字段三分发；endpoint 恒为
-//! 用户配置的显式值（必填），没有编译期默认端点。
+//! `build_client` 构造 API key 客户端；订阅客户端由 provider command 注入
+//! 本机授权管理器，并且只能请求固定的 Codex 云端地址。
 
 pub mod anthropic;
+pub mod codex;
 pub mod deepseek;
 mod protocol;
 
@@ -42,6 +44,11 @@ pub enum ChatMessage {
         /// 其他厂商：传 None，序列化时不会出现该字段，零影响。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
+        /// Opaque Codex reasoning items required for stateless tool continuations.
+        /// Only the Codex encoder sends these back; text and tool calls remain
+        /// in their canonical fields so normal redaction still applies.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_reasoning: Option<Vec<serde_json::Value>>,
     },
     ToolResult {
         tool_call_id: String,
@@ -91,6 +98,9 @@ pub struct ChatResponse {
     pub tokens_out: Option<u32>,
     /// 思考链（DeepSeek reasoner 之类）。原样传回 history 给下一轮。
     pub reasoning_content: Option<String>,
+    /// Provider-specific encrypted reasoning, never displayed as assistant text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_reasoning: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +140,7 @@ pub enum Protocol {
     DeepSeekThinking,
     OpenAiCompletions,
     AnthropicMessages,
+    CodexSubscription,
 }
 
 impl Protocol {
@@ -138,6 +149,7 @@ impl Protocol {
             "deepseek-thinking" => Some(Protocol::DeepSeekThinking),
             "openai-completions" => Some(Protocol::OpenAiCompletions),
             "anthropic-messages" => Some(Protocol::AnthropicMessages),
+            "codex-subscription" => Some(Protocol::CodexSubscription),
             _ => None,
         }
     }
@@ -148,8 +160,8 @@ pub fn protocol_valid(p: &str) -> bool {
     Protocol::parse(p).is_some()
 }
 
-/// Build the client for a provider row's protocol. `endpoint` is the row's
-/// explicit (required) endpoint — no compile-time vendor defaults anywhere.
+/// Build an API-key client using the provider's explicit endpoint. Subscription
+/// providers need `codex::CodexClient` with the device's shared auth manager.
 pub fn build_client(
     protocol: &str,
     api_key: String,
@@ -165,6 +177,12 @@ pub fn build_client(
         Some(Protocol::AnthropicMessages) => {
             Ok(Box::new(anthropic::AnthropicClient::new(api_key, endpoint)))
         }
+        // Subscription clients need the device's live auth manager, not a
+        // snapshot of an API key. Provider commands construct them separately.
+        Some(Protocol::CodexSubscription) => Err(crate::error::AppError::config(
+            "codex_login_required",
+            serde_json::json!({}),
+        )),
         None => Err(crate::error::AppError::config(
             "llm_unknown_protocol",
             serde_json::json!({ "protocol": protocol }),
@@ -262,6 +280,63 @@ impl SseParser {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::ChatMessage;
+    use serde_json::json;
+
+    #[test]
+    fn old_conversations_remain_readable_without_codex_metadata() {
+        let stored = json!({
+            "role": "assistant",
+            "content": "previous answer",
+            "tool_calls": [],
+        });
+        let message: ChatMessage = serde_json::from_value(stored.clone()).unwrap();
+        assert!(matches!(
+            &message,
+            ChatMessage::Assistant {
+                codex_reasoning: None,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(message).unwrap(), stored);
+    }
+
+    #[test]
+    fn codex_continuation_survives_conversation_storage() {
+        let reasoning = json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "encrypted_content": "opaque-continuation",
+            "summary": [],
+        });
+        let message = ChatMessage::Assistant {
+            content: String::new(),
+            tool_calls: vec![super::ToolCall {
+                id: "call_1".into(),
+                name: "run_command".into(),
+                input: json!({ "cmd": "pwd" }),
+            }],
+            reasoning_content: None,
+            codex_reasoning: Some(vec![reasoning.clone()]),
+        };
+        let serialized = serde_json::to_string(&message).unwrap();
+        let restored: ChatMessage = serde_json::from_str(&serialized).unwrap();
+        match restored {
+            ChatMessage::Assistant {
+                codex_reasoning,
+                tool_calls,
+                ..
+            } => {
+                assert_eq!(codex_reasoning, Some(vec![reasoning]));
+                assert_eq!(tool_calls[0].id, "call_1");
+            }
+            _ => panic!("assistant history changed variant"),
         }
     }
 }

@@ -146,6 +146,7 @@ impl LlmClient for AnthropicClient {
                     content,
                     tool_calls,
                     reasoning_content: _, // Anthropic 不需要 OpenAI 协议下的 reasoning_content
+                    ..
                 } => {
                     let mut blocks: Vec<AnthropicBlock> = Vec::new();
                     if !content.is_empty() {
@@ -324,6 +325,7 @@ impl LlmClient for AnthropicClient {
             tokens_in,
             tokens_out,
             reasoning_content: None,
+            codex_reasoning: None,
         })
     }
 }
@@ -331,6 +333,53 @@ impl LlmClient for AnthropicClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn codex_continuation_is_never_sent_to_anthropic() {
+        let mut server = mockito::Server::new_async().await;
+        let request = server
+            .mock("POST", "/messages")
+            .match_body(mockito::Matcher::Json(json!({
+                "model": "test-model",
+                "max_tokens": 1024,
+                "system": "sys",
+                "messages": [{
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "answer" }],
+                }],
+                "tools": [],
+                "stream": true,
+            })))
+            .with_header("content-type", "text/event-stream")
+            .with_body("data: {\"type\":\"message_stop\"}\n\n")
+            .create_async()
+            .await;
+        let client = AnthropicClient::new("test-key".into(), server.url());
+        let result = client
+            .chat(
+                ChatRequest {
+                    system_prompt: "sys".into(),
+                    messages: vec![ChatMessage::Assistant {
+                        content: "answer".into(),
+                        tool_calls: vec![],
+                        reasoning_content: None,
+                        codex_reasoning: Some(vec![json!({
+                            "type": "reasoning",
+                            "encrypted_content": "codex-ciphertext",
+                            "summary": [],
+                        })]),
+                    }],
+                    tools: vec![],
+                    model: "test-model".into(),
+                    max_tokens: 1024,
+                },
+                std::sync::Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+        assert!(result.codex_reasoning.is_none());
+        request.assert_async().await;
+    }
 
     #[test]
     fn base_url_gets_messages_suffix() {

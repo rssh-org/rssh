@@ -324,6 +324,7 @@ pub async fn chat(
         tokens_out,
         // The OpenAI Completions protocol carries no thinking chain.
         reasoning_content: None,
+        codex_reasoning: None,
     })
 }
 
@@ -386,10 +387,17 @@ mod tests {
             content: "answer".into(),
             tool_calls: vec![],
             reasoning_content: Some("secret chain of thought".into()),
+            codex_reasoning: Some(vec![json!({
+                "type": "reasoning",
+                "encrypted_content": "codex-ciphertext",
+                "summary": [],
+            })]),
         }];
         let s = serde_json::to_string(&build_messages("sys", &history)).unwrap();
         assert!(!s.contains("reasoning_content"));
         assert!(!s.contains("secret chain"));
+        assert!(!s.contains("codex-ciphertext"));
+        assert!(!s.contains("codex_reasoning"));
     }
 
     #[test]

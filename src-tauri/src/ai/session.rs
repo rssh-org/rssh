@@ -726,6 +726,7 @@ impl Actor {
                 content: "[session closed by user]".into(),
                 tool_calls: Vec::new(),
                 reasoning_content: None,
+                codex_reasoning: None,
             });
             return true;
         }
@@ -877,6 +878,7 @@ impl Actor {
                         content: "[response failed]".to_string(),
                         tool_calls: vec![],
                         reasoning_content: None,
+                        codex_reasoning: None,
                     });
                     return Err(e);
                 }
@@ -914,6 +916,7 @@ impl Actor {
                         content: history_content,
                         tool_calls: vec![],
                         reasoning_content: None,
+                        codex_reasoning: None,
                     });
                     return Ok(());
                 }
@@ -951,6 +954,7 @@ impl Actor {
                 content: resp.text.clone(),
                 tool_calls: resp.tool_calls.clone(),
                 reasoning_content: resp.reasoning_content.clone(),
+                codex_reasoning: resp.codex_reasoning.clone(),
             };
 
             if resp.tool_calls.is_empty() {
@@ -2029,6 +2033,7 @@ mod tests {
             content: content.to_string(),
             tool_calls: Vec::new(),
             reasoning_content: None,
+            codex_reasoning: None,
         }
     }
 

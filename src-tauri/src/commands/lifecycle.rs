@@ -1311,6 +1311,7 @@ mod tests {
                     tokens_in: None,
                     tokens_out: None,
                     reasoning_content: None,
+                    codex_reasoning: None,
                 });
             }
 
@@ -1364,6 +1365,7 @@ mod tests {
                     tokens_in: None,
                     tokens_out: None,
                     reasoning_content: None,
+                    codex_reasoning: None,
                 });
             }
 
@@ -1380,6 +1382,14 @@ mod tests {
         let secret_store: Arc<dyn crate::secret::SecretStore> =
             Arc::new(crate::secret::DbStore::new(db.clone()));
         AppState {
+            codex_auth: Arc::new(
+                crate::ai::codex_auth::CodexAuth::new(
+                    db.clone(),
+                    secret_store.clone(),
+                    PathBuf::new(),
+                )
+                .unwrap(),
+            ),
             db,
             secret_store,
             lifecycle_sessions: Mutex::new(HashMap::new()),

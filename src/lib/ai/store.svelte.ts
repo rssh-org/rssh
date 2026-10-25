@@ -1825,6 +1825,11 @@ export async function loadProviders(): Promise<AiProviderRecord[]> {
   return invoke<AiProviderRecord[]>("ai_provider_list");
 }
 
+/** Subscription credentials and API keys both enable AI on this device. */
+export function hasCredentials(snapshot: { has_credentials?: boolean; has_api_key: boolean } | null | undefined): boolean {
+  return snapshot?.has_credentials ?? snapshot?.has_api_key ?? false;
+}
+
 export interface ProviderSaveInput {
   /** 空 = 新建（后端生成 id）。 */
   id?: string;

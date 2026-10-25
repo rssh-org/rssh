@@ -163,6 +163,7 @@ fn build_messages(system: &str, history: &[ChatMessage]) -> Vec<DsMsg> {
                 content,
                 tool_calls,
                 reasoning_content,
+                ..
             } => {
                 let ds_calls: Vec<DsToolCall> = tool_calls
                     .iter()
@@ -369,6 +370,7 @@ async fn chat(
         } else {
             Some(reasoning_out)
         },
+        codex_reasoning: None,
     })
 }
 
@@ -386,9 +388,16 @@ mod tests {
             content: "answer".into(),
             tool_calls: vec![],
             reasoning_content: Some("chain".into()),
+            codex_reasoning: Some(vec![json!({
+                "type": "reasoning",
+                "encrypted_content": "codex-ciphertext",
+                "summary": [],
+            })]),
         }];
         let s = serde_json::to_string(&build_messages("sys", &history)).unwrap();
         assert!(s.contains("\"reasoning_content\":\"chain\""));
+        assert!(!s.contains("codex-ciphertext"));
+        assert!(!s.contains("codex_reasoning"));
     }
 
     #[test]

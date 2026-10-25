@@ -20,7 +20,7 @@
 
     // ─── Provider 管理（动态发现式：列表 + 内联表单）────────────
     // 数据模型：ai_providers 表一行一个 provider（name/protocol/endpoint/model
-    // + key 在 secret store）。协议三选一；endpoint 必填，chips 一键填官方值。
+    // + credentials in SecretStore). Codex uses device-local subscription login.
     let providers = $state<AiProviderRecord[]>([]);
     /** 当前 active 行 id（`ai_provider` settings 键的镜像）。 */
     let activeId = $state("");
@@ -37,12 +37,13 @@
     // 慢失败的老请求不可能把过期的 previousId 盖到新选择上。
     let activating = $state(false);
 
-    /** 协议三卡 —— 表单顶部的类型选择（对应动态发现的 Docker/kubectl 卡）。
+    /** 协议卡 —— 表单顶部的类型选择（对应动态发现的 Docker/kubectl 卡）。
      * 副行文案走 i18n，卡标题是专有名词不翻译。 */
     const PROTOCOL_CARDS: { protocol: LlmProtocol; label: string; subKey: string }[] = [
         { protocol: "deepseek-thinking", label: "DeepSeek Thinking", subKey: "ai.settings.protocol.sub.deepseek" },
         { protocol: "openai-completions", label: "OpenAI Completions", subKey: "ai.settings.protocol.sub.openai" },
         { protocol: "anthropic-messages", label: "Anthropic Messages", subKey: "ai.settings.protocol.sub.anthropic" },
+        { protocol: "codex-subscription", label: "Codex Subscription", subKey: "ai.settings.protocol.sub.codex" },
     ];
 
     /** endpoint 快捷填充 —— 对应凭证页的 ~/.ssh/id_rsa / id_ed25519 chips。 */
@@ -55,6 +56,7 @@
         "anthropic-messages": [
             { label: "Anthropic", url: "https://api.anthropic.com/v1/messages" },
         ],
+        "codex-subscription": [],
     };
 
     function protocolLabel(protocol: string): string {
@@ -582,6 +584,7 @@
                     endpointChips={ENDPOINT_CHIPS}
                     onSave={onProviderSaved}
                     onCancel={cancelForm}
+                    onChange={refreshProviders}
                 />
             {/key}
         {/if}
@@ -594,6 +597,7 @@
                     endpointChips={ENDPOINT_CHIPS}
                     onSave={onProviderSaved}
                     onCancel={cancelForm}
+                    onChange={refreshProviders}
                 />
             {:else}
                 <div class="provider-row">
@@ -606,8 +610,12 @@
                             <span class="shell-radio-indicator" aria-hidden="true"></span>
                             <div class="provider-text">
                                 <div class="provider-name" title={p.name}>{p.name}</div>
-                                <div class="provider-sub" title={`${protocolLabel(p.protocol)} · ${p.endpoint} · ${p.model}`}>
-                                    {protocolLabel(p.protocol)} · {p.endpoint} · {p.model}
+                                <div class="provider-sub" title={p.protocol === "codex-subscription" ? `${protocolLabel(p.protocol)} · ${p.model}` : `${protocolLabel(p.protocol)} · ${p.endpoint} · ${p.model}`}>
+                                    {#if p.protocol === "codex-subscription"}
+                                        {protocolLabel(p.protocol)} · {p.model} · {t(ai.hasCredentials(p) ? "ai.settings.codex.signed_in" : "ai.settings.codex.signed_out")}
+                                    {:else}
+                                        {protocolLabel(p.protocol)} · {p.endpoint} · {p.model}
+                                    {/if}
                                 </div>
                             </div>
                         </label>

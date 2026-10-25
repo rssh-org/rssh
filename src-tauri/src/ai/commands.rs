@@ -11,6 +11,7 @@ use crate::error::{locked, AppError, AppResult};
 use crate::secret::setting_key;
 use crate::state::AppState;
 
+use super::codex_auth;
 use super::command_blacklist::{self, CategoryGroup};
 use super::llm;
 use super::redact_rules::{self, RedactRuleRecord};
@@ -35,10 +36,70 @@ use super::skills::{self, SkillRecord};
 fn key_provider() -> String {
     "ai_provider".into()
 }
-/// API key 走 SecretStore —— 唯一真 secret，命名空间带 "setting:" 前缀以跟其它
-/// secret（cred:* 等）隔离。参数是 provider 行 id。
+/// API keys use the setting namespace; device-local OAuth grants have a
+/// separate namespace in `codex_auth` and never enter configuration exports.
 fn key_api_key(provider: &str) -> String {
     setting_key(&format!("ai_{provider}_key"))
+}
+
+fn provider_client(
+    state: &AppState,
+    row: &crate::db::ai_provider::ProviderRow,
+) -> AppResult<Box<dyn llm::LlmClient>> {
+    if row.protocol == codex_auth::PROTOCOL {
+        if !codex_auth::has_credentials(state.secret_store.as_ref(), &row.id)? {
+            return Err(AppError::config("codex_login_required", json!({})));
+        }
+        return Ok(Box::new(llm::codex::CodexClient::new(
+            row.id.clone(),
+            state.codex_auth.clone(),
+        )?));
+    }
+    let api_key = state
+        .secret_store
+        .get(&key_api_key(&row.id))?
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| AppError::config("api_key_missing", json!({ "provider": row.id })))?;
+    llm::build_client(&row.protocol, api_key, row.endpoint.clone())
+}
+
+#[tauri::command]
+pub async fn ai_codex_auth_status(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> AppResult<codex_auth::AuthStatus> {
+    state.codex_auth.status(&provider_id)
+}
+
+#[tauri::command]
+pub async fn ai_codex_login_start(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> AppResult<codex_auth::DeviceLogin> {
+    state.codex_auth.login_start(&provider_id).await
+}
+
+#[tauri::command]
+pub async fn ai_codex_login_poll(
+    state: State<'_, AppState>,
+    provider_id: String,
+    login_id: String,
+) -> AppResult<codex_auth::LoginPoll> {
+    state.codex_auth.login_poll(&provider_id, &login_id).await
+}
+
+#[tauri::command]
+pub async fn ai_codex_login_cancel(
+    state: State<'_, AppState>,
+    provider_id: String,
+    login_id: String,
+) -> AppResult<()> {
+    state.codex_auth.login_cancel(&provider_id, &login_id).await
+}
+
+#[tauri::command]
+pub async fn ai_codex_logout(state: State<'_, AppState>, provider_id: String) -> AppResult<()> {
+    state.codex_auth.logout(&provider_id).await
 }
 /// 危险模式（全局，不分 provider）：总闸；开启后才允许下面的 per-tool 自动批准生效。
 /// 这是 issue #39 的明确需求——用户在受控环境（隔离 VM、靶机）里期望像 Claude Code
@@ -87,7 +148,8 @@ pub fn export_ai_settings(
         if !row.model.is_empty() {
             obj["model"] = json!(row.model);
         }
-        if include_keys {
+        // OAuth grants belong to this device, including in local backups.
+        if include_keys && row.protocol != codex_auth::PROTOCOL {
             let api_key = ss.get(&key_api_key(&row.id))?.unwrap_or_default();
             if !api_key.trim().is_empty() {
                 obj["api_key"] = json!(api_key.trim());
@@ -114,6 +176,7 @@ pub fn export_ai_settings(
 pub fn import_ai_settings(
     db: &crate::db::Db,
     ss: &dyn crate::secret::SecretStore,
+    data_dir: &std::path::Path,
     ai: &serde_json::Value,
 ) -> AppResult<()> {
     let arr = ai
@@ -137,7 +200,11 @@ pub fn import_ai_settings(
         let id = field("provider")?;
         let name = field("name")?;
         let protocol = field("protocol")?;
-        let endpoint = field("endpoint")?;
+        let endpoint = if protocol == codex_auth::PROTOCOL {
+            codex_auth::ENDPOINT.to_owned()
+        } else {
+            field("endpoint")?
+        };
         if !llm::protocol_valid(&protocol) {
             return Err(AppError::config(
                 "ai_payload_invalid",
@@ -155,6 +222,7 @@ pub fn import_ai_settings(
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
+            .filter(|_| protocol != codex_auth::PROTOCOL)
             .map(String::from);
         rows.push((
             crate::db::ai_provider::ProviderRow {
@@ -171,25 +239,41 @@ pub fn import_ai_settings(
     // Mirror: wipe + insert atomically. Validation above already guaranteed
     // every row's shape, so the transaction only guards against DB-level
     // failures mid-insert — a half-replaced table can never be observable.
-    let old_ids = crate::db::ai_provider::ids(db)?;
-    db.with_transaction(|tx| {
-        crate::db::ai_provider::clear_all_tx(tx)?;
-        for (row, _) in &rows {
-            crate::db::ai_provider::upsert_tx(tx, row)?;
-        }
-        Ok(())
+    let old_rows = crate::db::ai_provider::list(db)?;
+    let removed_grants: Vec<&str> = old_rows
+        .iter()
+        .filter(|old| {
+            old.protocol == codex_auth::PROTOCOL
+                && !rows
+                    .iter()
+                    .any(|(row, _)| row.id == old.id && row.protocol == codex_auth::PROTOCOL)
+        })
+        .map(|row| row.id.as_str())
+        .collect();
+    codex_auth::with_removed_credentials(ss, data_dir, &removed_grants, || {
+        db.with_transaction(|tx| {
+            crate::db::ai_provider::clear_all_tx(tx)?;
+            for (row, _) in &rows {
+                crate::db::ai_provider::upsert_tx(tx, row)?;
+            }
+            Ok(())
+        })
     })?;
     // Secrets ride outside the transaction: write the carried keys, then drop
     // the secrets of rows the mirror deleted. A failure here leaves consistent
     // rows and surfaces as an import error — never a half-wiped table.
     for (row, api_key) in &rows {
+        if row.protocol == codex_auth::PROTOCOL {
+            ss.delete(&key_api_key(&row.id))?;
+        }
         if let Some(k) = api_key {
             ss.set(&key_api_key(&row.id), k)?;
         }
     }
-    for id in &old_ids {
-        if crate::db::ai_provider::get(db, id)?.is_none() {
-            ss.delete(&key_api_key(id))?;
+    for old in &old_rows {
+        let current = crate::db::ai_provider::get(db, &old.id)?;
+        if current.is_none() {
+            ss.delete(&key_api_key(&old.id))?;
         }
     }
     // Active selection: apply only when it names a carried row; anything else
@@ -426,17 +510,18 @@ pub async fn ai_session_start_impl(
         }
     }
 
-    // 1. Provider 行（协议 + endpoint）+ API key（SecretStore）。
+    // 1. Provider 行（协议 + endpoint）及对应的本机凭据。
     // provider 参数是行 id —— 协议分发行查，不在请求里猜。
     let provider_row = crate::db::ai_provider::get(&state.db, &provider)?.ok_or_else(|| {
         AppError::not_found("provider_not_found", json!({ "provider": provider }))
     })?;
-    let api_key = state
-        .secret_store
-        .get(&key_api_key(&provider_row.id))?
-        .ok_or_else(|| {
-            AppError::config("api_key_missing", json!({ "provider": provider_row.id }))
-        })?;
+    let client = provider_client(state, &provider_row)?;
+    if model.trim().is_empty() {
+        return Err(AppError::config(
+            "provider_field_required",
+            json!({ "field": "model" }),
+        ));
+    }
 
     // 2. 校验 target 存在 + 抓 SSH handle（给 download_file 工具复用）+ 推断初始 shell。
     //
@@ -523,12 +608,6 @@ pub async fn ai_session_start_impl(
             None
         }
     };
-
-    let client = llm::build_client(
-        &provider_row.protocol,
-        api_key,
-        provider_row.endpoint.clone(),
-    )?;
 
     // system prompt = 内置 general 规则集 + lazy Skill 目录（id + description）。
     // 其它内置 Skill 和用户 Skill 走 load_skill 工具按需加载，
@@ -1463,6 +1542,8 @@ pub struct AiSettings {
     pub model: String,
     pub endpoint: Option<String>,
     pub has_api_key: bool,
+    #[serde(default)]
+    pub has_credentials: bool,
     /// 危险模式总闸。off 时下面所有 auto_* 视同 false（per-tool 设置仍持久化，
     /// 但运行时不生效，方便用户切回 danger 时复原选择）。
     pub danger_mode: bool,
@@ -1525,8 +1606,17 @@ pub async fn ai_settings_get_impl(
     // 空 key 在 ai_provider_save 里走 delete（不存空串），所以"存在"==有真
     // key。真正的解密留给发起 LLM 请求时。
     let has_api_key = match &row {
-        Some(r) => state.secret_store.exists(&key_api_key(&r.id))?,
+        Some(r) if r.protocol != codex_auth::PROTOCOL => {
+            state.secret_store.exists(&key_api_key(&r.id))?
+        }
+        Some(_) => false,
         None => false,
+    };
+    let has_credentials = match &row {
+        Some(r) if r.protocol == codex_auth::PROTOCOL => {
+            codex_auth::has_credentials(state.secret_store.as_ref(), &r.id)?
+        }
+        _ => has_api_key,
     };
     let danger_mode = crate::db::settings::get(&state.db, &key_danger_mode())?
         .map(|v| v == "1")
@@ -1542,6 +1632,7 @@ pub async fn ai_settings_get_impl(
         model: row.as_ref().map(|r| r.model.clone()).unwrap_or_default(),
         endpoint: row.as_ref().map(|r| r.endpoint.clone()),
         has_api_key,
+        has_credentials,
         danger_mode,
         auto_run_command: read_auto(state, "run_command")?,
         auto_match_file: read_auto(state, "match_file")?,
@@ -1581,6 +1672,16 @@ pub async fn ai_list_models_impl(
     endpoint: String,
     api_key: Option<String>,
 ) -> AppResult<Vec<llm::ModelInfo>> {
+    if protocol == codex_auth::PROTOCOL {
+        let id = provider_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| AppError::config("codex_login_required", json!({})))?;
+        let row = crate::db::ai_provider::get(&state.db, id)?
+            .filter(|row| row.protocol == codex_auth::PROTOCOL)
+            .ok_or_else(|| AppError::not_found("provider_not_found", json!({ "provider": id })))?;
+        return provider_client(state, &row)?.list_models().await;
+    }
     // 入参先 trim：纯空白当作"未提供"，回落到 secret_store
     let endpoint = endpoint.trim().to_string();
     if endpoint.is_empty() {
@@ -1619,6 +1720,7 @@ pub struct AiProviderInfo {
     pub model: String,
     pub endpoint: String,
     pub has_api_key: bool,
+    pub has_credentials: bool,
 }
 
 #[tauri::command]
@@ -1631,7 +1733,13 @@ pub async fn ai_provider_list_impl(state: &AppState) -> AppResult<Vec<AiProvider
     let mut out = Vec::new();
     for row in crate::db::ai_provider::list(&state.db)? {
         // 同 ai_settings_get：只查存在性，不解密。
-        let has_api_key = state.secret_store.exists(&key_api_key(&row.id))?;
+        let is_codex = row.protocol == codex_auth::PROTOCOL;
+        let has_api_key = !is_codex && state.secret_store.exists(&key_api_key(&row.id))?;
+        let has_credentials = if is_codex {
+            codex_auth::has_credentials(state.secret_store.as_ref(), &row.id)?
+        } else {
+            has_api_key
+        };
         out.push(AiProviderInfo {
             id: row.id,
             name: row.name,
@@ -1639,6 +1747,7 @@ pub async fn ai_provider_list_impl(state: &AppState) -> AppResult<Vec<AiProvider
             model: row.model,
             endpoint: row.endpoint,
             has_api_key,
+            has_credentials,
         });
     }
     Ok(out)
@@ -1692,13 +1801,20 @@ pub async fn ai_provider_save_impl(state: &AppState, patch: AiProviderPatch) -> 
             json!({ "protocol": protocol }),
         ));
     }
-    let endpoint = patch
-        .endpoint
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| AppError::config("provider_field_required", json!({ "field": "endpoint" })))?
-        .to_string();
+    let is_codex = protocol == codex_auth::PROTOCOL;
+    let endpoint = if is_codex {
+        codex_auth::ENDPOINT.to_owned()
+    } else {
+        patch
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AppError::config("provider_field_required", json!({ "field": "endpoint" }))
+            })?
+            .to_string()
+    };
     let model = patch
         .model
         .as_deref()
@@ -1729,6 +1845,7 @@ pub async fn ai_provider_save_impl(state: &AppState, patch: AiProviderPatch) -> 
         }
     };
 
+    let old_row = crate::db::ai_provider::get(&state.db, &id)?;
     crate::db::ai_provider::upsert(
         &state.db,
         &crate::db::ai_provider::ProviderRow {
@@ -1739,15 +1856,27 @@ pub async fn ai_provider_save_impl(state: &AppState, patch: AiProviderPatch) -> 
             endpoint,
         },
     )?;
-    match patch.api_key.as_deref().map(str::trim) {
-        None => {} // field absent — keep the stored key
-        Some("") => {
-            // Explicit clear (matches the AiProviderPatch doc). The UI form
-            // sends None for a blank box (keep); only an explicit "" clears.
-            state.secret_store.delete(&key_api_key(&id))?;
-        }
-        Some(k) => {
-            state.secret_store.set(&key_api_key(&id), k)?;
+    if !is_codex
+        && (old_row
+            .as_ref()
+            .is_some_and(|row| row.protocol == codex_auth::PROTOCOL)
+            || codex_auth::has_credentials(state.secret_store.as_ref(), &id)?)
+    {
+        state.codex_auth.logout(&id).await?;
+    }
+    if is_codex {
+        state.secret_store.delete(&key_api_key(&id))?;
+    } else {
+        match patch.api_key.as_deref().map(str::trim) {
+            None => {} // field absent — keep the stored key
+            Some("") => {
+                // Explicit clear (matches the AiProviderPatch doc). The UI form
+                // sends None for a blank box (keep); only an explicit "" clears.
+                state.secret_store.delete(&key_api_key(&id))?;
+            }
+            Some(k) => {
+                state.secret_store.set(&key_api_key(&id), k)?;
+            }
         }
     }
     if patch.activate {
@@ -1767,8 +1896,14 @@ pub async fn ai_provider_delete(state: State<'_, AppState>, id: String) -> AppRe
 /// retry re-runs cleanly — the other order could orphan the encrypted key
 /// forever (nothing later inspects ids whose row is already gone).
 pub async fn ai_provider_delete_impl(state: &AppState, id: String) -> AppResult<()> {
+    let is_codex = crate::db::ai_provider::get(&state.db, &id)?
+        .is_some_and(|row| row.protocol == codex_auth::PROTOCOL);
     state.secret_store.delete(&key_api_key(&id))?;
-    crate::db::ai_provider::delete(&state.db, &id)?;
+    if is_codex || codex_auth::has_credentials(state.secret_store.as_ref(), &id)? {
+        state.codex_auth.delete_provider(&id).await?;
+    } else {
+        crate::db::ai_provider::delete(&state.db, &id)?;
+    }
     if crate::db::settings::get(&state.db, &key_provider())?.as_deref() == Some(id.as_str()) {
         crate::db::settings::delete(&state.db, &key_provider())?;
     }

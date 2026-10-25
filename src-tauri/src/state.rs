@@ -89,6 +89,7 @@ pub struct OwnedWaiter<T> {
 pub struct AppState {
     pub db: Arc<Db>,
     pub secret_store: Arc<dyn SecretStore>,
+    pub codex_auth: Arc<crate::ai::codex_auth::CodexAuth>,
     /// Single source of truth for connection identity, ownership and lifecycle.
     /// Typed handle maps below contain Ready handles only.
     pub lifecycle_sessions: Mutex<HashMap<String, SessionRecord>>,

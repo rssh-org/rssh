@@ -339,8 +339,8 @@
         try {
             const settings = await ai.loadSettings();
             if (!ai.isOpen(tabId)) return;
-            if (!settings.provider || !settings.has_api_key) {
-                console.error("AI handoff: 缺 Provider/API key，无法自动启动会话");
+            if (!settings.provider || !ai.hasCredentials(settings)) {
+                console.error("AI handoff: 缺 Provider/登录凭据，无法自动启动会话");
                 return;
             }
             const info = await ai.startSession({

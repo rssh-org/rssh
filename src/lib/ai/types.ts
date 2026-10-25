@@ -33,8 +33,8 @@ export interface CategoryGroup {
   commands: string[];
 }
 
-/** 三种协议类型 —— 与后端 db::ai_provider::PROTOCOLS 一一对应。 */
-export type LlmProtocol = "deepseek-thinking" | "openai-completions" | "anthropic-messages";
+/** Wire values match the backend protocol registry. */
+export type LlmProtocol = "deepseek-thinking" | "openai-completions" | "anthropic-messages" | "codex-subscription";
 
 /** 一条用户自定义 provider（ai_providers 表一行）。 */
 export interface AiProviderRecord {
@@ -44,6 +44,8 @@ export interface AiProviderRecord {
   model: string;
   endpoint: string;
   has_api_key: boolean;
+  /** Local credentials only; older servers expose just has_api_key. */
+  has_credentials?: boolean;
 }
 
 export interface AiSettings {
@@ -54,6 +56,7 @@ export interface AiSettings {
   model: string;
   endpoint: string | null;
   has_api_key: boolean;
+  has_credentials?: boolean;
   /** 危险模式总闸。off 时下面 8 个 auto_* 视同 false（持久化保留，方便切回时复原）。 */
   danger_mode: boolean;
   /** per-tool 自动批准。仅当 danger_mode=true 时生效；UI 上 danger 关时整组禁用。 */

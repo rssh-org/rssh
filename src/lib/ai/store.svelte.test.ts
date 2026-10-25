@@ -36,6 +36,14 @@ afterEach(() => {
 });
 
 describe("panel visibility", () => {
+  it("recognizes device-local subscription credentials separately from API keys", async () => {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    expect(ai.hasCredentials({ has_api_key: false, has_credentials: true })).toBe(true);
+    expect(ai.hasCredentials({ has_api_key: true, has_credentials: false })).toBe(false);
+    expect(ai.hasCredentials({ has_api_key: true })).toBe(true);
+    expect(ai.hasCredentials(null)).toBe(false);
+  });
   it("keeps each tab's open state independent", async () => {
     vi.resetModules();
     const ai = await import("./store.svelte.ts");

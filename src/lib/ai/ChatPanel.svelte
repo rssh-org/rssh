@@ -178,8 +178,8 @@
             if (!settings.provider) {
                 throw new Error(t("ai.error.no_provider"));
             }
-            if (!settings.has_api_key) {
-                throw new Error(t("ai.error.no_api_key"));
+            if (!ai.hasCredentials(settings)) {
+                throw new Error(t(settings.protocol === "codex-subscription" ? "error.codex_login_required" : "ai.error.no_api_key"));
             }
             // targetId 是连接句柄：同一 tab 重连后应使用此刻的最新值，不能在点击时
             // 冻结旧句柄；tabId / targetKind 才是这次动作不可变的 owner。
@@ -216,8 +216,8 @@
             if (!settings.provider) {
                 throw new Error(t("ai.error.no_provider"));
             }
-            if (!settings.has_api_key) {
-                throw new Error(t("ai.error.no_api_key"));
+            if (!ai.hasCredentials(settings)) {
+                throw new Error(t(settings.protocol === "codex-subscription" ? "error.codex_login_required" : "ai.error.no_api_key"));
             }
             const startedTargetId = liveTargetId();
             await ai.resumeSession({

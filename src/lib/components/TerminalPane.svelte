@@ -576,8 +576,8 @@
             : t("terminal.block.menu.copy_image");
         // 染色是 per-block 状态 toggle（像 fold），不走 Finder 多选——标签随右键块的染色态翻转。
         const colored = coloredBlockIds.has(r.id);
-        // 发送到 AI 走 Finder 多选（像复制）。未配 API key → 置灰。
-        const aiConfigured = ai.settings()?.has_api_key === true;
+        // Sending blocks requires local API-key or subscription credentials.
+        const aiConfigured = ai.hasCredentials(ai.settings());
         const sendAiLabel = n > 1
             ? t("terminal.block.menu.send_ai_n", { n })
             : t("terminal.block.menu.send_ai");

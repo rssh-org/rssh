@@ -56,6 +56,11 @@ fn build_state() -> AppResult<AppState> {
         log::warn!("migration failed (will retry on next startup): {e}");
     }
     Ok(AppState {
+        codex_auth: Arc::new(crate::ai::codex_auth::CodexAuth::new(
+            db.clone(),
+            secret_system.store.clone(),
+            data_dir.clone(),
+        )?),
         db,
         secret_store: secret_system.store,
         lifecycle_sessions: Mutex::new(HashMap::new()),
@@ -1113,6 +1118,31 @@ async fn dispatch_async(
         )
         .await),
         "ai_provider_list" => ok(crate::ai::commands::ai_provider_list_impl(state).await),
+        "ai_codex_auth_status" => ok(state
+            .codex_auth
+            .status(&arg::<String>(&args, "providerId")?)),
+        "ai_codex_login_start" => ok(state
+            .codex_auth
+            .login_start(&arg::<String>(&args, "providerId")?)
+            .await),
+        "ai_codex_login_poll" => ok(state
+            .codex_auth
+            .login_poll(
+                &arg::<String>(&args, "providerId")?,
+                &arg::<String>(&args, "loginId")?,
+            )
+            .await),
+        "ai_codex_login_cancel" => ok(state
+            .codex_auth
+            .login_cancel(
+                &arg::<String>(&args, "providerId")?,
+                &arg::<String>(&args, "loginId")?,
+            )
+            .await),
+        "ai_codex_logout" => ok(state
+            .codex_auth
+            .logout(&arg::<String>(&args, "providerId")?)
+            .await),
         "ai_provider_save" => {
             ok(crate::ai::commands::ai_provider_save_impl(state, arg(&args, "patch")?).await)
         }
