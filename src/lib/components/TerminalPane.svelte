@@ -43,6 +43,7 @@
     import {setupTouchScroll} from "../terminal/touch-scroll.ts";
     import {setupTerminalSoftKeyboard} from "../terminal/soft-keyboard.ts";
     import {registerBracketedPasteProvider, unregisterBracketedPasteProvider} from "../terminal/bracketed-paste.ts";
+    import {registerAlternateScreenProvider, unregisterAlternateScreenProvider} from "../terminal/alternate-screen.ts";
     import {setupXtermIme229Workaround} from "../terminal/xterm-ime-229-workaround.ts";
     import {disposeWebglAddon} from "../terminal/webgl-addon.ts";
     import {createReservedSessionAttempt} from "../terminal/reserved-session-attempt.ts";
@@ -1551,6 +1552,7 @@
         // AI-driven pastes the same way xterm wraps manual ones. See
         // bracketed-paste.ts.
         registerBracketedPasteProvider(tabId, () => terminal?.modes.bracketedPasteMode ?? false);
+        registerAlternateScreenProvider(tabId, () => terminal?.buffer.active.type === "alternate");
         // Copy-on-select (left-button mouseup) + right-click action (capture
         // phase — required so preventDefault can suppress the native menu before
         // xterm/WebView handle the event). See onSelectMouseUp / onTerminalContextMenu.
@@ -1824,6 +1826,7 @@
         blockTracker?.dispose();
         app.unregisterTerminalControls(tabId);
         unregisterBracketedPasteProvider(tabId);
+        unregisterAlternateScreenProvider(tabId);
         app.unregisterSession(tabId);
         app.clearTerminalConnectionStatus(tabId);
         highlightDecorator?.dispose();

@@ -51,6 +51,11 @@ import type {
 } from "./types.ts";
 import { isRawDeviceKind } from "./types.ts";
 import { bracketedPasteEnabled } from "../terminal/bracketed-paste.ts";
+import { alternateScreenActive } from "../terminal/alternate-screen.ts";
+
+const ALTERNATE_SCREEN_ERROR = "Command was not executed: the target terminal is in alternate screen mode "
+  + "(for example, Vim, less, or top). Ask the user to exit the full-screen application and return to "
+  + "the normal command prompt before retrying. Do not send shell commands or exit keystrokes to that application.";
 
 /** DECSET 2004 bracketed-paste markers. When the target shell has enabled
  *  bracketed paste, a paste is wrapped so zsh/bash/PowerShell treat it as one
@@ -1388,6 +1393,17 @@ export async function executeCommand(
   target_kind: AiTargetKind,
   target_session_id: string,
 ): Promise<void> {
+  return executePtyCommand(session, cardId, execution, target_kind, target_session_id);
+}
+
+async function executePtyCommand(
+  session: SessionInstanceRef,
+  cardId: string,
+  execution: PtyExecution,
+  target_kind: AiTargetKind,
+  target_session_id: string,
+  blockedReason?: string,
+): Promise<void> {
   // Re-entrancy guard: a command card must never be pasted twice. A
   // CommandConfirmDialog remount can lose its local `executing` flag and fire
   // approve() again; without this, the command
@@ -1536,6 +1552,12 @@ export async function executeCommand(
     return exec.done;
   };
 
+  // Refusals use the same delivery/retry lifecycle as executed commands, but
+  // never register a stream listener, start a timeout or send terminal input.
+  if (blockedReason || alternateScreenActive(session.tabId)) {
+    return finish(blockedReason ?? ALTERNATE_SCREEN_ERROR, -1, false);
+  }
+
   try {
     const unlisten = await listen<string>(dataEvent, (e) => {
       if (exec.status !== "running") return;
@@ -1560,6 +1582,12 @@ export async function executeCommand(
     // command card isn't wedged "in flight" forever.
     removeCommandExecution(executionKey, exec);
     throw new CommandSetupError(e);
+  }
+
+  // The user may enter a full-screen program while listen() is registering.
+  // Read xterm's live mode again immediately before the transport write.
+  if (alternateScreenActive(session.tabId)) {
+    return finish(ALTERNATE_SCREEN_ERROR, -1, false);
   }
 
   // \r (not \n) is the cross-platform PTY/serial Enter byte: ConPTY/PowerShell
@@ -1994,6 +2022,16 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
     );
     _pendingByTab[tab] = proposed;
     pushChat(tab, { kind: "command", cmd: proposed, at: Date.now() });
+    const kind = _targetKindByTab[tab];
+    const targetId = _sessionByTab[tab]?.target_id;
+    if (proposed.kind === "run_command" && kind && targetId && alternateScreenActive(tab)) {
+      // Report immediately, including while the approval card is unmounted.
+      // Passing the refusal explicitly cannot accidentally grant approval if
+      // the terminal leaves alternate screen before the result is delivered.
+      commandApprovals.markAttempted(session, proposed.id);
+      void executePtyCommand(session, proposed.id, proposed.execution, kind, targetId, ALTERNATE_SCREEN_ERROR)
+        .catch((error) => console.error("[ai] alternate-screen refusal delivery failed:", error));
+    }
   });
 
   await addListener<WebToolProposal>(`ai:web_tool_proposed:${tab}`, (e) => {

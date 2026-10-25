@@ -2104,6 +2104,107 @@ describe("tab lifecycle", () => {
 });
 
 describe("executeCommand", () => {
+  const guardedExecution = { full_cmd: "echo test", sentinel: "sentinel", timeout_s: 30 };
+  const guardedSession = { tabId: "guarded-tab", instanceId: "guarded-instance" };
+
+  it.each(["ssh", "local", "serial", "telnet"] as const)(
+    "returns an LLM-visible error without writing to an alternate-screen %s terminal", async (kind) => {
+      vi.resetModules();
+      const ai = await import("./store.svelte.ts");
+      const screen = await import("../terminal/alternate-screen.ts");
+      screen.registerAlternateScreenProvider(guardedSession.tabId, () => true);
+
+      await ai.executeCommand(guardedSession, "blocked", guardedExecution, kind, "target");
+      expect(listenMock).not.toHaveBeenCalled();
+      expect(invokeMock.mock.calls).toEqual([["ai_command_result", {
+        ...guardedSession, toolCallId: "blocked", exitCode: -1,
+        output: expect.stringContaining("alternate screen mode"),
+        timedOut: false, earlyTerminated: false,
+      }]]);
+      expect(ai.commandExecutionStatus(guardedSession, "blocked")).toBe("delivered");
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("rechecks alternate screen after asynchronous listener registration", async () => {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    const screen = await import("../terminal/alternate-screen.ts");
+    let alternate = false;
+    screen.registerAlternateScreenProvider(guardedSession.tabId, () => alternate);
+    listenMock.mockImplementation(async () => {
+      alternate = true;
+      return unlistenMock;
+    });
+
+    await ai.executeCommand(guardedSession, "race", guardedExecution, "ssh", "target");
+    expect(unlistenMock).toHaveBeenCalledOnce();
+    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_command_result"]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retries refusal delivery without executing even after returning to the normal screen", async () => {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    const screen = await import("../terminal/alternate-screen.ts");
+    let alternate = true;
+    screen.registerAlternateScreenProvider(guardedSession.tabId, () => alternate);
+    invokeMock.mockRejectedValueOnce(new Error("delivery failed"));
+    await expect(ai.executeCommand(guardedSession, "retry", guardedExecution, "local", "target"))
+      .rejects.toThrow("delivery failed");
+    expect(ai.commandExecutionStatus(guardedSession, "retry")).toBe("delivery_failed");
+    alternate = false;
+
+    await ai.executeCommand(guardedSession, "retry", guardedExecution, "local", "target");
+    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_command_result", "ai_command_result"]);
+    expect(invokeMock.mock.calls[1][1]).toEqual(invokeMock.mock.calls[0][1]);
+    expect(listenMock).not.toHaveBeenCalled();
+  });
+
+  it("allows a new command after leaving alternate screen and ignores other tabs", async () => {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    const screen = await import("../terminal/alternate-screen.ts");
+    let alternate = true;
+    screen.registerAlternateScreenProvider("another-tab", () => true);
+    screen.registerAlternateScreenProvider(guardedSession.tabId, () => alternate);
+    await ai.executeCommand(guardedSession, "old", guardedExecution, "telnet", "target");
+    alternate = false;
+    const running = ai.executeCommand(guardedSession, "new", guardedExecution, "telnet", "target");
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("telnet_write_line", {
+      sessionId: "target", text: "echo test",
+    }));
+    await ai.submitCommand(guardedSession, "new");
+    await running;
+  });
+
+  it.each([true, false])("checks run_command arrival without waiting for approval (alternate=%s)", async (alternate) => {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    const screen = await import("../terminal/alternate-screen.ts");
+    ai.activateTab(guardedSession.tabId);
+    screen.registerAlternateScreenProvider(guardedSession.tabId, () => alternate);
+    invokeMock.mockImplementation(async (cmd) => cmd === "ai_session_start" ? {
+      tab_id: guardedSession.tabId, instance_id: guardedSession.instanceId,
+      target_id: "target", skill: "general", model: "model", provider: "openai", conversation_id: "conversation",
+    } : null);
+    await ai.startSession({ tabId: guardedSession.tabId, targetKind: "ssh", targetId: "target",
+      skill: "general", provider: "openai", model: "model", lease: ai.captureSessionLease(guardedSession.tabId) });
+    const proposed = listenMock.mock.calls.find(([event]) => event === "ai:command_proposed:guarded-tab")![1];
+    invokeMock.mockClear();
+    proposed({ payload: { id: "arrival", kind: "run_command", cmd: "echo test", execution: guardedExecution } });
+    if (alternate) {
+      await vi.waitFor(() => expect(ai.commandExecutionStatus(guardedSession, "arrival")).toBe("delivered"));
+      expect(invokeMock.mock.calls).toEqual([["ai_command_result", expect.objectContaining({
+        ...guardedSession, toolCallId: "arrival", exitCode: -1,
+        output: expect.stringContaining("Command was not executed"),
+      })]]);
+    } else {
+      expect(invokeMock).not.toHaveBeenCalled();
+      expect(ai.pendingCommand(guardedSession.tabId)?.id).toBe("arrival");
+    }
+  });
+
   it.each([
     ["serial" as const, "serial_write"],
     ["telnet" as const, "telnet_write"],
