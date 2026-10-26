@@ -1,11 +1,10 @@
 # Rust
 /src-tauri/target/
-/src-tauri/bin/rssh-cli*
+/src-tauri/bin/
 
-# Tauri build output: capability JSON schemas + resolved ACL manifests.
-# build.rs regenerates them on every build and nothing in the tree reads them.
-/src-tauri/gen/schemas/
-/src-tauri/gen/apple/
+# Generated native projects and Tauri schemas. Maintained sources live in
+# android/ and ohos/; repository build entry points prepare these workspaces.
+/src-tauri/gen/
 
 # Node
 /node_modules/

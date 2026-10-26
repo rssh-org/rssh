@@ -140,6 +140,23 @@ rg 'if version <' src-tauri/src/db/schema.rs   # 每个块只加不改
 | Headless 二进制 `rssh-server` | `src-tauri/src/server_main.rs`，gated by feature `server` | 同上；给 browser / JetBrains 提供 embedded HTTP + WebSocket IPC |
 | 共享 lib `rssh_lib` | `src-tauri/src/lib.rs`，`[lib] name="rssh_lib"` | `rg 'rssh_lib::' src-tauri/src/bin/rssh` |
 
+### 平台源码与构建产物
+
+| 概念 | 在哪 | 怎么验证 |
+|---|---|---|
+| Android 原生工程 | `android/` | `npm run tauri -- android dev --open` 先准备生成工程再打开 IDE |
+| OHOS 平台实现 | `ohos/app/`、`ohos/src/` | ArkTS 工程与 Rust 适配集中维护；核对 `src-tauri/src/lib.rs` 模块入口 |
+| OHOS 原生适配测试 | `ohos/tests/` | `npm test` 直接测试 `ohos/app/` 源码，不依赖生成目录 |
+| OHOS 框架与准备工具 | `ohos/framework/`、`ohos/scripts/` | 独立 lock、上游 revision、patch、测试及生成 workspace |
+| 图标 | `icons/` | `src-tauri/tauri.conf.json` 的 `bundle.icon` 引用；移动端复制进生成工程 |
+| 平台构建入口 | `scripts/build-*.sh`、`scripts/tauri.mjs` | `npm run tauri -- ...` 调用仓库准备流程，勿直接绕过 wrapper |
+| 生成目录 | `src-tauri/gen/`、`src-tauri/bin/`、`src-tauri/target/` | 全部忽略；源码修改必须回到对应平台目录 |
+
+`src-tauri/capabilities/` 是权限源码，保留跟踪。macOS / Windows / Linux 打包时
+统一编译 CLI、暂存到 `src-tauri/bin/` 并装入应用资源，供 GUI 安装。
+普通开发和 Cargo 检查不依赖预编译二进制。各平台构建与打包见
+[CONTRIBUTING.md](CONTRIBUTING.md#build)。
+
 ### 前端
 
 | 概念 | 在哪 | 怎么验证 |
@@ -194,19 +211,23 @@ rg 'crypto\.randomUUID' src/lib   # 看 tab id 怎么造
 ### 构建命令
 
 ```bash
-npm test                                                        # Vitest；CI gate
+npm test                                                        # Vitest（含 ohos/tests）；CI gate
 npm run build                                                   # Vite production build
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo test --manifest-path src-tauri/Cargo.toml                  # Rust tests；CI gate
 cargo check --manifest-path src-tauri/Cargo.toml                 # 默认 GUI/lib
 cargo check --manifest-path src-tauri/Cargo.toml --features cli --bin rssh-cli
 cargo check --manifest-path src-tauri/Cargo.toml --features server --bin rssh-server
-npm run tauri dev                                               # 本地 GUI
-./build-mac.sh                                                  # macOS aarch64 .dmg
-./build-android.sh                                              # APK + AAB（需 Android SDK/NDK）
+npm run tauri -- dev                                            # 本地 GUI
+./scripts/build-mac.sh                                          # macOS aarch64 .dmg
+./scripts/build-android.sh                                      # universal + ARM64 APK（需 Android SDK/NDK）
+./scripts/build-ohos.sh --unsigned                              # 手机 / 电脑 HAP 与 App Pack
+node --test ohos/scripts/*.test.mjs                             # OHOS 构建流程回归
+# 固定上游源码准备后：
+node --test ohos/framework/tests/*.test.mjs                     # OHOS 框架契约
 ```
 
-当前没有 frontend lint script；有 Vitest 与 Rust unit/integration tests。UI、真实 SSH/Telnet/serial、Docker/K8s 等环境行为仍要按改动范围手测，不能拿编译替代。
+当前没有 frontend lint script；有 Vitest、Rust unit/integration tests 与 Node 构建流程测试。`npm test` 包含 `ohos/tests/`，但不覆盖 `.mjs` Node 测试；修改打包流程需单独运行后者。UI、真实 SSH/Telnet/serial、Docker/K8s 等环境行为仍要按改动范围手测，不能拿编译替代。
 
 ---
 

@@ -54,10 +54,17 @@ No extra dependencies. Visual Studio Build Tools with C++ workload must be insta
 
 ### HarmonyOS phone and PC
 
-Both editions are available in [Huawei AppGallery](https://appgallery.huawei.com/app/detail?id=com.rssh.app&channelId=SHARE&source=appshare).
-Open the store link or search for **RSSH** on the target device to install.
-Source builds require DevEco Studio with the full
-HarmonyOS SDK and the pinned tooling described in [BUILD_OHOS.md](BUILD_OHOS.md).
+Install DevEco Studio with the full HarmonyOS SDK (`native/`, Hvigor and OHPM),
+then install the build helper and Rust target:
+
+```bash
+cargo install ohrs --version 1.5.0 --locked
+rustup target add aarch64-unknown-linux-ohos
+```
+
+The build script detects common SDK locations. Otherwise, set `OHOS_HOME` to
+the SDK directory containing `native/`, and set `HVIGOR_BIN` / `OHPM_BIN` to
+`hvigorw.js` / `ohpm` if needed.
 
 ## Dev
 
@@ -66,7 +73,7 @@ HarmonyOS SDK and the pinned tooling described in [BUILD_OHOS.md](BUILD_OHOS.md)
 npm install
 
 # start dev server (hot-reload frontend + Rust backend)
-npm run tauri dev
+npm run tauri -- dev
 ```
 
 ## Build
@@ -74,55 +81,59 @@ npm run tauri dev
 ### Desktop (macOS, Windows or Linux)
 
 ```bash
-npm run tauri build
+npm run tauri -- build
 ```
 
+The repository's Tauri wrapper builds `rssh-cli`, stages it in the ignored
+`src-tauri/bin/` directory and includes it in the desktop application's resources.
+The GUI can then install the bundled CLI. Ordinary development and Cargo
+check/test commands do not require this directory or a prebuilt CLI.
+`npm run tauri -- build --no-bundle` also skips CLI staging.
 Output lands in `src-tauri/target/release/bundle/`.
 
-### Desktop with CLI bundled
-
-The desktop app bundles a CLI binary via `resources`. To include it:
+The platform scripts also install npm dependencies and perform their platform's
+packaging steps:
 
 ```bash
-# 1. build CLI
-cd src-tauri
-cargo build --release --features cli --bin rssh-cli
-
-# 2. stage it
-mkdir -p bin
-cp target/release/rssh-cli bin/    # or rssh-cli.exe on Windows
-
-# 3. build app
-cd ..
-npx tauri build
+./scripts/build-mac.sh
+./scripts/build-linux.sh
 ```
 
 ### Cross-compile for a specific target
 
 ```bash
-# add the target
 rustup target add x86_64-apple-darwin
-
-# build
-npx tauri build --target x86_64-apple-darwin
+npm run tauri -- build --target x86_64-apple-darwin
 ```
 
 ### Android
 
+The maintained Android Studio project is in `android/`. The repository wrapper
+prepares `src-tauri/gen/android/` before invoking Tauri; a fresh checkout does not
+need `tauri android init`.
+
 ```bash
-# init (first time only)
-npx tauri android init
-
-# dev
-npx tauri android dev
-
-# release APK
-npx tauri android build --apk
+npm run tauri -- android dev
+npm run tauri -- android build --apk
+npm run tauri -- android dev --open
+# Build both universal and ARM64 APKs:
+./scripts/build-android.sh
 ```
 
-The release APK requires a signing keystore. See `src-tauri/gen/android/key.properties`.
+Edit Kotlin, manifests and Gradle configuration in `android/`, not in the generated
+project. Open the generated project through the wrapper when using Android Studio.
+Use `npm run tauri -- ...` rather than invoking `npx tauri` directly so the source
+preparation step is not skipped.
+
+Keep `key.properties` and the release `.jks` keystore in `android/` (both ignored),
+or use an absolute path to an external keystore. Generated Gradle builds read these
+signing inputs from the maintained project; preparation does not copy them into
+`gen/`. SDK paths may be supplied through the ignored `android/local.properties`;
+existing local SDK configuration in the generated project is retained.
 
 ### iOS
+
+Local iOS builds require macOS, full Xcode with the iOS SDK, CocoaPods and XcodeGen.
 
 For a local device build, add an Apple ID under **Xcode > Settings > Accounts**,
 connect and trust the iPhone, and enable Developer Mode. For a new account or
@@ -130,7 +141,7 @@ device, initialize the generated project once:
 
 ```bash
 APPLE_DEVELOPMENT_TEAM=XXXXXXXXXX \
-./build-ios.sh --open
+./scripts/build-ios.sh --open
 ```
 
 In Xcode, select the app target, enable **Automatically manage signing**, choose
@@ -141,7 +152,7 @@ new device from its CLI build.
 After the device is registered, build the IPA with the Personal Team ID:
 
 ```bash
-APPLE_DEVELOPMENT_TEAM=XXXXXXXXXX ./build-ios.sh
+APPLE_DEVELOPMENT_TEAM=XXXXXXXXXX ./scripts/build-ios.sh
 ```
 
 The script uses Xcode automatic signing and the `debugging` export method by
@@ -154,55 +165,62 @@ ID. Override it only when necessary:
 ```bash
 APPLE_DEVELOPMENT_TEAM=XXXXXXXXXX \
 IOS_BUNDLE_IDENTIFIER=com.example.rssh.dev \
-./build-ios.sh
+./scripts/build-ios.sh
 ```
 
-iOS release packaging runs on GitHub Actions. Before enabling it, register the
-identifier from `src-tauri/tauri.conf.json` (`com.rssh.app` by default) as an
-explicit App ID. The registered Bundle ID and the Tauri `identifier` must match
-exactly.
-
-Configure these GitHub Actions secrets with the manual signing material:
-
-- `APPLE_DEVELOPMENT_TEAM`: the 10-character Apple Developer Team ID
-- `IOS_CERTIFICATE`: base64-encoded Apple Distribution `.p12`
-- `IOS_CERTIFICATE_PASSWORD`: password used when exporting that `.p12`
-- `IOS_MOBILE_PROVISION`: base64-encoded App Store Connect provisioning profile
-
-Run **iOS Release** manually from the Actions tab to test the setup. Its optional
-`build_number` input defaults to the monotonically increasing GitHub Actions run
-number. To package iOS automatically for `v*` tags, set the repository variable
-`IOS_BUILD_ENABLED` to `true`; without that opt-in, tag-triggered iOS jobs are
-skipped and the existing desktop/Android release workflow is unchanged.
-
-The workflow builds with `--export-method app-store-connect`, uploads the IPA as
-a workflow artifact, and, for tags, appends it to the draft GitHub release. The
-IPA is not uploaded to App Store Connect automatically. The CI helper copies the
-required privacy manifest into the generated Xcode project before packaging.
+The script prepares the generated Xcode project, icons and privacy manifest.
+IPA output lands in `src-tauri/gen/apple/build/arm64/`.
 
 iOS may suspend network sessions when RSSH enters the background; this project
 does not claim a background execution mode it cannot guarantee.
 
-### HarmonyOS phone and PC
+### HarmonyOS packaging
 
-Follow [BUILD_OHOS.md](BUILD_OHOS.md) for SDK setup, signing, packaging and device
-regression checks. From the repository root:
+Maintain HarmonyOS sources in `ohos/`. The build script prepares the ignored
+`src-tauri/gen/ohos/` project automatically.
 
 ```bash
-./build-ohos.sh             # signed phone HAP, PC HAP and App Pack
-./build-ohos.sh --unsigned  # unsigned packages for emulator development
+./scripts/build-ohos.sh             # Signed packages; configure signing below first
+./scripts/build-ohos.sh --unsigned  # Unsigned packages for emulator testing
 ```
 
-The phone and PC have separate product entries under `src-tauri/gen/ohos/products/`
-and share `common/runtime`. AppGallery distributes the matching HAP to each device.
-The HarmonyOS build uses an isolated Cargo workspace and lockfile for its pinned
-framework patches; other platforms keep the upstream dependencies in the normal
-Cargo workspace.
+The ARM64 build produces separate phone/tablet and PC HAPs plus one App Pack:
 
-Keep shared build configuration in Git. Keep local signing configuration in
-`src-tauri/gen/ohos/signing.local.json`, with certificates and key material outside
-the repository or in the ignored `src-tauri/gen/ohos/signing/` directory. Do not
-commit signing credentials or generated packages.
+```text
+src-tauri/gen/ohos/products/phone/build/default/outputs/default/entry-default-signed.hap
+src-tauri/gen/ohos/products/desktop/build/default/outputs/default/desktop-default-signed.hap
+src-tauri/gen/ohos/build/outputs/default/RSSH.app
+```
+
+With `--unsigned`, the HAP suffix becomes `unsigned` and the App Pack is named
+`RSSH-unsigned.app`.
+
+For AppGallery releases, set `OHOS_VERSION_CODE` higher than all previously
+submitted versions. The version name follows `src-tauri/tauri.conf.json` and must
+match the Cargo package version.
+
+#### Signing
+
+Create the local configuration:
+
+```bash
+cp ohos/app/signing.example.json ohos/app/signing.local.json
+```
+
+Use DevEco Studio's **Project Structure > Signing Configs** to generate signing
+materials, then put its `signingConfigs` array in the local file, keeping the
+configuration name `default`. If DevEco writes signing settings into
+`build-profile.json5`, move them to the local file and restore the public
+`app.signingConfigs` array to `[]`.
+
+Keep certificates, the profile and keystore under `ohos/app/signing/`, using
+`signing/...` paths in the configuration; external files need absolute paths.
+Copy DevEco's encrypted `storePassword` / `keyPassword` values unchanged and
+preserve the `material` directory beside the keystore, which Hvigor needs for
+decryption.
+
+`signing.local.json` and `signing/` are Git-ignored and copied into the generated
+project during preparation. `--unsigned` does not require signing configuration.
 
 ## Running outside Tauri (headless server + IDEA plugin)
 
@@ -258,31 +276,59 @@ Package: `cd idea-plugin && ./gradlew buildPlugin` → a zip under `build/distri
 Ship it on a GitHub release; install via Settings → Plugins → ⚙ → Install Plugin from
 Disk. Details in `idea-plugin/README.md`.
 
+## App icons
+
+Maintain source artwork and platform icon sets in `icons/`. To regenerate the
+standard desktop, Android and iOS sets from the canonical source image:
+
+```bash
+npm run tauri -- icon icons/icon-source.png --output icons
+```
+
+Desktop builds reference this directory directly. Android preparation copies the
+existing launcher resource set from `icons/android/`; iOS packaging copies
+`icons/ios/` into the generated Xcode asset catalog. Do not maintain duplicate icon
+files in `android/app/src/main/res/` or edit icons under `src-tauri/gen/`.
+The optional Android adaptive-icon XML is not staged, preserving the app's current
+launcher appearance. HarmonyOS keeps its platform-specific app icon under
+`ohos/app/AppScope/resources/base/media/`.
+
 ## Project Structure
 
-```
-src/                          # frontend (Svelte 5)
-  lib/
-    stores/app.svelte.ts      # reactive state
-    components/               # UI components
-  styles/global.css           # theme tokens
-src-tauri/                    # backend (Rust)
+```text
+src/                          # shared frontend (Svelte 5)
+src-tauri/                    # shared backend (Rust) and Tauri configuration
   src/
-    main.rs                   # entry point
-    lib.rs                    # Tauri app builder, IPC commands
-    models.rs                 # domain types
-    error.rs                  # error types
-    state.rs                  # AppState (DB + sessions)
+    main.rs                   # desktop entry point
+    lib.rs                    # app builder and conditional platform module wiring
+    bin/rssh/                 # CLI (behind the cli feature)
+    server_main.rs            # headless server (behind the server feature)
     db/                       # SQLite CRUD
-    ssh/                      # russh client, config parser, forwarding, SFTP
+    ssh/                      # SSH, forwarding and SFTP
     commands/                 # Tauri command handlers
-    terminal/                 # PTY + asciicast recorder
-    crypto.rs                 # config encryption
-    sync/                     # Remote sync (GitHub + WebDAV)
-  src/bin/rssh.rs             # CLI binary (behind `cli` feature flag)
-  gen/android/                # Android build files
-  gen/apple/                  # iOS Xcode project and privacy manifest
+    terminal/                 # terminal transports
+    sync/                     # GitHub / WebDAV configuration sync
+  capabilities/               # maintained Tauri frontend permissions
+  gen/                        # ignored Android / Apple / OHOS projects and schemas
+  bin/                        # ignored CLI staging, created for desktop packaging
+  target/                     # ignored Cargo outputs and OHOS dependency workspaces
+android/                      # maintained Android project and preparation tools
+icons/                        # shared source images and platform icon sets
+ohos/
+  app/                        # maintained phone / desktop HAPs and common runtime
+  src/                        # Rust platform adapter, loaded through cfg
+  framework/                  # OHOS lockfile, fixed upstream revisions, patches, tests
+  scripts/                    # OHOS preparation tools and build regression tests
+  tests/                      # Vitest tests against maintained ArkTS sources
+idea-plugin/                  # IntelliJ plugin
+scripts/                      # build-*.sh entry points and shared build/dev tooling
 ```
+
+Only the maintained source directories are edited and committed. `src-tauri/gen/`,
+`src-tauri/bin/` and build caches are disposable outputs. The build entry points
+prepare them from source before invoking the platform tools. Desktop icons are
+referenced directly from `icons/`; mobile packaging copies the required assets
+into the generated native projects. `roadmap.md` remains at the repository root.
 
 ## Release
 
@@ -294,16 +340,11 @@ git push origin v0.2.0
 ```
 
 GitHub Actions builds desktop and Android artifacts and creates a draft release.
-The separate **iOS Release** workflow adds a signed IPA only when explicitly run
-or when `IOS_BUILD_ENABLED=true` enables tag builds.
 Desktop/Android artifact naming:
 
 ```
 rssh-{version}-{os}-{arch}.{ext}
 ```
-
-The iOS Actions artifact is named `rssh-ios-{run_id}-build-{build_number}`;
-the signed file inside it, and on a tagged draft release, is `RSSH.ipa`.
 
 Version is derived from the git tag. No need to manually update `tauri.conf.json` or `Cargo.toml` -- CI syncs them automatically.
 

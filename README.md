@@ -143,7 +143,7 @@ exports. An expired or revoked authorization requires signing in again.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). For HarmonyOS builds and signing, see [BUILD_OHOS.md](BUILD_OHOS.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). For HarmonyOS builds and signing, see [CONTRIBUTING.md — HarmonyOS](CONTRIBUTING.md#harmonyos-packaging).
 
 ## License
 

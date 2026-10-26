@@ -1,6 +1,7 @@
 mod ai;
 mod commands;
 #[cfg(any(ohos, test))]
+#[path = "../../ohos/src/mod.rs"]
 mod ohos;
 #[cfg(any(windows, macos, linux))]
 pub use commands::cli::CLI_VERSION;

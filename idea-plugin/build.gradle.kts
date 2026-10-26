@@ -17,7 +17,7 @@ group = "sh.rssh"
 // single source the desktop/Android builds sync into package.json /
 // tauri.conf.json / Cargo.toml (see release.yml & pre-release.yml "Sync version").
 // Local/dev builds fall back to 0.0.0, mirroring Android's versionName fallback in
-// gen/android/app/build.gradle.kts. Changelog lives in git tags / GitHub releases.
+// android/app/build.gradle.kts. Changelog lives in git tags / GitHub releases.
 version = providers.gradleProperty("pluginVersion").getOrElse("0.0.0")
 
 repositories {

@@ -7,8 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri",
+    "tauri": "node scripts/tauri.mjs",
     "test": "vitest run",
+    "test:build": "node --test scripts/*.test.mjs android/scripts/*.test.mjs ohos/scripts/*.test.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {

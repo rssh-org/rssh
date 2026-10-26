@@ -50,6 +50,9 @@ jobs:
       - name: Frontend tests (vitest)
         run: npm test
 
+      - name: Build preparation tests (node)
+        run: npm run test:build
+
       - name: Backend tests (cargo)
         working-directory: src-tauri
         run: cargo test

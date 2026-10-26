@@ -44,6 +44,9 @@ jobs:
       - name: Frontend tests (vitest)
         run: npm test
 
+      - name: Build preparation tests (node)
+        run: npm run test:build
+
       - name: Backend tests (cargo)
         working-directory: src-tauri
         run: cargo test
@@ -122,20 +125,8 @@ jobs:
           echo "v=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
 
-      - name: Build CLI
-        working-directory: src-tauri
-        run: cargo build --release --features cli --bin rssh-cli --target ${{ matrix.target }}
-
-      - name: Stage CLI for bundling
-        shell: bash
-        run: |
-          mkdir -p src-tauri/bin
-          NAME="rssh-cli"
-          if [[ "${{ matrix.target }}" == *windows* ]]; then NAME="rssh-cli.exe"; fi
-          cp "src-tauri/target/${{ matrix.target }}/release/${NAME}" src-tauri/bin/
-
       - name: Build Tauri app
-        run: npx tauri build --target ${{ matrix.target }}
+        run: npm run tauri -- build --target ${{ matrix.target }}
         env:
           APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
 
@@ -308,22 +299,22 @@ jobs:
 
       - name: Setup signing
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > src-tauri/gen/android/release.jks
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/release.jks
           printf 'storeFile=release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
             "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
             "${{ secrets.ANDROID_KEY_ALIAS }}" \
             "${{ secrets.ANDROID_KEY_PASSWORD }}" \
-            > src-tauri/gen/android/key.properties
+            > android/key.properties
 
       # Two invocations: plain --apk builds the universal APK (all 4 ABIs,
       # incl. x86 emulators); --split-per-abi replaces that output with one
       # APK per requested target, so it must be a second run. The arm64 leg
       # reuses the cargo cache from the universal build — only repackaging.
       - name: Build Android APK (universal)
-        run: npx tauri android build --apk
+        run: npm run tauri -- android build --apk
 
       - name: Build Android APK (arm64 split)
-        run: npx tauri android build --apk --split-per-abi --target aarch64
+        run: npm run tauri -- android build --apk --split-per-abi --target aarch64
 
       - name: Rename APKs
         shell: bash
