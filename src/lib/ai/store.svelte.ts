@@ -1844,7 +1844,10 @@ export interface ProviderSaveInput {
 
 /** 新建/更新一行，返回行 id。 */
 export async function saveProvider(p: ProviderSaveInput): Promise<string> {
-  return invoke<string>("ai_provider_save", { patch: p });
+  const id = await invoke<string>("ai_provider_save", { patch: p });
+  // New sessions read the cached active provider's model and credentials.
+  if (_settings?.provider === id || p.activate) await loadSettings();
+  return id;
 }
 
 export async function deleteProvider(id: string): Promise<void> {

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AiSettings } from "./types.ts";
+import type { ProviderSaveInput } from "./store.svelte.ts";
 
 const invokeMock = vi.fn(async (_command: string, _args?: unknown): Promise<unknown> => null);
 const unlistenMock = vi.fn();
@@ -165,6 +167,162 @@ describe("panel visibility", () => {
     ai.activateTab("tab-b");
     expect(ai.panelWidth("tab-a")).toBeNull();
     expect(ai.panelWidth("tab-b")).toBeNull();
+  });
+});
+
+describe("provider settings", () => {
+  const initialSettings: AiSettings = {
+    provider: "provider-active",
+    provider_name: "Active provider",
+    protocol: "openai-completions",
+    model: "old-model",
+    endpoint: "https://api.example/v1",
+    has_api_key: true,
+    has_credentials: true,
+    danger_mode: false,
+    auto_run_command: false,
+    auto_match_file: false,
+    auto_download_file: false,
+    auto_analyze_locally: false,
+    auto_patch_cp: false,
+    auto_patch_modify: false,
+    auto_patch_diff: false,
+    auto_patch_mv: false,
+    auto_web_search: false,
+    auto_web_fetch: false,
+    auto_detect_remote_shell: false,
+  };
+
+  it.each(["codex-subscription", "openai-completions"] as const)(
+    "uses the saved %s model for new sessions without changing running sessions",
+    async (protocol) => {
+      vi.resetModules();
+      const ai = await import("./store.svelte.ts");
+      let backendSettings = { ...initialSettings, protocol };
+      invokeMock.mockImplementation(async (command: string, callArgs?: unknown) => {
+        if (command === "ai_settings_get") return backendSettings;
+        if (command === "ai_provider_save") {
+          const { patch } = callArgs as { patch: ProviderSaveInput };
+          backendSettings = { ...backendSettings, model: patch.model };
+          return backendSettings.provider;
+        }
+        if (command === "ai_session_start") {
+          const args = callArgs as {
+            tabId: string; provider: string; model: string; target: { id: string };
+          };
+          return {
+            tab_id: args.tabId,
+            instance_id: `instance-${args.tabId}`,
+            target_id: args.target.id,
+            skill: "general",
+            model: args.model,
+            provider: args.provider,
+            conversation_id: `conversation-${args.tabId}`,
+          };
+        }
+        return null;
+      });
+      await ai.loadSettings();
+      async function startChat(tabId: string) {
+        ai.activateTab(tabId);
+        ai.openPanel(tabId);
+        const settings = ai.settings()!;
+        return ai.startSession({
+          tabId,
+          targetKind: "local",
+          targetId: `pty-${tabId}`,
+          skill: "general",
+          provider: settings.provider,
+          model: settings.model,
+          lease: ai.captureSessionLease(tabId),
+        });
+      }
+      await startChat("existing");
+
+      const id = await ai.saveProvider({
+        id: initialSettings.provider,
+        name: initialSettings.provider_name,
+        protocol,
+        model: "new-model",
+        endpoint: initialSettings.endpoint!,
+      });
+      await startChat("new");
+
+      expect(id).toBe(initialSettings.provider);
+      expect(invokeMock).toHaveBeenCalledWith("ai_session_start", expect.objectContaining({
+        tabId: "new", provider: initialSettings.provider, model: "new-model",
+      }));
+      expect(ai.sessionForTab("existing")?.model).toBe("old-model");
+    },
+  );
+
+  it.each([undefined, "provider-inactive"])(
+    "returns another provider's saved id when settings become unavailable (%s)",
+    async (id) => {
+      vi.resetModules();
+      const ai = await import("./store.svelte.ts");
+      const savedId = id ?? "provider-new";
+      let settingsAvailable = true;
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "ai_settings_get") {
+          if (!settingsAvailable) throw new Error("Settings unavailable");
+          return { ...initialSettings };
+        }
+        if (command === "ai_provider_save") return savedId;
+        return null;
+      });
+      await ai.loadSettings();
+      settingsAvailable = false;
+
+      await expect(ai.saveProvider({
+        id,
+        name: "Another provider",
+        protocol: "codex-subscription",
+        model: "another-model",
+        endpoint: "",
+      })).resolves.toBe(savedId);
+
+      expect(ai.settings()?.provider).toBe(initialSettings.provider);
+      expect(ai.settings()?.model).toBe(initialSettings.model);
+      expect(invokeMock.mock.calls.some(([command]) => command === "ai_settings_set")).toBe(false);
+    },
+  );
+
+  it("refreshes the active selection when explicitly activating a saved provider", async () => {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    let backendSettings = { ...initialSettings };
+    invokeMock.mockImplementation(async (command: string, callArgs?: unknown) => {
+      if (command === "ai_settings_get") return backendSettings;
+      if (command === "ai_provider_save") {
+        const { patch } = callArgs as { patch: ProviderSaveInput };
+        if (patch.activate) {
+          backendSettings = {
+            ...backendSettings,
+            provider: patch.id!,
+            provider_name: patch.name,
+            protocol: patch.protocol,
+            model: patch.model,
+            endpoint: patch.endpoint,
+          };
+        }
+        return patch.id;
+      }
+      return null;
+    });
+    await ai.loadSettings();
+
+    await expect(ai.saveProvider({
+      id: "provider-inactive",
+      name: "Another provider",
+      protocol: "codex-subscription",
+      model: "another-model",
+      endpoint: "",
+      activate: true,
+    })).resolves.toBe("provider-inactive");
+
+    expect(ai.settings()?.provider).toBe("provider-inactive");
+    expect(ai.settings()?.model).toBe("another-model");
   });
 });
 

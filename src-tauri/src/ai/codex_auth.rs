@@ -503,17 +503,19 @@ impl CodexAuth {
             .await
             .map_err(|_| failure("codex_auth_request_failed"))?;
         let status = response.status();
+        // A failed refresh invalidates only the existing grant. An independent
+        // device login may still be waiting for the user's authorization.
         if !status.is_success() {
             let body = response_json(response).await.unwrap_or(Value::Null);
             if permanent_refresh_failure(status.as_u16(), &body) {
-                clear_credentials(self.secrets.as_ref(), provider_id)?;
+                self.secrets.delete(&credential_key(provider_id))?;
                 return Err(failure("codex_login_required"));
             }
             return Err(http_failure(status.as_u16()));
         }
         let refreshed = credentials_from_response(response_json(response).await?, Some(&current))?;
         if refreshed.account_id != current.account_id {
-            clear_credentials(self.secrets.as_ref(), provider_id)?;
+            self.secrets.delete(&credential_key(provider_id))?;
             return Err(failure("codex_login_required"));
         }
         self.validate_provider(provider_id)?;
@@ -1320,6 +1322,90 @@ mod tests {
         assert_eq!(err.code(), "codex_login_required");
         assert!(!err.to_string().contains("old-refresh"));
         assert!(!fixture.auth.status(PROVIDER).unwrap().authenticated);
+    }
+
+    async fn assert_refresh_failure_keeps_pending_login(status: usize, body: Value) {
+        let mut server = mockito::Server::new_async().await;
+        let fixture = Fixture::new(&server.url());
+        fixture.seed(0);
+        let start = server
+            .mock("POST", "/api/accounts/deviceauth/usercode")
+            .with_body(r#"{"device_auth_id":"device", "user_code":"code"}"#)
+            .create_async()
+            .await;
+        let refresh = server
+            .mock("POST", "/oauth/token")
+            .match_body(mockito::Matcher::Json(json!({
+                "grant_type": "refresh_token",
+                "client_id": CLIENT_ID,
+                "refresh_token": "old-refresh",
+            })))
+            .with_status(status)
+            .with_body(body.to_string())
+            .create_async()
+            .await;
+        let poll = server
+            .mock("POST", "/api/accounts/deviceauth/token")
+            .with_body(r#"{"authorization_code":"exchange", "code_verifier":"verifier"}"#)
+            .create_async()
+            .await;
+        let exchange = server
+            .mock("POST", "/oauth/token")
+            .match_body(mockito::Matcher::UrlEncoded(
+                "grant_type".into(),
+                "authorization_code".into(),
+            ))
+            .with_body(token_response(Some("new-login-refresh")).to_string())
+            .create_async()
+            .await;
+
+        let login = fixture.auth.login_start(PROVIDER).await.unwrap();
+        let err = fixture.auth.authorize(PROVIDER, None).await.err().unwrap();
+        assert_eq!(err.code(), "codex_login_required");
+        assert!(!fixture.auth.status(PROVIDER).unwrap().authenticated);
+        assert_eq!(
+            fixture.secrets.get(&login_key(PROVIDER)).unwrap(),
+            Some(login.login_id.clone())
+        );
+        refresh.assert_async().await;
+        refresh.remove_async().await;
+        fixture.due().await;
+        assert_eq!(
+            fixture
+                .auth
+                .login_poll(PROVIDER, &login.login_id)
+                .await
+                .unwrap()
+                .status,
+            "complete"
+        );
+        assert_eq!(
+            fixture.auth.load(PROVIDER).unwrap().refresh_token,
+            "new-login-refresh"
+        );
+        start.assert_async().await;
+        poll.assert_async().await;
+        exchange.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn permanent_refresh_failure_keeps_pending_device_login() {
+        assert_refresh_failure_keeps_pending_login(
+            400,
+            json!({"error": {"code": "refresh_token_reused"}}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mismatched_refresh_account_keeps_pending_device_login() {
+        let mut response = token_response(Some("unexpected-refresh"));
+        let claims = json!({"exp": now() + 3600, "https://api.openai.com/auth": {"chatgpt_account_id":"account-2"}});
+        response["access_token"] = json!(format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(claims.to_string())
+        ));
+        assert_refresh_failure_keeps_pending_login(200, response).await;
     }
 
     #[test]
