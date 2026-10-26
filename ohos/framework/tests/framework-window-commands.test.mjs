@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-const tauri = fileURLToPath(new URL('../../../src-tauri/target/ohos-sources/tauri/crates/tauri/src/', import.meta.url));
+const tauri = fileURLToPath(new URL('../../../target/ohos-sources/tauri/crates/tauri/src/', import.meta.url));
 
 function runRust(source, flags = [], expectedStatus = 0) {
   const directory = mkdtempSync(path.join(tmpdir(), 'rssh-window-commands-'));

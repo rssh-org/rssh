@@ -35,7 +35,7 @@ function excluded(relative) {
 
 export function prepareAndroid(root) {
   const source = path.join(root, 'android');
-  const destination = path.join(root, 'src-tauri/gen/android');
+  const destination = path.join(root, 'app/gen/android');
   stageProject(source, destination, { exclude: excluded });
   stageProject(path.join(root, 'icons/android'), path.join(destination, 'app/src/main/res'), {
     exclude: (relative, entry) => entry.isDirectory()

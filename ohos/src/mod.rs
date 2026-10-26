@@ -17,7 +17,7 @@ mod runtime;
 pub use runtime::*;
 
 #[cfg(ohos)]
-pub mod serial;
+pub use rssh_core::ohos::{app, native_error, serial, unavailable};
 
 #[cfg(any(ohos, all(test, any(windows, macos, linux))))]
 pub mod window;

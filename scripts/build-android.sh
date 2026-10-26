@@ -52,14 +52,14 @@ echo "=== Done ==="
 echo ""
 
 # Find output APKs
-APK_DIR="src-tauri/gen/android/app/build/outputs/apk"
+APK_DIR="app/gen/android/app/build/outputs/apk"
 if [ -d "$APK_DIR" ]; then
     echo "APKs:"
     find "$APK_DIR" -name "*.apk" -exec ls -lh {} \;
 fi
 
 # Find output AABs
-AAB_DIR="src-tauri/gen/android/app/build/outputs/bundle"
+AAB_DIR="app/gen/android/app/build/outputs/bundle"
 if [ -d "$AAB_DIR" ]; then
     echo ""
     echo "AABs:"

@@ -31,10 +31,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
 
-      # cargo test 会编译整个 crate（含 wry / tauri）。复用 build-desktop
-      # linux 的同款 system deps，否则 webkit2gtk 链接失败。
+      # Workspace tests cover shared core, CLI and app; the Tauri adapter
+      # check also needs the Linux desktop libraries.
       - run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -47,9 +47,25 @@ jobs:
       - name: Build preparation tests (node)
         run: npm run test:build
 
+      - name: Build frontend for embedded server
+        run: npm run build
+
       - name: Backend tests (cargo)
-        working-directory: src-tauri
-        run: cargo test
+        run: cargo test --workspace --all-features
+
+      - name: Check standalone CLI and headless server
+        run: |
+          cargo check -p rssh-cli
+          cargo check -p rssh-app --no-default-features --features server --bin rssh-server
+          for package in rssh-core rssh-cli rssh-app; do
+            features=()
+            if [ "$package" = rssh-app ]; then features=(--features server); fi
+            dependencies=$(cargo tree -p "$package" --no-default-features --edges normal,build "${features[@]}")
+            if grep -Eq '(^|[[:space:]])(tauri([-a-z]+)?|wry|tao) v' <<< "$dependencies"; then
+              echo "Unexpected GUI dependency in $package" >&2
+              exit 1
+            fi
+          done
 
   build-desktop:
     needs: test
@@ -87,7 +103,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
 
       - if: runner.os == 'Linux'
         run: |
@@ -96,8 +112,8 @@ jobs:
             libgtk-3-dev libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev librsvg2-dev libudev-dev
 
-      # Sync version across the three manifests (package.json /
-      # tauri.conf.json / Cargo.toml). Pattern lifted from release.yml
+      # Sync the frontend, Tauri configuration and all workspace packages.
+      # Pattern lifted from release.yml
       # — Cargo.toml MUST be updated too, otherwise some bundle metadata
       # ends up at the stale version. Ephemeral: runner-only, no commit.
       - name: Sync version
@@ -118,10 +134,10 @@ jobs:
             VERSION=$(node -p "require('./package.json').version")
           fi
           npm version "${VERSION}" --no-git-tag-version --allow-same-version
-          cd src-tauri
-          sed -i.bak "s/\"version\": \".*\"/\"version\": \"${VERSION}\"/" tauri.conf.json && rm -f tauri.conf.json.bak
-          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml && rm -f Cargo.toml.bak
-          cd ..
+          sed -i.bak "s/\"version\": \".*\"/\"version\": \"${VERSION}\"/" app/tauri.conf.json && rm -f app/tauri.conf.json.bak
+          for manifest in app/Cargo.toml core/Cargo.toml cli/Cargo.toml; do
+            sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" "$manifest" && rm -f "$manifest.bak"
+          done
           echo "v=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
 
@@ -137,7 +153,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          BUNDLE="src-tauri/target/${{ matrix.target }}/release/bundle"
+          BUNDLE="target/${{ matrix.target }}/release/bundle"
           APPIMAGE="$(ls "${BUNDLE}"/appimage/*.AppImage 2>/dev/null | head -1 || true)"
           [ -n "$APPIMAGE" ] && bash .github/scripts/fix-appimage-icon.sh "$APPIMAGE" || echo "No AppImage; skipping."
 
@@ -149,7 +165,7 @@ jobs:
         run: |
           VERSION="${{ steps.ver.outputs.v }}"
           PREFIX="rssh-${VERSION}-${{ matrix.name }}"
-          BUNDLE="src-tauri/target/${{ matrix.target }}/release/bundle"
+          BUNDLE="target/${{ matrix.target }}/release/bundle"
           mkdir -p dist
           for f in "${BUNDLE}"/dmg/*.dmg;             do [ -f "$f" ] && cp "$f" "dist/${PREFIX}.dmg";       done
           for f in "${BUNDLE}"/deb/*.deb;             do [ -f "$f" ] && cp "$f" "dist/${PREFIX}.deb";       done
@@ -169,7 +185,7 @@ jobs:
         run: |
           VERSION="${{ steps.ver.outputs.v }}"
           PORTABLE="rssh-${VERSION}-${{ matrix.name }}-portable"
-          REL="src-tauri/target/${{ matrix.target }}/release"
+          REL="target/${{ matrix.target }}/release"
           mkdir -p "${PORTABLE}"
           cp "${REL}/rssh.exe" "${PORTABLE}/"
           cp "${REL}/rssh-cli.exe" "${PORTABLE}/"
@@ -203,8 +219,7 @@ jobs:
           java-version: 21
 
       - name: Build rssh-server (for plugin)
-        working-directory: src-tauri
-        run: cargo build --release --features server --bin rssh-server --target ${{ matrix.target }}
+        run: cargo build --release -p rssh-app --features server --bin rssh-server --target ${{ matrix.target }}
 
       - name: Build JetBrains plugin
         shell: bash
@@ -212,7 +227,7 @@ jobs:
           VERSION="${{ steps.ver.outputs.v }}"
           BIN="rssh-server"
           [[ "${{ matrix.target }}" == *windows* ]] && BIN="rssh-server.exe"
-          SRV="$(pwd)/src-tauri/target/${{ matrix.target }}/release/${BIN}"
+          SRV="$(pwd)/target/${{ matrix.target }}/release/${BIN}"
           chmod +x idea-plugin/gradlew || true
           (cd idea-plugin && ./gradlew --no-daemon clean buildPlugin \
             -PrsshIdeVersion=2024.2 \
@@ -257,7 +272,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
 
       - name: Setup Android SDK & NDK
         uses: android-actions/setup-android@v3
@@ -290,10 +305,10 @@ jobs:
             VERSION=$(node -p "require('./package.json').version")
           fi
           npm version "${VERSION}" --no-git-tag-version --allow-same-version
-          cd src-tauri
-          sed -i "s/\"version\": \".*\"/\"version\": \"${VERSION}\"/" tauri.conf.json
-          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
-          cd ..
+          sed -i "s/\"version\": \".*\"/\"version\": \"${VERSION}\"/" app/tauri.conf.json
+          for manifest in app/Cargo.toml core/Cargo.toml cli/Cargo.toml; do
+            sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" "$manifest"
+          done
           echo "v=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
 
@@ -321,7 +336,7 @@ jobs:
         run: |
           VERSION="${{ steps.ver.outputs.v }}"
           mkdir -p dist
-          APK_ROOT=src-tauri/gen/android/app/build/outputs/apk
+          APK_ROOT=app/gen/android/app/build/outputs/apk
           UNIVERSAL=$(find "$APK_ROOT/universal" -name '*.apk' -type f | head -1)
           ARM64=$(find "$APK_ROOT/arm64" -name '*.apk' -type f | head -1)
           cp "$UNIVERSAL" "dist/rssh-${VERSION}-android-universal.apk"

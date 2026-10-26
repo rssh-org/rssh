@@ -15,7 +15,7 @@ import org.cef.handler.CefLoadHandlerAdapter
 /**
  * Bridges the web frontend's native file-dialog needs to IntelliJ's FileChooser.
  *
- * The IPC shim ([src/lib/ipc-shim.ts]) calls `window.__RSSH_PICK__(kind)` for
+ * The IPC shim ([frontend/lib/ipc-shim.ts]) calls `window.__RSSH_PICK__(kind)` for
  * `sftp_pick_folder` / `sftp_pick_open_files`. A bare browser can't return a real
  * local path (sandbox), so those transfers reject there; inside the plugin we
  * answer with actual path(s) via IntelliJ's chooser, and the server-side SFTP

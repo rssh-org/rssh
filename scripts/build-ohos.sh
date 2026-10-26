@@ -4,10 +4,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 TARGET="aarch64-unknown-linux-ohos"
-OHOS_PROJECT="$ROOT/src-tauri/gen/ohos"
-WORKSPACE="$ROOT/src-tauri/target/ohos-workspace"
-STAGING="$ROOT/src-tauri/target/ohos-staging"
-FRONTEND="$ROOT/src-tauri/target/ohos-frontend"
+OHOS_PROJECT="$ROOT/app/gen/ohos"
+WORKSPACE="$ROOT/target/ohos-workspace"
+STAGING="$ROOT/target/ohos-staging"
+FRONTEND="$ROOT/target/ohos-frontend"
 RUNTIME="$OHOS_PROJECT/common/runtime"
 PHONE_HAP_DIR="$OHOS_PROJECT/products/phone/build/default/outputs/default"
 DESKTOP_HAP_DIR="$OHOS_PROJECT/products/desktop/build/default/outputs/default"
@@ -89,7 +89,7 @@ export CC_SHELL_ESCAPED_FLAGS=1
 export CFLAGS_aarch64_unknown_linux_ohos="--target=aarch64-linux-ohos --sysroot=\"$NDK/sysroot\""
 export CXXFLAGS_aarch64_unknown_linux_ohos="$CFLAGS_aarch64_unknown_linux_ohos"
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/src-tauri/target/ohos}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/ohos}"
 
 # Discard stale package/staging outputs before doing any build. Every command
 # below must succeed; a Rust/frontend failure must never package an older .so.
@@ -106,7 +106,7 @@ echo "Building OHOS Rust library (isolated Cargo workspace)"
     cd "$WORKSPACE"
     # ohrs performs cargo metadata internally; check the lock before it can
     # resolve anything, then verify that it left the normalized lock unchanged.
-    # Only this application's release version differs from the checked-in lock.
+    # Only local package release versions differ from the checked-in lock.
     cargo metadata --locked --format-version 1 --filter-platform "$TARGET" >/dev/null
     ohrs build --arch arm64 --release --dist "$STAGING" --target-dir "$CARGO_TARGET_DIR" -- \
         --locked --lib --features custom-protocol

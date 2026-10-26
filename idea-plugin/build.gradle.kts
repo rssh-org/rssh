@@ -78,7 +78,7 @@ tasks.withType<KotlinCompile>().configureEach {
 // to the host release path, or skips bundling and sets RSSH_SERVER_BIN at runtime.
 val serverBin = file(
     providers.gradleProperty("rsshServerBin")
-        .orElse(layout.projectDirectory.file("../src-tauri/target/release/rssh-server").asFile.path)
+        .orElse(layout.projectDirectory.file("../target/release/rssh-server").asFile.path)
         .get()
 )
 tasks.processResources {

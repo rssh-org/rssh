@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-const sourceRoot = fileURLToPath(new URL('../../../src-tauri/target/ohos-sources/', import.meta.url));
+const sourceRoot = fileURLToPath(new URL('../../../target/ohos-sources/', import.meta.url));
 const patchRoot = fileURLToPath(new URL('../patches/', import.meta.url));
 
 test('checked-in framework patches include every modified or added generated source', () => {

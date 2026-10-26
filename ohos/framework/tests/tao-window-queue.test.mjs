@@ -11,7 +11,7 @@ import test from 'node:test';
 test('Tao windows keep independent lifetimes during closure and native creation', (context) => {
   const directory = mkdtempSync(path.join(tmpdir(), 'rssh-tao-window-queue-'));
   try {
-    const source = process.env.RSSH_TAO_QUEUE_SOURCE ?? fileURLToPath(new URL('../../../src-tauri/target/ohos-sources/tao/src/platform_impl/ohos/window_queue.rs', import.meta.url));
+    const source = process.env.RSSH_TAO_QUEUE_SOURCE ?? fileURLToPath(new URL('../../../target/ohos-sources/tao/src/platform_impl/ohos/window_queue.rs', import.meta.url));
     const harness = path.join(directory, 'window-queue-tests.rs');
     const binary = path.join(directory, process.platform === 'win32' ? 'window-queue-tests.exe' : 'window-queue-tests');
     writeFileSync(harness, `
@@ -170,7 +170,7 @@ fn closing_a_window_during_its_creation_orders_its_own_cleanup() {
 test('Tao initializes once from an ArkUI stage or a legacy render surface', () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'rssh-tao-window-init-'));
   try {
-    const queue = process.env.RSSH_TAO_QUEUE_SOURCE ?? fileURLToPath(new URL('../../../src-tauri/target/ohos-sources/tao/src/platform_impl/ohos/window_queue.rs', import.meta.url));
+    const queue = process.env.RSSH_TAO_QUEUE_SOURCE ?? fileURLToPath(new URL('../../../target/ohos-sources/tao/src/platform_impl/ohos/window_queue.rs', import.meta.url));
     const source = readFileSync(path.join(path.dirname(queue), 'mod.rs'), 'utf8');
     const arms = source.match(/        MainEvent::WindowCreate => \{[\s\S]*?(?=        MainEvent::SurfaceDestroy)/)?.[0];
     assert.ok(arms, 'WindowStage creation must be able to start the event loop without an XComponent');

@@ -9,7 +9,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
 
-const ability = fileURLToPath(new URL('../../../src-tauri/target/ohos-sources/ability/', import.meta.url));
+const ability = fileURLToPath(new URL('../../../target/ohos-sources/ability/', import.meta.url));
 const ets = path.join(ability, 'native_ability/src/main/ets');
 
 async function runtime(useSerial = false, serialApi = 26) {

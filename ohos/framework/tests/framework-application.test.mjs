@@ -9,7 +9,7 @@ import ts from 'typescript';
 
 // Execute the patched framework; only SDK, bridge transport and native module are
 // replaced. No native device, hidden Ability or application data is involved.
-const framework = process.env.RSSH_ABILITY_ROOT ?? fileURLToPath(new URL('../../../src-tauri/target/ohos-sources/ability/native_ability/src/main/ets/', import.meta.url));
+const framework = process.env.RSSH_ABILITY_ROOT ?? fileURLToPath(new URL('../../../target/ohos-sources/ability/native_ability/src/main/ets/', import.meta.url));
 function gate() {
   let resolve;
   const promise = new Promise((done) => { resolve = done; });

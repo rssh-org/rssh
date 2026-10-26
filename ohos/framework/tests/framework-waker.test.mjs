@@ -11,7 +11,7 @@ import test from 'node:test';
 test('framework wakers resolve the current lifecycle callback when waking', (context) => {
   const directory = mkdtempSync(path.join(tmpdir(), 'rssh-framework-waker-'));
   try {
-    const sourceDirectory = fileURLToPath(new URL('../../../src-tauri/target/ohos-sources/ability/crates/ability/src/', import.meta.url));
+    const sourceDirectory = fileURLToPath(new URL('../../../target/ohos-sources/ability/crates/ability/src/', import.meta.url));
     const source = path.join(sourceDirectory, 'waker.rs');
     const appSource = readFileSync(path.join(sourceDirectory, 'app.rs'), 'utf8');
     const createWaker = appSource.match(/pub fn create_waker\(&self\) -> OpenHarmonyWaker \{[\s\S]*?\n    \}/)?.[0];

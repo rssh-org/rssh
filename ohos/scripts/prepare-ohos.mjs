@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import JSON5 from 'json5';
@@ -31,23 +31,31 @@ function packageVersion(manifest) {
   throw new Error('Missing Cargo package version');
 }
 
-function appVersionLock(lock, version) {
-  let matches = 0;
+function packageVersionLock(lock, versions) {
+  const matched = new Set();
   const result = lock.split(/(?=^\[\[package\]\]\r?$)/m).map((entry) => {
-    // Only the local application's identity changes. Every dependency entry,
+    // Only local package versions change. Every dependency entry,
     // including its source, checksum and dependency edges, stays byte-for-byte.
-    if (!/^name = "rssh"\r?$/m.test(entry) || /^source = /m.test(entry)) return entry;
-    if (!/^version = "[^"]+"\r?$/m.test(entry)) throw new Error('Missing rssh lock version');
-    matches++;
-    return entry.replace(/^version = "[^"]+"/m, `version = ${JSON.stringify(version)}`);
+    const name = /^name = "([^"]+)"\r?$/m.exec(entry)?.[1];
+    if (!versions.has(name) || /^source = /m.test(entry)) return entry;
+    if (matched.has(name) || !/^version = "[^"]+"\r?$/m.test(entry)) throw new Error(`Invalid ${name} lock entry`);
+    matched.add(name);
+    return entry.replace(/^version = "[^"]+"/m, `version = ${JSON.stringify(versions.get(name))}`);
   }).join('');
-  if (matches !== 1) throw new Error(`Expected one local rssh lock entry, found ${matches}`);
+  for (const name of versions.keys()) {
+    if (!matched.has(name)) throw new Error(`Missing local ${name} lock entry`);
+  }
   return result;
 }
 
 function sourceTargets(manifest, source) {
   let hasLibrary = false;
   const blocks = manifest.split(/(?=^\[)/m).map((block) => {
+    if (block.startsWith('[package]')) {
+      const build = /^build = "([^"]+)"/m.exec(block);
+      if (build) return block.replace(build[0], `build = ${JSON.stringify(path.resolve(source, build[1]))}`);
+      if (existsSync(path.join(source, 'build.rs'))) return block.replace('[package]', `[package]\nbuild = ${JSON.stringify(path.join(source, 'build.rs'))}`);
+    }
     if (!/^\[lib\]|^\[\[bin\]\]/.test(block)) return block;
     const library = block.startsWith('[lib]');
     hasLibrary ||= library;
@@ -61,14 +69,18 @@ function sourceTargets(manifest, source) {
 }
 
 export function prepareWorkspace(root, workspace, { versionCode } = {}) {
-  const source = path.join(root, 'src-tauri');
+  const source = path.join(root, 'app');
+  const coreSource = path.join(root, 'core');
   const framework = path.join(root, 'ohos/framework');
   let manifest = readFileSync(path.join(source, 'Cargo.toml'), 'utf8');
+  let coreManifest = readFileSync(path.join(coreSource, 'Cargo.toml'), 'utf8');
   const config = JSON.parse(readFileSync(path.join(source, 'tauri.conf.json'), 'utf8'));
   if (typeof config.version !== 'string' || packageVersion(manifest) !== config.version) {
     throw new Error('Cargo and Tauri package versions must match before building OHOS');
   }
-  const lock = appVersionLock(readFileSync(path.join(framework, 'Cargo.lock'), 'utf8'), config.version);
+  const lock = packageVersionLock(readFileSync(path.join(framework, 'Cargo.lock'), 'utf8'), new Map([
+    ['rssh-app', config.version], ['rssh-core', packageVersion(coreManifest)],
+  ]));
   const appConfig = JSON5.parse(readFileSync(path.join(root, 'ohos/app/AppScope/app.json5'), 'utf8'));
   if (versionCode !== undefined && versionCode !== '') {
     if (!/^[0-9]+$/.test(String(versionCode))) throw new Error('OHOS versionCode must be a positive integer');
@@ -84,18 +96,23 @@ export function prepareWorkspace(root, workspace, { versionCode } = {}) {
   // Absolute target paths keep Rust's external module paths relative to the
   // real source files, even though this workspace has its own dependency graph.
   manifest = sourceTargets(manifest, source);
-  const sourceRoot = path.join(source, 'target/ohos-sources');
+  manifest = manifest.replace(/^(rssh-core\s*=\s*\{[^\n]*\bpath\s*=\s*)"[^"]+"/m, '$1"core"');
+  if (!/^rssh-core\s*=\s*\{[^\n]*\bpath\s*=\s*"core"/m.test(manifest)) throw new Error('App must declare a local rssh-core dependency');
+  coreManifest = sourceTargets(coreManifest, coreSource);
+  const sourceRoot = path.join(root, 'target/ohos-sources');
   manifest += '\n' + readFileSync(path.join(framework, 'overlay.toml'), 'utf8')
     .replaceAll('@OHOS_SOURCES@', JSON.stringify(sourceRoot).slice(1, -1));
-  mkdirSync(workspace, { recursive: true });
+  coreManifest += '\n' + readFileSync(path.join(framework, 'core.toml'), 'utf8')
+    .replaceAll('@OHOS_SOURCES@', JSON.stringify(sourceRoot).slice(1, -1));
+  mkdirSync(path.join(workspace, 'core'), { recursive: true });
   writeFileSync(path.join(workspace, 'Cargo.toml'), manifest);
+  writeFileSync(path.join(workspace, 'core/Cargo.toml'), coreManifest);
   writeFileSync(path.join(workspace, 'Cargo.lock'), lock);
   writeFileSync(path.join(workspace, 'Cargo.lock.expected'), lock);
   // Packaging installs this only into the generated native project. The source
   // AppScope file is never modified, including on interrupted or failed builds.
   writeFileSync(path.join(workspace, 'app.json5'), JSON.stringify(appConfig, null, 2) + '\n');
-  copyFileSync(path.join(source, 'build.rs'), path.join(workspace, 'build.rs'));
-  for (const dir of ['src', 'icons', 'bin']) rmSync(path.join(workspace, dir), { recursive: true, force: true });
+  for (const dir of ['build.rs', 'src', 'icons', 'bin']) rmSync(path.join(workspace, dir), { recursive: true, force: true });
   for (const dir of ['capabilities']) {
     const from = path.join(source, dir);
     const to = path.join(workspace, dir);
@@ -105,7 +122,7 @@ export function prepareWorkspace(root, workspace, { versionCode } = {}) {
 
   // A normal GUI/server build consumes the repository's dist/. Never replace
   // it while building this independent Cargo graph.
-  config.build.frontendDist = path.join(source, 'target/ohos-frontend');
+  config.build.frontendDist = path.join(root, 'target/ohos-frontend');
   if (config.bundle?.icon) config.bundle.icon = config.bundle.icon.map((icon) => path.resolve(source, icon));
   writeFileSync(path.join(workspace, 'tauri.conf.json'), JSON.stringify(config, null, 2) + '\n');
   return workspace;
@@ -113,7 +130,7 @@ export function prepareWorkspace(root, workspace, { versionCode } = {}) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
-  const workspace = prepareWorkspace(root, path.join(root, 'src-tauri/target/ohos-workspace'), {
+  const workspace = prepareWorkspace(root, path.join(root, 'target/ohos-workspace'), {
     versionCode: process.env.OHOS_VERSION_CODE,
   });
   process.stdout.write(workspace + '\n');

@@ -76,7 +76,7 @@ test('HAR staging retains upstream layout and excludes dependency/build outputs'
     descriptor.abilityModules = ['native_ability'];
     save();
     prepareAbilityModules(root, sources);
-    const staged = path.join(root, 'src-tauri/gen/ohos/vendor/ability/native_ability');
+    const staged = path.join(root, 'app/gen/ohos/vendor/ability/native_ability');
     assert.equal(readFileSync(path.join(staged, 'index.ets'), 'utf8'), 'export class NativeAbility {}');
     assert.equal(existsSync(path.join(staged, 'oh_modules')), false);
   });

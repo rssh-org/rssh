@@ -9,7 +9,7 @@ import ts from 'typescript';
 
 // Run after prepare-ohos: execute the actual pinned framework, with only SDK
 // objects and the loaded native module replaced. No device or app data is used.
-const framework = process.env.RSSH_ABILITY_ROOT ? path.join(process.env.RSSH_ABILITY_ROOT, 'native_ability/src/main/ets') : fileURLToPath(new URL('../../../src-tauri/target/ohos-sources/ability/native_ability/src/main/ets/', import.meta.url));
+const framework = process.env.RSSH_ABILITY_ROOT ? path.join(process.env.RSSH_ABILITY_ROOT, 'native_ability/src/main/ets') : fileURLToPath(new URL('../../../target/ohos-sources/ability/native_ability/src/main/ets/', import.meta.url));
 function gate() {
   let resolve;
   const promise = new Promise((done) => { resolve = done; });

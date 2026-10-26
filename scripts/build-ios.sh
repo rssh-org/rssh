@@ -65,23 +65,29 @@ rustup target add aarch64-apple-ios
 echo "=== 1. Install frontend dependencies ==="
 npm ci
 
-if [ ! -f src-tauri/gen/apple/project.yml ]; then
+if [ ! -f app/gen/apple/project.yml ]; then
     echo "=== 2. Initialize the Tauri iOS project ==="
     npm run tauri -- ios init --ci --skip-targets-install
 else
     echo "=== 2. Tauri iOS project already initialized ==="
 fi
 
-project_yml="src-tauri/gen/apple/project.yml"
+project_yml="app/gen/apple/project.yml"
 if grep -q 'script: npm run -- tauri ios xcode-script' "$project_yml"; then
     perl -0pi -e 's{script: npm run -- tauri ios xcode-script}{script: cd "\$\{SRCROOT\}/../../.." \&\& npm run -- tauri ios xcode-script}' "$project_yml"
 fi
 
-cp src-tauri/PrivacyInfo.xcprivacy src-tauri/gen/apple/rssh_iOS/PrivacyInfo.xcprivacy
-xcodegen generate --spec "$project_yml" --project src-tauri/gen/apple
+# The generated target name follows the Cargo package, not the installed binary.
+ios_targets=(app/gen/apple/*_iOS)
+if [ "${#ios_targets[@]}" -ne 1 ] || [ ! -d "${ios_targets[0]}" ]; then
+    echo "Error: expected one generated iOS application target." >&2
+    exit 1
+fi
+cp ios/PrivacyInfo.xcprivacy "${ios_targets[0]}/PrivacyInfo.xcprivacy"
+xcodegen generate --spec "$project_yml" --project app/gen/apple
 
 echo "=== 3. Sync iOS app icons ==="
-app_icon_dir="src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset"
+app_icon_dir="app/gen/apple/Assets.xcassets/AppIcon.appiconset"
 cp icons/ios/*.png "$app_icon_dir"/
 
 echo "=== 4. Build iOS IPA ($export_method) ==="
@@ -92,7 +98,7 @@ else
     npm run tauri -- ios build --ci --export-method "$export_method" "$@"
 fi
 
-IPA_DIR="src-tauri/gen/apple/build/arm64"
+IPA_DIR="app/gen/apple/build/arm64"
 if [ -d "$IPA_DIR" ]; then
     echo "=== IPAs ==="
     find "$IPA_DIR" -maxdepth 1 -name "*.ipa" -exec ls -lh {} \;

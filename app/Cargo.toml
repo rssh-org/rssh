@@ -1,0 +1,60 @@
+[package]
+name = "rssh-app"
+version = "0.0.1"
+edition = "2021"
+default-run = "rssh"
+
+[lib]
+name = "rssh_lib"
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true , features = [] }
+
+[dependencies]
+rssh-core = { path = "../core" }
+tauri = { version = "2", features = ["protocol-asset"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+log = "0.4"
+env_logger = "0.11"
+tokio = { version = "1", features = ["sync", "macros", "net", "io-util", "rt", "process", "time", "fs", "rt-multi-thread"] }
+async-trait = "0.1"
+base64 = "0.22"
+futures-util = "0.3"
+url = "2.5.8"
+# Embedded browser frontend and WebSocket adapter for JetBrains/headless.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"], optional = true }
+include_dir = { version = "0.7", optional = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos"))))'.dependencies]
+arboard = "3"
+
+# Upstream plugins do not supply an OHOS backend.
+[target.'cfg(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos")), target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-opener = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-fs = { version = "2", optional = true }
+
+[features]
+default = []
+tauri = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-opener", "dep:tauri-plugin-dialog", "dep:tauri-plugin-fs"]
+server = ["dep:tokio-tungstenite", "dep:include_dir"]
+custom-protocol = ["tauri", "tauri/custom-protocol"]
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "rssh"
+path = "src/main.rs"
+required-features = ["tauri"]
+
+# Keep outside src/bin: Tauri's bundler discovers that directory regardless of features.
+[[bin]]
+name = "rssh-server"
+path = "src/server_main.rs"
+required-features = ["server"]

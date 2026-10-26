@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import test from 'node:test';
 
-const sourceRoot = fileURLToPath(new URL('../../../src-tauri/target/ohos-sources/', import.meta.url));
+const sourceRoot = fileURLToPath(new URL('../../../target/ohos-sources/', import.meta.url));
 
 test('Wry injects real Tauri bootstrap and metadata in order before plugin scripts', () => {
   const manager = readFileSync(path.join(sourceRoot, 'tauri/crates/tauri/src/manager/webview.rs'), 'utf8');

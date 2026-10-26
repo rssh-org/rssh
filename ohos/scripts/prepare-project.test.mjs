@@ -8,7 +8,7 @@ import { prepareProject } from './prepare-project.mjs';
 test('OHOS staging synchronizes native sources without importing IDE or build state', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'rssh ohos project '));
   const source = path.join(root, 'ohos/app');
-  const generated = path.join(root, 'src-tauri/gen/ohos');
+  const generated = path.join(root, 'app/gen/ohos');
   const write = (base, file, value) => {
     const target = path.join(base, file);
     mkdirSync(path.dirname(target), { recursive: true });

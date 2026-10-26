@@ -13,7 +13,7 @@ val tauriProperties = Properties().apply {
     }
 }
 
-// This project runs from src-tauri/gen/android. Keep signing material with the
+// This project runs from app/gen/android. Keep signing material with the
 // maintained Android source rather than copying it into disposable build inputs.
 val androidSource = rootProject.file("../../../android")
 val keyProperties = Properties().apply {

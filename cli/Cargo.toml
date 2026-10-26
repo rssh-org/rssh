@@ -1,0 +1,16 @@
+[package]
+name = "rssh-cli"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+rssh-core = { path = "../core" }
+clap = { version = "4", features = ["derive"] }
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
+log = "0.4"
+rpassword = "7"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "net", "time"] }
+uuid = { version = "1", features = ["v4"] }

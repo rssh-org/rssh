@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import test from 'node:test';
 
-const source = fileURLToPath(new URL('../../../src-tauri/target/ohos-sources/', import.meta.url));
+const source = fileURLToPath(new URL('../../../target/ohos-sources/', import.meta.url));
 const tauri = path.join(source, 'tauri/crates/tauri');
 const read = (name) => readFileSync(path.join(tauri, name), 'utf8');
 const channelCommand = 'plugin:__TAURI_CHANNEL__|fetch';

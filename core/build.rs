@@ -1,0 +1,7 @@
+#[path = "../scripts/platform-cfg.rs"]
+mod platform_cfg;
+
+fn main() {
+    println!("cargo:rerun-if-changed=../scripts/platform-cfg.rs");
+    platform_cfg::configure();
+}

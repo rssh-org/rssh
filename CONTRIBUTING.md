@@ -36,7 +36,7 @@ xcode-select --install
 sudo apt-get update
 sudo apt-get install -y \
     libgtk-3-dev libwebkit2gtk-4.1-dev \
-    libayatana-appindicator3-dev librsvg2-dev
+    libayatana-appindicator3-dev librsvg2-dev libudev-dev
 ```
 
 ### Windows
@@ -84,12 +84,12 @@ npm run tauri -- dev
 npm run tauri -- build
 ```
 
-The repository's Tauri wrapper builds `rssh-cli`, stages it in the ignored
-`src-tauri/bin/` directory and includes it in the desktop application's resources.
+The repository's Tauri wrapper uses `desktop/scripts/` to build `rssh-cli`, stages it in the ignored
+`app/bin/` directory and includes it in the desktop application's resources.
 The GUI can then install the bundled CLI. Ordinary development and Cargo
 check/test commands do not require this directory or a prebuilt CLI.
 `npm run tauri -- build --no-bundle` also skips CLI staging.
-Output lands in `src-tauri/target/release/bundle/`.
+Output lands in `target/release/bundle/`.
 
 The platform scripts also install npm dependencies and perform their platform's
 packaging steps:
@@ -109,7 +109,7 @@ npm run tauri -- build --target x86_64-apple-darwin
 ### Android
 
 The maintained Android Studio project is in `android/`. The repository wrapper
-prepares `src-tauri/gen/android/` before invoking Tauri; a fresh checkout does not
+prepares `app/gen/android/` before invoking Tauri; a fresh checkout does not
 need `tauri android init`.
 
 ```bash
@@ -168,8 +168,9 @@ IOS_BUNDLE_IDENTIFIER=com.example.rssh.dev \
 ./scripts/build-ios.sh
 ```
 
+Maintain the iOS Info.plist and privacy manifest in `ios/`.
 The script prepares the generated Xcode project, icons and privacy manifest.
-IPA output lands in `src-tauri/gen/apple/build/arm64/`.
+IPA output lands in `app/gen/apple/build/arm64/`.
 
 iOS may suspend network sessions when RSSH enters the background; this project
 does not claim a background execution mode it cannot guarantee.
@@ -177,7 +178,7 @@ does not claim a background execution mode it cannot guarantee.
 ### HarmonyOS packaging
 
 Maintain HarmonyOS sources in `ohos/`. The build script prepares the ignored
-`src-tauri/gen/ohos/` project automatically.
+`app/gen/ohos/` project automatically.
 
 ```bash
 ./scripts/build-ohos.sh             # Signed packages; configure signing below first
@@ -187,16 +188,16 @@ Maintain HarmonyOS sources in `ohos/`. The build script prepares the ignored
 The ARM64 build produces separate phone/tablet and PC HAPs plus one App Pack:
 
 ```text
-src-tauri/gen/ohos/products/phone/build/default/outputs/default/entry-default-signed.hap
-src-tauri/gen/ohos/products/desktop/build/default/outputs/default/desktop-default-signed.hap
-src-tauri/gen/ohos/build/outputs/default/RSSH.app
+app/gen/ohos/products/phone/build/default/outputs/default/entry-default-signed.hap
+app/gen/ohos/products/desktop/build/default/outputs/default/desktop-default-signed.hap
+app/gen/ohos/build/outputs/default/RSSH.app
 ```
 
 With `--unsigned`, the HAP suffix becomes `unsigned` and the App Pack is named
 `RSSH-unsigned.app`.
 
 For AppGallery releases, set `OHOS_VERSION_CODE` higher than all previously
-submitted versions. The version name follows `src-tauri/tauri.conf.json` and must
+submitted versions. The version name follows `app/tauri.conf.json` and must
 match the Cargo package version.
 
 #### Signing
@@ -233,22 +234,23 @@ backend through one seam: Tauri's injected `window.__TAURI_INTERNALS__`
 (`invoke` / `listen`). There are two implementations of that one contract:
 
 - **Desktop (unchanged):** Tauri injects the global; IPC is in-process via the WebView.
-- **Outside Tauri:** `src/lib/ipc-shim.ts` detects the global is absent and installs a
+- **Outside Tauri:** `frontend/lib/ipc-shim.ts` detects the global is absent and installs a
   compatible one that routes `invoke`/`listen` over a localhost **WebSocket** to
   `rssh-server`. Inside the real app the shim is a no-op.
 
 So the 90+ `invoke` / 25+ `listen` call sites are untouched and the desktop
 transport stays byte-identical. On the Rust side the *same engine* is reused via a
-`Host` enum (`src-tauri/src/emitter.rs`): Tauri commands pass `Host::Tauri`
-(→ `app.emit` / `app.state`), the headless server passes `Host::Headless` (→ ws push).
+`Host` (`core/src/emitter.rs`): the app adapters supply an event sink and
+optional window capabilities. Tauri forwards events through its application handle;
+the headless server forwards them through its WebSocket. The core has no Tauri dependency.
 
 ### Pieces
 
 ```
-src-tauri/src/server.rs        # headless adapter: HTTP (embedded UI) + ws (IPC) on one port
-src-tauri/src/emitter.rs       # Host enum (Tauri | headless sink)
-src-tauri/src/server_main.rs   # the `rssh-server` binary entry (--features server; kept out of src/bin/ so the Tauri bundler ignores it)
-src/lib/ipc-shim.ts            # Tauri-IPC shim over ws (no-op inside Tauri)
+app/src/server/mod.rs        # headless adapter: HTTP (embedded UI) + ws (IPC) on one port
+core/src/emitter.rs      # Host with injected event sink and window capabilities
+app/src/server_main.rs   # the `rssh-server` binary entry (--features server; kept out of src/bin/ so the Tauri bundler ignores it)
+frontend/lib/ipc-shim.ts            # Tauri-IPC shim over ws (no-op inside Tauri)
 idea-plugin/                   # IntelliJ plugin (JCEF tool window)
 ```
 
@@ -260,15 +262,15 @@ idea-plugin/                   # IntelliJ plugin (JCEF tool window)
 
 ```bash
 npm run build
-node scripts/dev-browser.mjs   # builds + runs rssh-server, prints a localhost URL to open
+node idea-plugin/scripts/dev-browser.mjs   # builds + runs rssh-server, prints a localhost URL to open
 ```
 
 ### IDEA plugin
 
 ```bash
 npm run build
-cargo build --release --manifest-path src-tauri/Cargo.toml --features server --bin rssh-server
-export RSSH_SERVER_BIN="$PWD/src-tauri/target/release/rssh-server"
+cargo build --release -p rssh-app --features server --bin rssh-server
+export RSSH_SERVER_BIN="$PWD/target/release/rssh-server"
 # open idea-plugin/ in IDEA → run the `runIde` Gradle task → open the "RSSH" tool window
 ```
 
@@ -288,7 +290,7 @@ npm run tauri -- icon icons/icon-source.png --output icons
 Desktop builds reference this directory directly. Android preparation copies the
 existing launcher resource set from `icons/android/`; iOS packaging copies
 `icons/ios/` into the generated Xcode asset catalog. Do not maintain duplicate icon
-files in `android/app/src/main/res/` or edit icons under `src-tauri/gen/`.
+files in `android/app/src/main/res/` or edit icons under `app/gen/`.
 The optional Android adaptive-icon XML is not staged, preserving the app's current
 launcher appearance. HarmonyOS keeps its platform-specific app icon under
 `ohos/app/AppScope/resources/base/media/`.
@@ -296,36 +298,49 @@ launcher appearance. HarmonyOS keeps its platform-specific app icon under
 ## Project Structure
 
 ```text
-src/                          # shared frontend (Svelte 5)
-src-tauri/                    # shared backend (Rust) and Tauri configuration
-  src/
-    main.rs                   # desktop entry point
-    lib.rs                    # app builder and conditional platform module wiring
-    bin/rssh/                 # CLI (behind the cli feature)
-    server_main.rs            # headless server (behind the server feature)
-    db/                       # SQLite CRUD
-    ssh/                      # SSH, forwarding and SFTP
-    commands/                 # Tauri command handlers
-    terminal/                 # terminal transports
-    sync/                     # GitHub / WebDAV configuration sync
+Cargo.toml / Cargo.lock       # shared Rust workspace and dependency lock
+frontend/                     # shared Svelte 5 frontend
+core/                         # Tauri-free Rust business logic and connection engine
+  src/commands/               # shared operations used by host adapters
+  src/{db,ssh,terminal,sync}/  # storage, transports and configuration sync
+app/                          # application adapters; library name remains rssh_lib
+  src/tauri/                  # GUI startup and Tauri wire command wrappers
+  src/server/                 # headless HTTP/WebSocket adapter
+  src/server_main.rs          # rssh-server binary (server feature)
   capabilities/               # maintained Tauri frontend permissions
-  gen/                        # ignored Android / Apple / OHOS projects and schemas
-  bin/                        # ignored CLI staging, created for desktop packaging
-  target/                     # ignored Cargo outputs and OHOS dependency workspaces
+  gen/                        # ignored native projects and schemas
+  bin/                        # ignored CLI staging for desktop packaging
+cli/                          # standalone rssh-cli binary, depends on rssh-core
+desktop/scripts/              # desktop CLI resource preparation
 android/                      # maintained Android project and preparation tools
+ios/                          # maintained iOS plist and privacy manifest
 icons/                        # shared source images and platform icon sets
 ohos/
   app/                        # maintained phone / desktop HAPs and common runtime
-  src/                        # Rust platform adapter, loaded through cfg
-  framework/                  # OHOS lockfile, fixed upstream revisions, patches, tests
+  src/                        # Rust platform adapters, loaded through cfg
+  framework/                  # OHOS lockfile, upstream revisions, patches and tests
   scripts/                    # OHOS preparation tools and build regression tests
   tests/                      # Vitest tests against maintained ArkTS sources
-idea-plugin/                  # IntelliJ plugin
-scripts/                      # build-*.sh entry points and shared build/dev tooling
+idea-plugin/                  # IntelliJ plugin and browser development launcher
+scripts/                      # shared build entry points, staging and platform cfg
+target/                       # ignored workspace Cargo outputs and OHOS workspaces
 ```
 
-Only the maintained source directories are edited and committed. `src-tauri/gen/`,
-`src-tauri/bin/` and build caches are disposable outputs. The build entry points
+The three Rust crates have separate responsibilities: `rssh-core` owns the shared
+engine, `rssh-app` supplies Tauri and headless adapters, and `rssh-cli` uses the core
+directly. GUI commands enable the app's `tauri` feature through `app/tauri.conf.json`;
+CLI and headless builds do not pull in Tauri or a WebView.
+
+```bash
+cargo check -p rssh-cli
+npm run build
+cargo check -p rssh-app --features server --bin rssh-server
+cargo check -p rssh-app --features tauri
+cargo test --workspace --all-features
+```
+
+Only the maintained source directories are edited and committed. `app/gen/`,
+`app/bin/` and build caches are disposable outputs. The build entry points
 prepare them from source before invoking the platform tools. Desktop icons are
 referenced directly from `icons/`; mobile packaging copies the required assets
 into the generated native projects. `roadmap.md` remains at the repository root.

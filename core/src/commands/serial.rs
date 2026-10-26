@@ -1,0 +1,124 @@
+use crate::error::{locked, AppError, AppResult};
+use crate::models::SerialProfile;
+use crate::state::{AppState, SessionKind};
+use crate::terminal::serial;
+
+pub async fn serial_get_capabilities() -> AppResult<serial::SerialCapabilities> {
+    serial::capabilities().await
+}
+
+pub async fn serial_list_ports() -> AppResult<Vec<String>> {
+    serial::available_ports().await
+}
+
+pub async fn serial_open(
+    app: crate::emitter::Host,
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    port: String,
+    config: serial::SerialConfig,
+    session_id: Option<String>,
+) -> AppResult<String> {
+    let session_id = crate::commands::lifecycle::resolve_session_id(session_id)?;
+    let reservation = crate::commands::lifecycle::reserve_resource(
+        &state,
+        &session_id,
+        SessionKind::Serial,
+        owner,
+    )?;
+    let operation = reservation.pending_operation()?;
+    // Turn transport-agnostic serial output into Tauri events. The headless ws
+    // server builds a different sink over the same `serial::open_resource`.
+    let sink: serial::SerialSink =
+        std::sync::Arc::new(move |id: &str, out: serial::SerialOut| match out {
+            serial::SerialOut::Data(b) => {
+                let _ = app.emit(
+                    &format!("serial:data:{id}"),
+                    crate::emitter::b64_payload(&b),
+                );
+            }
+            serial::SerialOut::Close => {
+                let _ = app.emit(&format!("serial:close:{id}"), ());
+            }
+        });
+    let opened = serial::open_resource(session_id, &port, config, sink, operation).await?;
+    opened
+        .activate(|id, handle| {
+            reservation
+                .activate_returned(id, crate::commands::lifecycle::ReadySession::Serial(handle))
+        })
+        .await
+}
+
+/// Look up an open serial session's handle (cloned — `SerialHandle` is Arc-backed).
+fn serial_handle(state: &AppState, session_id: &str) -> AppResult<serial::SerialHandle> {
+    locked(&state.serial_sessions)?
+        .get(session_id)
+        .cloned()
+        .ok_or_else(|| AppError::not_found("serial_not_found", serde_json::json!({})))
+}
+
+pub async fn serial_write(state: &AppState, session_id: String, data: Vec<u8>) -> AppResult<()> {
+    let handle = serial_handle(&state, &session_id)?;
+    handle.write(&data).await
+}
+
+/// Drive the DTR control line (`true` = asserted). Manual line control for
+/// MCU reset / bootloader entry / modem signalling.
+pub async fn serial_set_dtr(state: &AppState, session_id: String, level: bool) -> AppResult<()> {
+    let handle = serial_handle(&state, &session_id)?;
+    handle.set_dtr(level).await
+}
+
+/// Drive the RTS control line (`true` = asserted).
+pub async fn serial_set_rts(state: &AppState, session_id: String, level: bool) -> AppResult<()> {
+    let handle = serial_handle(&state, &session_id)?;
+    handle.set_rts(level).await
+}
+
+/// Send a serial BREAK pulse — attention/interrupt signal for U-Boot,
+/// kernel SysRq-over-serial, telco gear. Desktop holds it for ~250ms;
+/// HarmonyOS uses the system serial service's pulse duration.
+pub async fn serial_send_break(state: &AppState, session_id: String) -> AppResult<()> {
+    let handle = serial_handle(&state, &session_id)?;
+    handle.send_break().await
+}
+
+// No serial_resize: a serial line has no rows/cols. The frontend's transport
+// table maps serial's resize entry to null, so it simply never calls it.
+
+pub async fn serial_close(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    session_id: String,
+) -> AppResult<()> {
+    crate::commands::lifecycle::close_resource_and_wait(
+        &state,
+        &session_id,
+        SessionKind::Serial,
+        &owner,
+    )
+    .await
+}
+
+// ── Saved serial profiles (peer of profile/forward; SQLite-persisted CRUD) ──
+
+pub fn list_serial_profiles(state: &AppState) -> AppResult<Vec<SerialProfile>> {
+    crate::db::serial_profile::list(&state.db)
+}
+
+pub fn get_serial_profile(state: &AppState, id: String) -> AppResult<SerialProfile> {
+    crate::db::serial_profile::get(&state.db, &id)
+}
+
+pub fn create_serial_profile(state: &AppState, profile: SerialProfile) -> AppResult<()> {
+    crate::db::serial_profile::insert(&state.db, &profile)
+}
+
+pub fn update_serial_profile(state: &AppState, profile: SerialProfile) -> AppResult<()> {
+    crate::db::serial_profile::update(&state.db, &profile)
+}
+
+pub fn delete_serial_profile(state: &AppState, id: String) -> AppResult<()> {
+    crate::db::serial_profile::delete(&state.db, &id)
+}

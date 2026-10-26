@@ -10,7 +10,7 @@ const repo = fileURLToPath(new URL('../..', import.meta.url));
 
 function runBuild(failure, { version = '0.0.1', versionCode = '', args = [], targetDir = '' } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'rssh ohos build '));
-  const source = path.join(root, 'src-tauri');
+  const source = path.join(root, 'app');
   const packagePaths = Object.fromEntries(['signed', 'unsigned'].flatMap((signature) => [
     [`phone-${signature}`, `products/phone/build/default/outputs/default/entry-default-${signature}.hap`],
     [`desktop-${signature}`, `products/desktop/build/default/outputs/default/desktop-default-${signature}.hap`],
@@ -19,7 +19,7 @@ function runBuild(failure, { version = '0.0.1', versionCode = '', args = [], tar
   const legacyHap = path.join(source, 'gen/ohos/entry/build/default/outputs/default/entry-default-signed.hap');
   const tools = path.join(root, 'fake-tools');
   const sdk = path.join(root, 'sdk/default/openharmony');
-  for (const dir of ['scripts', 'dist', 'fake-tools', 'ohos/framework', 'ohos/scripts', 'ohos/app/AppScope', 'src-tauri/src', 'src-tauri/gen/ohos/AppScope', 'src-tauri/target/ohos-staging/arm64-v8a', 'sdk/default/openharmony/native/llvm/bin']) {
+  for (const dir of ['scripts', 'dist', 'fake-tools', 'ohos/framework', 'ohos/scripts', 'ohos/app/AppScope', 'app/src', 'core/src', 'app/gen/ohos/AppScope', 'target/ohos-staging/arm64-v8a', 'sdk/default/openharmony/native/llvm/bin']) {
     mkdirSync(path.join(root, dir), { recursive: true });
   }
   copyFileSync(path.join(repo, 'scripts/build-ohos.sh'), path.join(root, 'scripts/build-ohos.sh'));
@@ -31,18 +31,20 @@ function runBuild(failure, { version = '0.0.1', versionCode = '', args = [], tar
   writeFileSync(path.join(root, 'ohos/framework/sources.json'), JSON.stringify({
     repositories: failure === 'sources' ? { invalid: { rev: 'unfixed branch' } } : {}, abilityModules: [],
   }));
-  writeFileSync(path.join(source, 'Cargo.toml'), `[package]\nname = "rssh"\nversion = "${version}"\n[build-dependencies]\ntauri-build = { version = "2" }\n[dependencies]\ntauri = { version = "2" }\n`);
-  writeFileSync(path.join(source, 'Cargo.lock'), 'normal lock');
-  const lock = 'version = 4\n\n[[package]]\nname = "rssh"\nversion = "0.0.1"\n';
+  writeFileSync(path.join(source, 'Cargo.toml'), `[package]\nname = "rssh-app"\nversion = "${version}"\n[build-dependencies]\ntauri-build = { version = "2" }\n[dependencies]\nrssh-core = { path = "../core" }\ntauri = { version = "2" }\n`);
+  writeFileSync(path.join(root, 'Cargo.lock'), 'normal lock');
+  writeFileSync(path.join(root, 'core/Cargo.toml'), '[package]\nname = "rssh-core"\nversion = "0.0.1"\n');
+  writeFileSync(path.join(root, 'ohos/framework/core.toml'), '');
+  const lock = 'version = 4\n\n[[package]]\nname = "rssh-app"\nversion = "0.0.1"\ndependencies = ["rssh-core"]\n\n[[package]]\nname = "rssh-core"\nversion = "0.0.1"\n';
   writeFileSync(path.join(root, 'ohos/framework/Cargo.lock'), lock);
-  writeFileSync(path.join(root, 'ohos/framework/overlay.toml'), '[workspace]\n');
+  writeFileSync(path.join(root, 'ohos/framework/overlay.toml'), '[workspace]\nmembers = ["core"]\n');
   writeFileSync(path.join(source, 'build.rs'), 'fn main() {}');
   writeFileSync(path.join(source, 'tauri.conf.json'), JSON.stringify({ version, build: { frontendDist: '../dist' } }));
   const appConfigPath = path.join(root, 'ohos/app/AppScope/app.json5');
   const appConfig = '{\n// Existing DevEco project configuration\napp: {bundleName: "com.rssh.app", versionName: "old-name", versionCode: 9,},\n}\n';
   writeFileSync(appConfigPath, appConfig);
   writeFileSync(path.join(root, 'dist/index.html'), 'old frontend');
-  writeFileSync(path.join(source, 'target/ohos-staging/arm64-v8a/librssh_lib.so'), 'old library');
+  writeFileSync(path.join(root, 'target/ohos-staging/arm64-v8a/librssh_lib.so'), 'old library');
   for (const packagePath of [...Object.values(packagePaths), legacyHap]) {
     mkdirSync(path.dirname(packagePath), { recursive: true });
     writeFileSync(packagePath, 'old package');
@@ -70,9 +72,9 @@ if (tool === 'ohrs' && process.env.FAIL_AT !== 'missing-artifact') {
 }
 if (tool === 'hvigor.js') {
   if (process.env.FAIL_AT === 'missing-package') process.exit(0);
-  if (fs.readFileSync(path.join(root, 'src-tauri/gen/ohos/common/runtime/libs/arm64-v8a/librssh_lib.so'), 'utf8') !== 'new library') process.exit(9);
-  if (fs.readFileSync(path.join(root, 'src-tauri/gen/ohos/common/runtime/src/main/resources/rawfile/index.html'), 'utf8') !== 'new frontend') process.exit(9);
-  fs.copyFileSync(path.join(root, 'src-tauri/gen/ohos/AppScope/app.json5'), path.join(root, 'hap-app-config.json'));
+  if (fs.readFileSync(path.join(root, 'app/gen/ohos/common/runtime/libs/arm64-v8a/librssh_lib.so'), 'utf8') !== 'new library') process.exit(9);
+  if (fs.readFileSync(path.join(root, 'app/gen/ohos/common/runtime/src/main/resources/rawfile/index.html'), 'utf8') !== 'new frontend') process.exit(9);
+  fs.copyFileSync(path.join(root, 'app/gen/ohos/AppScope/app.json5'), path.join(root, 'hap-app-config.json'));
   const signature = args.includes('enableSignTask=false') || process.env.FAIL_AT === 'unsigned-only' ? 'unsigned' : 'signed';
   const outputs = {
     phone: 'products/phone/build/default/outputs/default/entry-default-' + signature + '.hap',
@@ -81,7 +83,7 @@ if (tool === 'hvigor.js') {
   };
   for (const [name, relativePath] of Object.entries(outputs)) {
     if (process.env.FAIL_AT === 'missing-' + name) continue;
-    const output = path.join(root, 'src-tauri/gen/ohos', relativePath);
+    const output = path.join(root, 'app/gen/ohos', relativePath);
     fs.mkdirSync(path.dirname(output), { recursive: true });
     fs.writeFileSync(output, 'new ' + name + ' package');
   }
@@ -103,7 +105,7 @@ if (tool === 'hvigor.js') {
         CARGO_TARGET_DIR: targetDir, OHOS_HOME: sdk, OHOS_VERSION_CODE: versionCode,
         HVIGOR_BIN: path.join(tools, 'hvigor.js'), OHPM_BIN: path.join(tools, 'ohpm') },
     });
-    assert.equal(readFileSync(path.join(source, 'Cargo.lock'), 'utf8'), 'normal lock');
+    assert.equal(readFileSync(path.join(root, 'Cargo.lock'), 'utf8'), 'normal lock');
     assert.equal(readFileSync(path.join(root, 'ohos/framework/Cargo.lock'), 'utf8'), lock);
     assert.equal(readFileSync(path.join(root, 'dist/index.html'), 'utf8'), 'old frontend');
     assert.equal(readFileSync(appConfigPath, 'utf8'), appConfig, 'source AppScope must stay unchanged on both success and failure');
@@ -147,7 +149,7 @@ test('success builds the common runtime once and assembles both signed HAPs and 
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.calls, /cargo metadata --locked/);
   assert.match(result.calls, /ohrs build .*--locked --lib --features custom-protocol/);
-  assert.match(result.calls, /--target-dir .*\/src-tauri\/target\/ohos --/);
+  assert.match(result.calls, /--target-dir .*\/target\/ohos --/);
   assert.equal((result.calls.match(/^npm run build /gm) ?? []).length, 1);
   assert.equal((result.calls.match(/^ohrs build /gm) ?? []).length, 1);
   assert.match(result.calls, /hvigor\.js assembleApp --mode project -p product=default -p buildMode=release -p enableSignTask=true/);

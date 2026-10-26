@@ -7,7 +7,7 @@ import ts from 'typescript';
 
 // Exercise the pinned ArkTS WebView plugin and its actual builder callbacks.
 // The SDK rendering/controller objects are fakes; no WebView or device is started.
-const sourcePath = fileURLToPath(new URL('../../../src-tauri/target/ohos-sources/ability/plugins/webview/src/main/ets/WebviewPlugin.ets', import.meta.url));
+const sourcePath = fileURLToPath(new URL('../../../target/ohos-sources/ability/plugins/webview/src/main/ets/WebviewPlugin.ets', import.meta.url));
 const code = ts.transpileModule(readFileSync(sourcePath, 'utf8'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;

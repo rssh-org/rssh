@@ -1,13 +1,13 @@
 # Rust
-/src-tauri/target/
-/src-tauri/bin/
+/target/
+/app/bin/
 
 # Generated native projects and Tauri schemas. Maintained sources live in
 # android/ and ohos/; repository build entry points prepare these workspaces.
-/src-tauri/gen/
+/app/gen/
 
 # Node
-/node_modules/
+node_modules/
 /dist/
 .vite/
 

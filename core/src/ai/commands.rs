@@ -1,0 +1,1959 @@
+//! Shared AI operations used by native and server hosts.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use serde_json::json;
+
+use crate::error::{locked, AppError, AppResult};
+use crate::secret::setting_key;
+use crate::state::AppState;
+
+use super::codex_auth;
+use super::command_blacklist::{self, CategoryGroup};
+use super::llm;
+use super::redact_rules::{self, RedactRuleRecord};
+use super::sanitize;
+use super::session::{self, DiagnoseSession, UserAction};
+use super::skills::{self, SkillRecord};
+
+// ─── BYOK 设置存储 ─────────────────────────────────────────────────
+//
+// 分两类存储：
+//   - API key：真 secret，走 state.secret_store（= HybridStore，ChaCha20-Poly1305
+//     加密后落 DB.secrets 表；主密钥在 keychain 或 master.key 文件），带 "setting:"
+//     命名空间前缀。
+//   - provider 实体（name/protocol/model/endpoint）：DB.ai_providers 表一行一个；
+//     active 选择（`ai_provider` settings 键，值 = 行 id）与 danger_mode/auto_*
+//     等行为偏好走 DB.settings 表，跟 locale / theme 同档次。
+//
+// 历史包袱已清：v3 之前的散键（ai_{vendor}_model / ai_{vendor}_endpoint）由
+// `migration/v3_ai_provider_entities` 迁进表后删除，这里不再有任何按厂商名
+// 拼键的代码。
+
+fn key_provider() -> String {
+    "ai_provider".into()
+}
+/// API keys use the setting namespace; device-local OAuth grants have a
+/// separate namespace in `codex_auth` and never enter configuration exports.
+fn key_api_key(provider: &str) -> String {
+    setting_key(&format!("ai_{provider}_key"))
+}
+
+fn provider_client(
+    state: &AppState,
+    row: &crate::db::ai_provider::ProviderRow,
+) -> AppResult<Box<dyn llm::LlmClient>> {
+    if row.protocol == codex_auth::PROTOCOL {
+        if !codex_auth::has_credentials(state.secret_store.as_ref(), &row.id)? {
+            return Err(AppError::config("codex_login_required", json!({})));
+        }
+        return Ok(Box::new(llm::codex::CodexClient::new(
+            row.id.clone(),
+            state.codex_auth.clone(),
+        )?));
+    }
+    let api_key = state
+        .secret_store
+        .get(&key_api_key(&row.id))?
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| AppError::config("api_key_missing", json!({ "provider": row.id })))?;
+    llm::build_client(&row.protocol, api_key, row.endpoint.clone())
+}
+
+pub async fn ai_codex_auth_status(
+    state: &AppState,
+    provider_id: String,
+) -> AppResult<codex_auth::AuthStatus> {
+    state.codex_auth.status(&provider_id)
+}
+
+pub async fn ai_codex_login_start(
+    state: &AppState,
+    provider_id: String,
+) -> AppResult<codex_auth::DeviceLogin> {
+    state.codex_auth.login_start(&provider_id).await
+}
+
+pub async fn ai_codex_login_poll(
+    state: &AppState,
+    provider_id: String,
+    login_id: String,
+) -> AppResult<codex_auth::LoginPoll> {
+    state.codex_auth.login_poll(&provider_id, &login_id).await
+}
+
+pub async fn ai_codex_login_cancel(
+    state: &AppState,
+    provider_id: String,
+    login_id: String,
+) -> AppResult<()> {
+    state.codex_auth.login_cancel(&provider_id, &login_id).await
+}
+
+pub async fn ai_codex_logout(state: &AppState, provider_id: String) -> AppResult<()> {
+    state.codex_auth.logout(&provider_id).await
+}
+/// 危险模式（全局，不分 provider）：总闸；开启后才允许下面的 per-tool 自动批准生效。
+/// 这是 issue #39 的明确需求——用户在受控环境（隔离 VM、靶机）里期望像 Claude Code
+/// 一样无打扰自主跑，但要分粒度——文件改动比命令风险高一档，得让用户自己决定。
+fn key_danger_mode() -> String {
+    "ai_danger_mode".into()
+}
+/// per-tool 自动批准开关。仅当 danger_mode=on 时生效。
+/// run_command / match_file 默认 true（向后兼容旧 danger_mode 全开的行为），
+/// 其它默认 false（写动作 / 大副作用，明确表示需要新设默认就开）。
+fn key_auto(name: &str) -> String {
+    format!("ai_auto_{name}")
+}
+/// 远端 shell 自动探测开关。off（默认）时远端 shell 假设 POSIX（覆盖 ~99% Linux/macOS
+/// 远端，零探测开销保留现有行为）；on 时 AI panel 打开后台发一行 echo 探针，靠
+/// `$PSEdition`/`$$` 解析结果在三类 shell（POSIX / cmd.exe / PowerShell）间分类。
+/// 跟 per-tool `auto_*`（自动批准）语义不同，独立 key。
+fn key_auto_detect_remote_shell() -> String {
+    "ai_auto_detect_remote_shell".into()
+}
+
+// ─── Sync (export/import of provider rows) ─────────────────────────
+//
+// `danger_mode` and the `auto_*` family are deliberately NOT synced — they are
+// per-device safety preferences, not portable config.
+
+/// Build the `ai` payload section: `{ active_provider, providers: [...] }`.
+/// Rows come from the `ai_providers` table — every row the user created rides
+/// along (a row IS intent; there is no "never-configured" partial state to
+/// filter). `include_keys` gates the plaintext `api_key` field (the AI-key
+/// sync toggle); the value comes from the SecretStore decrypted, and the whole
+/// payload is encrypted as one blob before leaving the device.
+pub fn export_ai_settings(
+    db: &crate::db::Db,
+    ss: &dyn crate::secret::SecretStore,
+    include_keys: bool,
+) -> AppResult<serde_json::Value> {
+    let mut providers = Vec::new();
+    for row in crate::db::ai_provider::list(db)? {
+        let mut obj = json!({
+            "provider": row.id,
+            "name": row.name,
+            "protocol": row.protocol,
+            "endpoint": row.endpoint,
+        });
+        if !row.model.is_empty() {
+            obj["model"] = json!(row.model);
+        }
+        // OAuth grants belong to this device, including in local backups.
+        if include_keys && row.protocol != codex_auth::PROTOCOL {
+            let api_key = ss.get(&key_api_key(&row.id))?.unwrap_or_default();
+            if !api_key.trim().is_empty() {
+                obj["api_key"] = json!(api_key.trim());
+            }
+        }
+        providers.push(obj);
+    }
+    let active = crate::db::settings::get(db, &key_provider())?;
+    Ok(json!({ "active_provider": active, "providers": providers }))
+}
+
+/// Apply an `ai` payload section — full replace (mirror): the local table
+/// becomes exactly what the payload carries. Rows absent from the payload are
+/// deleted (row + api_key).
+///
+/// **Validate-then-mutate**: every row is parsed and checked (id/name/protocol/
+/// endpoint non-empty, protocol one of the three) BEFORE the mirror's first
+/// move — the mirror starts by clearing the local table, so writing any part
+/// of a payload that fails validation mid-way would leave a half-wiped state.
+/// An invalid row (e.g. a legacy fixed-vendor payload without name/protocol)
+/// fails the whole category with `ai_payload_invalid`; local config is never
+/// touched. That is the agreed behavior for old payloads: error out, no
+/// compat mapping.
+pub fn import_ai_settings(
+    db: &crate::db::Db,
+    ss: &dyn crate::secret::SecretStore,
+    data_dir: &std::path::Path,
+    ai: &serde_json::Value,
+) -> AppResult<()> {
+    let arr = ai
+        .get("providers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut rows = Vec::with_capacity(arr.len());
+    for (i, entry) in arr.iter().enumerate() {
+        let field = |name: &str| -> AppResult<String> {
+            entry
+                .get(name)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .ok_or_else(|| {
+                    AppError::config("ai_payload_invalid", json!({ "row": i, "field": name }))
+                })
+        };
+        let id = field("provider")?;
+        let name = field("name")?;
+        let protocol = field("protocol")?;
+        let endpoint = if protocol == codex_auth::PROTOCOL {
+            codex_auth::ENDPOINT.to_owned()
+        } else {
+            field("endpoint")?
+        };
+        if !llm::protocol_valid(&protocol) {
+            return Err(AppError::config(
+                "ai_payload_invalid",
+                json!({ "row": i, "field": "protocol", "value": protocol }),
+            ));
+        }
+        let model = entry
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let api_key = entry
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter(|_| protocol != codex_auth::PROTOCOL)
+            .map(String::from);
+        rows.push((
+            crate::db::ai_provider::ProviderRow {
+                id,
+                name,
+                protocol,
+                model,
+                endpoint,
+            },
+            api_key,
+        ));
+    }
+
+    // Mirror: wipe + insert atomically. Validation above already guaranteed
+    // every row's shape, so the transaction only guards against DB-level
+    // failures mid-insert — a half-replaced table can never be observable.
+    let old_rows = crate::db::ai_provider::list(db)?;
+    let removed_grants: Vec<&str> = old_rows
+        .iter()
+        .filter(|old| {
+            old.protocol == codex_auth::PROTOCOL
+                && !rows
+                    .iter()
+                    .any(|(row, _)| row.id == old.id && row.protocol == codex_auth::PROTOCOL)
+        })
+        .map(|row| row.id.as_str())
+        .collect();
+    codex_auth::with_removed_credentials(ss, data_dir, &removed_grants, || {
+        db.with_transaction(|tx| {
+            crate::db::ai_provider::clear_all_tx(tx)?;
+            for (row, _) in &rows {
+                crate::db::ai_provider::upsert_tx(tx, row)?;
+            }
+            Ok(())
+        })
+    })?;
+    // Secrets ride outside the transaction: write the carried keys, then drop
+    // the secrets of rows the mirror deleted. A failure here leaves consistent
+    // rows and surfaces as an import error — never a half-wiped table.
+    for (row, api_key) in &rows {
+        if row.protocol == codex_auth::PROTOCOL {
+            ss.delete(&key_api_key(&row.id))?;
+        }
+        if let Some(k) = api_key {
+            ss.set(&key_api_key(&row.id), k)?;
+        }
+    }
+    for old in &old_rows {
+        let current = crate::db::ai_provider::get(db, &old.id)?;
+        if current.is_none() {
+            ss.delete(&key_api_key(&old.id))?;
+        }
+    }
+    // Active selection: apply only when it names a carried row; anything else
+    // clears it (never dangle at a row the mirror just deleted).
+    crate::db::settings::delete(db, &key_provider())?;
+    if let Some(active) = ai.get("active_provider").and_then(|v| v.as_str()) {
+        if rows.iter().any(|(r, _)| r.id == active) {
+            crate::db::settings::set(db, &key_provider(), active)?;
+        }
+    }
+    Ok(())
+}
+
+// ─── 命令 ──────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct AiSessionInfo {
+    /// Tab 内的会话身份。切 Tab / SSH 重连时前端仍用 tab_id 定位同一 actor；
+    /// 显式关闭 AI 面板会结束 actor，历史通过 conversation 恢复。
+    pub tab_id: String,
+    /// Unique actor incarnation used to reject delayed commands after a tab
+    /// closes and starts a replacement session.
+    pub instance_id: String,
+    /// 当前绑定的 SSH/PTY session_id（重连时由 rebind 更新）。
+    pub target_id: String,
+    pub skill: String,
+    pub model: String,
+    pub provider: String,
+    /// Persistent row id in ai_conversations — the front-end keys its
+    /// timeline autosaves on this.
+    pub conversation_id: String,
+}
+
+impl From<&DiagnoseSession> for AiSessionInfo {
+    fn from(s: &DiagnoseSession) -> Self {
+        Self::from_with_instance(s, s.instance_id)
+    }
+}
+
+impl AiSessionInfo {
+    fn from_with_instance(s: &DiagnoseSession, instance_id: uuid::Uuid) -> Self {
+        Self {
+            tab_id: s.tab_id.clone(),
+            instance_id: instance_id.to_string(),
+            target_id: s.target_id.clone(),
+            skill: s.skill.clone(),
+            model: s.model.clone(),
+            provider: s.provider.clone(),
+            conversation_id: s.conversation_id.clone(),
+        }
+    }
+}
+
+/// What an AI session is attached to. An enum — not a `(kind: String, id: String)`
+/// pair — precisely because the kind is closed: the type makes the old
+/// stringly-typed `_ => unknown_target_kind` runtime error (which was duplicated
+/// across session start, rebind, and the headless rebind) impossible to reach.
+/// Wire shape: `{ "kind": "ssh"|"local"|"serial"|"telnet", "id": "<session id>" }`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "lowercase")]
+pub enum AiTarget {
+    Ssh(String),
+    Local(String),
+    /// A connected serial port. No shell behind it — the session runs with
+    /// `ShellKind::Serial` (no sentinel, no exit code; user-driven completion).
+    Serial(String),
+    /// A connected telnet session. Same raw-device treatment as Serial
+    /// (`ShellKind::Telnet`: no sentinel, user-driven completion), but the LLM
+    /// steering targets network-OS CLIs instead of UART peers.
+    Telnet(String),
+}
+
+impl AiTarget {
+    /// The underlying session id, regardless of kind.
+    pub fn id(&self) -> &str {
+        match self {
+            AiTarget::Ssh(id)
+            | AiTarget::Local(id)
+            | AiTarget::Serial(id)
+            | AiTarget::Telnet(id) => id,
+        }
+    }
+}
+
+pub async fn ai_list_skills(state: &AppState) -> AppResult<Vec<SkillRecord>> {
+    skills::list_all(&state.db)
+}
+
+pub async fn ai_get_skill(state: &AppState, id: String) -> AppResult<Option<SkillRecord>> {
+    skills::get(&state.db, &id)
+}
+
+pub async fn ai_save_skill(
+    state: &AppState,
+    id: String,
+    name: String,
+    description: String,
+    content: String,
+) -> AppResult<()> {
+    skills::save_user(
+        &state.db,
+        &SkillRecord {
+            id,
+            name,
+            description,
+            content,
+            builtin: false,
+        },
+    )
+}
+
+pub async fn ai_delete_skill(state: &AppState, id: String) -> AppResult<()> {
+    skills::delete_user(&state.db, &id)
+}
+
+// ─── 脱敏规则管理 ────────────────────────────────────────────────────
+// 规则变更只对**新会话**生效（同 skill：建会话时 snapshot，会话期间不重读 DB）。
+
+pub async fn ai_list_redact_rules(state: &AppState) -> AppResult<Vec<RedactRuleRecord>> {
+    redact_rules::list(&state.db)
+}
+
+pub async fn ai_save_redact_rule(
+    state: &AppState,
+    id: String,
+    pattern: String,
+    replacement: String,
+) -> AppResult<()> {
+    redact_rules::save(
+        &state.db,
+        &RedactRuleRecord {
+            id,
+            pattern,
+            replacement,
+        },
+    )
+}
+
+pub async fn ai_delete_redact_rule(state: &AppState, id: String) -> AppResult<()> {
+    redact_rules::delete(&state.db, &id)
+}
+
+pub async fn ai_list_command_blacklist(state: &AppState) -> AppResult<Vec<CategoryGroup>> {
+    command_blacklist::list_grouped(&state.db)
+}
+
+/// 整类替换某一分类的命令集合（前端按类编辑、整行保存）。坏命令名 fail-fast，整批拒。
+pub async fn ai_replace_command_blacklist(
+    state: &AppState,
+    category: String,
+    names: Vec<String>,
+) -> AppResult<()> {
+    command_blacklist::replace_category(&state.db, &category, &names)
+}
+
+/// 把前端 locale code 映射为给 LLM 的语言名称（用于 prompt 末尾的 "Respond in X"）。
+fn locale_label(locale: &str) -> &'static str {
+    match locale {
+        "zh" | "zh-CN" | "zh-Hans" => "Chinese (Simplified)",
+        "zh-TW" | "zh-Hant" => "Chinese (Traditional)",
+        _ => "English",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn ai_session_start(
+    app: crate::emitter::Host,
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    target: AiTarget,
+    skill: String,
+    provider: String,
+    model: String,
+    locale: Option<String>,
+    resume: Option<String>,
+) -> AppResult<AiSessionInfo> {
+    ai_session_start_impl(
+        &state, app, owner, tab_id, target, skill, provider, model, locale, resume,
+    )
+    .await
+}
+
+/// Transport-agnostic body shared by the Tauri command and the headless server.
+#[allow(clippy::too_many_arguments)]
+pub async fn ai_session_start_impl(
+    state: &AppState,
+    host: crate::emitter::Host,
+    owner: crate::state::SessionOwner,
+    tab_id: String,
+    target: AiTarget,
+    skill: String,
+    provider: String,
+    model: String,
+    locale: Option<String>,
+    resume: Option<String>,
+) -> AppResult<AiSessionInfo> {
+    let mut owner_reservation =
+        crate::commands::lifecycle::reserve_ai_owner(state, tab_id.clone(), owner.clone())?;
+    {
+        let g = locked(&state.ai_sessions)?;
+        // 一个 tab 至多一个 actor。前端 ensureSession 已经做了"有 session 就复用"的判断，
+        // 但并发请求还是可能撞同一个 tab_id —— 这里 fail-fast，不静默覆盖。
+        // 注意：此处只是早退化检查；下面有 await 会释放锁，所以 insert 时还要再查一次。
+        if g.contains_key(&tab_id) {
+            return Err(AppError::other(
+                "session_already_exists",
+                json!({ "tab_id": tab_id }),
+            ));
+        }
+    }
+
+    // 1. Provider 行（协议 + endpoint）及对应的本机凭据。
+    // provider 参数是行 id —— 协议分发行查，不在请求里猜。
+    let provider_row = crate::db::ai_provider::get(&state.db, &provider)?.ok_or_else(|| {
+        AppError::not_found("provider_not_found", json!({ "provider": provider }))
+    })?;
+    let client = provider_client(state, &provider_row)?;
+    if model.trim().is_empty() {
+        return Err(AppError::config(
+            "provider_field_required",
+            json!({ "field": "model" }),
+        ));
+    }
+
+    // 2. 校验 target 存在 + 抓 SSH handle（给 download_file 工具复用）+ 推断初始 shell。
+    //
+    // Shell 决策 3 路径：
+    //   - local PTY: PtyHandle 记得用户选的 shell path → 映射 ShellKind，零探测。
+    //   - remote SSH + auto_detect off: POSIX 兜底（保护 99% Linux/macOS 现状）。
+    //   - remote SSH + auto_detect on:
+    //       cache 命中（连接时探测已写入）→ 用缓存值。
+    //       cache 未命中（探测未完成 / 失败 / 未开 auto_detect）→ POSIX 兜底。
+    //   探测本身在 SSH 连接成功后跑（见前端 TerminalPane + ai_remote_shell_probe_needed /
+    //   ai_cache_remote_shell），结果只落 profile 缓存，与 AI 会话生命周期解耦。
+    let auto_detect = crate::db::settings::get(&state.db, &key_auto_detect_remote_shell())?
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let mut initial_shell = super::shell::ShellKind::default();
+    let ssh_handle = match &target {
+        AiTarget::Ssh(target_id) => {
+            let (handle, profile_id) = match crate::commands::lifecycle::owned_ready_ai_target(
+                state,
+                target_id,
+                crate::state::SessionKind::Ssh,
+                &owner,
+            )? {
+                crate::commands::lifecycle::OwnedAiTarget::Ssh { handle, profile_id } => {
+                    (handle, profile_id)
+                }
+                _ => unreachable!("SSH lifecycle kind returned a non-SSH target"),
+            };
+            if auto_detect {
+                if let Some(k) = locked(&state.ai_remote_shell_cache)?
+                    .get(&profile_id)
+                    .copied()
+                {
+                    initial_shell = k; // cache 命中：用连接时探测的结果
+                }
+                // cache 未命中：保持 POSIX 兜底（探测还没跑完或失败，不阻塞启动）。
+            }
+            Some(handle)
+        }
+        #[cfg(any(windows, macos, linux, ohos))]
+        AiTarget::Local(target_id) => {
+            let shell_path = match crate::commands::lifecycle::owned_ready_ai_target(
+                state,
+                target_id,
+                crate::state::SessionKind::Pty,
+                &owner,
+            )? {
+                crate::commands::lifecycle::OwnedAiTarget::PtyShellPath(path) => path,
+                _ => unreachable!("PTY lifecycle kind returned a non-PTY target"),
+            };
+            initial_shell = super::shell::ShellKind::from_local_path(&shell_path);
+            None
+        }
+        #[cfg(any(android, ios))]
+        AiTarget::Local(_) => return Err(AppError::not_found("local_pty_not_found", json!({}))),
+        #[cfg(any(windows, macos, linux, ohos))]
+        AiTarget::Serial(target_id) => {
+            // No shell to probe — a serial port is raw bytes. Validate it exists,
+            // then run with ShellKind::Serial (no sentinel, no exit code) and no
+            // ssh_handle (like Local; the front-end does the serial_write/read).
+            let _ = crate::commands::lifecycle::owned_ready_ai_target(
+                state,
+                target_id,
+                crate::state::SessionKind::Serial,
+                &owner,
+            )?;
+            initial_shell = super::shell::ShellKind::Serial;
+            None
+        }
+        #[cfg(any(android, ios))]
+        AiTarget::Serial(_) => {
+            return Err(AppError::not_found("serial_session_not_found", json!({})))
+        }
+        AiTarget::Telnet(target_id) => {
+            // Same raw-device path as Serial: validate it exists, run with
+            // ShellKind::Telnet, no ssh_handle (front-end does telnet_write/read).
+            let _ = crate::commands::lifecycle::owned_ready_ai_target(
+                state,
+                target_id,
+                crate::state::SessionKind::Telnet,
+                &owner,
+            )?;
+            initial_shell = super::shell::ShellKind::Telnet;
+            None
+        }
+    };
+
+    // system prompt = 内置 general 规则集 + lazy Skill 目录（id + description）。
+    // 其它内置 Skill 和用户 Skill 走 load_skill 工具按需加载，
+    // 用户写多个 skill 也不会让启动 prompt 爆炸。
+    let _ = skill; // 前端不再选；保留参数兼容
+    let locale_lbl = locale_label(locale.as_deref().unwrap_or("en"));
+    // Use the same host check as analyze_locally: OHOS phone and PC share one
+    // library, but native windows and a local terminal depend on the device.
+    let local_analysis_unavailable = host.ensure_local_analysis_available().await.err();
+    let system_prompt = skills::build_catalog_prompt(
+        &state.db,
+        locale_lbl,
+        local_analysis_unavailable.as_deref(),
+        host.allows_diagnosis_downloads(),
+    )?;
+    let user_skills_cache = skills::list_user(&state.db)?;
+
+    // 3. Conversation identity. Resume revives a persisted history under its
+    //    old id; otherwise a fresh id with empty history. The target check is
+    //    defensive — the picker UI only lists matching conversations, but a
+    //    stale front-end cache must not graft an SSH history onto a serial port.
+    let target_key = conversation_target_key(state, &target)?;
+    let is_new_conversation = resume.is_none();
+    let (conversation_id, initial_history, initial_audit) = match resume {
+        Some(id) => {
+            // Claim before reading the row. Otherwise delete or another resume
+            // can win the load-to-activation gap and leave two writers (or
+            // resurrect a deleted conversation on the next autosave).
+            owner_reservation.claim_conversation(&id)?;
+            let row = crate::db::ai_conversation::get(&state.db, &id)?
+                .ok_or_else(|| AppError::not_found("conversation_not_found", json!({})))?;
+            if row.target_key != target_key {
+                return Err(AppError::other(
+                    "conversation_target_mismatch",
+                    json!({ "expected": row.target_key, "actual": target_key }),
+                ));
+            }
+            let history: Vec<llm::ChatMessage> =
+                serde_json::from_str(&row.history_json).map_err(|e| {
+                    AppError::other("conversation_corrupt", json!({ "error": e.to_string() }))
+                })?;
+            // Audit is fail-soft: a corrupt/missing audit must NOT block the
+            // conversation (unlike history, which the LLM needs to continue).
+            // Fall back to an empty log — the panel just shows nothing for the
+            // old turns, and token totals start from 0 for this resumed session.
+            let audit: super::audit::AuditLog =
+                serde_json::from_str(&row.audit_json).unwrap_or_default();
+            (id, history, audit)
+        }
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            owner_reservation.claim_conversation(&id)?;
+            (id, Vec::new(), super::audit::AuditLog::default())
+        }
+    };
+
+    let cfg = session::SessionConfig {
+        tab_id: tab_id.clone(),
+        target_id: target.id().to_string(),
+        skill: "general".to_string(),
+        system_prompt,
+        user_skills_cache,
+        model,
+        provider: provider_row.id.clone(),
+        client,
+        // DB 读规则失败直接向上抛 —— fail-closed。脱敏策略读不出来就让会话起步失败、
+        // 报错给用户，绝不静默回退默认：用户可能删过 / 改严过默认规则，回退会悄悄套用
+        // 一套不同的（更弱的）脱敏策略，给"我的配置生效了"的假象，比报错危险得多。
+        redact_rules: redact_rules::compiled(&state.db)?,
+        // 同 redact_rules 的理由 —— fail-closed。DB 读黑名单失败就让会话起步失败、
+        // 报错给用户，绝不退化成空名单放行一切（C 模型下唯一的硬不变量）。
+        blacklist: command_blacklist::load(&state.db)?,
+        max_output_bytes: sanitize::DEFAULT_MAX_OUTPUT_BYTES,
+        ssh_handle,
+        data_dir: state.data_dir.clone(),
+        // 本地 PTY: 上面从 PtyHandle.shell_path 推断（确定值）；
+        // 远端 SSH: 连接时探测命中过则用缓存值，否则 POSIX 默认（写一次，会话期不变）。
+        shell_kind: initial_shell,
+        db: state.db.clone(),
+        conversation_id,
+        target_key: target_key.clone(),
+        initial_history,
+        initial_audit,
+    };
+
+    // 并发 start 防御：上方的 contains_key 检查到这里的 insert 之间夹着
+    // 几个 await（api_key / target 校验 / llm client 构造），锁会释放，两个
+    // 并发请求都可能通过第一轮检查。
+    //
+    // `session::start` 现在返回 `PendingSession`（actor **未 spawn**）—— 在
+    // 锁下再查一遍，撞了直接 return Err，PendingSession 就地 drop，actor
+    // 从未运行过、不会 emit `ai:session_ended:<tab_id>` 污染赢家的事件流。
+    let pending = session::start(cfg, host)?;
+    let info = AiSessionInfo::from_with_instance(pending.info(), owner_reservation.instance_id());
+    activate_pending_ai_session(
+        state,
+        owner_reservation,
+        pending,
+        is_new_conversation,
+        &target_key,
+    )?;
+    Ok(info)
+}
+
+pub(crate) fn activate_pending_ai_session(
+    state: &AppState,
+    owner_reservation: crate::commands::lifecycle::AiOwnerReservation<'_>,
+    pending: session::PendingSession,
+    is_new_conversation: bool,
+    target_key: &str,
+) -> AppResult<()> {
+    let conversation_id = pending.info().conversation_id.clone();
+    if is_new_conversation {
+        // Ready actors use UPDATE-only autosaves, so their row must exist before
+        // launch/publication. A create failure leaves PendingSession unlaunched.
+        crate::db::ai_conversation::create(&state.db, &conversation_id, target_key)?;
+    }
+
+    match owner_reservation.activate(pending) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // Close can remove the Pending reservation while the row is being
+            // created. Delete only while it remains unleased; another claimant
+            // winning the gap owns the row and must not be disturbed.
+            if is_new_conversation {
+                if let Err(cleanup_error) = ai_conversation_delete_impl(state, &conversation_id) {
+                    log::warn!(
+                        "failed to clean unactivated conversation {conversation_id}: {cleanup_error}"
+                    );
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn ai_session_not_found() -> AppError {
+    AppError::not_found("ai_session_not_found", json!({}))
+}
+
+pub(crate) fn ensure_ai_running(session: &DiagnoseSession) -> AppResult<()> {
+    if session.is_stopping() {
+        return Err(AppError::other("ai_session_stopped", json!({})));
+    }
+    Ok(())
+}
+
+/// Access a live AI actor only after proving that the caller owns its tab.
+///
+/// AI actor ids intentionally reuse tab ids, so an id alone is never an
+/// authority boundary. Keep the owner registry locked before the actor map;
+/// lifecycle start/stop follows the same order, which prevents lock inversion
+/// and makes owner/actor validation one atomic registry observation.
+pub(crate) fn with_owned_ready_ai_session<T>(
+    state: &AppState,
+    tab_id: &str,
+    expected_owner: &crate::state::SessionOwner,
+    expected_instance_id: Option<&str>,
+    access: impl FnOnce(&mut DiagnoseSession) -> AppResult<T>,
+) -> AppResult<T> {
+    let owners = locked(&state.ai_session_owners)?;
+    let record = owners.get(tab_id).ok_or_else(ai_session_not_found)?;
+    if &record.owner != expected_owner
+        || record.phase != crate::state::SessionPhase::Ready
+        || expected_instance_id.is_some_and(|expected| expected != record.nonce.to_string())
+    {
+        return Err(ai_session_not_found());
+    }
+
+    let mut sessions = locked(&state.ai_sessions)?;
+    let session = sessions
+        .get_mut(tab_id)
+        .ok_or_else(|| AppError::other("session_registry_inconsistent", json!({ "id": tab_id })))?;
+    if session.instance_id != record.nonce {
+        return Err(AppError::other(
+            "session_registry_inconsistent",
+            json!({ "id": tab_id }),
+        ));
+    }
+    access(session)
+}
+
+pub fn ai_list_sessions_for_owner(
+    state: &AppState,
+    expected_owner: &crate::state::SessionOwner,
+) -> AppResult<Vec<AiSessionInfo>> {
+    let owners = locked(&state.ai_session_owners)?;
+    let sessions = locked(&state.ai_sessions)?;
+    owners
+        .iter()
+        .filter(|(_, record)| {
+            &record.owner == expected_owner && record.phase == crate::state::SessionPhase::Ready
+        })
+        .map(|(tab_id, record)| {
+            let session = sessions.get(tab_id).ok_or_else(|| {
+                AppError::other("session_registry_inconsistent", json!({ "id": tab_id }))
+            })?;
+            if session.instance_id != record.nonce {
+                return Err(AppError::other(
+                    "session_registry_inconsistent",
+                    json!({ "id": tab_id }),
+                ));
+            }
+            Ok(AiSessionInfo::from(session))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn ai_action_sender(
+    state: &AppState,
+    tab_id: &str,
+    expected_owner: &crate::state::SessionOwner,
+    expected_instance_id: Option<&str>,
+) -> AppResult<tokio::sync::mpsc::UnboundedSender<UserAction>> {
+    with_owned_ready_ai_session(
+        state,
+        tab_id,
+        expected_owner,
+        expected_instance_id,
+        |session| {
+            ensure_ai_running(session)?;
+            Ok(session.action_tx.clone())
+        },
+    )
+}
+
+/// Enqueue while holding the session registry lock. Prepare-stop takes the
+/// same lock before flipping shutdown, so an action is either fully queued
+/// before the cutoff or rejected after it; there is no clone-then-send gap.
+pub(crate) fn ai_send_action(
+    state: &AppState,
+    tab_id: &str,
+    expected_owner: &crate::state::SessionOwner,
+    expected_instance_id: Option<&str>,
+    action: UserAction,
+) -> AppResult<()> {
+    with_owned_ready_ai_session(
+        state,
+        tab_id,
+        expected_owner,
+        expected_instance_id,
+        |session| {
+            ensure_ai_running(session)?;
+            session
+                .action_tx
+                .send(action)
+                .map_err(|_| AppError::other("ai_session_stopped", json!({})))
+        },
+    )
+}
+
+async fn ai_send_processed_action<T>(
+    state: &AppState,
+    tab_id: &str,
+    expected_owner: &crate::state::SessionOwner,
+    expected_instance_id: Option<&str>,
+    build: impl FnOnce(tokio::sync::oneshot::Sender<AppResult<T>>) -> UserAction,
+) -> AppResult<T> {
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    ai_send_action(
+        state,
+        tab_id,
+        expected_owner,
+        expected_instance_id,
+        build(ack_tx),
+    )?;
+    ack_rx
+        .await
+        .unwrap_or_else(|_| Err(AppError::other("ai_session_stopped", json!({}))))
+}
+
+pub async fn ai_user_message_impl(
+    state: &AppState,
+    tab_id: &str,
+    expected_owner: &crate::state::SessionOwner,
+    text: String,
+    expected_instance_id: Option<&str>,
+) -> AppResult<()> {
+    ai_send_processed_action(state, tab_id, expected_owner, expected_instance_id, |ack| {
+        UserAction::Message {
+            text,
+            ack: Some(ack),
+        }
+    })
+    .await
+}
+
+pub async fn ai_session_clear_context_impl(
+    state: &AppState,
+    tab_id: &str,
+    expected_owner: &crate::state::SessionOwner,
+    expected_instance_id: Option<&str>,
+) -> AppResult<()> {
+    ai_send_processed_action(state, tab_id, expected_owner, expected_instance_id, |ack| {
+        UserAction::ClearContext { ack: Some(ack) }
+    })
+    .await
+}
+
+pub async fn ai_session_rollback_context_impl(
+    state: &AppState,
+    tab_id: &str,
+    expected_owner: &crate::state::SessionOwner,
+    user_message_index: usize,
+    expected_user_messages: Vec<String>,
+    expected_instance_id: Option<&str>,
+) -> AppResult<Vec<session::AiTerminalMutation>> {
+    ai_send_processed_action(state, tab_id, expected_owner, expected_instance_id, |ack| {
+        UserAction::RollbackContext {
+            user_message_index,
+            expected_user_messages,
+            ack: Some(ack),
+        }
+    })
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn ai_command_result_impl(
+    state: &AppState,
+    tab_id: &str,
+    expected_owner: &crate::state::SessionOwner,
+    tool_call_id: String,
+    exit_code: i32,
+    output: String,
+    timed_out: bool,
+    early_terminated: bool,
+    expected_instance_id: Option<&str>,
+) -> AppResult<()> {
+    ai_send_processed_action(state, tab_id, expected_owner, expected_instance_id, |ack| {
+        UserAction::CommandResult {
+            command_id: tool_call_id,
+            exit_code,
+            output,
+            timed_out,
+            early_terminated,
+            ack: Some(ack),
+        }
+    })
+    .await
+}
+
+pub async fn ai_command_reject_impl(
+    state: &AppState,
+    tab_id: &str,
+    expected_owner: &crate::state::SessionOwner,
+    tool_call_id: String,
+    reason: String,
+    expected_instance_id: Option<&str>,
+) -> AppResult<()> {
+    ai_send_processed_action(state, tab_id, expected_owner, expected_instance_id, |ack| {
+        UserAction::RejectCommand {
+            command_id: tool_call_id,
+            reason,
+            ack: Some(ack),
+        }
+    })
+    .await
+}
+
+pub fn ai_cancel_slot(
+    state: &AppState,
+    tab_id: &str,
+    expected_owner: &crate::state::SessionOwner,
+    expected_instance_id: Option<&str>,
+) -> AppResult<std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>>> {
+    with_owned_ready_ai_session(
+        state,
+        tab_id,
+        expected_owner,
+        expected_instance_id,
+        |session| Ok(session.cancel_slot.clone()),
+    )
+}
+
+pub fn ai_audit_handle(
+    state: &AppState,
+    tab_id: &str,
+    expected_owner: &crate::state::SessionOwner,
+    expected_instance_id: Option<&str>,
+) -> AppResult<std::sync::Arc<std::sync::Mutex<super::audit::AuditLog>>> {
+    with_owned_ready_ai_session(
+        state,
+        tab_id,
+        expected_owner,
+        expected_instance_id,
+        |session| Ok(session.audit.clone()),
+    )
+}
+
+pub async fn ai_user_message(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    text: String,
+    instance_id: Option<String>,
+) -> AppResult<()> {
+    ai_user_message_impl(&state, &tab_id, &owner, text, instance_id.as_deref()).await
+}
+
+pub async fn ai_command_result(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    tool_call_id: String,
+    exit_code: i32,
+    output: String,
+    timed_out: bool,
+    early_terminated: Option<bool>,
+    instance_id: Option<String>,
+) -> AppResult<()> {
+    ai_command_result_impl(
+        &state,
+        &tab_id,
+        &owner,
+        tool_call_id,
+        exit_code,
+        output,
+        timed_out,
+        early_terminated.unwrap_or(false),
+        instance_id.as_deref(),
+    )
+    .await
+}
+
+pub async fn ai_command_reject(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    tool_call_id: String,
+    reason: String,
+    instance_id: Option<String>,
+) -> AppResult<()> {
+    ai_command_reject_impl(
+        &state,
+        &tab_id,
+        &owner,
+        tool_call_id,
+        reason,
+        instance_id.as_deref(),
+    )
+    .await
+}
+
+/// Phase 1 of panel teardown: cancel network/tool work, stop accepting actions,
+/// and await the actor's final event drain while retaining its registry entry
+/// and conversation lease. The returned terminal mutations are replayable by
+/// id, so the UI can persist an exact final timeline before full stop releases.
+pub async fn ai_session_prepare_stop(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    instance_id: Option<String>,
+) -> AppResult<Vec<session::AiTerminalMutation>> {
+    crate::commands::lifecycle::prepare_ai_session_stop(
+        &state,
+        &tab_id,
+        &owner,
+        instance_id.as_deref(),
+    )
+    .await
+}
+
+/// 销毁 actor并等待完全退出。前端显式关闭 AI 面板或关闭 Tab 时调用。
+pub async fn ai_session_stop(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    instance_id: Option<String>,
+) -> AppResult<()> {
+    crate::commands::lifecycle::close_ai_session(&state, &tab_id, &owner, instance_id.as_deref())
+        .await
+}
+
+/// 清空 actor 的 history（保留 audit log）。
+/// 用户手动按"清理上下文"按钮触发。actor 不死，下条 message 进来时是全新对话。
+pub async fn ai_session_clear_context(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    instance_id: Option<String>,
+) -> AppResult<()> {
+    ai_session_clear_context_impl(&state, &tab_id, &owner, instance_id.as_deref()).await
+}
+
+/// Truncate history before one user message while preserving the audit log.
+pub async fn ai_session_rollback_context(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    user_message_index: usize,
+    expected_user_messages: Vec<String>,
+    instance_id: Option<String>,
+) -> AppResult<Vec<session::AiTerminalMutation>> {
+    ai_session_rollback_context_impl(
+        &state,
+        &tab_id,
+        &owner,
+        user_message_index,
+        expected_user_messages,
+        instance_id.as_deref(),
+    )
+    .await
+}
+
+/// 连接时探测前的门控查询：这个 target 现在需要跑 shell 探测吗？
+///
+/// true 仅当三条同时成立：auto_detect 开 + target 是已知 SSH 会话 + 该 profile 进程
+/// 缓存未命中。缓存命中（同 profile 之前探过）或 auto_detect 关 → false，于是连接 /
+/// 重连都不会重复刷探针。本地 PTY 的 session_id 不在 `state.sessions` 里 → 自然返回
+/// false（本地 shell 已知，无需探测）。
+pub async fn ai_remote_shell_probe_needed(state: &AppState, target_id: String) -> AppResult<bool> {
+    ai_remote_shell_probe_needed_impl(&state, target_id)
+}
+
+/// Transport-agnostic body shared by the Tauri command and the headless server.
+pub fn ai_remote_shell_probe_needed_impl(state: &AppState, target_id: String) -> AppResult<bool> {
+    let auto_detect = crate::db::settings::get(&state.db, &key_auto_detect_remote_shell())?
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if !auto_detect {
+        return Ok(false);
+    }
+    let profile_id = match locked(&state.sessions)?.get(&target_id) {
+        Some(h) => h.profile_id().to_string(),
+        None => return Ok(false), // 本地 PTY 或会话已断：不探
+    };
+    Ok(!locked(&state.ai_remote_shell_cache)?.contains_key(&profile_id))
+}
+
+/// 前端在 SSH 连接成功后探测远端 shell，把结果写进程级 cache（key=profile_id）。
+///
+/// 不需要 AI 会话 —— shell 种类是 profile 级事实，AI session 启动时（ai_session_start）
+/// 从这个缓存读初始 shell。同 profile 的下一次连接 / AI 会话直接命中，不再重探。
+///
+/// `target_id` 是发起探测时的 SSH session_id；探针刚回来 SSH 就断（极少）→ 查不到
+/// profile_id，静默跳过写入（下次连接会重探），不当错误抛。
+pub async fn ai_cache_remote_shell(
+    state: &AppState,
+    target_id: String,
+    shell: super::shell::ShellKind,
+) -> AppResult<()> {
+    if let Some(profile_id) = locked(&state.sessions)?
+        .get(&target_id)
+        .map(|h| h.profile_id().to_string())
+    {
+        locked(&state.ai_remote_shell_cache)?.insert(profile_id, shell);
+    }
+    Ok(())
+}
+
+/// SSH 重连后重新绑定 target。actor 内部更新 target_id + ssh_handle，让
+/// 后续 file_ops / SFTP 走新连接。history / audit / pending 全保留。
+///
+/// 错误模型：target_id 必须在 state.sessions / pty_sessions 里存在，否则
+/// rebind 后立即触发的 file_ops 会拿到孤儿 handle 失败。前端通常在 SSH 重连
+/// 成功后立刻调，target 存在是常态。
+pub async fn ai_session_rebind_target(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    target: AiTarget,
+    conversation_id: Option<String>,
+    instance_id: Option<String>,
+) -> AppResult<()> {
+    ai_session_rebind_target_impl(
+        &state,
+        &owner,
+        tab_id,
+        target,
+        conversation_id,
+        instance_id.as_deref(),
+    )
+}
+
+pub fn ai_session_rebind_target_impl(
+    state: &AppState,
+    expected_owner: &crate::state::SessionOwner,
+    tab_id: String,
+    target: AiTarget,
+    conversation_id: Option<String>,
+    instance_id: Option<&str>,
+) -> AppResult<()> {
+    // Reject an alien actor before touching its requested transport. The
+    // mutation below repeats this check while holding both registries, so a
+    // concurrent stop cannot create a validate-then-mutate gap.
+    with_owned_ready_ai_session(state, &tab_id, expected_owner, instance_id, |_| Ok(()))?;
+
+    // 重新抓 ssh_handle（local 是 None）—— 复用 ai_session_start 的同款校验。
+    let ssh_handle = match &target {
+        AiTarget::Ssh(target_id) => match crate::commands::lifecycle::owned_ready_ai_target(
+            state,
+            target_id,
+            crate::state::SessionKind::Ssh,
+            expected_owner,
+        )? {
+            crate::commands::lifecycle::OwnedAiTarget::Ssh { handle, .. } => Some(handle),
+            _ => unreachable!("SSH lifecycle kind returned a non-SSH target"),
+        },
+        #[cfg(any(windows, macos, linux, ohos))]
+        AiTarget::Local(target_id) => {
+            let _ = crate::commands::lifecycle::owned_ready_ai_target(
+                state,
+                target_id,
+                crate::state::SessionKind::Pty,
+                expected_owner,
+            )?;
+            None
+        }
+        #[cfg(any(android, ios))]
+        AiTarget::Local(_) => return Err(AppError::not_found("local_pty_not_found", json!({}))),
+        #[cfg(any(windows, macos, linux, ohos))]
+        AiTarget::Serial(target_id) => {
+            let _ = crate::commands::lifecycle::owned_ready_ai_target(
+                state,
+                target_id,
+                crate::state::SessionKind::Serial,
+                expected_owner,
+            )?;
+            None
+        }
+        #[cfg(any(android, ios))]
+        AiTarget::Serial(_) => {
+            return Err(AppError::not_found("serial_session_not_found", json!({})))
+        }
+        AiTarget::Telnet(target_id) => {
+            let _ = crate::commands::lifecycle::owned_ready_ai_target(
+                state,
+                target_id,
+                crate::state::SessionKind::Telnet,
+                expected_owner,
+            )?;
+            None
+        }
+    };
+    let target_id = target.id().to_string();
+    // Conversation scope guard: the persisted conversation row is keyed by
+    // target_key, fixed at session start. A rebind within the same scope
+    // (SSH reconnect to the same profile) passes; a cross-scope rebind would
+    // silently append this transcript into another scope's stored
+    // conversation, so it is rejected outright.
+    let new_target_key = conversation_target_key(&state, &target)?;
+
+    // 锁里一次完成：发送 RebindTarget + 同步更新 stored target_id。
+    // prepare-stop 也拿同一把锁，因此 rebind 要么完整排在 cutoff 之前，
+    // 要么在 cutoff 之后被拒绝；不能留下“stored 已更新、actor 未收到”的半状态。
+    // 不更新 stored 那一份的话，ai_list_sessions / AiSessionInfo::from 会一直
+    // 报老 target_id；前端 resync 时反向把本地缓存覆盖回旧值。
+    {
+        with_owned_ready_ai_session(state, &tab_id, expected_owner, instance_id, |s| {
+            ensure_ai_running(s)?;
+            if conversation_id
+                .as_deref()
+                .is_some_and(|expected| s.conversation_id != expected)
+            {
+                return Err(ai_session_not_found());
+            }
+            if s.target_key != new_target_key {
+                return Err(AppError::other(
+                    "conversation_target_mismatch",
+                    json!({ "expected": s.target_key, "actual": new_target_key }),
+                ));
+            }
+            s.action_tx
+                .send(UserAction::RebindTarget {
+                    target_id: target_id.clone(),
+                    ssh_handle,
+                })
+                .map_err(|_| AppError::other("ai_session_stopped", json!({})))?;
+            s.target_id = target_id.clone();
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// 取消当前正在进行的 LLM 流式响应。仅当 actor 阻塞在 chat() 时有效；
+/// 否则 slot 为 None，这是 no-op（不算错——用户也可能恰好在响应完结那一刻按下）。
+/// 会话本身（history / pending command / audit）全部保留。
+pub async fn ai_cancel_stream(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    instance_id: Option<String>,
+) -> AppResult<()> {
+    let slot = ai_cancel_slot(&state, &tab_id, &owner, instance_id.as_deref())?;
+    // 先把 Notify clone 出来再释放锁——slot 用的是 std::sync::Mutex，
+    // 持锁期间调 notify_one 阻塞 actor 端尝试清空 slot 的同一把锁。
+    // 用代码块限定 guard 生命周期，notify_one 在 lock 释放后才执行。
+    let notify = {
+        let g = slot.lock().map_err(|_| AppError::Lock)?;
+        g.as_ref().cloned()
+    };
+    if let Some(n) = notify {
+        n.notify_one();
+    }
+    Ok(())
+}
+
+pub async fn ai_audit_save(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    file_path: String,
+    instance_id: Option<String>,
+) -> AppResult<()> {
+    let audit = ai_audit_handle(&state, &tab_id, &owner, instance_id.as_deref())?;
+    let g = audit.lock().map_err(|_| AppError::Lock)?;
+    g.save_to_file(&PathBuf::from(file_path))?;
+    Ok(())
+}
+
+/// 返回审计日志的人类可读文本（.log 格式）。前端配合 plugin-dialog/plugin-fs
+/// 存盘，桌面 / 移动 / 浏览器统一一套。
+pub async fn ai_audit_log_text(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    instance_id: Option<String>,
+) -> AppResult<String> {
+    let audit = ai_audit_handle(&state, &tab_id, &owner, instance_id.as_deref())?;
+    let g = audit.lock().map_err(|_| AppError::Lock)?;
+    Ok(g.to_log_string())
+}
+
+pub async fn ai_audit_get(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    instance_id: Option<String>,
+) -> AppResult<super::audit::AuditLog> {
+    let audit = ai_audit_handle(&state, &tab_id, &owner, instance_id.as_deref())?;
+    let g = audit.lock().map_err(|_| AppError::Lock)?;
+    Ok(g.clone())
+}
+
+pub async fn ai_list_sessions(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+) -> AppResult<Vec<AiSessionInfo>> {
+    ai_list_sessions_for_owner(&state, &owner)
+}
+
+// ─── 对话持久化 ────────────────────────────────────────────────────
+
+/// Conversation grouping key — "ssh:<profile_id>" / "local" / "serial:<port>".
+/// Requires a live target (same precondition as session start itself): the
+/// profile id / port name live on the connected handle, and both the picker
+/// and resume only make sense on a connected tab.
+pub(crate) fn conversation_target_key(state: &AppState, target: &AiTarget) -> AppResult<String> {
+    Ok(match target {
+        AiTarget::Ssh(id) => {
+            let g = locked(&state.sessions)?;
+            let h = g
+                .get(id)
+                .ok_or_else(|| AppError::not_found("ssh_session_not_found", json!({})))?;
+            crate::db::ai_conversation::ssh_target_key(h.profile_id())
+        }
+        AiTarget::Local(_) => "local".to_string(),
+        #[cfg(any(windows, macos, linux, ohos))]
+        AiTarget::Serial(id) => {
+            let g = locked(&state.serial_sessions)?;
+            let h = g
+                .get(id)
+                .ok_or_else(|| AppError::not_found("serial_session_not_found", json!({})))?;
+            format!("serial:{}", h.port_name())
+        }
+        #[cfg(any(android, ios))]
+        AiTarget::Serial(_) => {
+            return Err(AppError::not_found("serial_session_not_found", json!({})))
+        }
+        AiTarget::Telnet(id) => {
+            let g = locked(&state.telnet_sessions)?;
+            let h = g
+                .get(id)
+                .ok_or_else(|| AppError::not_found("telnet_session_not_found", json!({})))?;
+            format!("telnet:{}", h.peer())
+        }
+    })
+}
+
+/// Persisted conversations for the panel's picker, most recent first.
+/// Metadata only — blobs never cross IPC here.
+pub async fn ai_conversations_list(
+    state: &AppState,
+    target: AiTarget,
+) -> AppResult<Vec<crate::db::ai_conversation::ConversationMeta>> {
+    ai_conversations_list_impl(&state, &target)
+}
+
+pub fn ai_conversations_list_impl(
+    state: &AppState,
+    target: &AiTarget,
+) -> AppResult<Vec<crate::db::ai_conversation::ConversationMeta>> {
+    let key = conversation_target_key(state, target)?;
+    crate::db::ai_conversation::list(&state.db, &key)
+}
+
+/// The UI blob for one conversation — fetched once on resume, parsed by the
+/// front-end into ChatItem[].
+pub async fn ai_conversation_timeline(
+    state: &AppState,
+    id: String,
+    target: Option<AiTarget>,
+) -> AppResult<String> {
+    ai_conversation_timeline_impl(&state, &id, target.as_ref())
+}
+
+/// When a caller supplies its target, enforce the same scope check resume does:
+/// this fetch is the first half of the resume flow, and the data must not be
+/// readable across scopes when the second half would reject the id. `None`
+/// preserves the original id-only command contract for older clients.
+pub fn ai_conversation_timeline_impl(
+    state: &AppState,
+    id: &str,
+    target: Option<&AiTarget>,
+) -> AppResult<String> {
+    let row = crate::db::ai_conversation::get(&state.db, id)?
+        .ok_or_else(|| AppError::not_found("conversation_not_found", json!({})))?;
+    if let Some(target) = target {
+        let key = conversation_target_key(state, target)?;
+        if row.target_key != key {
+            return Err(AppError::other(
+                "conversation_target_mismatch",
+                json!({ "expected": row.target_key, "actual": key }),
+            ));
+        }
+    }
+    Ok(row.timeline_json)
+}
+
+/// Front-end autosave of its chat timeline (the actor saves history itself).
+pub async fn ai_conversation_save_timeline(
+    state: &AppState,
+    id: String,
+    timeline: String,
+) -> AppResult<()> {
+    crate::db::ai_conversation::set_timeline(&state.db, &id, &timeline)
+}
+
+pub async fn ai_conversation_delete(state: &AppState, id: String) -> AppResult<()> {
+    ai_conversation_delete_impl(&state, &id)
+}
+
+pub fn ai_conversation_delete_impl(state: &AppState, id: &str) -> AppResult<()> {
+    // Hold the owner registry across the short synchronous delete. This makes
+    // delete atomic with pending `claim_conversation`: either delete wins and
+    // resume subsequently sees no row, or the claim wins and delete is rejected.
+    let owners = locked(&state.ai_session_owners)?;
+    if owners
+        .values()
+        .any(|record| record.conversation_id.as_deref() == Some(id))
+    {
+        return Err(AppError::other("conversation_in_use", json!({})));
+    }
+    crate::db::ai_conversation::delete(&state.db, id)
+}
+
+// ─── 设置（BYOK） ──────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Default)]
+pub struct AiSettings {
+    /// Active (or requested) provider row id. Empty = nothing configured.
+    pub provider: String,
+    /// Display name / protocol of that row (empty alongside `provider`).
+    pub provider_name: String,
+    pub protocol: String,
+    pub model: String,
+    pub endpoint: Option<String>,
+    pub has_api_key: bool,
+    #[serde(default)]
+    pub has_credentials: bool,
+    /// 危险模式总闸。off 时下面所有 auto_* 视同 false（per-tool 设置仍持久化，
+    /// 但运行时不生效，方便用户切回 danger 时复原选择）。
+    pub danger_mode: bool,
+    /// per-tool 自动批准。命名直接映射到前端 CommandProposed.kind。
+    pub auto_run_command: bool,
+    pub auto_match_file: bool,
+    pub auto_download_file: bool,
+    pub auto_analyze_locally: bool,
+    pub auto_patch_cp: bool,
+    pub auto_patch_modify: bool,
+    pub auto_patch_diff: bool,
+    pub auto_patch_mv: bool,
+    pub auto_web_search: bool,
+    pub auto_web_fetch: bool,
+    /// 远端 shell 自动探测：off 时远端假设 POSIX；on 时 AI panel 打开后跑探针。
+    /// 详见 `key_auto_detect_remote_shell` 注释。
+    pub auto_detect_remote_shell: bool,
+}
+
+/// per-tool auto-approve 字段的默认值 —— 在 ai_settings_get / ai_settings_set 间共享。
+/// run_command + match_file 默认开（向后兼容旧 danger_mode 全开行为），其余默认关。
+fn auto_default(name: &str) -> bool {
+    matches!(name, "run_command" | "match_file")
+}
+
+fn read_auto(state: &AppState, name: &str) -> AppResult<bool> {
+    Ok(crate::db::settings::get(&state.db, &key_auto(name))?
+        .map(|v| v == "1")
+        .unwrap_or_else(|| auto_default(name)))
+}
+
+/// `provider` 入参：传 `Some(p)` → 拉该 provider 行的快照（不改 active）；
+/// `None` → 拉当前 active provider 行的快照。没有配置任何 provider 时
+/// provider 字段为空串，其余字段为默认值 —— 无兜底厂商。
+pub async fn ai_settings_get(state: &AppState, provider: Option<String>) -> AppResult<AiSettings> {
+    ai_settings_get_impl(&state, provider).await
+}
+
+/// Transport-agnostic body shared by the Tauri command and the headless server.
+pub async fn ai_settings_get_impl(
+    state: &AppState,
+    provider: Option<String>,
+) -> AppResult<AiSettings> {
+    let provider_id = match provider.filter(|s| !s.is_empty()) {
+        Some(p) => Some(p),
+        None => crate::db::settings::get(&state.db, &key_provider())?,
+    };
+    // Row absent (deleted active / never configured) → empty provider fields,
+    // never a fabricated default.
+    let row = match &provider_id {
+        Some(id) => crate::db::ai_provider::get(&state.db, id)?,
+        None => None,
+    };
+    // 只查存在性，**不解密** —— 解密会加载 master key（=钥匙串授权弹窗），
+    // 仅仅为了渲染设置 / 给"发送到 AI"做置灰判断而弹钥匙串是不可接受的。
+    // 空 key 在 ai_provider_save 里走 delete（不存空串），所以"存在"==有真
+    // key。真正的解密留给发起 LLM 请求时。
+    let has_api_key = match &row {
+        Some(r) if r.protocol != codex_auth::PROTOCOL => {
+            state.secret_store.exists(&key_api_key(&r.id))?
+        }
+        Some(_) => false,
+        None => false,
+    };
+    let has_credentials = match &row {
+        Some(r) if r.protocol == codex_auth::PROTOCOL => {
+            codex_auth::has_credentials(state.secret_store.as_ref(), &r.id)?
+        }
+        _ => has_api_key,
+    };
+    let danger_mode = crate::db::settings::get(&state.db, &key_danger_mode())?
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let auto_detect_remote_shell =
+        crate::db::settings::get(&state.db, &key_auto_detect_remote_shell())?
+            .map(|v| v == "1")
+            .unwrap_or(false);
+    Ok(AiSettings {
+        provider: row.as_ref().map(|r| r.id.clone()).unwrap_or_default(),
+        provider_name: row.as_ref().map(|r| r.name.clone()).unwrap_or_default(),
+        protocol: row.as_ref().map(|r| r.protocol.clone()).unwrap_or_default(),
+        model: row.as_ref().map(|r| r.model.clone()).unwrap_or_default(),
+        endpoint: row.as_ref().map(|r| r.endpoint.clone()),
+        has_api_key,
+        has_credentials,
+        danger_mode,
+        auto_run_command: read_auto(state, "run_command")?,
+        auto_match_file: read_auto(state, "match_file")?,
+        auto_download_file: read_auto(state, "download_file")?,
+        auto_analyze_locally: read_auto(state, "analyze_locally")?,
+        auto_patch_cp: read_auto(state, "patch_cp")?,
+        auto_patch_modify: read_auto(state, "patch_modify")?,
+        auto_patch_diff: read_auto(state, "patch_diff")?,
+        auto_patch_mv: read_auto(state, "patch_mv")?,
+        auto_web_search: read_auto(state, "web_search")?,
+        auto_web_fetch: read_auto(state, "web_fetch")?,
+        auto_detect_remote_shell,
+    })
+}
+
+/// 拉取模型列表（设置页表单的"拉取模型"按钮）。
+///
+/// `protocol` + `endpoint` 来自表单当前值（未保存也能试）；`api_key` 优先用
+/// 入参（"试一下再保存"），缺省回落到 `provider_id` 行已存的 key。服务端
+/// 不开放 /models（如智谱）时报错上浮 —— 前端下拉留空即可。
+pub async fn ai_list_models(
+    state: &AppState,
+    provider_id: Option<String>,
+    protocol: String,
+    endpoint: String,
+    api_key: Option<String>,
+) -> AppResult<Vec<llm::ModelInfo>> {
+    ai_list_models_impl(&state, provider_id, protocol, endpoint, api_key).await
+}
+
+/// Transport-agnostic body shared by the Tauri command and the headless server.
+pub async fn ai_list_models_impl(
+    state: &AppState,
+    provider_id: Option<String>,
+    protocol: String,
+    endpoint: String,
+    api_key: Option<String>,
+) -> AppResult<Vec<llm::ModelInfo>> {
+    if protocol == codex_auth::PROTOCOL {
+        let id = provider_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| AppError::config("codex_login_required", json!({})))?;
+        let row = crate::db::ai_provider::get(&state.db, id)?
+            .filter(|row| row.protocol == codex_auth::PROTOCOL)
+            .ok_or_else(|| AppError::not_found("provider_not_found", json!({ "provider": id })))?;
+        return provider_client(state, &row)?.list_models().await;
+    }
+    // 入参先 trim：纯空白当作"未提供"，回落到 secret_store
+    let endpoint = endpoint.trim().to_string();
+    if endpoint.is_empty() {
+        return Err(AppError::config("endpoint_missing", json!({})));
+    }
+    let api_key = match api_key
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        Some(k) => k,
+        None => match provider_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(id) => state
+                .secret_store
+                .get(&key_api_key(id))?
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| AppError::config("api_key_missing", json!({ "provider": id })))?,
+            None => {
+                return Err(AppError::config(
+                    "api_key_missing",
+                    json!({ "provider": "" }),
+                ));
+            }
+        },
+    };
+    let client = llm::build_client(&protocol, api_key, endpoint)?;
+    client.list_models().await
+}
+
+// ─── Provider 实体管理（设置页列表/表单的后端）──────────────────────
+
+#[derive(Serialize)]
+pub struct AiProviderInfo {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub model: String,
+    pub endpoint: String,
+    pub has_api_key: bool,
+    pub has_credentials: bool,
+}
+
+pub async fn ai_provider_list(state: &AppState) -> AppResult<Vec<AiProviderInfo>> {
+    ai_provider_list_impl(&state).await
+}
+
+/// Transport-agnostic body shared by the Tauri command and the headless server.
+pub async fn ai_provider_list_impl(state: &AppState) -> AppResult<Vec<AiProviderInfo>> {
+    let mut out = Vec::new();
+    for row in crate::db::ai_provider::list(&state.db)? {
+        // 同 ai_settings_get：只查存在性，不解密。
+        let is_codex = row.protocol == codex_auth::PROTOCOL;
+        let has_api_key = !is_codex && state.secret_store.exists(&key_api_key(&row.id))?;
+        let has_credentials = if is_codex {
+            codex_auth::has_credentials(state.secret_store.as_ref(), &row.id)?
+        } else {
+            has_api_key
+        };
+        out.push(AiProviderInfo {
+            id: row.id,
+            name: row.name,
+            protocol: row.protocol,
+            model: row.model,
+            endpoint: row.endpoint,
+            has_api_key,
+            has_credentials,
+        });
+    }
+    Ok(out)
+}
+
+/// Create/update one provider. `id` empty → create (id generated here);
+/// non-empty → update that row (unknown id → `provider_not_found`).
+/// `api_key`: `Some("")` deletes the stored key, `None` keeps it as-is.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiProviderPatch {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub protocol: Option<String>,
+    pub model: Option<String>,
+    pub endpoint: Option<String>,
+    pub api_key: Option<String>,
+    /// Also make this provider the active selection.
+    #[serde(default)]
+    pub activate: bool,
+}
+
+pub async fn ai_provider_save(state: &AppState, patch: AiProviderPatch) -> AppResult<String> {
+    ai_provider_save_impl(&state, patch).await
+}
+
+/// Transport-agnostic body shared by the Tauri command and the headless server.
+/// Returns the row id (generated on create).
+pub async fn ai_provider_save_impl(state: &AppState, patch: AiProviderPatch) -> AppResult<String> {
+    let name = patch
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::config("provider_field_required", json!({ "field": "name" })))?
+        .to_string();
+    let protocol = patch
+        .protocol
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::config("provider_field_required", json!({ "field": "protocol" })))?
+        .to_string();
+    if !llm::protocol_valid(&protocol) {
+        return Err(AppError::config(
+            "provider_protocol_invalid",
+            json!({ "protocol": protocol }),
+        ));
+    }
+    let is_codex = protocol == codex_auth::PROTOCOL;
+    let endpoint = if is_codex {
+        codex_auth::ENDPOINT.to_owned()
+    } else {
+        patch
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AppError::config("provider_field_required", json!({ "field": "endpoint" }))
+            })?
+            .to_string()
+    };
+    let model = patch
+        .model
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+
+    let id = match patch.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => {
+            if crate::db::ai_provider::get(&state.db, id)?.is_none() {
+                return Err(AppError::not_found(
+                    "provider_not_found",
+                    json!({ "provider": id }),
+                ));
+            }
+            id.to_string()
+        }
+        None => {
+            // Generate until unique (5 chars of uuid — collision odds are tiny,
+            // the loop makes it zero).
+            let existing = crate::db::ai_provider::ids(&state.db)?;
+            loop {
+                let candidate = crate::db::ai_provider::ProviderRow::generate_id();
+                if !existing.contains(&candidate) {
+                    break candidate;
+                }
+            }
+        }
+    };
+
+    let old_row = crate::db::ai_provider::get(&state.db, &id)?;
+    crate::db::ai_provider::upsert(
+        &state.db,
+        &crate::db::ai_provider::ProviderRow {
+            id: id.clone(),
+            name,
+            protocol,
+            model,
+            endpoint,
+        },
+    )?;
+    if !is_codex
+        && (old_row
+            .as_ref()
+            .is_some_and(|row| row.protocol == codex_auth::PROTOCOL)
+            || codex_auth::has_credentials(state.secret_store.as_ref(), &id)?)
+    {
+        state.codex_auth.logout(&id).await?;
+    }
+    if is_codex {
+        state.secret_store.delete(&key_api_key(&id))?;
+    } else {
+        match patch.api_key.as_deref().map(str::trim) {
+            None => {} // field absent — keep the stored key
+            Some("") => {
+                // Explicit clear (matches the AiProviderPatch doc). The UI form
+                // sends None for a blank box (keep); only an explicit "" clears.
+                state.secret_store.delete(&key_api_key(&id))?;
+            }
+            Some(k) => {
+                state.secret_store.set(&key_api_key(&id), k)?;
+            }
+        }
+    }
+    if patch.activate {
+        crate::db::settings::set(&state.db, &key_provider(), &id)?;
+    }
+    Ok(id)
+}
+
+pub async fn ai_provider_delete(state: &AppState, id: String) -> AppResult<()> {
+    ai_provider_delete_impl(&state, id).await
+}
+
+/// Transport-agnostic body shared by the Tauri command and the headless server.
+/// Deleting the active provider clears the selection (never dangles).
+/// Secret first, row second: if the secret delete fails the row survives, so a
+/// retry re-runs cleanly — the other order could orphan the encrypted key
+/// forever (nothing later inspects ids whose row is already gone).
+pub async fn ai_provider_delete_impl(state: &AppState, id: String) -> AppResult<()> {
+    let is_codex = crate::db::ai_provider::get(&state.db, &id)?
+        .is_some_and(|row| row.protocol == codex_auth::PROTOCOL);
+    state.secret_store.delete(&key_api_key(&id))?;
+    if is_codex || codex_auth::has_credentials(state.secret_store.as_ref(), &id)? {
+        state.codex_auth.delete_provider(&id).await?;
+    } else {
+        crate::db::ai_provider::delete(&state.db, &id)?;
+    }
+    if crate::db::settings::get(&state.db, &key_provider())?.as_deref() == Some(id.as_str()) {
+        crate::db::settings::delete(&state.db, &key_provider())?;
+    }
+    Ok(())
+}
+
+/// A partial update of the AI settings: each field is "set this if `Some`, leave
+/// untouched if `None`". Replaces the 14 positional `Option<_>` arguments that
+/// `ai_settings_set` / `_impl` previously carried (and forwarded twice). Field
+/// names match the frontend's camelCase wire shape.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSettingsPatch {
+    /// Set the active provider (row id). Must name an existing row.
+    pub provider: Option<String>,
+    pub danger_mode: Option<bool>,
+    pub auto_run_command: Option<bool>,
+    pub auto_match_file: Option<bool>,
+    pub auto_download_file: Option<bool>,
+    pub auto_analyze_locally: Option<bool>,
+    pub auto_patch_cp: Option<bool>,
+    pub auto_patch_modify: Option<bool>,
+    pub auto_patch_diff: Option<bool>,
+    pub auto_patch_mv: Option<bool>,
+    pub auto_web_search: Option<bool>,
+    pub auto_web_fetch: Option<bool>,
+    pub auto_detect_remote_shell: Option<bool>,
+}
+
+pub async fn ai_settings_set(state: &AppState, patch: AiSettingsPatch) -> AppResult<()> {
+    ai_settings_set_impl(&state, patch).await
+}
+
+/// Transport-agnostic body shared by the Tauri command and the headless server.
+pub async fn ai_settings_set_impl(state: &AppState, patch: AiSettingsPatch) -> AppResult<()> {
+    let AiSettingsPatch {
+        provider,
+        danger_mode,
+        auto_run_command,
+        auto_match_file,
+        auto_download_file,
+        auto_analyze_locally,
+        auto_patch_cp,
+        auto_patch_modify,
+        auto_patch_diff,
+        auto_patch_mv,
+        auto_web_search,
+        auto_web_fetch,
+        auto_detect_remote_shell,
+    } = patch;
+    // provider 字段 = 激活哪个行（校验存在，fail-fast）。行本身的
+    // name/protocol/model/endpoint/api_key 归 ai_provider_save 管。
+    if let Some(p) = provider.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if crate::db::ai_provider::get(&state.db, p)?.is_none() {
+            return Err(AppError::not_found(
+                "provider_not_found",
+                json!({ "provider": p }),
+            ));
+        }
+        crate::db::settings::set(&state.db, &key_provider(), p)?;
+    }
+    if let Some(on) = danger_mode {
+        // 用 "1"/"0" 而不是 delete on false——显式记录用户的"我关了"，
+        // 与"从未设置过"区分开，后续审计/排错更直接。
+        crate::db::settings::set(&state.db, &key_danger_mode(), if on { "1" } else { "0" })?;
+    }
+    // per-tool 自动批准。同 danger_mode 的存储约定（"1"/"0"），None 不动。
+    let auto_writes: &[(&str, Option<bool>)] = &[
+        ("run_command", auto_run_command),
+        ("match_file", auto_match_file),
+        ("download_file", auto_download_file),
+        ("analyze_locally", auto_analyze_locally),
+        ("patch_cp", auto_patch_cp),
+        ("patch_modify", auto_patch_modify),
+        ("patch_diff", auto_patch_diff),
+        ("patch_mv", auto_patch_mv),
+        ("web_search", auto_web_search),
+        ("web_fetch", auto_web_fetch),
+    ];
+    for (name, val) in auto_writes {
+        if let Some(on) = val {
+            crate::db::settings::set(&state.db, &key_auto(name), if *on { "1" } else { "0" })?;
+        }
+    }
+    if let Some(on) = auto_detect_remote_shell {
+        crate::db::settings::set(
+            &state.db,
+            &key_auto_detect_remote_shell(),
+            if on { "1" } else { "0" },
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AiSettingsPatch, AiTarget};
+    use serde_json::json;
+
+    #[test]
+    fn patch_deserializes_camelcase_wire_shape() {
+        // Frontend sends camelCase keys; the headless server deserializes the same
+        // object. Pin that contract so a field rename can't silently break it.
+        let p: AiSettingsPatch = serde_json::from_value(json!({
+            "provider": "provider-ab12c",
+            "dangerMode": true,
+            "autoRunCommand": false,
+            "autoDetectRemoteShell": true,
+        }))
+        .unwrap();
+        assert_eq!(p.provider.as_deref(), Some("provider-ab12c"));
+        assert_eq!(p.danger_mode, Some(true));
+        assert_eq!(p.auto_run_command, Some(false));
+        assert_eq!(p.auto_detect_remote_shell, Some(true));
+    }
+
+    #[test]
+    fn patch_absent_fields_are_none() {
+        // A partial update touches only the present keys; everything else stays None
+        // so the impl leaves those settings untouched.
+        let p: AiSettingsPatch = serde_json::from_value(json!({ "dangerMode": true })).unwrap();
+        assert_eq!(p.danger_mode, Some(true));
+        assert!(p.provider.is_none());
+        assert!(p.auto_patch_mv.is_none());
+    }
+
+    #[test]
+    fn ai_target_deserializes_from_kind_id_wire() {
+        // Frontend (and headless ws) send `{ kind, id }`; pin both variants.
+        let ssh: AiTarget = serde_json::from_value(json!({ "kind": "ssh", "id": "s1" })).unwrap();
+        assert!(matches!(ssh, AiTarget::Ssh(ref id) if id == "s1"));
+        assert_eq!(ssh.id(), "s1");
+
+        let local: AiTarget =
+            serde_json::from_value(json!({ "kind": "local", "id": "p9" })).unwrap();
+        assert!(matches!(local, AiTarget::Local(ref id) if id == "p9"));
+        assert_eq!(local.id(), "p9");
+
+        let serial: AiTarget =
+            serde_json::from_value(json!({ "kind": "serial", "id": "tty0" })).unwrap();
+        assert!(matches!(serial, AiTarget::Serial(ref id) if id == "tty0"));
+        assert_eq!(serial.id(), "tty0");
+
+        let telnet: AiTarget =
+            serde_json::from_value(json!({ "kind": "telnet", "id": "t7" })).unwrap();
+        assert!(matches!(telnet, AiTarget::Telnet(ref id) if id == "t7"));
+        assert_eq!(telnet.id(), "t7");
+    }
+
+    #[test]
+    fn ai_target_rejects_unknown_kind() {
+        // The old `_ => unknown_target_kind` runtime branch is now a parse error —
+        // an invalid kind can't even be constructed.
+        let bad = serde_json::from_value::<AiTarget>(json!({ "kind": "wat", "id": "x" }));
+        assert!(bad.is_err());
+    }
+}

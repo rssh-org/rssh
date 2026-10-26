@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::OnceLock};
+use std::path::PathBuf;
 
 use openharmony_ability::OpenHarmonyApp;
 use openharmony_ability_plugin_app_control::AppControlBridgePlugin;
@@ -10,11 +10,8 @@ use openharmony_ability_plugin_webview::{
 };
 use openharmony_ability_plugin_window::WindowBridgePlugin;
 
-use crate::error::{AppError, AppResult};
-
-// The framework refreshes this shared handle's contexts on Ability recreation.
-// Tauri consumes its own copy when building the runtime.
-static APP: OnceLock<OpenHarmonyApp> = OnceLock::new();
+use super::{app, unavailable};
+use crate::error::AppResult;
 
 fn register_plugins(app: &OpenHarmonyApp) -> napi_ohos::Result<()> {
     for scheme in ["tauri", "ipc", "asset", "isolation"] {
@@ -43,19 +40,12 @@ fn register_plugins(app: &OpenHarmonyApp) -> napi_ohos::Result<()> {
 #[openharmony_ability_derive::ability]
 fn configure_ability(app: OpenHarmonyApp) {
     register_plugins(&app).expect("failed to register RSSH native capability plugins");
-    assert!(
-        APP.set(app.clone()).is_ok(),
-        "RSSH native host already configured"
-    );
+    rssh_core::ohos::configure(app.clone());
     tauri::ohos::APP
         .lock()
         .expect("Tauri host lock poisoned")
         .replace(app);
     crate::run();
-}
-
-pub fn app() -> AppResult<OpenHarmonyApp> {
-    APP.get().cloned().ok_or_else(unavailable)
 }
 
 pub fn data_dir() -> AppResult<PathBuf> {
@@ -65,15 +55,4 @@ pub fn data_dir() -> AppResult<PathBuf> {
         .base_path()
         .map(PathBuf::from)
         .ok_or_else(unavailable)
-}
-
-pub fn unavailable() -> AppError {
-    AppError::other("ohos_native_unavailable", serde_json::json!({}))
-}
-
-pub fn native_error(error: impl std::fmt::Display) -> AppError {
-    AppError::other(
-        "ohos_native_failed",
-        serde_json::json!({"err": error.to_string()}),
-    )
 }

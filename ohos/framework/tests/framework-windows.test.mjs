@@ -8,7 +8,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
 
-const abilityRoot = process.env.RSSH_ABILITY_ROOT ?? fileURLToPath(new URL('../../../src-tauri/target/ohos-sources/ability/', import.meta.url));
+const abilityRoot = process.env.RSSH_ABILITY_ROOT ?? fileURLToPath(new URL('../../../target/ohos-sources/ability/', import.meta.url));
 const read = (file) => readFileSync(path.join(abilityRoot, file), 'utf8');
 function deferred() {
   let resolve, reject;

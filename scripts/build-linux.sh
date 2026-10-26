@@ -21,7 +21,7 @@ npm ci
 echo "=== 2. Build Tauri app with CLI ==="
 npm run tauri -- build --target "$TARGET"
 
-BUNDLE="src-tauri/target/$TARGET/release/bundle"
+BUNDLE="target/$TARGET/release/bundle"
 
 echo "=== 3. Repack AppImage with a relocatable icon symlink (issue #91) ==="
 APPIMAGE="$(ls "$BUNDLE"/appimage/*.AppImage 2>/dev/null | head -1 || true)"

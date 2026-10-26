@@ -1,0 +1,2043 @@
+//! Headless WebSocket server — a second adapter over the SAME rssh engine the
+//! Tauri app uses (INV-4); only the transport differs. It lets the unchanged
+//! web frontend run outside Tauri (a browser, or IntelliJ's JCEF) by speaking
+//! the wire protocol the IPC shim expects. Gated behind the `server` feature.
+//!
+//! Protocol (JSON over one WS):
+//!   →  { type:"invoke",   id, cmd, args }
+//!   ←  { type:"response",  id, ok, result|error }
+//!   ←  { type:"event",     event, payload }
+//!
+//! Each dispatch arm calls the SAME `crate::db::*` / engine function the
+//! matching `#[tauri::command]` calls, so there is no behaviour divergence.
+//! Wired so far: local PTY + the DB-backed CRUD that populates the GUI.
+//! SSH / SFTP / AI follow the identical pattern.
+
+use std::sync::Arc;
+
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{json, Value};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http;
+use tokio_tungstenite::tungstenite::Message;
+
+use crate::error::{locked, AppError, AppResult};
+use crate::models::{
+    Credential, Forward, Group, HighlightRule, Profile, SerialProfile, Snippet, TelnetProfile,
+};
+use crate::state::{AppState, SessionKind, SessionOwner};
+use crate::terminal::pty::{self, PtyOut, PtySink};
+use crate::terminal::serial::{self, SerialOut, SerialSink};
+use crate::terminal::telnet::{self, TelnetOut, TelnetSink};
+
+type ConnResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+/// The built frontend, embedded at compile time so the server is self-contained
+/// (the IDEA plugin just spawns the binary + points JCEF at `http://127.0.0.1:<port>/`).
+/// Requires `npm run build` (→ ../dist) before `cargo build --features server`.
+static UI: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/../dist");
+
+/// Construct the engine state exactly like the Tauri app's `setup()` does:
+/// open the DB at the shared data dir, open the secret store, run migrations.
+/// Both adapters sit on this identical state (INV-3 shared data dir).
+fn build_state() -> AppResult<AppState> {
+    AppState::open(crate::db::data_dir()?)
+}
+
+/// Bind loopback on a random port, print `{"port":..,"token":..}` as a JSON line
+/// on stdout (the launcher reads it), then serve until the process is killed.
+pub async fn run() -> std::io::Result<()> {
+    let state = Arc::new(build_state().map_err(|e| std::io::Error::other(e.to_string()))?);
+    let token = uuid::Uuid::new_v4().to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+
+    println!("{}", json!({ "port": port, "token": token }));
+    {
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+    }
+
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                // A transient accept error (ECONNABORTED: peer RST between SYN and
+                // accept; EMFILE/ENFILE: fd exhaustion) must NOT tear down the whole
+                // headless server. Propagating it `?`→`run()`→`process::exit(1)`
+                // would drop every live SSH session and freeze the IDEA tool window.
+                // Log and keep serving. The short backoff stops a hot spin under fd
+                // exhaustion (accept would otherwise fail-and-retry at 100% CPU
+                // until an fd frees up).
+                log::warn!("rssh-server: accept failed (continuing): {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        let expected = token.clone();
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_conn(stream, expected, state).await {
+                log::warn!("rssh-server: connection ended: {e}");
+            }
+        });
+    }
+}
+
+async fn handle_conn(stream: TcpStream, expected: String, state: Arc<AppState>) -> ConnResult {
+    // Sniff the request without consuming it (peek): a WebSocket upgrade takes the
+    // ws path below; any other GET is served the embedded frontend over HTTP, so a
+    // single port serves both the UI and the IPC socket.
+    let mut sniff = [0u8; 2048];
+    let n = stream.peek(&mut sniff).await?;
+    let head = String::from_utf8_lossy(&sniff[..n]).to_string();
+    if !head.to_ascii_lowercase().contains("upgrade: websocket") {
+        return serve_static(stream).await.map_err(Into::into);
+    }
+
+    // Loopback bind + per-launch token are the guard (INV-3). Browsers can't set
+    // headers on a WS, so the token rides the query string: ws://..:port/?token=..
+    let ws = tokio_tungstenite::accept_hdr_async(stream, move |req: &Request, resp: Response| {
+        let ok = req
+            .uri()
+            .query()
+            .and_then(query_token)
+            .map(|t| t == expected)
+            .unwrap_or(false);
+        if ok {
+            Ok(resp)
+        } else {
+            let err: ErrorResponse = http::Response::builder()
+                .status(http::StatusCode::UNAUTHORIZED)
+                .body(Some("invalid token".to_string()))
+                .unwrap();
+            Err(err)
+        }
+    })
+    .await?;
+
+    let (mut ws_tx, mut ws_rx) = ws.split();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    let connection_owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+    // Broadcasts "connection gone" to in-flight invoke tasks. A task blocked on a
+    // frontend response (SSH auth / passphrase / host-key prompt) would otherwise
+    // wait forever after the socket drops — the headless emit is a sink no-op, so
+    // no reply ever comes. On close we flip this; each task selects against it,
+    // gets dropped, and its RAII guard releases the waiter + SSH handle. Aborting
+    // the writer alone never touches those blocked dispatch tasks.
+    let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+
+    // Single writer task: serializes responses + pushed events onto the socket.
+    let writer = tokio::spawn(async move {
+        while let Some(m) = rx.recv().await {
+            if ws_tx.send(m).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    while let Some(msg) = ws_rx.next().await {
+        // `break`, NOT `?`: an abnormal close (TCP reset, protocol error, JCEF
+        // process killed) yields `Some(Err(_))`. Returning early here would skip
+        // the cleanup below, leaving SSH prompt workers parked forever. Break so
+        // every exit path — clean or abnormal — runs the shutdown + waiter-clear.
+        let msg = match msg {
+            Ok(m) => m,
+            Err(_) => break,
+        };
+        if !(msg.is_text() || msg.is_binary()) {
+            continue;
+        }
+        let data = msg.into_data();
+        let req: Value = match serde_json::from_slice(&data) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if req.get("type").and_then(Value::as_str) != Some("invoke") {
+            continue;
+        }
+        let id = req.get("id").cloned().unwrap_or(Value::Null);
+        let cmd = req
+            .get("cmd")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let args = req.get("args").cloned().unwrap_or_else(|| json!({}));
+
+        // Each invoke runs concurrently: a slow ssh_connect must not block the
+        // ssh_auth_respond on the SAME connection that unblocks its auth prompt.
+        let state = state.clone();
+        let tx = tx.clone();
+        let owner = connection_owner.clone();
+        let mut shutdown = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            tokio::select! {
+                // Connection closed mid-flight: drop the dispatch future so its
+                // RAII guards clean up. There's no reply to send — socket is gone.
+                _ = shutdown.changed() => {}
+                resp = dispatch_async(&state, &owner, &cmd, args, &tx) => {
+                    let resp = match resp {
+                        Ok(result) => json!({ "type": "response", "id": id, "ok": true, "result": result }),
+                        Err(error) => json!({ "type": "response", "id": id, "ok": false, "error": error }),
+                    };
+                    let _ = tx.send(Message::Text(resp.to_string()));
+                }
+            }
+        });
+    }
+
+    // Connection closed: stop its dispatch work, make its event sink fail, then
+    // close resources and prompt waiters owned by this websocket. Other websocket
+    // connections and native windows share AppState, so global waiter cleanup would
+    // incorrectly cancel their in-flight SSH handshakes.
+    let _ = shutdown_tx.send(true);
+    writer.abort();
+    let _ = writer.await;
+    crate::commands::lifecycle::close_owner(&state, &connection_owner);
+    Ok(())
+}
+
+/// Synchronous command dispatch. Each arm mirrors the matching `#[tauri::command]`.
+fn dispatch(
+    state: &AppState,
+    owner: &SessionOwner,
+    cmd: &str,
+    args: Value,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<Value, Value> {
+    match cmd {
+        // ---- profiles ----
+        "list_profiles" => ok(crate::db::profile::list(&state.db)),
+        "get_profile" => ok(crate::db::profile::get(
+            &state.db,
+            &arg::<String>(&args, "id")?,
+        )),
+        "create_profile" => ok(crate::db::profile::insert(
+            &state.db,
+            &arg::<Profile>(&args, "profile")?,
+        )),
+        "update_profile" => ok(crate::db::profile::update(
+            &state.db,
+            &arg::<Profile>(&args, "profile")?,
+        )),
+        "delete_profile" => ok(crate::db::profile::delete(
+            &state.db,
+            &arg::<String>(&args, "id")?,
+        )),
+        "ssh_algorithm_catalog" => ok(Ok::<_, AppError>(crate::ssh::algorithms::catalog())),
+        // List the local shells the host offers (pure engine, no UI).
+        "refresh_shells" => ok(crate::commands::pty::refresh_shells()),
+
+        // ---- credentials (secret via SecretStore, metadata via DB) ----
+        "list_credentials" => ok(crate::db::credential::list(&state.db)),
+        "get_credential" => {
+            let id: String = arg(&args, "id")?;
+            let mut cred = crate::db::credential::get(&state.db, &id).map_err(err_value)?;
+            cred.secret = state
+                .secret_store
+                .get(&crate::secret::cred_secret_key(&id))
+                .map_err(err_value)?;
+            ok::<Credential>(Ok(cred))
+        }
+        "create_credential" => {
+            let c: Credential = arg(&args, "credential")?;
+            crate::db::credential::insert(&state.db, &c).map_err(err_value)?;
+            save_cred_secret(state, &c).map(|_| Value::Null)
+        }
+        "update_credential" => {
+            let c: Credential = arg(&args, "credential")?;
+            crate::db::credential::update(&state.db, &c).map_err(err_value)?;
+            save_cred_secret(state, &c).map(|_| Value::Null)
+        }
+        "delete_credential" => {
+            let id: String = arg(&args, "id")?;
+            crate::db::credential::delete(&state.db, &id).map_err(err_value)?;
+            state
+                .secret_store
+                .delete(&crate::secret::cred_secret_key(&id))
+                .map_err(err_value)?;
+            Ok(Value::Null)
+        }
+
+        // ---- groups ----
+        "list_groups" => ok(crate::db::group::list(&state.db)),
+        "create_group" => ok(crate::db::group::insert(
+            &state.db,
+            &arg::<Group>(&args, "group")?,
+        )),
+        "update_group" => ok(crate::db::group::update(
+            &state.db,
+            &arg::<Group>(&args, "group")?,
+        )),
+        "delete_group" => ok(crate::db::group::delete(
+            &state.db,
+            &arg::<String>(&args, "id")?,
+        )),
+
+        // ---- forwards (CRUD; active start/stop need SSH — deferred) ----
+        "list_forwards" => ok(crate::db::forward::list(&state.db)),
+        "get_forward" => ok(crate::db::forward::get(
+            &state.db,
+            &arg::<String>(&args, "id")?,
+        )),
+        "create_forward" => ok(crate::db::forward::insert(
+            &state.db,
+            &arg::<Forward>(&args, "forward")?,
+        )),
+        "update_forward" => ok(crate::db::forward::update(
+            &state.db,
+            &arg::<Forward>(&args, "forward")?,
+        )),
+        "delete_forward" => ok(crate::db::forward::delete(
+            &state.db,
+            &arg::<String>(&args, "id")?,
+        )),
+
+        // ---- plugins (JCEF hosts the UI but has no asset protocol, so iframe
+        //      loading is unavailable there; registry + exec still work) ----
+        "plugins_root" => ok(Ok::<_, AppError>(
+            crate::commands::plugin::plugins_dir(state)
+                .to_string_lossy()
+                .into_owned(),
+        )),
+        "install_plugin" => {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            let b64: String = arg(&args, "base64Zip")?;
+            // Same region-button contract as the Tauri command — passing None
+            // here would silently skip the area mismatch validation.
+            let area = optional_string_arg(&args, "area")?;
+            crate::commands::plugin::ensure_zip_b64_within_cap(&b64).map_err(err_value)?;
+            let bytes = STANDARD.decode(b64.trim()).map_err(|e| {
+                err_value(AppError::config(
+                    "crypto_base64_decode_failed",
+                    json!({ "err": e.to_string() }),
+                ))
+            })?;
+            ok(crate::commands::plugin::install_impl(
+                state,
+                &bytes,
+                area.as_deref(),
+            ))
+        }
+        "list_plugins" => ok(crate::db::plugin::list(&state.db)),
+        "set_plugin_enabled" => {
+            let id: String = arg(&args, "id")?;
+            let enabled: bool = arg(&args, "enabled")?;
+            ok(crate::db::plugin::set_enabled(&state.db, &id, enabled))
+        }
+        "set_plugin_order" => {
+            let ids: Vec<String> = arg(&args, "ids")?;
+            ok(crate::db::plugin::set_order(&state.db, &ids))
+        }
+        "uninstall_plugin" => {
+            let id: String = arg(&args, "id")?;
+            ok(crate::commands::plugin::uninstall_impl(state, &id))
+        }
+
+        // ---- settings / snippets / highlights ----
+        "get_setting" => {
+            let key: String = arg(&args, "key")?;
+            if crate::secret::is_secret_setting(&key) {
+                ok(state.secret_store.get(&crate::secret::setting_key(&key)))
+            } else {
+                ok(crate::db::settings::get(&state.db, &key))
+            }
+        }
+        "set_setting" => {
+            let key: String = arg(&args, "key")?;
+            let value: String = arg(&args, "value")?;
+            let r = if crate::secret::is_secret_setting(&key) {
+                if value.is_empty() {
+                    state.secret_store.delete(&crate::secret::setting_key(&key))
+                } else {
+                    state
+                        .secret_store
+                        .set(&crate::secret::setting_key(&key), &value)
+                }
+            } else {
+                crate::db::settings::set(&state.db, &key, &value)
+            };
+            ok(r)
+        }
+        "command_block_list_redact_rules" => {
+            ok(crate::commands::command_block::list_redact_rules(&state.db))
+        }
+        "command_block_save_redact_rule" => ok(crate::commands::command_block::save_redact_rule(
+            &state.db,
+            &crate::db::command_block_redact_rule::RedactRuleRow {
+                id: arg(&args, "id")?,
+                pattern: arg(&args, "pattern")?,
+                replacement: arg(&args, "replacement")?,
+            },
+        )),
+        "command_block_delete_redact_rule" => {
+            ok(crate::commands::command_block::delete_redact_rule(
+                &state.db,
+                &arg::<String>(&args, "id")?,
+            ))
+        }
+        "set_sync_auto_pull" => ok(crate::commands::sync::set_sync_auto_pull_impl(
+            state,
+            arg(&args, "provider")?,
+            arg(&args, "enabled")?,
+            arg(&args, "password")?,
+        )),
+        "get_sync_auto_pull_status" => {
+            ok(crate::commands::sync::get_sync_auto_pull_status_impl(state))
+        }
+        "list_highlights" => ok(crate::db::highlight::list(&state.db)),
+        "add_highlight" => ok(crate::db::highlight::insert(
+            &state.db,
+            &arg::<HighlightRule>(&args, "rule")?,
+        )),
+        "remove_highlight" => ok(crate::db::highlight::delete_by_keyword(
+            &state.db,
+            &arg::<String>(&args, "keyword")?,
+        )),
+        "update_highlight" => ok(crate::db::highlight::update(
+            &state.db,
+            &arg::<String>(&args, "oldKeyword")?,
+            &arg::<HighlightRule>(&args, "rule")?,
+        )),
+        "reset_highlights" => ok(crate::db::highlight::reset_defaults(&state.db)),
+        "load_snippets" => ok(crate::db::snippet::load(&state.data_dir)),
+        "save_snippets" => ok(crate::db::snippet::save(
+            &state.data_dir,
+            &arg::<Vec<Snippet>>(&args, "snippets")?,
+        )),
+        "secret_backend" => Ok(json!(state.secret_store.backend_name())),
+
+        // ---- local PTY ----
+        "list_shells" => Ok(json!(pty::available_shells())),
+        "pty_spawn" => {
+            let cols = checked_u16_arg(&args, "cols", 80)?;
+            let rows = checked_u16_arg(&args, "rows", 24)?;
+            let requested_id = optional_string_arg(&args, "sessionId")?;
+            let session_id =
+                crate::commands::lifecycle::resolve_session_id(requested_id).map_err(err_value)?;
+            let reservation = crate::commands::lifecycle::reserve_resource(
+                state,
+                &session_id,
+                SessionKind::Pty,
+                owner.clone(),
+            )
+            .map_err(err_value)?;
+            let shell = crate::db::settings::get(&state.db, "local_shell")
+                .ok()
+                .flatten()
+                .filter(|s| !s.is_empty());
+            let tx = tx.clone();
+            let sink: PtySink = Arc::new(move |id: &str, out: PtyOut| {
+                let msg = match out {
+                    PtyOut::Data(b) => {
+                        json!({ "type": "event", "event": format!("pty:data:{id}"), "payload": crate::emitter::b64_payload(&b) })
+                    }
+                    PtyOut::Close => {
+                        json!({ "type": "event", "event": format!("pty:close:{id}"), "payload": Value::Null })
+                    }
+                };
+                let _ = tx.send(Message::Text(msg.to_string()));
+            });
+            let (id, handle) =
+                pty::spawn(session_id, cols, rows, sink, shell).map_err(err_value)?;
+            reservation
+                .activate_returned(&id, crate::commands::lifecycle::ReadySession::Pty(handle))
+                .map_err(err_value)?;
+            Ok(json!(id))
+        }
+        "pty_write" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let data: Vec<u8> = arg(&args, "data")?;
+            let handle = locked(&state.pty_sessions)
+                .map_err(err_value)?
+                .get(&sid)
+                .cloned();
+            match handle {
+                Some(h) => h.write(&data).map(|_| Value::Null).map_err(err_value),
+                None => Err(json!("pty_not_found")),
+            }
+        }
+        "pty_resize" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let cols = checked_u16_arg(&args, "cols", 80)?;
+            let rows = checked_u16_arg(&args, "rows", 24)?;
+            let handle = locked(&state.pty_sessions)
+                .map_err(err_value)?
+                .get(&sid)
+                .cloned();
+            match handle {
+                Some(h) => h.resize(cols, rows).map(|_| Value::Null).map_err(err_value),
+                None => Err(json!("pty_not_found")),
+            }
+        }
+        "pty_close" => {
+            let sid: String = arg(&args, "sessionId")?;
+            crate::commands::lifecycle::close_resource(state, &sid, SessionKind::Pty, owner)
+                .map_err(err_value)?;
+            Ok(Value::Null)
+        }
+
+        // ---- telnet (open lives in dispatch_async — blocking DNS+connect) ----
+        "telnet_write" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let data: Vec<u8> = arg(&args, "data")?;
+            let handle = locked(&state.telnet_sessions)
+                .map_err(err_value)?
+                .get(&sid)
+                .cloned();
+            match handle {
+                Some(h) => h.write(&data).map(|_| Value::Null).map_err(err_value),
+                None => Err(json!("telnet_not_found")),
+            }
+        }
+        "telnet_write_line" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let text: String = arg(&args, "text")?;
+            let handle = locked(&state.telnet_sessions)
+                .map_err(err_value)?
+                .get(&sid)
+                .cloned();
+            match handle {
+                Some(h) => h.write_line(&text).map(|_| Value::Null).map_err(err_value),
+                None => Err(json!("telnet_not_found")),
+            }
+        }
+        "telnet_resize" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let cols = checked_u16_arg(&args, "cols", 80)?;
+            let rows = checked_u16_arg(&args, "rows", 24)?;
+            let handle = locked(&state.telnet_sessions)
+                .map_err(err_value)?
+                .get(&sid)
+                .cloned();
+            match handle {
+                Some(h) => h.resize(cols, rows).map(|_| Value::Null).map_err(err_value),
+                None => Err(json!("telnet_not_found")),
+            }
+        }
+        "telnet_close" => {
+            let sid: String = arg(&args, "sessionId")?;
+            crate::commands::lifecycle::close_resource(state, &sid, SessionKind::Telnet, owner)
+                .map_err(err_value)?;
+            Ok(Value::Null)
+        }
+
+        // ---- telnet profiles (CRUD; peer of serial profiles) ----
+        "list_telnet_profiles" => ok(crate::telnet_profile::list_metadata(&state.db)),
+        "get_telnet_profile" => {
+            let id: String = arg(&args, "id")?;
+            let profile =
+                crate::telnet_profile::get_full(&state.db, state.secret_store.as_ref(), &id)
+                    .map_err(err_value)?;
+            Ok(json!(profile))
+        }
+        "create_telnet_profile" => {
+            let profile: TelnetProfile = arg(&args, "profile")?;
+            let intent = crate::telnet_profile::LoginScriptIntent::from_profile(&profile);
+            crate::telnet_profile::upsert(&state.db, state.secret_store.as_ref(), &profile, intent)
+                .map_err(err_value)?;
+            Ok(Value::Null)
+        }
+        "update_telnet_profile" => {
+            let profile: TelnetProfile = arg(&args, "profile")?;
+            let update: Option<crate::telnet_profile::LoginScriptUpdate> =
+                arg(&args, "loginScriptUpdate")?;
+            let intent =
+                crate::telnet_profile::LoginScriptIntent::from_update_profile(&profile, update);
+            crate::telnet_profile::update(&state.db, state.secret_store.as_ref(), &profile, intent)
+                .map_err(err_value)?;
+            Ok(Value::Null)
+        }
+        "delete_telnet_profile" => {
+            let id: String = arg(&args, "id")?;
+            crate::telnet_profile::delete(&state.db, state.secret_store.as_ref(), &id)
+                .map_err(err_value)?;
+            Ok(Value::Null)
+        }
+
+        // ---- serial profiles (CRUD; peer of forwards) ----
+        "list_serial_profiles" => ok(crate::db::serial_profile::list(&state.db)),
+        "get_serial_profile" => ok(crate::db::serial_profile::get(
+            &state.db,
+            &arg::<String>(&args, "id")?,
+        )),
+        "create_serial_profile" => ok(crate::db::serial_profile::insert(
+            &state.db,
+            &arg::<SerialProfile>(&args, "profile")?,
+        )),
+        "update_serial_profile" => ok(crate::db::serial_profile::update(
+            &state.db,
+            &arg::<SerialProfile>(&args, "profile")?,
+        )),
+        "delete_serial_profile" => ok(crate::db::serial_profile::delete(
+            &state.db,
+            &arg::<String>(&args, "id")?,
+        )),
+
+        // ---- recordings (asciicast playback) ----
+        "list_recordings" => ok(crate::commands::settings::list_recordings_impl(state)),
+        "read_recording" => ok(crate::commands::settings::read_recording_impl(
+            state,
+            arg(&args, "name")?,
+        )),
+
+        "read_default_key_file" => ok(crate::commands::profile::read_default_key_file(arg(
+            &args, "name",
+        )?)),
+
+        // ---- config import/export (JSON-string core; the *_to_file / *_from_file
+        //      dialog variants are handled browser-side by the IPC shim) ----
+        "export_config" => ok(crate::commands::sync::export_config_impl(state)),
+
+        // ---- port forwarding: stop + live stats (start is async, see dispatch_async) ----
+        "forward_stop" => {
+            let active_id: String = arg(&args, "activeId")?;
+            match crate::commands::lifecycle::close_resource(
+                state,
+                &active_id,
+                SessionKind::Forward,
+                owner,
+            )
+            .map_err(err_value)
+            {
+                Ok(()) => Ok(Value::Null),
+                Err(_) => Err(json!("fwd_not_found")),
+            }
+        }
+        "forward_stats" => {
+            let active_id: String = arg(&args, "activeId")?;
+            ok(crate::commands::forward::forward_stats_impl(
+                state, owner, active_id,
+            ))
+        }
+
+        // ---- CLI: PATH-based status; install is host-managed in embedded mode ----
+        "get_runtime_capabilities" => ok(Ok::<_, AppError>(
+            crate::platform::runtime::RuntimeCapabilities::headless(),
+        )),
+        "cli_status" => ok(Ok::<_, AppError>(crate::cli::cli_status_headless())),
+        "cli_install" => Err(json!("cli_install_not_applicable_embedded")),
+
+        // ---- AI: audit save to a server-side path + remote-shell cache write ----
+        "ai_audit_save" => {
+            let tab_id: String = arg(&args, "tabId")?;
+            let file_path: String = arg(&args, "filePath")?;
+            let audit = crate::ai::commands::ai_audit_handle(
+                state,
+                &tab_id,
+                owner,
+                args.get("instanceId").and_then(Value::as_str),
+            )
+            .map_err(err_value)?;
+            let g = audit.lock().map_err(|_| err_value(AppError::Lock))?;
+            g.save_to_file(&std::path::PathBuf::from(file_path))
+                .map_err(|error| err_value(error.into()))?;
+            Ok(Value::Null)
+        }
+        "ai_cache_remote_shell" => {
+            let target_id: String = arg(&args, "targetId")?;
+            let shell: crate::ai::shell::ShellKind = arg(&args, "shell")?;
+            if let Some(profile_id) = locked(&state.sessions)
+                .map_err(err_value)?
+                .get(&target_id)
+                .map(|h| h.profile_id().to_string())
+            {
+                locked(&state.ai_remote_shell_cache)
+                    .map_err(err_value)?
+                    .insert(profile_id, shell);
+            }
+            Ok(Value::Null)
+        }
+
+        // `getVersion()` (@tauri-apps/api/app) → plugin:app|version. Desktop has
+        // the Tauri app plugin; headless answers with the crate version (synced
+        // across manifests at release) so About + update checks work embedded.
+        "plugin:app|version" => Ok(json!(env!("CARGO_PKG_VERSION"))),
+
+        other => Err(json!(format!("unknown command: {other}"))),
+    }
+}
+
+/// Async dispatch: the `async` commands (ssh / sftp / ai) live here; everything
+/// else falls through to the sync `dispatch`. Mirrors the matching commands.
+async fn dispatch_async(
+    state: &Arc<AppState>,
+    owner: &SessionOwner,
+    cmd: &str,
+    args: Value,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<Value, Value> {
+    match cmd {
+        // ---- orphan-session reap on (re)mount: the server outlives a page reload,
+        //      so stale ssh/sftp/forward/pty from before the reload get cleaned ----
+        "reconcile_sessions" => {
+            let active_ids: Vec<String> = args
+                .get("activeIds")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            ok(crate::commands::lifecycle::reconcile_sessions_impl(state, owner, active_ids).await)
+        }
+
+        // ---- serial console ----
+        "serial_get_capabilities" => Ok(json!(serial::capabilities().await.map_err(err_value)?)),
+        "serial_list_ports" => Ok(json!(serial::available_ports().await.map_err(err_value)?)),
+        "serial_open" => {
+            let port: String = arg(&args, "port")?;
+            let config: serial::SerialConfig = arg(&args, "config")?;
+            let requested_id = optional_string_arg(&args, "sessionId")?;
+            let session_id =
+                crate::commands::lifecycle::resolve_session_id(requested_id).map_err(err_value)?;
+            let reservation = crate::commands::lifecycle::reserve_resource(
+                state,
+                &session_id,
+                SessionKind::Serial,
+                owner.clone(),
+            )
+            .map_err(err_value)?;
+            let tx = tx.clone();
+            let sink: SerialSink = Arc::new(move |id: &str, out: SerialOut| {
+                let msg = match out {
+                    SerialOut::Data(b) => {
+                        json!({ "type": "event", "event": format!("serial:data:{id}"), "payload": crate::emitter::b64_payload(&b) })
+                    }
+                    SerialOut::Close => {
+                        json!({ "type": "event", "event": format!("serial:close:{id}"), "payload": Value::Null })
+                    }
+                };
+                let _ = tx.send(Message::Text(msg.to_string()));
+            });
+            let operation = reservation.pending_operation().map_err(err_value)?;
+            let opened = serial::open_resource(session_id, &port, config, sink, operation)
+                .await
+                .map_err(err_value)?;
+            let id = opened
+                .activate(|id, handle| {
+                    reservation.activate_returned(
+                        id,
+                        crate::commands::lifecycle::ReadySession::Serial(handle),
+                    )
+                })
+                .await
+                .map_err(err_value)?;
+            Ok(json!(id))
+        }
+        "serial_write" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let data: Vec<u8> = arg(&args, "data")?;
+            let handle = locked(&state.serial_sessions)
+                .map_err(err_value)?
+                .get(&sid)
+                .cloned();
+            match handle {
+                Some(h) => h.write(&data).await.map(|_| Value::Null).map_err(err_value),
+                None => Err(json!("serial_not_found")),
+            }
+        }
+        "serial_close" => {
+            let sid: String = arg(&args, "sessionId")?;
+            crate::commands::lifecycle::close_resource_and_wait(
+                state,
+                &sid,
+                SessionKind::Serial,
+                owner,
+            )
+            .await
+            .map_err(err_value)?;
+            Ok(Value::Null)
+        }
+        "serial_set_dtr" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let level: bool = arg(&args, "level")?;
+            let handle = locked(&state.serial_sessions)
+                .map_err(err_value)?
+                .get(&sid)
+                .cloned();
+            match handle {
+                Some(h) => h
+                    .set_dtr(level)
+                    .await
+                    .map(|_| Value::Null)
+                    .map_err(err_value),
+                None => Err(json!("serial_not_found")),
+            }
+        }
+        "serial_set_rts" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let level: bool = arg(&args, "level")?;
+            let handle = locked(&state.serial_sessions)
+                .map_err(err_value)?
+                .get(&sid)
+                .cloned();
+            match handle {
+                Some(h) => h
+                    .set_rts(level)
+                    .await
+                    .map(|_| Value::Null)
+                    .map_err(err_value),
+                None => Err(json!("serial_not_found")),
+            }
+        }
+        "serial_send_break" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let handle = locked(&state.serial_sessions)
+                .map_err(err_value)?
+                .get(&sid)
+                .cloned();
+            match handle {
+                Some(h) => h.send_break().await.map(|_| Value::Null).map_err(err_value),
+                None => Err(json!("serial_not_found")),
+            }
+        }
+
+        "ssh_connect" => ssh_connect(state, owner, args, tx).await,
+        // Async like the Tauri command, for the same reason: DNS + TCP connect
+        // can block up to 10s per address and must not stall the ws event loop.
+        "telnet_open" => {
+            let host: String = arg(&args, "host")?;
+            let port = checked_u16_arg(&args, "port", 23)?;
+            let cols = checked_u16_arg(&args, "cols", 80)?;
+            let rows = checked_u16_arg(&args, "rows", 24)?;
+            let input_newline = match args.get("inputNewline") {
+                None | Some(Value::Null) => "crlf".to_owned(),
+                Some(Value::String(value)) => value.clone(),
+                Some(_) => {
+                    return Err(err_value(AppError::config(
+                        "telnet_profile_invalid",
+                        json!({ "field": "input_newline" }),
+                    )))
+                }
+            };
+            let requested_id = optional_string_arg(&args, "sessionId")?;
+            let session_id =
+                crate::commands::lifecycle::resolve_session_id(requested_id).map_err(err_value)?;
+            let reservation = crate::commands::lifecycle::reserve_resource(
+                state,
+                &session_id,
+                SessionKind::Telnet,
+                owner.clone(),
+            )
+            .map_err(err_value)?;
+            let tx = tx.clone();
+            let sink: TelnetSink = Arc::new(move |id: &str, out: TelnetOut| {
+                let msg = match out {
+                    TelnetOut::Data(b) => {
+                        json!({ "type": "event", "event": format!("telnet:data:{id}"), "payload": crate::emitter::b64_payload(&b) })
+                    }
+                    TelnetOut::RemoteEcho(enabled) => {
+                        json!({ "type": "event", "event": format!("telnet:echo:{id}"), "payload": enabled })
+                    }
+                    TelnetOut::Close => {
+                        json!({ "type": "event", "event": format!("telnet:close:{id}"), "payload": Value::Null })
+                    }
+                };
+                let _ = tx.send(Message::Text(msg.to_string()));
+            });
+            let spawn_session_id = session_id.clone();
+            let opened = tokio::task::spawn_blocking(move || {
+                telnet::open(
+                    spawn_session_id,
+                    &host,
+                    port,
+                    cols,
+                    rows,
+                    &input_newline,
+                    sink,
+                )
+            })
+            .await
+            // Same coded error as the desktop command, so errMsg() can
+            // translate it; a bare JoinError string has no protocol prefix.
+            .map_err(|e| {
+                err_value(AppError::other(
+                    "task_join_failed",
+                    json!({ "err": e.to_string() }),
+                ))
+            });
+            let (id, handle) = match opened {
+                Ok(result) => result.map_err(err_value)?,
+                Err(e) => return Err(e),
+            };
+            reservation
+                .activate_returned(
+                    &id,
+                    crate::commands::lifecycle::ReadySession::Telnet(handle),
+                )
+                .map_err(err_value)?;
+            Ok(json!(id))
+        }
+        "ssh_write" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let data: Vec<u8> = arg(&args, "data")?;
+            ssh_session(state, &sid)?
+                .write(&data)
+                .map(|_| Value::Null)
+                .map_err(err_value)
+        }
+        "ssh_resize" => {
+            let sid: String = arg(&args, "sessionId")?;
+            let cols = args.get("cols").and_then(Value::as_u64).unwrap_or(80) as u32;
+            let rows = args.get("rows").and_then(Value::as_u64).unwrap_or(24) as u32;
+            ssh_session(state, &sid)?
+                .resize(cols, rows)
+                .map(|_| Value::Null)
+                .map_err(err_value)
+        }
+        "ssh_disconnect" => {
+            let sid: String = arg(&args, "sessionId")?;
+            crate::commands::lifecycle::close_resource(state, &sid, SessionKind::Ssh, owner)
+                .map_err(err_value)?;
+            if let Some(tid) = args.get("tabId").and_then(Value::as_str) {
+                if tid != sid {
+                    let _ = waiter_cancel_owned(&state.auth_waiters, tid, owner);
+                    let _ = waiter_cancel_owned(&state.passphrase_waiters, tid, owner);
+                    let _ = waiter_cancel_owned(&state.host_key_waiters, tid, owner);
+                }
+            }
+            Ok(Value::Null)
+        }
+        "ssh_auth_respond" => {
+            let prompt_id: String = arg(&args, "tabId")?;
+            let responses: Vec<String> = arg(&args, "responses")?;
+            let w = take_waiter_owned(&state.auth_waiters, &prompt_id, owner).map_err(err_value)?;
+            w.send(responses)
+                .map(|_| Value::Null)
+                .map_err(|_| json!("auth_channel_closed"))
+        }
+        "ssh_passphrase_respond" => {
+            let prompt_id: String = arg(&args, "tabId")?;
+            let passphrase: String = arg(&args, "passphrase")?;
+            let w = take_waiter_owned(&state.passphrase_waiters, &prompt_id, owner)
+                .map_err(err_value)?;
+            w.send(passphrase)
+                .map(|_| Value::Null)
+                .map_err(|_| json!("passphrase_channel_closed"))
+        }
+        "ssh_host_key_respond" => {
+            let prompt_id: String = arg(&args, "tabId")?;
+            let answer: String = arg(&args, "answer")?;
+            let w =
+                take_waiter_owned(&state.host_key_waiters, &prompt_id, owner).map_err(err_value)?;
+            w.send(answer)
+                .map(|_| Value::Null)
+                .map_err(|_| json!("hostkey_channel_closed"))
+        }
+        "ssh_auth_cancel" => waiter_cancel(&state.auth_waiters, &args, owner),
+        "ssh_passphrase_cancel" => waiter_cancel(&state.passphrase_waiters, &args, owner),
+        "ssh_host_key_cancel" => waiter_cancel(&state.host_key_waiters, &args, owner),
+
+        // ---- SFTP (core ops + streaming to/from a caller-supplied local path;
+        //      the native pick dialogs that supply that path are host-provided) ----
+        "sftp_connect" => sftp_connect(state, owner, args).await,
+        "sftp_connect_session" => sftp_connect_session(state, owner, args).await,
+        "plugin_exec" => {
+            let session_id: String = arg(&args, "sessionId")?;
+            let command: String = arg(&args, "command")?;
+            let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64);
+            ok(crate::commands::plugin::plugin_exec_impl(
+                state, owner, session_id, command, timeout_ms,
+            )
+            .await)
+        }
+        "sftp_home" => ok(sftp_handle(state, &arg::<String>(&args, "sftpId")?)?
+            .home_dir()
+            .await),
+        "sftp_list" => {
+            let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
+            ok(h.list_dir(&arg::<String>(&args, "path")?).await)
+        }
+        "sftp_walk_remote_dir" => {
+            let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
+            ok(h.walk_files(&arg::<String>(&args, "remoteRoot")?).await)
+        }
+        "resolve_local_paths" => ok(crate::files::resolve_paths(
+            arg(&args, "localRoot")?,
+            arg(&args, "relativePaths")?,
+            arg(&args, "write")?,
+        )
+        .await),
+        "walk_local_dir" => {
+            ok(crate::files::walk_directory(arg::<String>(&args, "localRoot")?).await)
+        }
+        "sftp_download" => {
+            let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
+            ok(h.download(&arg::<String>(&args, "path")?).await)
+        }
+        "sftp_upload" => {
+            let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
+            ok(h.upload(
+                &arg::<String>(&args, "path")?,
+                &arg::<Vec<u8>>(&args, "data")?,
+            )
+            .await)
+        }
+        "sftp_mkdir" => {
+            let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
+            ok(h.mkdir(&arg::<String>(&args, "path")?).await)
+        }
+        "sftp_close" => {
+            let sftp_id: String = arg(&args, "sftpId")?;
+            crate::commands::lifecycle::close_resource(state, &sftp_id, SessionKind::Sftp, owner)
+                .map_err(err_value)?;
+            Ok(Value::Null)
+        }
+        "sftp_cancel_transfer" => {
+            use std::sync::atomic::Ordering;
+            let tid: String = arg(&args, "transferId")?;
+            if let Some(flag) = locked(&state.transfer_cancels)
+                .map_err(err_value)?
+                .get(&tid)
+            {
+                flag.store(true, Ordering::SeqCst);
+            }
+            Ok(Value::Null)
+        }
+        "sftp_remove" => {
+            let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
+            ok(h.remove(&arg::<String>(&args, "path")?).await)
+        }
+        "sftp_rename" => {
+            let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
+            ok(h.rename(
+                &arg::<String>(&args, "oldPath")?,
+                &arg::<String>(&args, "newPath")?,
+            )
+            .await)
+        }
+        "sftp_stat" => {
+            let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
+            ok(h.stat(&arg::<String>(&args, "path")?).await)
+        }
+        "sftp_download_to" => {
+            let sftp = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
+            let remote_path: String = arg(&args, "remotePath")?;
+            let local_path: String = arg(&args, "localPath")?;
+            let transfer_id: String = arg(&args, "transferId")?;
+            // RAII: unregisters the cancel flag on return / `?` / panic (matches desktop).
+            let (_guard, flag) =
+                crate::commands::sftp::CancelGuard::register(state, transfer_id.clone())
+                    .map_err(err_value)?;
+            let host = headless_host(state, tx);
+            ok(sftp
+                .download_streaming(
+                    &remote_path,
+                    std::path::Path::new(&local_path),
+                    &host,
+                    &transfer_id,
+                    flag,
+                )
+                .await
+                .map(|_| ()))
+        }
+        "sftp_upload_from" => {
+            let sftp = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
+            let local_path: String = arg(&args, "localPath")?;
+            let remote_path: String = arg(&args, "remotePath")?;
+            let transfer_id: String = arg(&args, "transferId")?;
+            let (_guard, flag) =
+                crate::commands::sftp::CancelGuard::register(state, transfer_id.clone())
+                    .map_err(err_value)?;
+            let host = headless_host(state, tx);
+            // Headless server runs on a real host filesystem (never Android), so
+            // open the local path directly as the upload reader. `upload_streaming`
+            // now takes (reader, total, …) — mirror of commands::sftp::sftp_upload_from.
+            let mut reader = tokio::fs::File::open(&local_path)
+                .await
+                .map_err(|e| err_value(AppError::from(e)))?;
+            let total = reader.metadata().await.map(|m| m.len()).unwrap_or(0);
+            ok(sftp
+                .upload_streaming(&mut reader, total, &remote_path, &host, &transfer_id, flag)
+                .await
+                .map(|_| ()))
+        }
+
+        // ---- AI (settings + models + sessions + messaging + skills + audit) ----
+        "ai_settings_get" => ok(crate::ai::commands::ai_settings_get_impl(
+            state,
+            args.get("provider")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        )
+        .await),
+        "ai_settings_set" => {
+            ok(crate::ai::commands::ai_settings_set_impl(state, arg(&args, "patch")?).await)
+        }
+        "ai_list_models" => ok(crate::ai::commands::ai_list_models_impl(
+            state,
+            args.get("providerId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            arg(&args, "protocol")?,
+            arg(&args, "endpoint")?,
+            args.get("apiKey")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        )
+        .await),
+        "ai_provider_list" => ok(crate::ai::commands::ai_provider_list_impl(state).await),
+        "ai_codex_auth_status" => ok(state
+            .codex_auth
+            .status(&arg::<String>(&args, "providerId")?)),
+        "ai_codex_login_start" => ok(state
+            .codex_auth
+            .login_start(&arg::<String>(&args, "providerId")?)
+            .await),
+        "ai_codex_login_poll" => ok(state
+            .codex_auth
+            .login_poll(
+                &arg::<String>(&args, "providerId")?,
+                &arg::<String>(&args, "loginId")?,
+            )
+            .await),
+        "ai_codex_login_cancel" => ok(state
+            .codex_auth
+            .login_cancel(
+                &arg::<String>(&args, "providerId")?,
+                &arg::<String>(&args, "loginId")?,
+            )
+            .await),
+        "ai_codex_logout" => ok(state
+            .codex_auth
+            .logout(&arg::<String>(&args, "providerId")?)
+            .await),
+        "ai_provider_save" => {
+            ok(crate::ai::commands::ai_provider_save_impl(state, arg(&args, "patch")?).await)
+        }
+        "ai_provider_delete" => {
+            ok(crate::ai::commands::ai_provider_delete_impl(state, arg(&args, "id")?).await)
+        }
+        "ai_list_sessions" => ok(crate::ai::commands::ai_list_sessions_for_owner(
+            state, owner,
+        )),
+        "ai_session_start" => {
+            let host = headless_host(state, tx);
+            ok(crate::ai::commands::ai_session_start_impl(
+                state,
+                host,
+                owner.clone(),
+                arg(&args, "tabId")?,
+                arg(&args, "target")?,
+                args.get("skill")
+                    .and_then(Value::as_str)
+                    .unwrap_or("general")
+                    .to_string(),
+                arg(&args, "provider")?,
+                arg(&args, "model")?,
+                args.get("locale")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                args.get("resume")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            )
+            .await)
+        }
+        "ai_user_message" => ok(crate::ai::commands::ai_user_message_impl(
+            state,
+            &arg::<String>(&args, "tabId")?,
+            owner,
+            arg(&args, "text")?,
+            args.get("instanceId").and_then(Value::as_str),
+        )
+        .await),
+        "ai_command_result" => ok(crate::ai::commands::ai_command_result_impl(
+            state,
+            &arg::<String>(&args, "tabId")?,
+            owner,
+            arg(&args, "toolCallId")?,
+            arg::<i32>(&args, "exitCode")?,
+            arg(&args, "output")?,
+            arg::<bool>(&args, "timedOut")?,
+            arg::<Option<bool>>(&args, "earlyTerminated")?.unwrap_or(false),
+            args.get("instanceId").and_then(Value::as_str),
+        )
+        .await),
+        "ai_command_reject" => ok(crate::ai::commands::ai_command_reject_impl(
+            state,
+            &arg::<String>(&args, "tabId")?,
+            owner,
+            arg(&args, "toolCallId")?,
+            arg(&args, "reason")?,
+            args.get("instanceId").and_then(Value::as_str),
+        )
+        .await),
+        "ai_session_clear_context" => ok(crate::ai::commands::ai_session_clear_context_impl(
+            state,
+            &arg::<String>(&args, "tabId")?,
+            owner,
+            args.get("instanceId").and_then(Value::as_str),
+        )
+        .await),
+        "ai_session_rollback_context" => ok(crate::ai::commands::ai_session_rollback_context_impl(
+            state,
+            &arg::<String>(&args, "tabId")?,
+            owner,
+            arg::<usize>(&args, "userMessageIndex")?,
+            arg(&args, "expectedUserMessages")?,
+            args.get("instanceId").and_then(Value::as_str),
+        )
+        .await),
+        "ai_session_prepare_stop" => crate::commands::lifecycle::prepare_ai_session_stop(
+            state,
+            &arg::<String>(&args, "tabId")?,
+            owner,
+            args.get("instanceId").and_then(Value::as_str),
+        )
+        .await
+        .map(|mutations| json!(mutations))
+        .map_err(err_value),
+        "ai_session_stop" => {
+            let tab_id: String = arg(&args, "tabId")?;
+            crate::commands::lifecycle::close_ai_session(
+                state,
+                &tab_id,
+                owner,
+                args.get("instanceId").and_then(Value::as_str),
+            )
+            .await
+            .map(|_| Value::Null)
+            .map_err(err_value)
+        }
+        "ai_cancel_stream" => {
+            let tab_id: String = arg(&args, "tabId")?;
+            let slot = crate::ai::commands::ai_cancel_slot(
+                state,
+                &tab_id,
+                owner,
+                args.get("instanceId").and_then(Value::as_str),
+            )
+            .map_err(err_value)?;
+            let notify = {
+                slot.lock()
+                    .map_err(|_| err_value(AppError::Lock))?
+                    .as_ref()
+                    .cloned()
+            };
+            if let Some(n) = notify {
+                n.notify_one();
+            }
+            Ok(Value::Null)
+        }
+        "ai_session_rebind_target" => ai_rebind(state, owner, args),
+        "ai_list_skills" => ok(crate::ai::skills::list_all(&state.db)),
+        "ai_get_skill" => ok(crate::ai::skills::get(
+            &state.db,
+            &arg::<String>(&args, "id")?,
+        )),
+        "ai_save_skill" => ok(crate::ai::skills::save_user(
+            &state.db,
+            &crate::ai::skills::SkillRecord {
+                id: arg(&args, "id")?,
+                name: arg(&args, "name")?,
+                description: arg(&args, "description")?,
+                content: arg(&args, "content")?,
+                builtin: false,
+            },
+        )),
+        "ai_delete_skill" => ok(crate::ai::skills::delete_user(
+            &state.db,
+            &arg::<String>(&args, "id")?,
+        )),
+        "ai_list_redact_rules" => ok(crate::ai::redact_rules::list(&state.db)),
+        "ai_save_redact_rule" => ok(crate::ai::redact_rules::save(
+            &state.db,
+            &crate::ai::redact_rules::RedactRuleRecord {
+                id: arg(&args, "id")?,
+                pattern: arg(&args, "pattern")?,
+                replacement: arg(&args, "replacement")?,
+            },
+        )),
+        "ai_delete_redact_rule" => ok(crate::ai::redact_rules::delete(
+            &state.db,
+            &arg::<String>(&args, "id")?,
+        )),
+        "ai_audit_get" => {
+            let tab_id: String = arg(&args, "tabId")?;
+            let audit = crate::ai::commands::ai_audit_handle(
+                state,
+                &tab_id,
+                owner,
+                args.get("instanceId").and_then(Value::as_str),
+            )
+            .map_err(err_value)?;
+            let g = audit.lock().map_err(|_| err_value(AppError::Lock))?;
+            ok(Ok::<_, AppError>(g.clone()))
+        }
+        "ai_audit_log_text" => {
+            let tab_id: String = arg(&args, "tabId")?;
+            let audit = crate::ai::commands::ai_audit_handle(
+                state,
+                &tab_id,
+                owner,
+                args.get("instanceId").and_then(Value::as_str),
+            )
+            .map_err(err_value)?;
+            let g = audit.lock().map_err(|_| err_value(AppError::Lock))?;
+            Ok(json!(g.to_log_string()))
+        }
+        "ai_remote_shell_probe_needed" => ok(
+            crate::ai::commands::ai_remote_shell_probe_needed_impl(state, arg(&args, "targetId")?),
+        ),
+        "ai_conversations_list" => ok(crate::ai::commands::ai_conversations_list_impl(
+            state,
+            &arg(&args, "target")?,
+        )),
+        "ai_conversation_timeline" => {
+            let target: Option<crate::ai::commands::AiTarget> = arg(&args, "target")?;
+            ok(crate::ai::commands::ai_conversation_timeline_impl(
+                state,
+                &arg::<String>(&args, "id")?,
+                target.as_ref(),
+            ))
+        }
+        "ai_conversation_save_timeline" => ok(crate::db::ai_conversation::set_timeline(
+            &state.db,
+            &arg::<String>(&args, "id")?,
+            &arg::<String>(&args, "timeline")?,
+        )),
+        "ai_conversation_delete" => ok(crate::ai::commands::ai_conversation_delete_impl(
+            state,
+            &arg::<String>(&args, "id")?,
+        )),
+
+        // Import may wait for the auth file lock held across a Codex HTTP
+        // request. Keep that wait off the single-threaded server runtime so
+        // the auth task can finish and release the lock.
+        "import_config" => {
+            let json: String = arg(&args, "json")?;
+            let state = state.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::commands::sync::import_config_impl(&state, json)
+            })
+            .await
+            .map_err(|e| {
+                err_value(AppError::other(
+                    "task_join_failed",
+                    json!({ "err": e.to_string() }),
+                ))
+            })?;
+            ok(result)
+        }
+
+        // ---- GitHub config sync ----
+        "github_push" => {
+            ok(crate::commands::sync::github_push_impl(state, arg(&args, "password")?).await)
+        }
+        "github_pull" => {
+            ok(crate::commands::sync::github_pull_impl(state, arg(&args, "password")?).await)
+        }
+
+        // ---- WebDAV config sync ----
+        "webdav_push" => {
+            ok(crate::commands::sync::webdav_push_impl(state, arg(&args, "password")?).await)
+        }
+        "webdav_pull" => {
+            ok(crate::commands::sync::webdav_pull_impl(state, arg(&args, "password")?).await)
+        }
+        "sync_check" => ok(crate::commands::sync::sync_check_impl(state).await),
+        "sync_refresh_local_metadata" => {
+            ok(crate::commands::sync::sync_refresh_local_metadata_impl(state).await)
+        }
+        "sync_check_remotes" => ok(crate::commands::sync::sync_check_remotes_impl(state).await),
+
+        // ---- port forwarding: start (stop is sync, in dispatch) ----
+        "forward_start" => ok(crate::commands::forward::forward_start_impl(
+            state,
+            owner.clone(),
+            arg(&args, "forwardId")?,
+        )
+        .await),
+        "forward_rule_start" => ok(crate::commands::forward::forward_rule_start_impl(
+            state,
+            owner,
+            arg(&args, "activeId")?,
+            arg(&args, "ruleIndex")?,
+        )
+        .await),
+        "forward_rule_stop" => ok(crate::commands::forward::forward_rule_stop_impl(
+            state,
+            owner,
+            arg(&args, "activeId")?,
+            arg(&args, "ruleIndex")?,
+        )
+        .await),
+
+        // ---- update check ----
+        "fetch_latest_release_tag" => {
+            ok(crate::commands::update::fetch_latest_release_tag(arg(&args, "repo")?).await)
+        }
+
+        // ---- fonts (fontdb scan; the impl runs it on a blocking thread) ----
+        "list_fonts" => ok(Ok::<_, AppError>(
+            crate::commands::settings::list_fonts().await,
+        )),
+
+        _ => dispatch(state, owner, cmd, args, tx),
+    }
+}
+
+fn waiter_cancel<T>(
+    map: &std::sync::Mutex<std::collections::HashMap<String, crate::state::OwnedWaiter<T>>>,
+    args: &Value,
+    owner: &SessionOwner,
+) -> Result<Value, Value> {
+    let prompt_id: String = arg(args, "tabId")?;
+    waiter_cancel_owned(map, &prompt_id, owner).map_err(err_value)?;
+    Ok(Value::Null)
+}
+
+fn waiter_cancel_owned<T>(
+    map: &std::sync::Mutex<std::collections::HashMap<String, crate::state::OwnedWaiter<T>>>,
+    prompt_id: &str,
+    owner: &SessionOwner,
+) -> AppResult<()> {
+    let mut waiters = locked(map)?;
+    if waiters
+        .get(prompt_id)
+        .is_some_and(|waiter| &waiter.owner == owner)
+    {
+        waiters.remove(prompt_id);
+    }
+    Ok(())
+}
+
+fn take_waiter_owned<T>(
+    map: &std::sync::Mutex<std::collections::HashMap<String, crate::state::OwnedWaiter<T>>>,
+    prompt_id: &str,
+    owner: &SessionOwner,
+) -> AppResult<tokio::sync::oneshot::Sender<T>> {
+    let mut waiters = locked(map)?;
+    if !waiters
+        .get(prompt_id)
+        .is_some_and(|waiter| &waiter.owner == owner)
+    {
+        return Err(AppError::not_found("prompt_waiter_not_found", json!({})));
+    }
+    Ok(waiters
+        .remove(prompt_id)
+        .expect("waiter was validated")
+        .sender)
+}
+
+fn ssh_session(state: &AppState, sid: &str) -> Result<crate::ssh::client::SessionHandle, Value> {
+    locked(&state.sessions)
+        .map_err(err_value)?
+        .get(sid)
+        .cloned()
+        .ok_or_else(|| json!("session_not_found"))
+}
+
+/// Build an engine host whose event sink pushes `{type:"event",..}` frames
+/// onto this connection's writer — the server counterpart of Tauri's
+/// `app.emit`. Shared by every dispatch arm that drives engine events
+/// (ssh_connect, ai_session_start, sftp streaming).
+fn headless_host(
+    state: &Arc<AppState>,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> crate::emitter::Host {
+    let tx = tx.clone();
+    crate::emitter::Host::new(
+        state.clone(),
+        Arc::new(move |event: &str, payload: Value| {
+            // `is_ok()` is false once the writer's receiver is dropped (connection
+            // closed) → Host::emit returns Err so prompt paths stop waiting.
+            tx.send(Message::Text(
+                json!({ "type": "event", "event": event, "payload": payload }).to_string(),
+            ))
+            .is_ok()
+        }),
+    )
+}
+
+/// Server-side `ssh_connect` — a faithful copy of the Tauri command body, but
+/// the engine emits through a host event sink (ws push) and we skip the
+/// per-window session bookkeeping (there are no windows).
+async fn ssh_connect(
+    state: &Arc<AppState>,
+    owner: &SessionOwner,
+    args: Value,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<Value, Value> {
+    let requested_id = optional_string_arg(&args, "sessionId")?;
+    let requested_session_id = requested_id.clone();
+    let session_id =
+        crate::commands::lifecycle::resolve_session_id(requested_id).map_err(err_value)?;
+    let reservation = crate::commands::lifecycle::reserve_resource(
+        state,
+        &session_id,
+        SessionKind::Ssh,
+        owner.clone(),
+    )
+    .map_err(err_value)?;
+    use crate::ssh::client;
+
+    let profile_id: String = arg(&args, "profileId")?;
+    let log_session_id: Option<String> = args
+        .get("logSessionId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let cols = args.get("cols").and_then(Value::as_u64).unwrap_or(80) as u32;
+    let rows = args.get("rows").and_then(Value::as_u64).unwrap_or(24) as u32;
+
+    let profile = crate::db::profile::get(&state.db, &profile_id).map_err(err_value)?;
+    let mut credential =
+        crate::db::credential::get(&state.db, &profile.credential_id).map_err(err_value)?;
+    credential.secret = state
+        .secret_store
+        .get(&crate::secret::cred_secret_key(&credential.id))
+        .map_err(err_value)?;
+
+    let chain_profiles =
+        crate::ssh::bastion::resolve_chain(&state.db, &profile).map_err(err_value)?;
+    let mut chain = Vec::with_capacity(chain_profiles.len());
+    for hop in chain_profiles {
+        let mut bc =
+            crate::db::credential::get(&state.db, &hop.credential_id).map_err(err_value)?;
+        bc.secret = state
+            .secret_store
+            .get(&crate::secret::cred_secret_key(&bc.id))
+            .map_err(err_value)?;
+        chain.push((hop, bc));
+    }
+
+    let verbose_log = crate::db::settings::get(&state.db, "verbose_log")
+        .map_err(err_value)?
+        .map(|v| v == "true")
+        .unwrap_or(true);
+    let timeout_secs: u64 = crate::db::settings::get(&state.db, "connect_timeout")
+        .map_err(err_value)?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(client::DEFAULT_CONNECT_TIMEOUT);
+    let prompt_session_id = requested_session_id
+        .map(|_| session_id.clone())
+        .or_else(|| log_session_id.clone());
+    let effective_log_id = if verbose_log {
+        prompt_session_id.clone()
+    } else {
+        None
+    };
+    let known_hosts_path = crate::ssh::known_hosts::path_for(&state.data_dir);
+    let init_command = profile.init_command.clone();
+    let recording_path =
+        crate::commands::settings::recording_path_for(state, &profile.name).map_err(err_value)?;
+    let emitter = headless_host(state, tx);
+    let connection_owner = owner.clone();
+
+    let result = client::run_blocking_ssh(move || async move {
+        client::connect(client::ConnectParams {
+            session_id,
+            profile,
+            credential,
+            bastion_chain: chain,
+            cols,
+            rows,
+            app: emitter,
+            owner: connection_owner,
+            recording_path,
+            log_session_id: effective_log_id,
+            prompt_session_id,
+            known_hosts_path,
+            timeout_secs,
+        })
+        .await
+    })
+    .await
+    .map_err(err_value)?;
+
+    if let Some(ref cmd) = init_command {
+        if !cmd.is_empty() {
+            result
+                .handle
+                .write(format!("{}\n", cmd).as_bytes())
+                .map_err(err_value)?;
+        }
+    }
+    let session_id = result.session_id;
+    reservation
+        .activate_returned(
+            &session_id,
+            crate::commands::lifecycle::ReadySession::Ssh(result.handle),
+        )
+        .map_err(err_value)?;
+    Ok(json!(session_id))
+}
+
+/// Serve an embedded frontend asset over HTTP/1.1 (one-shot, Connection: close).
+/// Unknown paths fall back to index.html for client-side routing.
+///
+/// We must READ (drain) the request before replying, not just peek it.
+/// `handle_conn` only PEEKED the head (so the ws path can hand the untouched
+/// stream to tungstenite), leaving the request bytes unread in the socket's RX
+/// buffer. Closing a socket that still has unread RX data makes the kernel send
+/// an RST instead of a FIN — and an RST discards whatever is still queued in the
+/// TX buffer, truncating large responses mid-flight. The 1.3 MB JS bundle would
+/// arrive cut off (intermittently, depending on the RST-vs-transfer race), CEF
+/// would see a half script, and the SPA would never mount → blank panel. Reading
+/// to end-of-head lets us close cleanly (FIN), so the whole body is delivered.
+async fn serve_static(mut stream: TcpStream) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Drain the request to end-of-head (a GET has no body). Parsing the path from
+    // what we actually read is also more reliable than the single peek, which
+    // could have been a partial fragment.
+    let mut req: Vec<u8> = Vec::with_capacity(1024);
+    let mut tmp = [0u8; 1024];
+    loop {
+        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if req.len() > 16 * 1024 {
+            break; // header-flood guard
+        }
+        match stream.read(&mut tmp).await? {
+            0 => break, // peer closed early
+            n => req.extend_from_slice(&tmp[..n]),
+        }
+    }
+
+    let head = String::from_utf8_lossy(&req);
+    let target = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or("/");
+    let path = target
+        .split('?')
+        .next()
+        .unwrap_or("/")
+        .trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    let (body, ctype): (&[u8], &str) = match UI.get_file(path) {
+        Some(f) => (f.contents(), mime_for(path)),
+        None => match UI.get_file("index.html") {
+            Some(f) => (f.contents(), "text/html; charset=utf-8"),
+            None => (b"not found".as_slice(), "text/plain"),
+        },
+    };
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(resp.as_bytes()).await?;
+    stream.write_all(body).await?;
+    let _ = stream.shutdown().await;
+    Ok(())
+}
+
+fn mime_for(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "woff2" => "font/woff2",
+        "wasm" => "application/wasm",
+        _ => "application/octet-stream",
+    }
+}
+
+fn ai_rebind(state: &AppState, owner: &SessionOwner, args: Value) -> Result<Value, Value> {
+    use crate::ai::commands::AiTarget;
+    let target: AiTarget = arg(&args, "target")?;
+    let tab_id: String = arg(&args, "tabId")?;
+    crate::ai::commands::ai_session_rebind_target_impl(
+        state,
+        owner,
+        tab_id,
+        target,
+        args.get("conversationId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        args.get("instanceId").and_then(Value::as_str),
+    )
+    .map(|_| Value::Null)
+    .map_err(err_value)
+}
+
+fn sftp_handle(
+    state: &AppState,
+    id: &str,
+) -> Result<std::sync::Arc<crate::ssh::sftp::SftpHandle>, Value> {
+    locked(&state.sftp_sessions)
+        .map_err(err_value)?
+        .get(id)
+        .cloned()
+        .ok_or_else(|| json!("sftp_session_not_found"))
+}
+
+async fn sftp_connect(
+    state: &Arc<AppState>,
+    owner: &SessionOwner,
+    args: Value,
+) -> Result<Value, Value> {
+    use crate::models::{Credential, CredentialType};
+    use crate::ssh::sftp::SftpHandle;
+    let reservation = crate::commands::lifecycle::reserve_generated_resource(
+        state,
+        SessionKind::Sftp,
+        owner.clone(),
+    )
+    .map_err(err_value)?;
+    let id = reservation.id().to_owned();
+    let host: String = arg(&args, "host")?;
+    let port = args.get("port").and_then(Value::as_u64).unwrap_or(22) as u16;
+    let username: String = arg(&args, "username")?;
+    let auth_type: String = arg(&args, "authType")?;
+    let secret: Option<String> = args
+        .get("secret")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let cred = Credential {
+        id: String::new(),
+        name: String::new(),
+        username,
+        credential_type: CredentialType::from_str(&auth_type),
+        secret,
+        save_to_remote: false,
+    };
+    let timeout_secs: u64 = crate::db::settings::get(&state.db, "connect_timeout")
+        .map_err(err_value)?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(crate::ssh::client::DEFAULT_CONNECT_TIMEOUT);
+    let known_hosts_path = crate::ssh::known_hosts::path_for(&state.data_dir);
+    let handle = crate::ssh::client::run_blocking_ssh(move || async move {
+        SftpHandle::connect(host, port, cred, known_hosts_path, timeout_secs).await
+    })
+    .await
+    .map_err(err_value)?;
+    reservation
+        .activate(crate::commands::lifecycle::ReadySession::Sftp(
+            std::sync::Arc::new(handle),
+        ))
+        .map_err(err_value)?;
+    Ok(json!(id))
+}
+
+async fn sftp_connect_session(
+    state: &Arc<AppState>,
+    owner: &SessionOwner,
+    args: Value,
+) -> Result<Value, Value> {
+    use crate::ssh::sftp::SftpHandle;
+    let session_id: String = arg(&args, "sessionId")?;
+    let (reservation, ssh_handle) =
+        crate::commands::lifecycle::reserve_sftp_child(state, &session_id, owner)
+            .map_err(err_value)?;
+    let id = reservation.id().to_owned();
+    let parent = session_id.clone();
+    let handle = crate::ssh::client::run_blocking_ssh(move || async move {
+        SftpHandle::from_handle(&ssh_handle, parent).await
+    })
+    .await
+    .map_err(err_value)?;
+    reservation
+        .activate(crate::commands::lifecycle::ReadySession::Sftp(
+            std::sync::Arc::new(handle),
+        ))
+        .map_err(err_value)?;
+    Ok(json!(id))
+}
+
+/// Map an `AppResult<T>` into the wire's Ok(result) / Err(error) JSON.
+fn ok<T: serde::Serialize>(r: AppResult<T>) -> Result<Value, Value> {
+    match r {
+        Ok(v) => serde_json::to_value(v).map_err(|e| json!(e.to_string())),
+        Err(e) => Err(err_value(e)),
+    }
+}
+
+/// Deserialize one named argument (camelCase, as Tauri sends it on the wire).
+fn arg<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<T, Value> {
+    serde_json::from_value(args.get(key).cloned().unwrap_or(Value::Null))
+        .map_err(|e| json!(format!("bad arg '{key}': {e}")))
+}
+
+fn checked_u16_arg(args: &Value, key: &'static str, default: u16) -> Result<u16, Value> {
+    let Some(value) = args.get(key) else {
+        return Ok(default);
+    };
+    let Some(value) = value.as_u64() else {
+        return Err(err_value(AppError::config(
+            "numeric_arg_invalid",
+            json!({ "field": key }),
+        )));
+    };
+    u16::try_from(value).map_err(|_| {
+        err_value(AppError::config(
+            "numeric_arg_invalid",
+            json!({ "field": key }),
+        ))
+    })
+}
+
+fn optional_string_arg(args: &Value, key: &'static str) -> Result<Option<String>, Value> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(err_value(AppError::config("session_id_invalid", json!({})))),
+    }
+}
+
+fn save_cred_secret(state: &AppState, c: &Credential) -> Result<(), Value> {
+    let key = crate::secret::cred_secret_key(&c.id);
+    match c.secret.as_deref() {
+        Some(s) if !s.is_empty() => state.secret_store.set(&key, s).map_err(err_value),
+        _ => state.secret_store.delete(&key).map_err(err_value),
+    }
+}
+
+fn err_value(e: AppError) -> Value {
+    json!(e.to_string())
+}
+
+fn query_token(q: &str) -> Option<String> {
+    q.split('&')
+        .find_map(|kv| kv.strip_prefix("token="))
+        .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{collections::HashMap, sync::Mutex};
+
+    fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::Db::open(dir.path()).unwrap());
+        let secret_store: Arc<dyn crate::secret::SecretStore> =
+            Arc::new(crate::secret::DbStore::new(db.clone()));
+        let state = AppState {
+            codex_auth: Arc::new(
+                crate::ai::codex_auth::CodexAuth::new(
+                    db.clone(),
+                    secret_store.clone(),
+                    dir.path().into(),
+                )
+                .unwrap(),
+            ),
+            db,
+            secret_store,
+            lifecycle_sessions: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
+            pty_sessions: Mutex::new(HashMap::new()),
+            serial_sessions: Mutex::new(HashMap::new()),
+            telnet_sessions: Mutex::new(HashMap::new()),
+            sftp_sessions: Mutex::new(HashMap::new()),
+            transfer_cancels: Mutex::new(HashMap::new()),
+            active_forwards: Mutex::new(HashMap::new()),
+            auth_waiters: Mutex::new(HashMap::new()),
+            passphrase_waiters: Mutex::new(HashMap::new()),
+            host_key_waiters: Mutex::new(HashMap::new()),
+            passphrase_cache: Mutex::new(HashMap::new()),
+            ai_sessions: Mutex::new(HashMap::new()),
+            ai_session_owners: Arc::new(Mutex::new(HashMap::new())),
+            ai_remote_shell_cache: Mutex::new(HashMap::new()),
+            data_dir: dir.path().into(),
+        };
+        (Arc::new(state), dir)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_import_yields_while_waiting_for_codex_auth_lock() {
+        use crate::ai::codex_auth;
+
+        let (state, _dir) = test_state();
+        let provider_id = "codex-import-test";
+        crate::db::ai_provider::upsert(
+            &state.db,
+            &crate::db::ai_provider::ProviderRow {
+                id: provider_id.into(),
+                name: "Codex".into(),
+                protocol: codex_auth::PROTOCOL.into(),
+                endpoint: codex_auth::ENDPOINT.into(),
+                model: String::new(),
+            },
+        )
+        .unwrap();
+        let credential_key = codex_auth::credential_key(provider_id);
+        state
+            .secret_store
+            .set(&credential_key, "test-grant")
+            .unwrap();
+        let lock = std::fs::File::create(state.data_dir.join("codex-auth.lock")).unwrap();
+        lock.lock().unwrap();
+
+        // Like a refresh awaiting HTTP, releasing the auth lock requires the
+        // runtime to poll another task. An OS-thread watchdog releases it even
+        // if import blocks the runtime, so the regression fails instead of hangs.
+        let (release, released) = std::sync::mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            let progressed = released
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .is_ok();
+            lock.unlock().unwrap();
+            progressed
+        });
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // spawn never polls synchronously; there is no yield before dispatch.
+        let refresh_completion = tokio::spawn(async move { release.send(()).is_ok() });
+        let result = dispatch_async(
+            &state,
+            &owner,
+            "import_config",
+            json!({"json": json!({"ai": {"providers": []}}).to_string()}),
+            &tx,
+        )
+        .await;
+        let completed = refresh_completion.await.unwrap();
+        let progressed = watchdog.join().unwrap();
+        assert!(
+            progressed && completed,
+            "import blocked the single-threaded runtime"
+        );
+        assert_eq!(result.unwrap(), Value::Null);
+        assert!(crate::db::ai_provider::get(&state.db, provider_id)
+            .unwrap()
+            .is_none());
+        assert!(!state.secret_store.exists(&credential_key).unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_import_preserves_coded_errors() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let error = dispatch_async(&state, &owner, "import_config", json!({"json": "{"}), &tx)
+            .await
+            .unwrap_err();
+        let payload = error
+            .as_str()
+            .unwrap()
+            .strip_prefix("__rssh_err__|")
+            .unwrap();
+        let error: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(error["code"], "json_parse_failed");
+    }
+
+    #[test]
+    fn headless_timeline_target_arg_is_optional() {
+        let target: Option<crate::ai::commands::AiTarget> =
+            arg(&json!({ "id": "conversation" }), "target").unwrap();
+        assert!(target.is_none());
+    }
+
+    #[test]
+    fn ai_instance_mismatch_uses_the_coded_headless_wire_format() {
+        assert_eq!(
+            err_value(AppError::not_found("ai_session_not_found", json!({}))),
+            json!(r#"__rssh_err__|{"code":"ai_session_not_found","params":{}}"#)
+        );
+    }
+
+    #[test]
+    fn headless_command_result_fields_match_tauri_types() {
+        let valid = json!({ "exitCode": -1, "timedOut": false });
+        assert_eq!(arg::<i32>(&valid, "exitCode").unwrap(), -1);
+        assert!(!arg::<bool>(&valid, "timedOut").unwrap());
+        assert_eq!(
+            arg::<Option<bool>>(&valid, "earlyTerminated").unwrap(),
+            None
+        );
+
+        let overflow = json!({ "exitCode": i64::from(i32::MAX) + 1 });
+        assert!(arg::<i32>(&overflow, "exitCode").is_err());
+        assert!(arg::<i32>(&json!({}), "exitCode").is_err());
+        assert!(arg::<bool>(&json!({}), "timedOut").is_err());
+    }
+
+    async fn serve_one(
+        state: Arc<AppState>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<ConnResult>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            handle_conn(stream, "test-launch-token".into(), state).await
+        });
+        (address, task)
+    }
+
+    #[tokio::test]
+    async fn standalone_server_serves_the_built_frontend() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (state, _directory) = test_state();
+        let (address, server) = serve_one(state).await;
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.read_to_string(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("<html"));
+        assert!(response.contains("/assets/"));
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn standalone_websocket_preserves_authentication_and_command_contract() {
+        let (state, _directory) = test_state();
+        let (address, server) = serve_one(state.clone()).await;
+        let stream = TcpStream::connect(address).await.unwrap();
+        let rejected =
+            tokio_tungstenite::client_async(format!("ws://{address}/?token=wrong"), stream).await;
+        assert!(
+            matches!(rejected, Err(tokio_tungstenite::tungstenite::Error::Http(response))
+            if response.status() == http::StatusCode::UNAUTHORIZED)
+        );
+        assert!(server.await.unwrap().is_err());
+
+        let (address, server) = serve_one(state).await;
+        let stream = TcpStream::connect(address).await.unwrap();
+        let (mut client, _) = tokio_tungstenite::client_async(
+            format!("ws://{address}/?token=test-launch-token"),
+            stream,
+        )
+        .await
+        .unwrap();
+        for (id, command) in [(1, "list_groups"), (2, "get_runtime_capabilities")] {
+            client
+                .send(Message::Text(
+                    json!({
+                        "type": "invoke", "id": id, "cmd": command, "args": {}
+                    })
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+            let response = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let response: Value = serde_json::from_slice(&response.into_data()).unwrap();
+            assert_eq!(response["type"], "response");
+            assert_eq!(response["id"], id);
+            assert_eq!(response["ok"], true);
+            if command == "list_groups" {
+                assert!(response["result"].is_array());
+            } else {
+                assert_eq!(response["result"]["cliInstall"], false);
+                assert_eq!(response["result"]["plugins"], false);
+            }
+        }
+        client.close(None).await.unwrap();
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+}

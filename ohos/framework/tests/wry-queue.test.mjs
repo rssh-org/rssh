@@ -10,7 +10,7 @@ import test from 'node:test';
 test('Wry queue orders operations and rejects stale generations', (context) => {
   const directory = mkdtempSync(path.join(tmpdir(), 'rssh-wry-queue-'));
   try {
-    const source = fileURLToPath(new URL('../../../src-tauri/target/ohos-sources/wry/src/ohos/queue.rs', import.meta.url));
+    const source = fileURLToPath(new URL('../../../target/ohos-sources/wry/src/ohos/queue.rs', import.meta.url));
     const harness = path.join(directory, 'queue-tests.rs');
     const binary = path.join(directory, process.platform === 'win32' ? 'queue-tests.exe' : 'queue-tests');
     writeFileSync(harness, `#[path = ${JSON.stringify(source)}]\nmod queue;\n`);

@@ -147,6 +147,7 @@ struct SerialSession {
     id: String,
     port: String,
     bridge: BridgeRuntime,
+    runtime: tokio::runtime::Handle,
     operations: tokio::sync::Mutex<()>,
     capabilities: SerialCapabilities,
 }
@@ -162,7 +163,7 @@ impl Drop for SerialSession {
         }
         let bridge = self.bridge.clone();
         let id = self.id.clone();
-        tauri::async_runtime::spawn(async move {
+        self.runtime.spawn(async move {
             if let Err(error) = bridge
                 .call_async::<SerialPlugin, PortRequest, EmptyResponse>(
                     "close",
@@ -331,6 +332,7 @@ pub async fn open(
         id: id.clone(),
         port: port.to_owned(),
         bridge: bridge.clone(),
+        runtime: tokio::runtime::Handle::current(),
         operations: tokio::sync::Mutex::new(()),
         capabilities,
     }));

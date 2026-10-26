@@ -38,10 +38,10 @@ test('Android prepares native inputs without copying caches, credentials or gene
     write('android/local.properties', 'sdk.dir=local-sdk');
     write('android/app/src/main/res/values/colors.xml', 'app colors');
     write('icons/android/mipmap-anydpi-v26/ic_launcher.xml', 'unused adaptive icon');
-    write('src-tauri/gen/android/app/build/outputs/current.apk', 'keep current output');
-    write('src-tauri/gen/android/app/src/main/assets/bin/rssh-cli', 'old desktop CLI');
+    write('app/gen/android/app/build/outputs/current.apk', 'keep current output');
+    write('app/gen/android/app/src/main/assets/bin/rssh-cli', 'old desktop CLI');
     prepareAndroid(root);
-    const generated = path.join(root, 'src-tauri/gen/android');
+    const generated = path.join(root, 'app/gen/android');
     assert.equal(readFileSync(path.join(generated, 'app/src/main/java/Main.kt'), 'utf8'), 'source');
     assert.equal(readFileSync(path.join(generated, 'gradle/wrapper/gradle-wrapper.jar'), 'utf8'), 'wrapper');
     assert.equal(readFileSync(path.join(generated, 'local.properties'), 'utf8'), 'sdk.dir=local-sdk');
@@ -68,7 +68,10 @@ test('the CLI wrapper prepares Android before all native entry points and forwar
     try {
       write('node_modules/@tauri-apps/cli/tauri.js', `
         const fs = require('node:fs');
-        if (!fs.existsSync('src-tauri/gen/android/app/src/main/java/Main.kt')) process.exit(9);
+        if (!fs.existsSync('app/gen/android/app/src/main/java/Main.kt')) process.exit(9);
+        const path = require('node:path');
+        if (fs.realpathSync(process.env.TAURI_APP_PATH) !== path.join(process.cwd(), 'app')) process.exit(10);
+        if (fs.realpathSync(process.env.TAURI_FRONTEND_PATH) !== process.cwd()) process.exit(11);
         console.log(JSON.stringify(process.argv.slice(2)));
       `);
       const args = ['android', ...nativeArgs, '--target', 'aarch64', '--config', '{"build":{"devUrl":"http://localhost:1420"}}'];
@@ -87,7 +90,7 @@ test('help and non-Android commands do not prepare the native project', () => {
     write('node_modules/@tauri-apps/cli/tauri.js', 'process.exit(0)');
     for (const args of [['--help'], ['android', '--help'], ['android', 'build', '--help'], ['dev'], ['build', '--help']]) {
       assert.equal(runTauri(root, args, { stdio: 'pipe' }).status, 0);
-      assert.equal(existsSync(path.join(root, 'src-tauri/gen/android')), false);
+      assert.equal(existsSync(path.join(root, 'app/gen/android')), false);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });

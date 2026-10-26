@@ -13,7 +13,7 @@ function git(args, options = {}) {
 export function prepareSources(root, { offline = false } = {}) {
   const configDir = path.join(root, 'ohos/framework');
   const sources = JSON.parse(readFileSync(path.join(configDir, 'sources.json'), 'utf8'));
-  const target = path.join(root, 'src-tauri/target');
+  const target = path.join(root, 'target');
   const cacheRoot = path.join(target, 'ohos-git');
   const destination = path.join(target, 'ohos-sources');
   mkdirSync(cacheRoot, { recursive: true });
@@ -60,7 +60,7 @@ export function prepareSources(root, { offline = false } = {}) {
 
 export function prepareAbilityModules(root, sourceRoot) {
   const config = JSON.parse(readFileSync(path.join(root, 'ohos/framework/sources.json'), 'utf8'));
-  const vendor = path.join(root, 'src-tauri/gen/ohos/vendor/ability');
+  const vendor = path.join(root, 'app/gen/ohos/vendor/ability');
   // Keep upstream relative HAR dependencies intact; only copy source inputs.
   rmSync(vendor, { recursive: true, force: true });
   for (const module of config.abilityModules) {

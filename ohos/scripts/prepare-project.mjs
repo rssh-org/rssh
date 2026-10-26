@@ -9,7 +9,7 @@ const generatedDirectories = new Set(['build', 'oh_modules', 'node_modules', '.h
 
 export function prepareProject(root) {
   const source = path.join(root, 'ohos/app');
-  const destination = path.join(root, 'src-tauri/gen/ohos');
+  const destination = path.join(root, 'app/gen/ohos');
   stageProject(source, destination, { exclude: (relative, entry) => {
     if (!relative.includes('/')) return !sourceDirectories.has(relative) && !sourceFiles.has(relative);
     if (entry.isDirectory() && generatedDirectories.has(entry.name)) return true;
