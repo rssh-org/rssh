@@ -8,7 +8,7 @@
 use regex::Regex;
 use serde::Serialize;
 
-use super::llm::ChatMessage;
+use super::llm::{ChatMessage, CodexAssistantMessage};
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MB
 
@@ -82,10 +82,23 @@ pub fn redact_message(msg: &ChatMessage, rules: &[RedactRule]) -> ChatMessage {
             content,
             tool_calls,
             reasoning_content,
+            codex_reasoning,
+            codex_messages,
         } => ChatMessage::Assistant {
             content: redact(content, rules),
             tool_calls: tool_calls.clone(),
             reasoning_content: reasoning_content.as_ref().map(|r| redact(r, rules)),
+            // Ciphertext is opaque continuation state, not free-form text.
+            codex_reasoning: codex_reasoning.clone(),
+            codex_messages: codex_messages.as_ref().map(|messages| {
+                messages
+                    .iter()
+                    .map(|message| CodexAssistantMessage {
+                        content: redact(&message.content, rules),
+                        phase: message.phase.clone(),
+                    })
+                    .collect()
+            }),
         },
         ChatMessage::ToolResult {
             tool_call_id,
@@ -1046,6 +1059,8 @@ mod tests {
             content: "checked 192.168.1.1".into(),
             tool_calls: vec![],
             reasoning_content: Some("thinking about 172.16.0.1".into()),
+            codex_reasoning: None,
+            codex_messages: None,
         };
         match redact_message(&m, &rules) {
             ChatMessage::Assistant {
@@ -1055,6 +1070,36 @@ mod tests {
             } => {
                 assert!(content.contains("<REDACTED:ip-192>"));
                 assert!(reasoning_content.unwrap().contains("<REDACTED:ip-172>"));
+            }
+            _ => panic!("variant changed"),
+        }
+    }
+
+    #[test]
+    fn redact_message_preserves_opaque_codex_continuation() {
+        // Ciphertext can happen to match a user's redaction pattern. Changing
+        // any of it makes the next stateless Codex tool turn unreadable.
+        let reasoning = vec![serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "encrypted_content": "opaque-192.168.1.1-ciphertext",
+            "summary": [],
+        })];
+        let message = ChatMessage::Assistant {
+            content: "checked 192.168.1.1".into(),
+            tool_calls: vec![],
+            reasoning_content: None,
+            codex_messages: None,
+            codex_reasoning: Some(reasoning.clone()),
+        };
+        match redact_message(&message, &default_rules()) {
+            ChatMessage::Assistant {
+                content,
+                codex_reasoning,
+                ..
+            } => {
+                assert!(content.contains("<REDACTED:ip-192>"));
+                assert_eq!(codex_reasoning, Some(reasoning));
             }
             _ => panic!("variant changed"),
         }
@@ -1122,6 +1167,8 @@ mod tests {
             content: "running".into(),
             tool_calls: vec![tc.clone()],
             reasoning_content: None,
+            codex_reasoning: None,
+            codex_messages: None,
         };
         match redact_message(&m, &rules) {
             ChatMessage::Assistant { tool_calls, .. } => {

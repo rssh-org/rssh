@@ -24,8 +24,18 @@ pub(crate) mod test_support {
         tokio::sync::mpsc::UnboundedReceiver<(String, serde_json::Value)>,
     ) {
         let db = Arc::new(crate::db::Db::open_in_memory().unwrap());
+        let secret_store: Arc<dyn crate::secret::SecretStore> =
+            Arc::new(crate::secret::DbStore::new(db.clone()));
         let state = Arc::new(AppState {
-            secret_store: Arc::new(crate::secret::DbStore::new(db.clone())),
+            codex_auth: Arc::new(
+                crate::ai::codex_auth::CodexAuth::new(
+                    db.clone(),
+                    secret_store.clone(),
+                    PathBuf::new(),
+                )
+                .unwrap(),
+            ),
+            secret_store,
             db,
             lifecycle_sessions: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),

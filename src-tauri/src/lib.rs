@@ -135,6 +135,11 @@ pub fn run() {
             }
 
             app.manage(AppState {
+                codex_auth: Arc::new(ai::codex_auth::CodexAuth::new(
+                    db.clone(),
+                    secret_system.store.clone(),
+                    data_dir.clone(),
+                )?),
                 db,
                 secret_store: secret_system.store,
                 lifecycle_sessions: Mutex::new(HashMap::new()),
@@ -376,6 +381,11 @@ pub fn run() {
             ai::commands::ai_provider_list,
             ai::commands::ai_provider_save,
             ai::commands::ai_provider_delete,
+            ai::commands::ai_codex_auth_status,
+            ai::commands::ai_codex_login_start,
+            ai::commands::ai_codex_login_poll,
+            ai::commands::ai_codex_login_cancel,
+            ai::commands::ai_codex_logout,
         ])
         .run(tauri::generate_context!())
         .expect("RSSH startup failed");

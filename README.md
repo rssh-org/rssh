@@ -128,6 +128,19 @@ Install: **Settings → Plugins → ⚙ → Install Plugin from Disk…**, pick 
 your OS and restart. Open the **RSSH** tool window (bottom) to start; the ✕ in its
 title bar stops the embedded server.
 
+## Codex subscription
+
+In **Settings → AI**, add a **Codex subscription** provider, enter a name, and
+choose **Save and sign in**. Open the authorization page, enter the displayed
+device code, then select a model and save. RSSH connects directly to the Codex
+cloud service; installing Codex is unnecessary. Terminal tools use RSSH's
+existing approval controls.
+
+Each device signs in separately. RSSH encrypts its tokens locally and refreshes
+them automatically. Provider and model settings can sync through GitHub or
+WebDAV, but subscription credentials are excluded from sync and configuration
+exports. An expired or revoked authorization requires signing in again.
+
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). For HarmonyOS builds and signing, see [BUILD_OHOS.md](BUILD_OHOS.md).

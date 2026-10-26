@@ -957,6 +957,14 @@ mod tests {
         let secret_store: std::sync::Arc<dyn crate::secret::SecretStore> =
             std::sync::Arc::new(crate::secret::DbStore::new(db.clone()));
         AppState {
+            codex_auth: std::sync::Arc::new(
+                crate::ai::codex_auth::CodexAuth::new(
+                    db.clone(),
+                    secret_store.clone(),
+                    std::path::PathBuf::new(),
+                )
+                .unwrap(),
+            ),
             db,
             secret_store,
             lifecycle_sessions: Default::default(),

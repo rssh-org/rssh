@@ -284,7 +284,7 @@ mod tests {
 
         // And the exported payload re-imports cleanly on a fresh device.
         let (db2, ss2) = fixture();
-        crate::ai::commands::import_ai_settings(&db2, &ss2, &ai).unwrap();
+        crate::ai::commands::import_ai_settings(&db2, &ss2, std::path::Path::new(""), &ai).unwrap();
         let back = db::ai_provider::list(&db2).unwrap();
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].id, new_id);

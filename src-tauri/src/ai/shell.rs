@@ -82,7 +82,10 @@ impl ShellKind {
     /// marker for assertion.
     pub fn format_sentinel(self, cmd: &str, marker: &str) -> String {
         match self {
-            Self::Posix => format!("{cmd}; echo \"{marker}:$?\""),
+            // End the last word before adding shell syntax: zsh's
+            // url-quote-magic escapes a `;` attached to an unquoted URL,
+            // including bracketed pastes processed by bracketed-paste-magic.
+            Self::Posix => format!("{cmd} ; echo \"{marker}:$?\""),
             // cmd.exe's `echo "X"` prints the literal quotes. Skip them.
             // `&` is the unconditional separator (analogue of POSIX `;`).
             // `&&` would short-circuit on first failure, hiding the exit code.
@@ -266,7 +269,86 @@ mod tests {
     #[test]
     fn format_sentinel_posix() {
         let got = ShellKind::Posix.format_sentinel("ls -la", "__rssh_done_abc");
-        assert_eq!(got, "ls -la; echo \"__rssh_done_abc:$?\"");
+        assert_eq!(got, "ls -la ; echo \"__rssh_done_abc:$?\"");
+    }
+
+    // macOS ships /bin/zsh and its URL/paste widgets; no optional shell dependency.
+    #[cfg(macos)]
+    #[test]
+    fn posix_sentinel_survives_zsh_url_quoting() {
+        use crate::terminal::pty::{spawn_command, PtyOut};
+        use std::sync::{mpsc, Arc};
+        use std::time::{Duration, Instant};
+
+        let (sender, receiver) = mpsc::channel();
+        let (_, handle) = spawn_command(
+            "sentinel-zsh-test".into(),
+            200,
+            24,
+            Arc::new(move |_, output| {
+                let _ = sender.send(output);
+            }),
+            "/bin/zsh".into(),
+            "/usr/bin:/bin".into(),
+            vec!["-dfi".into()],
+        )
+        .expect("spawn isolated zsh");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let read_prompt = || {
+            let mut output = Vec::new();
+            // ZLE enables bracketed paste only after the command has finished.
+            while !output.ends_with(b"\x1b[?2004h") {
+                match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(PtyOut::Data(data)) => output.extend(data),
+                    _ => panic!(
+                        "zsh did not reach its prompt: {:?}",
+                        String::from_utf8_lossy(&output)
+                    ),
+                }
+            }
+            String::from_utf8(output).expect("ASCII test output")
+        };
+        read_prompt();
+        handle
+            .write(
+                concat!(
+                    "PROMPT='RSSH_TEST> '; RPROMPT=''; HISTFILE=/dev/null; ",
+                    "fpath=(/usr/share/zsh/$ZSH_VERSION/functions); ",
+                    "autoload -Uz url-quote-magic bracketed-paste-magic; ",
+                    "zle -N self-insert url-quote-magic; ",
+                    "zle -N bracketed-paste bracketed-paste-magic; ",
+                    "function curl() { printf 'ARG<%s>\\n' \"$@\"; return 7; }\r"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        read_prompt();
+
+        for bracketed in [false, true] {
+            let command = ShellKind::Posix
+                .format_sentinel("curl -s https://api.ipify.org", "__rssh_done_test");
+            let input = if bracketed {
+                format!("\x1b[200~{command}\x1b[201~\r")
+            } else {
+                format!("{command}\r")
+            };
+            handle.write(input.as_bytes()).unwrap();
+            let output = read_prompt();
+            let args: Vec<_> = output
+                .lines()
+                .filter(|line| line.starts_with("ARG<"))
+                .collect();
+            assert_eq!(
+                args,
+                ["ARG<-s>", "ARG<https://api.ipify.org>"],
+                "bracketed={bracketed}: {output:?}"
+            );
+            assert!(
+                output.lines().any(|line| line == "__rssh_done_test:7"),
+                "bracketed={bracketed}: {output:?}"
+            );
+        }
+        // Dropping the handle kills and reaps the isolated shell, also on panic.
     }
 
     #[test]

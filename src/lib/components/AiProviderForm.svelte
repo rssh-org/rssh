@@ -1,7 +1,11 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import type { AiProviderRecord, LlmProtocol } from "../ai/types.ts";
   import * as ai from "../ai/store.svelte.ts";
-  import { t, errMsg } from "../i18n/index.svelte.ts";
+  import { createCodexLogin } from "../ai/codex-login.svelte.ts";
+  import { writeText } from "../clipboard.ts";
+  import { t, errMsg, errCoded } from "../i18n/index.svelte.ts";
   import SearchSelect from "./SearchSelect.svelte";
   import AppIcon from "./AppIcon.svelte";
 
@@ -11,12 +15,14 @@
     endpointChips,
     onSave,
     onCancel,
+    onChange,
   }: {
     provider: AiProviderRecord;
     protocolCards: { protocol: LlmProtocol; label: string; subKey: string }[];
     endpointChips: Record<LlmProtocol, { label: string; url: string }[]>;
     onSave: (id: string) => void;
     onCancel: () => void;
+    onChange?: () => void;
   } = $props();
 
   let formId = $state("");
@@ -28,9 +34,20 @@
   let formModel = $state("");
   let saving = $state(false);
   let loadingModels = $state(false);
+  let modelsGeneration = 0;
   let note = $state<string | null>(null);
   let modelOptions = $state<{ value: string; label: string }[]>([]);
   let loadedSourceId = $state<string | null>(null);
+  const codex = createCodexLogin();
+  const isCodex = $derived(formProtocol === "codex-subscription");
+  const login = $derived(codex.challenge());
+  let alive = true;
+  onDestroy(() => {
+    alive = false;
+    codex.dispose();
+    modelsGeneration += 1;
+    loadingModels = false;
+  });
 
   function loadFromSource(p: AiProviderRecord) {
     formId = p.id;
@@ -42,6 +59,7 @@
     formModel = p.model ?? "";
     modelOptions = p.model ? [{ value: p.model, label: p.model }] : [];
     note = null;
+    if (p.protocol === "codex-subscription" && p.id) void codex.load(p.id);
   }
 
   // New (id "") and edit (row) share one form; the parent remounts via {#key}
@@ -55,7 +73,7 @@
   const formError = $derived(
     !formName.trim()
       ? t("ai.settings.provider.error.name_required")
-      : !formEndpoint.trim()
+      : !isCodex && !formEndpoint.trim()
         ? t("ai.settings.provider.error.endpoint_required")
         : !formModel.trim()
           ? t("ai.settings.provider.error.model_required")
@@ -66,26 +84,108 @@
     formEndpoint = url;
   }
 
+  function selectProtocol(protocol: LlmProtocol) {
+    if (protocol === formProtocol) return;
+    codex.dispose();
+    modelsGeneration += 1;
+    loadingModels = false;
+    formProtocol = protocol;
+    modelOptions = [];
+    note = null;
+    if (protocol === "codex-subscription" && provider.protocol === protocol && formId) {
+      void codex.load(formId);
+    }
+  }
+
+  async function signIn() {
+    if (!formName.trim() || saving || codex.busy()) return;
+    saving = true;
+    note = null;
+    try {
+      // Explicitly labelled "Save and sign in": persist a provider before
+      // authorizing it, then keep the form open for model selection.
+      const id = await ai.saveProvider({
+        id: formId || undefined,
+        name: formName.trim(),
+        protocol: "codex-subscription",
+        model: formModel.trim(),
+        endpoint: "",
+      });
+      onChange?.();
+      if (!alive) return;
+      formId = id;
+      await codex.start(id);
+    } catch (e) {
+      if (alive) note = t("ai.settings.note.save_failed", { error: errMsg(e) });
+    } finally {
+      if (alive) saving = false;
+    }
+  }
+
+  async function signOut() {
+    modelsGeneration += 1;
+    loadingModels = false;
+    modelOptions = [];
+    await codex.logout(formId);
+    onChange?.();
+  }
+
+  async function openLoginPage() {
+    if (!login) return;
+    try {
+      await invoke("open_external_url", { url: login.verification_url });
+    } catch (e) {
+      note = errMsg(e);
+    }
+  }
+
+  async function copyCode() {
+    if (!login) return;
+    try {
+      await writeText(login.user_code);
+      note = t("ai.settings.codex.code_copied");
+    } catch (e) {
+      note = errMsg(e);
+    }
+  }
+
+  let wasAuthenticated = false;
+  $effect(() => {
+    const authenticated = codex.authenticated();
+    if (authenticated && !wasAuthenticated && isCodex) {
+      void loadModels();
+      onChange?.();
+    }
+    wasAuthenticated = authenticated;
+  });
+
   /** 拉模型：显式按钮，失败给反馈（接口不开放的厂商就留空手填）。 */
   async function loadModels() {
+    const current = ++modelsGeneration;
     loadingModels = true;
     note = null;
     try {
-      const list = await ai.listModels(formProtocol, formEndpoint.trim(), {
+      const list = await ai.listModels(formProtocol, isCodex ? "" : formEndpoint.trim(), {
         providerId: formId || undefined,
-        apiKey: formApiKey.trim() || undefined,
+        apiKey: isCodex ? undefined : formApiKey.trim() || undefined,
       });
+      if (!alive || current !== modelsGeneration) return;
       modelOptions = list.map((m) => ({ value: m.id, label: m.display_name ?? m.id }));
       note = t("ai.settings.note.models_loaded", { count: list.length });
     } catch (e: any) {
-      note = t("ai.settings.note.models_failed", { error: errMsg(e) });
+      if (alive && current === modelsGeneration) {
+        note = t("ai.settings.note.models_failed", { error: errMsg(e) });
+        if (isCodex && formId && errCoded(e)?.code === "codex_login_required") {
+          await codex.load(formId);
+        }
+      }
     } finally {
-      loadingModels = false;
+      if (alive && current === modelsGeneration) loadingModels = false;
     }
   }
 
   async function handleSave() {
-    if (formError || saving) return;
+    if (formError || saving || login || codex.busy()) return;
     saving = true;
     note = null;
     try {
@@ -94,8 +194,8 @@
         name: formName.trim(),
         protocol: formProtocol,
         model: formModel.trim(),
-        endpoint: formEndpoint.trim(),
-        apiKey: formApiKey.trim() ? formApiKey.trim() : undefined,
+        endpoint: isCodex ? "" : formEndpoint.trim(),
+        apiKey: isCodex ? undefined : formApiKey.trim() || undefined,
       });
       onSave(id);
     } catch (e: any) {
@@ -121,7 +221,8 @@
         class:p-oai={card.protocol === "openai-completions"}
         class:p-ant={card.protocol === "anthropic-messages"}
         aria-pressed={formProtocol === card.protocol}
-        onclick={() => (formProtocol = card.protocol)}
+        onclick={() => selectProtocol(card.protocol)}
+        disabled={saving || codex.busy()}
       >
         <span class="protocol-icon"><AppIcon name="ai" size={17} /></span>
         <span class="protocol-text">
@@ -137,6 +238,34 @@
     <input type="text" bind:value={formName} placeholder={t("ai.settings.provider.name_placeholder")} onkeydown={handleKeydown} />
   </label>
 
+  {#if isCodex}
+    <div class="subscription-auth">
+      <p class="auth-hint">{t("ai.settings.codex.hint")}</p>
+      {#if login}
+        <p class="auth-hint">{t("ai.settings.codex.instructions")}</p>
+        <div class="auth-actions">
+          <code class="device-code">{login.user_code}</code>
+          <button type="button" class="btn btn-sm" onclick={copyCode}>{t("ai.settings.codex.copy_code")}</button>
+          <button type="button" class="btn btn-accent btn-sm" onclick={openLoginPage}>{t("ai.settings.codex.open_page")}</button>
+        </div>
+        <span class="auth-url">{login.verification_url}</span>
+        <div class="auth-actions">
+          <span class="auth-hint" role="status">{t("ai.settings.codex.waiting")}</span>
+          <button type="button" class="btn btn-sm" onclick={() => codex.cancel()}>{t("common.cancel")}</button>
+        </div>
+      {:else if codex.authenticated()}
+        <div class="auth-actions">
+          <span class="auth-hint" role="status">{t("ai.settings.codex.signed_in")}</span>
+          <button type="button" class="btn btn-sm" onclick={signOut} disabled={codex.busy()}>{t("ai.settings.codex.sign_out")}</button>
+        </div>
+      {:else}
+        <button type="button" class="btn btn-sm" onclick={signIn} disabled={saving || codex.busy() || !formName.trim()}>
+          {saving || codex.busy() ? t("ai.settings.codex.connecting") : t("ai.settings.codex.save_sign_in")}
+        </button>
+      {/if}
+      {#if codex.error()}<div class="form-error" role="alert">{errMsg(codex.error())}</div>{/if}
+    </div>
+  {:else}
   <div class="field">
     <div class="label-row">
       <span class="label-text" id={`endpoint-label-${formId || "new"}`}>{t("ai.settings.label.endpoint")}</span>
@@ -162,6 +291,7 @@
       placeholder={formHasKey ? t("ai.settings.placeholder.api_key_set") : t("ai.settings.placeholder.api_key_unset")}
     />
   </label>
+  {/if}
 
   <div class="field">
     <label class="label-text" for={`ai-model-${formId || "new"}`}>{t("ai.settings.label.model")}</label>
@@ -176,14 +306,14 @@
         searchPlaceholder={t("ai.settings.placeholder.model")}
         emptyText={t("ai.settings.model.empty")}
       />
-      <button type="button" class="btn btn-sm" onclick={loadModels} disabled={loadingModels}>
+      <button type="button" class="btn btn-sm" onclick={loadModels} disabled={loadingModels || (isCodex && !codex.authenticated())}>
         {loadingModels ? t("ai.settings.btn.loading_models") : t("ai.settings.btn.load_models")}
       </button>
     </div>
   </div>
 
   <div class="form-actions">
-    <button class="btn btn-accent btn-sm" onclick={handleSave} disabled={!!formError || saving}>
+    <button class="btn btn-accent btn-sm" onclick={handleSave} disabled={!!formError || saving || !!login || codex.busy()}>
       {saving ? t("ai.settings.btn.saving") : t("common.save")}
     </button>
     <button class="btn btn-sm" onclick={onCancel}>{t("common.cancel")}</button>
@@ -295,6 +425,30 @@
   .label-text {
     font-size: 12px;
     color: var(--text-sub);
+  }
+  .subscription-auth {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    min-width: 0;
+  }
+  .auth-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .auth-hint, .auth-url {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-sub);
+    overflow-wrap: anywhere;
+  }
+  .device-code {
+    font-size: 18px;
+    letter-spacing: 0.08em;
+    user-select: all;
   }
   .label-row {
     display: flex;

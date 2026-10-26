@@ -1861,6 +1861,11 @@ export async function loadProviders(): Promise<AiProviderRecord[]> {
   return invoke<AiProviderRecord[]>("ai_provider_list");
 }
 
+/** Subscription credentials and API keys both enable AI on this device. */
+export function hasCredentials(snapshot: { has_credentials?: boolean; has_api_key: boolean } | null | undefined): boolean {
+  return snapshot?.has_credentials ?? snapshot?.has_api_key ?? false;
+}
+
 export interface ProviderSaveInput {
   /** 空 = 新建（后端生成 id）。 */
   id?: string;
@@ -1875,7 +1880,10 @@ export interface ProviderSaveInput {
 
 /** 新建/更新一行，返回行 id。 */
 export async function saveProvider(p: ProviderSaveInput): Promise<string> {
-  return invoke<string>("ai_provider_save", { patch: p });
+  const id = await invoke<string>("ai_provider_save", { patch: p });
+  // New sessions read the cached active provider's model and credentials.
+  if (_settings?.provider === id || p.activate) await loadSettings();
+  return id;
 }
 
 export async function deleteProvider(id: string): Promise<void> {
