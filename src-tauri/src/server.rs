@@ -626,10 +626,6 @@ fn dispatch(
         // ---- config import/export (JSON-string core; the *_to_file / *_from_file
         //      dialog variants are handled browser-side by the IPC shim) ----
         "export_config" => ok(crate::commands::sync::export_config_impl(state)),
-        "import_config" => ok(crate::commands::sync::import_config_impl(
-            state,
-            arg(&args, "json")?,
-        )),
 
         // ---- port forwarding: stop + live stats (start is async, see dispatch_async) ----
         "forward_stop" => {
@@ -1343,6 +1339,25 @@ async fn dispatch_async(
             &arg::<String>(&args, "id")?,
         )),
 
+        // Import may wait for the auth file lock held across a Codex HTTP
+        // request. Keep that wait off the single-threaded server runtime so
+        // the auth task can finish and release the lock.
+        "import_config" => {
+            let json: String = arg(&args, "json")?;
+            let state = state.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::commands::sync::import_config_impl(&state, json)
+            })
+            .await
+            .map_err(|e| {
+                err_value(AppError::other(
+                    "task_join_failed",
+                    json!({ "err": e.to_string() }),
+                ))
+            })?;
+            ok(result)
+        }
+
         // ---- GitHub config sync ----
         "github_push" => {
             ok(crate::commands::sync::github_push_impl(state, arg(&args, "password")?).await)
@@ -1825,6 +1840,120 @@ fn query_token(q: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::Db::open_in_memory().unwrap());
+        let secret_store: Arc<dyn crate::secret::SecretStore> =
+            Arc::new(crate::secret::DbStore::new(db.clone()));
+        let state = AppState {
+            codex_auth: Arc::new(
+                crate::ai::codex_auth::CodexAuth::new(
+                    db.clone(),
+                    secret_store.clone(),
+                    dir.path().into(),
+                )
+                .unwrap(),
+            ),
+            db,
+            secret_store,
+            lifecycle_sessions: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
+            pty_sessions: Mutex::new(HashMap::new()),
+            serial_sessions: Mutex::new(HashMap::new()),
+            telnet_sessions: Mutex::new(HashMap::new()),
+            sftp_sessions: Mutex::new(HashMap::new()),
+            transfer_cancels: Mutex::new(HashMap::new()),
+            active_forwards: Mutex::new(HashMap::new()),
+            auth_waiters: Mutex::new(HashMap::new()),
+            passphrase_waiters: Mutex::new(HashMap::new()),
+            host_key_waiters: Mutex::new(HashMap::new()),
+            passphrase_cache: Mutex::new(HashMap::new()),
+            ai_sessions: Mutex::new(HashMap::new()),
+            ai_session_owners: Arc::new(Mutex::new(HashMap::new())),
+            ai_remote_shell_cache: Mutex::new(HashMap::new()),
+            data_dir: dir.path().into(),
+        };
+        (Arc::new(state), dir)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_import_yields_while_waiting_for_codex_auth_lock() {
+        use crate::ai::codex_auth;
+
+        let (state, _dir) = test_state();
+        let provider_id = "codex-import-test";
+        crate::db::ai_provider::upsert(
+            &state.db,
+            &crate::db::ai_provider::ProviderRow {
+                id: provider_id.into(),
+                name: "Codex".into(),
+                protocol: codex_auth::PROTOCOL.into(),
+                endpoint: codex_auth::ENDPOINT.into(),
+                model: String::new(),
+            },
+        )
+        .unwrap();
+        let credential_key = codex_auth::credential_key(provider_id);
+        state
+            .secret_store
+            .set(&credential_key, "test-grant")
+            .unwrap();
+        let lock = std::fs::File::create(state.data_dir.join("codex-auth.lock")).unwrap();
+        lock.lock().unwrap();
+
+        // Like a refresh awaiting HTTP, releasing the auth lock requires the
+        // runtime to poll another task. An OS-thread watchdog releases it even
+        // if import blocks the runtime, so the regression fails instead of hangs.
+        let (release, released) = std::sync::mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            let progressed = released
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .is_ok();
+            lock.unlock().unwrap();
+            progressed
+        });
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // spawn never polls synchronously; there is no yield before dispatch.
+        let refresh_completion = tokio::spawn(async move { release.send(()).is_ok() });
+        let result = dispatch_async(
+            &state,
+            &owner,
+            "import_config",
+            json!({"json": json!({"ai": {"providers": []}}).to_string()}),
+            &tx,
+        )
+        .await;
+        let completed = refresh_completion.await.unwrap();
+        let progressed = watchdog.join().unwrap();
+        assert!(
+            progressed && completed,
+            "import blocked the single-threaded runtime"
+        );
+        assert_eq!(result.unwrap(), Value::Null);
+        assert!(crate::db::ai_provider::get(&state.db, provider_id)
+            .unwrap()
+            .is_none());
+        assert!(!state.secret_store.exists(&credential_key).unwrap());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_import_preserves_coded_errors() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let error = dispatch_async(&state, &owner, "import_config", json!({"json": "{"}), &tx)
+            .await
+            .unwrap_err();
+        let payload = error
+            .as_str()
+            .unwrap()
+            .strip_prefix("__rssh_err__|")
+            .unwrap();
+        let error: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(error["code"], "json_parse_failed");
+    }
 
     #[test]
     fn headless_timeline_target_arg_is_optional() {
