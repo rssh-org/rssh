@@ -727,6 +727,7 @@ impl Actor {
                 tool_calls: Vec::new(),
                 reasoning_content: None,
                 codex_reasoning: None,
+                codex_messages: None,
             });
             return true;
         }
@@ -879,6 +880,7 @@ impl Actor {
                         tool_calls: vec![],
                         reasoning_content: None,
                         codex_reasoning: None,
+                        codex_messages: None,
                     });
                     return Err(e);
                 }
@@ -917,6 +919,7 @@ impl Actor {
                         tool_calls: vec![],
                         reasoning_content: None,
                         codex_reasoning: None,
+                        codex_messages: None,
                     });
                     return Ok(());
                 }
@@ -955,6 +958,7 @@ impl Actor {
                 tool_calls: resp.tool_calls.clone(),
                 reasoning_content: resp.reasoning_content.clone(),
                 codex_reasoning: resp.codex_reasoning.clone(),
+                codex_messages: resp.codex_messages.clone(),
             };
 
             if resp.tool_calls.is_empty() {
@@ -2034,6 +2038,7 @@ mod tests {
             tool_calls: Vec::new(),
             reasoning_content: None,
             codex_reasoning: None,
+            codex_messages: None,
         }
     }
 

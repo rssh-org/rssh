@@ -1296,7 +1296,7 @@ mod tests {
 
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Ok(crate::ai::llm::ChatResponse {
-                    text: String::new(),
+                    text: "Checking the target".into(),
                     tool_calls: vec![crate::ai::llm::ToolCall {
                         id: "tool-call".into(),
                         name: crate::ai::tools::TOOL_RUN_COMMAND.into(),
@@ -1312,6 +1312,10 @@ mod tests {
                     tokens_out: None,
                     reasoning_content: None,
                     codex_reasoning: None,
+                    codex_messages: Some(vec![crate::ai::llm::CodexAssistantMessage {
+                        content: "Checking the target".into(),
+                        phase: Some("commentary".into()),
+                    }]),
                 });
             }
 
@@ -1366,6 +1370,7 @@ mod tests {
                     tokens_out: None,
                     reasoning_content: None,
                     codex_reasoning: None,
+                    codex_messages: None,
                 });
             }
 
@@ -3139,6 +3144,17 @@ mod tests {
             .unwrap();
         let history: Vec<crate::ai::llm::ChatMessage> =
             serde_json::from_str(&row.history_json).unwrap();
+        assert!(history.iter().any(|message| matches!(
+            message,
+            crate::ai::llm::ChatMessage::Assistant {
+                content,
+                codex_messages: Some(messages),
+                ..
+            } if content == "Checking the target"
+                && messages.len() == 1
+                && messages[0].content == *content
+                && messages[0].phase.as_deref() == Some("commentary")
+        )));
         assert!(history.iter().any(|message| matches!(
             message,
             crate::ai::llm::ChatMessage::ToolResult {

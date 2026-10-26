@@ -326,6 +326,7 @@ impl LlmClient for AnthropicClient {
             tokens_out,
             reasoning_content: None,
             codex_reasoning: None,
+            codex_messages: None,
         })
     }
 }
@@ -363,6 +364,10 @@ mod tests {
                         content: "answer".into(),
                         tool_calls: vec![],
                         reasoning_content: None,
+                        codex_messages: Some(vec![super::super::CodexAssistantMessage {
+                            content: "codex-only-content".into(),
+                            phase: Some("commentary".into()),
+                        }]),
                         codex_reasoning: Some(vec![json!({
                             "type": "reasoning",
                             "encrypted_content": "codex-ciphertext",
@@ -378,6 +383,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.codex_reasoning.is_none());
+        assert!(result.codex_messages.is_none());
         request.assert_async().await;
     }
 

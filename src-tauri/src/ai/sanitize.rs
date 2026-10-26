@@ -8,7 +8,7 @@
 use regex::Regex;
 use serde::Serialize;
 
-use super::llm::ChatMessage;
+use super::llm::{ChatMessage, CodexAssistantMessage};
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MB
 
@@ -83,12 +83,22 @@ pub fn redact_message(msg: &ChatMessage, rules: &[RedactRule]) -> ChatMessage {
             tool_calls,
             reasoning_content,
             codex_reasoning,
+            codex_messages,
         } => ChatMessage::Assistant {
             content: redact(content, rules),
             tool_calls: tool_calls.clone(),
             reasoning_content: reasoning_content.as_ref().map(|r| redact(r, rules)),
             // Ciphertext is opaque continuation state, not free-form text.
             codex_reasoning: codex_reasoning.clone(),
+            codex_messages: codex_messages.as_ref().map(|messages| {
+                messages
+                    .iter()
+                    .map(|message| CodexAssistantMessage {
+                        content: redact(&message.content, rules),
+                        phase: message.phase.clone(),
+                    })
+                    .collect()
+            }),
         },
         ChatMessage::ToolResult {
             tool_call_id,
@@ -1050,6 +1060,7 @@ mod tests {
             tool_calls: vec![],
             reasoning_content: Some("thinking about 172.16.0.1".into()),
             codex_reasoning: None,
+            codex_messages: None,
         };
         match redact_message(&m, &rules) {
             ChatMessage::Assistant {
@@ -1078,6 +1089,7 @@ mod tests {
             content: "checked 192.168.1.1".into(),
             tool_calls: vec![],
             reasoning_content: None,
+            codex_messages: None,
             codex_reasoning: Some(reasoning.clone()),
         };
         match redact_message(&message, &default_rules()) {
@@ -1156,6 +1168,7 @@ mod tests {
             tool_calls: vec![tc.clone()],
             reasoning_content: None,
             codex_reasoning: None,
+            codex_messages: None,
         };
         match redact_message(&m, &rules) {
             ChatMessage::Assistant { tool_calls, .. } => {

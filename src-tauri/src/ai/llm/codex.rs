@@ -10,8 +10,8 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use super::{
-    ChatDelta, ChatMessage, ChatRequest, ChatResponse, DeltaSink, LlmClient, ModelInfo, SseParser,
-    ToolCall,
+    ChatDelta, ChatMessage, ChatRequest, ChatResponse, CodexAssistantMessage, DeltaSink, LlmClient,
+    ModelInfo, SseParser, ToolCall,
 };
 use crate::ai::codex_auth::{AccessToken, CodexAuth};
 use crate::error::{error_chain, AppError, AppResult};
@@ -193,6 +193,7 @@ fn build_request(request: &ChatRequest) -> Value {
                 content,
                 tool_calls,
                 codex_reasoning,
+                codex_messages,
                 ..
             } => {
                 if let Some(items) = codex_reasoning {
@@ -200,11 +201,13 @@ fn build_request(request: &ChatRequest) -> Value {
                     // opaque reasoning subset, never raw arbitrary API items.
                     input.extend(items.iter().filter_map(reasoning_item));
                 }
-                if !content.is_empty() {
-                    input.push(json!({
-                        "role": "assistant",
-                        "content": [{ "type": "output_text", "text": content }]
+                if let Some(messages) = codex_messages {
+                    input.extend(messages.iter().map(|message| {
+                        assistant_message_item(&message.content, message.phase.as_deref())
                     }));
+                } else if !content.is_empty() {
+                    // Old conversations and other providers have no phase.
+                    input.push(assistant_message_item(content, None));
                 }
                 for tool in tool_calls {
                     input.push(json!({
@@ -249,8 +252,35 @@ fn build_request(request: &ChatRequest) -> Value {
     })
 }
 
-/// Keep only opaque model state. Visible text and tool calls always come from
-/// the normal (redacted) RSSH history, not a duplicate provider-specific copy.
+fn assistant_message_item(content: &str, phase: Option<&str>) -> Value {
+    let mut item = json!({
+        "role": "assistant",
+        "content": [{ "type": "output_text", "text": content }]
+    });
+    if let Some(phase) = phase {
+        item["phase"] = json!(phase);
+    }
+    item
+}
+
+fn parse_assistant_message(item: &Value) -> AppResult<CodexAssistantMessage> {
+    let mut content = String::new();
+    for part in item["content"].as_array().ok_or_else(invalid_response)? {
+        let field = match part["type"].as_str() {
+            Some("output_text") => "text",
+            Some("refusal") => "refusal",
+            _ => continue,
+        };
+        content.push_str(part[field].as_str().ok_or_else(invalid_response)?);
+    }
+    Ok(CodexAssistantMessage {
+        content,
+        phase: item["phase"].as_str().map(str::to_owned),
+    })
+}
+
+/// Keep only opaque model state here. Visible text and tool calls are replayed
+/// separately from the redacted history fields.
 fn reasoning_item(item: &Value) -> Option<Value> {
     if item["type"] != "reasoning" {
         return None;
@@ -384,20 +414,13 @@ impl ResponseState {
         let mut tool_calls = Vec::new();
         let mut call_ids = HashSet::new();
         let mut reasoning = Vec::new();
+        let mut messages = Vec::new();
         for item in items {
             match item["type"].as_str() {
                 Some("message") => {
-                    let content = item["content"].as_array().ok_or_else(invalid_response)?;
-                    for part in content {
-                        match part["type"].as_str() {
-                            Some("output_text") => {
-                                text.push_str(part["text"].as_str().ok_or_else(invalid_response)?)
-                            }
-                            Some("refusal") => text
-                                .push_str(part["refusal"].as_str().ok_or_else(invalid_response)?),
-                            _ => {}
-                        }
-                    }
+                    let message = parse_assistant_message(&item)?;
+                    text.push_str(&message.content);
+                    messages.push(message);
                 }
                 Some("function_call") => {
                     let id = required_string(&item, "call_id")?.to_owned();
@@ -447,6 +470,7 @@ impl ResponseState {
             tokens_out: token_count(&response["usage"]["output_tokens"]),
             reasoning_content: None,
             codex_reasoning: (!reasoning.is_empty()).then_some(reasoning),
+            codex_messages: (!messages.is_empty()).then_some(messages),
         })
     }
 }
@@ -494,6 +518,54 @@ mod tests {
     }
 
     #[test]
+    fn assistant_phases_and_boundaries_survive_history_and_redaction() {
+        let (sink, _) = sink();
+        let mut state = ResponseState::default();
+        let mut commentary = message("Checking 192.168.1.1");
+        commentary["phase"] = json!("commentary");
+        let mut answer = message("Checked 10.0.0.1");
+        answer["phase"] = json!("final_answer");
+        state
+            .event(
+                completed(vec![commentary, answer, message("No phase")]),
+                &sink,
+            )
+            .unwrap();
+        let response = state.finish(&sink).unwrap();
+        // The session stores response text as content and keeps the Codex
+        // metadata. Round-trip the same fields through the persisted format.
+        let mut stored = serde_json::to_value(response).unwrap();
+        stored["role"] = json!("assistant");
+        stored["content"] = stored["text"].take();
+        let history: ChatMessage =
+            serde_json::from_str(&serde_json::to_string(&stored).unwrap()).unwrap();
+        let history =
+            crate::ai::sanitize::redact_message(&history, &crate::ai::sanitize::default_rules());
+        let body = build_request(&ChatRequest {
+            system_prompt: "Diagnose the host".into(),
+            messages: vec![history],
+            tools: vec![],
+            model: "account-model".into(),
+            max_tokens: 4096,
+        });
+        assert_eq!(body["input"].as_array().unwrap().len(), 3);
+        assert_eq!(body["input"][0]["phase"], "commentary");
+        assert_eq!(body["input"][1]["phase"], "final_answer");
+        assert!(body["input"][2].get("phase").is_none());
+        assert_eq!(body["input"][2]["content"][0]["text"], "No phase");
+        assert_eq!(
+            body["input"][0]["content"][0]["text"],
+            "Checking <REDACTED:ip-192>"
+        );
+        assert_eq!(
+            body["input"][1]["content"][0]["text"],
+            "Checked <REDACTED:ip-10>"
+        );
+        assert!(!body.to_string().contains("192.168.1.1"));
+        assert!(!body.to_string().contains("10.0.0.1"));
+    }
+
+    #[test]
     fn request_preserves_tool_round_trip_and_only_opaque_reasoning() {
         let request = ChatRequest {
             system_prompt: "Use approved tools".into(),
@@ -516,6 +588,7 @@ mod tests {
                         input: json!({"command": "df -h"}),
                     }],
                     reasoning_content: Some("other provider reasoning".into()),
+                    codex_messages: None,
                     codex_reasoning: Some(vec![
                         json!({"type": "reasoning", "id": "rs-1", "encrypted_content": "opaque", "summary": [{"text": "not replayed"}], "extra": "not replayed"}),
                         json!({"type": "function_call", "name": "injected"}),
@@ -543,6 +616,8 @@ mod tests {
             json!({"type":"reasoning", "id":"rs-1", "encrypted_content":"opaque", "summary":[]})
         );
         assert_eq!(body["input"][3]["call_id"], "call-1");
+        assert_eq!(body["input"][2]["content"][0]["text"], "Checking disk");
+        assert!(body["input"][2].get("phase").is_none());
         assert_eq!(body["input"][3]["arguments"], "{\"command\":\"df -h\"}");
         assert_eq!(body["input"][4]["output"], "[ERROR] Permission denied");
         assert_eq!(body["input"].as_array().unwrap().len(), 5);

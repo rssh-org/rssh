@@ -45,10 +45,14 @@ pub enum ChatMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
         /// Opaque Codex reasoning items required for stateless tool continuations.
-        /// Only the Codex encoder sends these back; text and tool calls remain
-        /// in their canonical fields so normal redaction still applies.
+        /// Only the Codex encoder sends these back; free-form text is stored
+        /// separately and redacted before replay.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         codex_reasoning: Option<Vec<serde_json::Value>>,
+        /// Original message boundaries and phases for Codex history replay.
+        /// Older history has only the concatenated display content above.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_messages: Option<Vec<CodexAssistantMessage>>,
     },
     ToolResult {
         tool_call_id: String,
@@ -64,6 +68,13 @@ pub enum ChatMessage {
         #[serde(skip)]
         pre_redacted: bool,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexAssistantMessage {
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +112,8 @@ pub struct ChatResponse {
     /// Provider-specific encrypted reasoning, never displayed as assistant text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex_reasoning: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_messages: Option<Vec<CodexAssistantMessage>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,6 +314,7 @@ mod history_tests {
             &message,
             ChatMessage::Assistant {
                 codex_reasoning: None,
+                codex_messages: None,
                 ..
             }
         ));
@@ -323,6 +337,7 @@ mod history_tests {
                 input: json!({ "cmd": "pwd" }),
             }],
             reasoning_content: None,
+            codex_messages: None,
             codex_reasoning: Some(vec![reasoning.clone()]),
         };
         let serialized = serde_json::to_string(&message).unwrap();
