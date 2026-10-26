@@ -1,0 +1,6 @@
+# Native services used by core, without the Tauri application runtime.
+[target.'cfg(target_env = "ohos")'.dependencies]
+portable-pty = "0.9"
+napi-derive-ohos = "=1.2.0"
+napi-ohos = { version = "=1.2.0", features = ["napi8"] }
+openharmony-ability = { path = "@OHOS_SOURCES@/ability/crates/ability" }

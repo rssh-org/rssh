@@ -52,7 +52,7 @@ class RsshServerProcess private constructor(private val process: Process) : Disp
 
         /**
          * Dev: set RSSH_SERVER_BIN to a locally-built binary
-         * (`src-tauri/target/{debug,release}/rssh-server`).
+         * (`target/{debug,release}/rssh-server`).
          * Release: extract the bundled binary to a STABLE path under the shared
          * data dir (`~/.rssh/bin/rssh-server`).
          *

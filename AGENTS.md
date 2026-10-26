@@ -15,7 +15,7 @@
 不带实例 ID 后缀的全局事件会在多 tab / 多传输并存时互相串话。第三段按事件实际作用域使用 session、prompt 或 transfer ID；不要一律假定它是 tab ID。
 
 ```bash
-rg 'emit\(|format!\("[a-z]+:' src-tauri/src   # 核对最终 channel 的构造位置
+rg 'emit\(|format!\("[a-z]+:' core/src app/src   # 核对最终 channel 的构造位置
 ```
 
 ### R2. CLI ↔ GUI 走 OSC 7337，不要再造 IPC
@@ -23,15 +23,15 @@ rg 'emit\(|format!\("[a-z]+:' src-tauri/src   # 核对最终 channel 的构造�
 GUI 内嵌终端跑 `rssh-cli` 时，CLI 通过 OSC 7337 转义序列与 GUI 通信，xterm parser 解码后调 store。要扩通信，加个 OSC kind，**不要**起 socket / pipe / tauri event。
 
 ```bash
-rg 'OSC_RSSH_ID|7337' src src-tauri/src/bin
+rg 'OSC_RSSH_ID|7337' frontend cli/src
 ```
 
 ### R3. 新增前端 command 必须检查两个后端适配器
 
-Tauri 路径需要在 `commands/*.rs` 实现并加入 `src-tauri/src/lib.rs` 的 `generate_handler!`。同一前端功能若要在 JetBrains / browser headless 模式可用，还必须在 `src-tauri/src/server.rs` 的 dispatcher 中暴露同名 command，并尽量复用同一 domain helper。漏任一目标适配器，那个目标运行时就是 "command not found"。
+共享逻辑放在 `core/src/commands/`，Tauri wire wrapper 放在 `app/src/tauri/commands/` 并加入 `app/src/tauri/mod.rs` 的 `generate_handler!`。同一前端功能若要在 JetBrains / browser headless 模式可用，还必须在 `app/src/server/mod.rs` 的 dispatcher 中暴露同名 command，并尽量复用同一 domain helper。漏任一目标适配器，那个目标运行时就是 "command not found"。
 
 ```bash
-rg 'generate_handler!' src-tauri/src/lib.rs
+rg 'generate_handler!' app/src/tauri/mod.rs
 ```
 
 ### R4. Tab 根容器必须明确尺寸与滚动所有权
@@ -48,10 +48,10 @@ min-height: 0;   /* 缺这条 flex 子元素不收缩，overflow 失效 */
 
 ### R5. Secret 不进 DB 明文，只走统一的加密存储
 
-调用方只能走 `SecretStore` (`src-tauri/src/secret/`)。`HybridStore` 用 ChaCha20-Poly1305 加密后把密文写入 DB `secrets` 表。首次选择 backend 时，系统 keychain 可用就把 master key 放 keychain，否则（包括 Android 和部分 headless 环境）放 data dir 下的 `master.key`；选择结果是 sticky 的，已选 keyring 后 keychain 失效必须硬失败，不能静默换新 file key。不要直接读写 `secrets` 表，也不要把原 secret 当成 keychain value 的当前架构。
+调用方只能走 `SecretStore` (`core/src/secret/`)。`HybridStore` 用 ChaCha20-Poly1305 加密后把密文写入 DB `secrets` 表。首次选择 backend 时，系统 keychain 可用就把 master key 放 keychain，否则（包括 Android 和部分 headless 环境）放 data dir 下的 `master.key`；选择结果是 sticky 的，已选 keyring 后 keychain 失效必须硬失败，不能静默换新 file key。不要直接读写 `secrets` 表，也不要把原 secret 当成 keychain value 的当前架构。
 
 ```bash
-rg 'secret_store|SecretStore' src-tauri/src
+rg 'secret_store|SecretStore' core/src app/src
 ```
 
 ### R6. 不要建"分析文档" / "实施计划归档"
@@ -67,19 +67,19 @@ rg 'secret_store|SecretStore' src-tauri/src
 Tab、导航和连接会话协调在 `app.svelte.ts`；AI、主题、快捷键、传输等分别在既有 domain store。沿用私有 `$state` + 导出 getter / action 的边界，**不要**导出裸 `$state` 对象，**不要**在组件里新建跨页全局状态，也不要把所有领域硬塞回 `app.svelte.ts`。
 
 ```bash
-rg '^let _.*\$state|^export function' src/lib/stores src/lib/ai src/lib/themes
+rg '^let _.*\$state|^export function' frontend/lib/stores frontend/lib/ai frontend/lib/themes
 ```
 
 ### R9. 布局、输入方式与宿主能力分别判断
 
 页面排版只看窗口或容器宽度：CSS 用 media/container query，需要切换 DOM 时用 `layout.compact()`；不能用 UA、OS 或触摸能力选择手机/电脑布局。触摸、鼠标、键盘按实际输入事件处理，窄窗口不代表没有硬件键盘，宽窗口也可能需要软键盘。
 
-原生功能必须走 `app.capabilities()`（后端 `get_runtime_capabilities`），不能从宽度推断 PTY、串口、多窗口、目录授权等能力。Rust 只在平台 API、库或实现不同处使用 `#[cfg(...)]`。OHOS 的 Rust 目标同时是 `target_os="linux"` 和 `target_env="ohos"`；Linux 专用的 libudev、Secret Service、WebKitGTK 等必须排除 OHOS；Rust 源码统一使用 `linux` / `macos` / `windows` / `android` / `ios` / `ohos` 六个互斥条件（`windows` 为 Rust 内建，其余在 build.rs 定义）；`linux` 明确排除 OHOS，不使用 Tauri 的 `mobile` / `desktop` 分类。多系统实现显式列举，例如 `any(android, ios)`。鸿蒙两个 HAP 共用一份 Rust 库，手机/平板与电脑由 `ohos::device::DeviceClass` 在运行时区分，不能伪造两个编译期 OS。Cargo.toml 依赖条件仍使用原生 target 表达式（build.rs 的 cfg 不参与依赖解析）。App 成功加载能力后才挂载资源页面。Docker CLI、kubectl、keychain 等外部能力仍应在运行时真实探测。
+原生功能必须走 `app.capabilities()`（后端 `get_runtime_capabilities`），不能从宽度推断 PTY、串口、多窗口、目录授权等能力。Rust 只在平台 API、库或实现不同处使用 `#[cfg(...)]`。OHOS 的 Rust 目标同时是 `target_os="linux"` 和 `target_env="ohos"`；Linux 专用的 libudev、Secret Service、WebKitGTK 等必须排除 OHOS；Rust 源码统一使用 `linux` / `macos` / `windows` / `android` / `ios` / `ohos` 六个互斥条件（`windows` 为 Rust 内建，其余由三个 crate 的 build.rs 共用 scripts/platform-cfg.rs 定义）；`linux` 明确排除 OHOS，不使用 Tauri 的 `mobile` / `desktop` 分类。多系统实现显式列举，例如 `any(android, ios)`。鸿蒙两个 HAP 共用一份 Rust 库，手机/平板与电脑由 `ohos::device::DeviceClass` 在运行时区分，不能伪造两个编译期 OS。Cargo.toml 依赖条件仍使用原生 target 表达式（build.rs 的 cfg 不参与依赖解析）。App 成功加载能力后才挂载资源页面。Docker CLI、kubectl、keychain 等外部能力仍应在运行时真实探测。
 
 ```bash
-rg 'layout\.compact|@media|@container|capabilities\(' src
-cat src-tauri/build.rs  # 六个系统条件的唯一定义
-rg 'cfg\(|cfg!\(' src-tauri/src
+rg 'layout\.compact|@media|@container|capabilities\(' frontend
+cat scripts/platform-cfg.rs  # 三个 crate 共用的六系统 cfg 定义
+rg 'cfg\(|cfg!\(' core/src app/src cli/src ohos/src
 ```
 
 ### R10. 新增功能必须显式考虑四条入口
@@ -88,15 +88,15 @@ rg 'cfg\(|cfg!\(' src-tauri/src
 
 - **桌面 GUI**：默认目标，必须可用
 - **移动 GUI**：窄窗口与触摸输入都要可操作，同时保留外接键盘/鼠标的能力；宽屏平板使用宽布局。操作需有可点击入口；确实缺少原生 API 的功能由能力查询关闭，不能按设备名称一概隐藏。
-- **CLI**：`src-tauri/src/bin/rssh/`。CRUD 类操作大概率要补；纯 UI/可视化类可声明 N/A
-- **Headless / JetBrains**：`src-tauri/src/server.rs` + `src/lib/ipc-shim.ts`。复用同一前端，但 command / event 需要 server adapter 支持
+- **CLI**：`cli/src/`。CRUD 类操作大概率要补；纯 UI/可视化类可声明 N/A
+- **Headless / JetBrains**：`app/src/server/mod.rs` + `frontend/lib/ipc-shim.ts`。复用同一前端，但 command / event 需要 server adapter 支持
 
 允许的结论是“全部支持”或“只在 X 入口，因为 Y”。**不允许**的是没想过——上线后才发现移动端按钮够不着、CLI 改了 schema 但读不出新字段、JetBrains 页面只能报 unknown command。
 
 ```bash
-rg 'layout\.compact|@media|@container' src/lib/components  # 看宽度响应式布局
-rg '#\[cfg\(' src-tauri/src/commands   # 看 command 层平台分支
-rg '"[a-z_]+" =>' src-tauri/src/server.rs  # 看 headless dispatcher
+rg 'layout\.compact|@media|@container' frontend/lib/components  # 看宽度响应式布局
+rg '#\[cfg\(' core/src/commands   # 看 command 层平台分支
+rg '"[a-z_]+" =>' app/src/server/mod.rs  # 看 headless dispatcher
 ```
 
 ### R11. Transport session 必须经过 lifecycle registry
@@ -104,7 +104,7 @@ rg '"[a-z_]+" =>' src-tauri/src/server.rs  # 看 headless dispatcher
 SSH / PTY / serial / Telnet / SFTP / forward 的 open 路径必须先在 `commands/lifecycle.rs` 预留规范 UUID、绑定 `SessionOwner` 与 nonce，再把 Ready handle 激活进 typed map。取消、关闭、窗口销毁和 reload reconcile 都依赖这份 registry；不要绕过它直接向 `sessions` / `pty_sessions` 等 map 插 handle。
 
 ```bash
-rg 'reserve_resource|\.activate\(|reconcile_owner|close_owner' src-tauri/src/commands src-tauri/src/server.rs
+rg 'reserve_resource|\.activate\(|reconcile_owner|close_owner' core/src/commands app/src/server/mod.rs
 ```
 
 ### R12. 动态发现只持久化 source，不持久化结果
@@ -112,7 +112,7 @@ rg 'reserve_resource|\.activate\(|reconcile_owner|close_owner' src-tauri/src/com
 `dynamic_discovery_sources` 是用户配置，进入 DB 与 sync；Docker container / K8s pod 的发现结果是瞬时 launch target，只能转成 connector-backed PTY tab。不要偷偷写成 Profile，也不要让已消失的容器在 Home 留陈旧数据。
 
 ```bash
-rg 'dynamic_discovery_sources|DynamicDiscoveredTarget|connectDynamicTarget' src src-tauri/src
+rg 'dynamic_discovery_sources|DynamicDiscoveredTarget|connectDynamicTarget' frontend core/src app/src
 ```
 
 ### R13. Github/WebDav 配置同步的兼容规则
@@ -124,7 +124,7 @@ rg 'dynamic_discovery_sources|DynamicDiscoveredTarget|connectDynamicTarget' src 
 同一个 `version` 在不同时间产出两种表结构，等于让迁移不再是版本的纯函数。要改默认数据或表结构，就开新版本块。
 
 ```bash
-rg 'if version <' src-tauri/src/db/schema.rs   # 每个块只加不改
+rg 'if version <' core/src/db/schema.rs   # 每个块只加不改
 ```
 
 ---
@@ -135,49 +135,69 @@ rg 'if version <' src-tauri/src/db/schema.rs   # 每个块只加不改
 
 | 概念 | 在哪 | 怎么验证 |
 |---|---|---|
-| GUI 二进制 `rssh` | `src-tauri/src/main.rs` | `cat src-tauri/Cargo.toml` 看 `[[bin]]` |
-| CLI 二进制 `rssh-cli` | `src-tauri/src/bin/rssh/main.rs` + `commands/`，gated by feature `cli` | 同上 |
-| Headless 二进制 `rssh-server` | `src-tauri/src/server_main.rs`，gated by feature `server` | 同上；给 browser / JetBrains 提供 embedded HTTP + WebSocket IPC |
-| 共享 lib `rssh_lib` | `src-tauri/src/lib.rs`，`[lib] name="rssh_lib"` | `rg 'rssh_lib::' src-tauri/src/bin/rssh` |
+| GUI 二进制 `rssh` | `app/src/main.rs` | `cat app/Cargo.toml` 看 `[[bin]]` |
+| CLI 二进制 `rssh-cli` | `cli/src/main.rs` + `commands/`，独立 crate | `cat cli/Cargo.toml`；直接依赖 `rssh-core` |
+| Headless 二进制 `rssh-server` | `app/src/server_main.rs`，gated by feature `server` | 同上；给 browser / JetBrains 提供 embedded HTTP + WebSocket IPC |
+| 共享引擎 `rssh_core` | `core/src/lib.rs`，不依赖 Tauri | `cargo tree -p rssh-core` |
+| 应用 lib `rssh_lib` | `app/src/lib.rs`，Tauri / headless 适配入口 | `cat app/Cargo.toml` 看 features |
+
+### 平台源码与构建产物
+
+| 概念 | 在哪 | 怎么验证 |
+|---|---|---|
+| Android 原生工程 | `android/` | `npm run tauri -- android dev --open` 先准备生成工程再打开 IDE |
+| OHOS 平台实现 | `ohos/app/`、`ohos/src/` | ArkTS 工程与 Rust 适配集中维护；核对 `app/src/lib.rs` 模块入口 |
+| OHOS 原生适配测试 | `ohos/tests/` | `npm test` 直接测试 `ohos/app/` 源码，不依赖生成目录 |
+| OHOS 框架与准备工具 | `ohos/framework/`、`ohos/scripts/` | 独立 lock、上游 revision、patch、测试及生成 workspace |
+| 图标 | `icons/` | `app/tauri.conf.json` 的 `bundle.icon` 引用；移动端复制进生成工程 |
+| 桌面打包准备 | `desktop/scripts/` | 编译 CLI 后放入 app/bin，再交给 Tauri bundler |
+| iOS 资源 | `ios/` | Info.plist / PrivacyInfo 随打包进入生成项目 |
+| 平台构建入口 | `scripts/build-*.sh`、`scripts/tauri.mjs` | `npm run tauri -- ...` 调用仓库准备流程，勿直接绕过 wrapper |
+| 生成目录 | `app/gen/`、`app/bin/`、`target/` | 全部忽略；源码修改必须回到对应平台目录 |
+
+`app/capabilities/` 是权限源码，保留跟踪。macOS / Windows / Linux 打包时
+统一编译 CLI、暂存到 `app/bin/` 并装入应用资源，供 GUI 安装。
+普通开发和 Cargo 检查不依赖预编译二进制。各平台构建与打包见
+[CONTRIBUTING.md](CONTRIBUTING.md#build)。
 
 ### 前端
 
 | 概念 | 在哪 | 怎么验证 |
 |---|---|---|
-| Tab / 导航 / 会话协调 store | `src/lib/stores/app.svelte.ts` | 搜 `export function` |
-| 领域 store | `src/lib/{ai,themes}/` + `src/lib/stores/` | AI、主题、快捷键、传输等各自维护 |
-| Tab 渲染分发 | `src/lib/components/AppShell.svelte` | 搜 `tab.type === ` |
-| 终端层 | `src/lib/components/TerminalPane.svelte` | 单文件，xterm + 高亮 + auth 全在内 |
-| OSC 解码 | `src/lib/osc/handler.ts` | `registerRsshOscHandlers` |
-| Headless IPC shim | `src/lib/ipc-shim.ts` | Tauri 外安装兼容 `invoke` / `listen` 的 WebSocket adapter |
-| 键盘注册表 | `src/lib/keyboard/registry.ts` | `attachShortcuts` |
-| i18n | `src/lib/i18n/index.svelte.ts` + `locales/{en,zh}.ts` | `t('key')` |
-| 设计令牌 | `src/styles/global.css` | `--bg --accent --raised --pressed` |
+| Tab / 导航 / 会话协调 store | `frontend/lib/stores/app.svelte.ts` | 搜 `export function` |
+| 领域 store | `frontend/lib/{ai,themes}/` + `frontend/lib/stores/` | AI、主题、快捷键、传输等各自维护 |
+| Tab 渲染分发 | `frontend/lib/components/AppShell.svelte` | 搜 `tab.type === ` |
+| 终端层 | `frontend/lib/components/TerminalPane.svelte` | 单文件，xterm + 高亮 + auth 全在内 |
+| OSC 解码 | `frontend/lib/osc/handler.ts` | `registerRsshOscHandlers` |
+| Headless IPC shim | `frontend/lib/ipc-shim.ts` | Tauri 外安装兼容 `invoke` / `listen` 的 WebSocket adapter |
+| 键盘注册表 | `frontend/lib/keyboard/registry.ts` | `attachShortcuts` |
+| i18n | `frontend/lib/i18n/index.svelte.ts` + `locales/{en,zh}.ts` | `t('key')` |
+| 设计令牌 | `frontend/styles/global.css` | `--bg --accent --raised --pressed` |
 
 ### 后端
 
 | 概念 | 在哪 | 怎么验证 |
 |---|---|---|
-| Tauri command 模块 | `src-tauri/src/commands/*.rs` | `ls src-tauri/src/commands` |
-| Command 注册总表 | `src-tauri/src/lib.rs` 的 `generate_handler!` | 见 R3 |
-| Headless command dispatcher | `src-tauri/src/server.rs` | 见 R3；只暴露明确支持的同名 command |
-| 全局运行态 | `src-tauri/src/state.rs` `AppState` | `rg 'AppState' src-tauri/src` |
-| Session lifecycle / ownership | `src-tauri/src/commands/lifecycle.rs` | reserve → activate → owner-scoped close/reconcile，见 R11 |
-| 跨宿主事件抽象 | `src-tauri/src/emitter.rs` `Host` | Tauri emit 与 headless WebSocket sink 共用入口 |
-| SSH 客户端 | `src-tauri/src/ssh/client.rs` | russh wrapper |
-| SSH 认证 / 算法策略 | `src-tauri/src/ssh/auth.rs` + `ssh/algorithms.rs` | password/key/agent/kbd-interactive + per-profile algorithms |
-| Telnet | `src-tauri/src/terminal/telnet.rs` + `commands/telnet.rs` | 跨平台 TCP transport + profile CRUD |
-| 串口 | `src-tauri/src/terminal/serial.rs` + `commands/serial.rs` | desktop-only serialport transport |
-| Docker / K8s 动态发现 | `src-tauri/src/commands/discovery.rs` | source 持久化；发现结果临时；connector PTY 见 `commands/pty.rs` |
-| SFTP | `src-tauri/src/ssh/sftp.rs` | russh-sftp wrapper |
-| 端口转发 | `src-tauri/src/ssh/forward.rs` | local/remote/dynamic |
-| PTY（仅桌面） | `src-tauri/src/terminal/pty.rs`，`#[cfg(not(target_os="android"))]` | portable-pty |
-| 数据库 | `src-tauri/src/db/`，rusqlite bundled | 看 `db/schema.rs` |
-| 数据迁移 | `src-tauri/src/migration/` + `db/schema.rs` | GUI / CLI 启动都必须走幂等 migration |
-| Secret 抽象 | `src-tauri/src/secret/`，HybridStore + master-key backend + 加密 DB | 见 R5 |
-| 错误类型 | `src-tauri/src/error.rs` `AppError` | thiserror 派生 |
-| GitHub 同步 | `src-tauri/src/sync/github.rs` | `commands/sync.rs` 入口 |
-| WebDAV 同步 | `src-tauri/src/sync/webdav.rs` | `commands/sync.rs` + CLI `rssh config webdav {set,push,pull}` |
+| Tauri command wrappers | `app/src/tauri/commands/*.rs` | 转交 `core/src/commands/` 共享逻辑 |
+| Command 注册总表 | `app/src/tauri/mod.rs` 的 `generate_handler!` | 见 R3 |
+| Headless command dispatcher | `app/src/server/mod.rs` | 见 R3；只暴露明确支持的同名 command |
+| 全局运行态 | `core/src/state.rs` `AppState` | `rg 'AppState' core/src app/src` |
+| Session lifecycle / ownership | `core/src/commands/lifecycle.rs` | reserve → activate → owner-scoped close/reconcile，见 R11 |
+| 跨宿主事件抽象 | `core/src/emitter.rs` `Host` | 应用注入事件 sink 与可选窗口能力，不依赖 Tauri |
+| SSH 客户端 | `core/src/ssh/client.rs` | russh wrapper |
+| SSH 认证 / 算法策略 | `core/src/ssh/auth.rs` + `ssh/algorithms.rs` | password/key/agent/kbd-interactive + per-profile algorithms |
+| Telnet | `core/src/terminal/telnet.rs` + `commands/telnet.rs` | 跨平台 TCP transport + profile CRUD |
+| 串口 | `core/src/terminal/serial.rs` + `commands/serial.rs` | desktop-only serialport transport |
+| Docker / K8s 动态发现 | `core/src/commands/discovery.rs` | source 持久化；发现结果临时；connector PTY 见 `commands/pty.rs` |
+| SFTP | `core/src/ssh/sftp.rs` | russh-sftp wrapper |
+| 端口转发 | `core/src/ssh/forward.rs` | local/remote/dynamic |
+| PTY | `core/src/terminal/pty.rs`；入口由 `terminal/mod.rs` 的系统 cfg 选择 | 桌面 portable-pty；OHOS 按运行时能力开放 |
+| 数据库 | `core/src/db/`，rusqlite bundled | 看 `db/schema.rs` |
+| 数据迁移 | `core/src/migration/` + `db/schema.rs` | GUI / CLI 启动都必须走幂等 migration |
+| Secret 抽象 | `core/src/secret/`，HybridStore + master-key backend + 加密 DB | 见 R5 |
+| 错误类型 | `core/src/error.rs` `AppError` | thiserror 派生 |
+| GitHub 同步 | `core/src/sync/github.rs` | `commands/sync.rs` 入口 |
+| WebDAV 同步 | `core/src/sync/webdav.rs` | `commands/sync.rs` + CLI `rssh config webdav {set,push,pull}` |
 
 ### Tab ID 形态
 
@@ -188,25 +208,29 @@ rg 'if version <' src-tauri/src/db/schema.rs   # 每个块只加不改
 | `forward` | `"fwd:<forward_id>:<timestamp>"` | `HomeScreen` / `osc/handler.ts` |
 
 ```bash
-rg 'crypto\.randomUUID' src/lib   # 看 tab id 怎么造
+rg 'crypto\.randomUUID' frontend/lib   # 看 tab id 怎么造
 ```
 
 ### 构建命令
 
 ```bash
-npm test                                                        # Vitest；CI gate
+npm test                                                        # Vitest（含 ohos/tests）；CI gate
 npm run build                                                   # Vite production build
-cargo fmt --manifest-path src-tauri/Cargo.toml --check
-cargo test --manifest-path src-tauri/Cargo.toml                  # Rust tests；CI gate
-cargo check --manifest-path src-tauri/Cargo.toml                 # 默认 GUI/lib
-cargo check --manifest-path src-tauri/Cargo.toml --features cli --bin rssh-cli
-cargo check --manifest-path src-tauri/Cargo.toml --features server --bin rssh-server
-npm run tauri dev                                               # 本地 GUI
-./build-mac.sh                                                  # macOS aarch64 .dmg
-./build-android.sh                                              # APK + AAB（需 Android SDK/NDK）
+cargo fmt --all --check
+cargo test --workspace --all-features                           # Rust tests；先 npm run build
+cargo check -p rssh-app --features tauri                        # GUI/lib
+cargo check -p rssh-cli
+cargo check -p rssh-app --features server --bin rssh-server
+npm run tauri -- dev                                            # 本地 GUI
+./scripts/build-mac.sh                                          # macOS aarch64 .dmg
+./scripts/build-android.sh                                      # universal + ARM64 APK（需 Android SDK/NDK）
+./scripts/build-ohos.sh --unsigned                              # 手机 / 电脑 HAP 与 App Pack
+node --test ohos/scripts/*.test.mjs                             # OHOS 构建流程回归
+# 固定上游源码准备后：
+node --test ohos/framework/tests/*.test.mjs                     # OHOS 框架契约
 ```
 
-当前没有 frontend lint script；有 Vitest 与 Rust unit/integration tests。UI、真实 SSH/Telnet/serial、Docker/K8s 等环境行为仍要按改动范围手测，不能拿编译替代。
+当前没有 frontend lint script；有 Vitest、Rust unit/integration tests 与 Node 构建流程测试。`npm test` 包含 `ohos/tests/`，但不覆盖 `.mjs` Node 测试；修改打包流程需单独运行后者。UI、真实 SSH/Telnet/serial、Docker/K8s 等环境行为仍要按改动范围手测，不能拿编译替代。
 
 ---
 
@@ -217,7 +241,7 @@ npm run tauri dev                                               # 本地 GUI
 主窗口必须先完成 owner-scoped `reconcile_sessions(activeIds=[])`，再放开 `resourcePanesAllowed` 让 Terminal / Forward / SFTP 创建后端资源；否则同一 owner 的新 session 会被启动清理误判成孤儿。Clone 与 AI handoff 窗口跳过这套主窗口初始化。后端现在按 `SessionOwner` 隔离，**不要再沿用“空列表会杀掉其他窗口所有 session”的旧解释**；真正不能破坏的是 owner 边界和 reconcile-before-create barrier。
 
 ```bash
-rg '__rssh_clone|__rssh_ai_handoff|resourcePanesAllowed|reconcile_sessions' src src-tauri/src
+rg '__rssh_clone|__rssh_ai_handoff|resourcePanesAllowed|reconcile_sessions' frontend core/src app/src
 ```
 
 ### P2. Linux CLI shadow GUI
@@ -225,7 +249,7 @@ rg '__rssh_clone|__rssh_ai_handoff|resourcePanesAllowed|reconcile_sessions' src 
 `/usr/local/bin/rssh`（CLI）会 shadow `/usr/bin/rssh`（GUI）。CLI 在无 subcommand + 有 `DISPLAY`/`WAYLAND_DISPLAY` 时主动 fork GUI 二进制。改 CLI 启动逻辑必须保留 `canonicalize` 自循环检测。
 
 ```bash
-rg 'try_launch_gui|RSSH_APP' src-tauri/src/bin/rssh
+rg 'try_launch_gui|RSSH_APP' cli/src
 ```
 
 ### P3. Highlight 是 xterm decoration，原始字节不可改
@@ -241,7 +265,7 @@ Keyboard-interactive、私钥 passphrase、host-key TOFU 分别使用 `auth_wait
 改表结构 / 改 SecretStore key 命名时，**同时审 CLI 路径**。CLI 不经过 Tauri command，但应复用 `db` / `secret` / `sync::config` 等共享 domain helper；只改 command wrapper 不会自动覆盖 CLI。
 
 ```bash
-rg 'db::|secret_store|sync::config' src-tauri/src/bin/rssh
+rg 'db::|secret_store|sync::config' cli/src
 ```
 
 ### P6. 本地备份与远程 push 的 secret 过滤不同
@@ -257,7 +281,7 @@ rg 'db::|secret_store|sync::config' src-tauri/src/bin/rssh
 前端 `invoke("name")`、Tauri `generate_handler!` 与 headless `server.rs` dispatcher 都按字符串对接。Rust 函数或 wire 字段改名会让某个入口运行时炸；要改就全局 grep，并补 desktop + ipc-shim/headless 覆盖。
 
 ```bash
-rg 'invoke\("|generate_handler!|"[a-z_]+" =>' src/lib src-tauri/src/lib.rs src-tauri/src/server.rs
+rg 'invoke\("|generate_handler!|"[a-z_]+" =>' frontend/lib app/src/tauri/mod.rs app/src/server/mod.rs
 ```
 
 ---
@@ -280,7 +304,7 @@ rg 'invoke\("|generate_handler!|"[a-z_]+" =>' src/lib src-tauri/src/lib.rs src-t
 
 ### Pr3. CSS
 
-- 用 `src/styles/global.css` 的变量与现有 `.neu-*` / `.btn*` 类。**不要**自己挑十六进制色——主题切换会破
+- 用 `frontend/styles/global.css` 的变量与现有 `.neu-*` / `.btn*` 类。**不要**自己挑十六进制色——主题切换会破
 - 图标自己画，别用emoji
 
 ### Pr4. 改动节奏
@@ -294,11 +318,11 @@ rg 'invoke\("|generate_handler!|"[a-z_]+" =>' src/lib src-tauri/src/lib.rs src-t
 ### Pr5. 提交前自查
 
 1. `npm test` + `npm run build` 通过
-2. `cargo fmt --manifest-path src-tauri/Cargo.toml --check` + `cargo test --manifest-path src-tauri/Cargo.toml` 通过；按改动入口补 CLI 或 server 的 feature check（见“构建命令”）
+2. `cargo fmt --all --check` + `cargo test --workspace --all-features` 通过；按改动入口补 CLI 或 server 的 feature check（见“构建命令”）
 3. 改了 command？检查 `lib.rs` handler；支持 headless 时同步 `server.rs` dispatcher（R3）
 4. 改了事件名？前后端同步 grep `<domain>:`（R1）
 5. 改了 schema？审 migration、sync import/export、CLI 共享路径（P5/P6）
-6. 改了 UI？跑 dev 实际点；涉及 JetBrains/headless 时也走 `scripts/dev-browser.mjs`
+6. 改了 UI？跑 dev 实际点；涉及 JetBrains/headless 时也走 `idea-plugin/scripts/dev-browser.mjs`
 
 ---
 

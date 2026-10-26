@@ -30,21 +30,21 @@ Build specifics that made it work against a current IDE (already in
 (`include_dir!`), and one local port serves **both** the UI over HTTP and the IPC
 over WebSocket. The plugin spawns the binary, reads its `{port,token}` line, and
 points `JBCefBrowser` at `http://127.0.0.1:<port>/?rsshPort=<port>&rsshToken=<token>`.
-The frontend's IPC shim (`src/lib/ipc-shim.ts`) reads those query params and routes
+The frontend's IPC shim (`frontend/lib/ipc-shim.ts`) reads those query params and routes
 `invoke`/`listen` over the ws — no changes to the 90+ frontend call sites.
 
 ## Build order (the frontend is embedded at compile time)
 
 ```sh
 npm run build                                  # → dist/
-cargo build --release --manifest-path src-tauri/Cargo.toml \
+cargo build --release -p rssh-app \
       --features server --bin rssh-server      # embeds dist/ into the binary
 ```
 
 ## Dev run
 
 ```sh
-export RSSH_SERVER_BIN="$PWD/src-tauri/target/release/rssh-server"   # or .../debug/
+export RSSH_SERVER_BIN="$PWD/target/release/rssh-server"   # or .../debug/
 # open idea-plugin/ in IDEA (auto-imports Gradle), then run the `runIde` task
 # — or via the checked-in wrapper (pinned to Gradle 8.10.2):
 #   (cd idea-plugin && ./gradlew runIde)
@@ -55,7 +55,7 @@ A sandbox IDE launches; open the **RSSH** tool window (docked bottom).
 ## Package for a GitHub release (no Marketplace)
 
 ```sh
-# processResources auto-copies src-tauri/target/release/rssh-server → resources/bin
+# processResources auto-copies target/release/rssh-server → resources/bin
 (cd idea-plugin && ./gradlew buildPlugin)      # → build/distributions/rssh-idea-*.zip
 ```
 

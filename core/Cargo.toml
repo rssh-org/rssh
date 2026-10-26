@@ -1,0 +1,95 @@
+[package]
+name = "rssh-core"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+rusqlite = { version = "0.31", features = ["bundled"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+# `Include` glob expansion when reading ~/.ssh/config (issue #96)
+glob = "0.3"
+log = "0.4"
+
+# SSH — 0.49+ merged russh-keys into russh::keys. RSA server-sig-algs
+# support via PrivateKeyWithHashAlg + best_supported_rsa_hash().
+# 0.62.7 closes CVE-2026-48110 (GHSA-4r3c-5hpg-58qr, issue #235). It
+# pins ssh-key itself and states its own RustCrypto requirements, which
+# resolve against stable pkcs5/pkcs8/ed25519 now — the 0.60-era local
+# exact-pins are gone with it.
+russh = "0.62.7"
+tokio = { version = "1", features = ["sync", "macros", "net", "io-util", "rt", "process", "time", "fs", "rt-multi-thread"] }
+async-trait = "0.1"
+
+# SFTP
+russh-sftp = "2"
+
+# Plugin packages are user-supplied zips (manifest.json + index.html + assets).
+# Default features on: accept any standard compression a packager might emit.
+zip = "2"
+
+# HTTP + crypto
+base64 = "0.22"
+# 配置备份/同步走 Argon2id（KDF）+ ChaCha20-Poly1305（AEAD），
+# 标准 RustCrypto 实现；不再手搓。getrandom 用于生成 salt + nonce。
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+getrandom = "0.2"
+sha2 = "0.10"
+# 进程内 passphrase 缓存的内存清零保护（drop 时擦写底层字节）
+zeroize = { version = "1", features = ["derive"] }
+regex = "1"
+# regex 的伴生 crate（已在依赖树里）。用于 save 时拒绝零宽匹配的脱敏规则
+# （minimum_len()==0 → 会在每个位置 replace → 灾难性 over-replacement）。
+regex-syntax = "0.8"
+futures-util = "0.3"
+html2md = "0.2.15"
+
+tree-sitter = "0.26.9"
+tree-sitter-bash = "0.25.1"
+fontdb = "0.23.0"
+url = "2.5.8"
+
+# Mobile reqwest carries webpki-roots so TLS works without a probeable
+# system trust store; OHOS rides the same table (ArkWeb devices have no
+# openssl-style cert probing rustls-native-certs can rely on).
+[target.'cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "rustls-tls-webpki-roots", "stream", "system-proxy"] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios", target_env = "ohos")))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream", "system-proxy"] }
+
+# Raw termios access for the serial `xany` (IXANY) flag — the serialport crate
+# doesn't expose it. Only the Unix desktop targets compile the serial module.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+libc = "0.2"
+
+# Native desktop PTY and serial retain their existing backends.
+# Cargo target tables cannot use the application's build.rs OS aliases, so keep
+# the native target conditions here.
+# OHOS is target_os = "linux" but has no libudev serial backend.
+# Rust source uses the `linux` alias from build.rs for this condition. Cargo
+# resolves dependencies before running build.rs, so these tables keep it inline.
+[target.'cfg(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos"))))'.dependencies]
+# Serial console transport — a 3rd byte-stream alongside SSH/PTY. macOS uses
+# IOKit and Windows uses the Win32 API (no extra system dep); Linux links
+# libudev for port enumeration, so Linux CI/packaging needs `libudev-dev` at
+# build time (see build-linux.sh).
+serialport = "4.9.0"
+portable-pty = "0.8"
+
+# Keychain — Apple platforms share the native Security.framework backend.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+[target.'cfg(all(target_os = "linux", not(target_env = "ohos")))'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+
+[dev-dependencies]
+mockito = "1.7.2"
+tempfile = "3"

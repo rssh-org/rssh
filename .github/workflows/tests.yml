@@ -37,10 +37,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
 
-      # cargo test compiles the whole crate (wry / tauri included) and needs
-      # the same system deps as the Linux desktop build to link webkit2gtk.
+      # Shared core tests exercise desktop transports and secret storage.
+      # Keep desktop dependencies available for the Tauri adapter check too.
       - run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -50,6 +50,25 @@ jobs:
       - name: Frontend tests (vitest)
         run: npm test
 
+      - name: Build preparation tests (node)
+        run: npm run test:build
+
+      - name: Build frontend for embedded server
+        run: npm run build
+
       - name: Backend tests (cargo)
-        working-directory: src-tauri
-        run: cargo test
+        run: cargo test --workspace --all-features
+
+      - name: Check standalone CLI and headless server
+        run: |
+          cargo check -p rssh-cli
+          cargo check -p rssh-app --no-default-features --features server --bin rssh-server
+          for package in rssh-core rssh-cli rssh-app; do
+            features=()
+            if [ "$package" = rssh-app ]; then features=(--features server); fi
+            dependencies=$(cargo tree -p "$package" --no-default-features --edges normal,build "${features[@]}")
+            if grep -Eq '(^|[[:space:]])(tauri([-a-z]+)?|wry|tao) v' <<< "$dependencies"; then
+              echo "Unexpected GUI dependency in $package" >&2
+              exit 1
+            fi
+          done
