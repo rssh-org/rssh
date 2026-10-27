@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -24,7 +24,9 @@ export function prepareSources(root, { offline = false } = {}) {
         throw new Error(`Invalid pinned source: ${name}`);
       }
       const cache = path.join(cacheRoot, `${name}.git`);
-      if (!existsSync(cache)) git(['init', '--bare', '--quiet', cache]);
+      // CI cache pruning can leave directories without Git metadata. init is
+      // idempotent: restore the layout without discarding valid objects or refs.
+      git(['init', '--bare', '--quiet', cache]);
       try {
         git(['--git-dir', cache, 'cat-file', '-e', `${source.rev}^{commit}`]);
       } catch {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -53,6 +53,40 @@ test('an unavailable pinned commit fails offline and preserves previous generate
     save();
     assert.throws(() => prepareSources(root, { offline: true }), /not cached \(offline\)/);
     assert.equal(readFileSync(path.join(sources, 'ability/value.txt'), 'utf8'), 'patched\n');
+  });
+});
+
+test('an existing empty cache directory is initialized before fetching', () => {
+  fixture(({ root, rev }) => {
+    mkdirSync(path.join(root, 'target/ohos-git/ability.git'), { recursive: true });
+    const sources = prepareSources(root);
+    assert.equal(readFileSync(path.join(sources, 'ability/value.txt'), 'utf8'), 'patched\n');
+    assert.equal(JSON.parse(readFileSync(path.join(sources, 'ability/.rssh-source.json'))).rev, rev);
+  });
+});
+
+test('a cache with files pruned by CI is fetched again without replacing sources on offline failure', () => {
+  fixture(({ root, rev }) => {
+    const sources = prepareSources(root);
+    const cache = path.join(root, 'target/ohos-git/ability.git');
+    // rust-cache prunes non-Cargo files under target/ but leaves directories.
+    function pruneFiles(directory) {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const filename = path.join(directory, entry.name);
+        if (entry.isDirectory()) pruneFiles(filename);
+        else rmSync(filename);
+      }
+    }
+    pruneFiles(cache);
+    assert.ok(existsSync(path.join(cache, 'objects')));
+    assert.equal(existsSync(path.join(cache, 'HEAD')), false);
+    assert.throws(() => prepareSources(root, { offline: true }), /not cached \(offline\)/);
+    assert.equal(readFileSync(path.join(sources, 'ability/value.txt'), 'utf8'), 'patched\n');
+
+    prepareSources(root);
+    assert.equal(readFileSync(path.join(sources, 'ability/value.txt'), 'utf8'), 'patched\n');
+    assert.equal(JSON.parse(readFileSync(path.join(sources, 'ability/.rssh-source.json'))).rev, rev);
+    prepareSources(root, { offline: true });
   });
 });
 
