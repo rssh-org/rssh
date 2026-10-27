@@ -105,16 +105,19 @@ jobs:
         run: cargo install ohrs --version 1.5.0 --locked
 
       - name: Restore release signing inputs
+        id: signing
         env:
           OHOS_SIGNING_BUNDLE_BASE64: ${{ secrets.OHOS_SIGNING_BUNDLE_BASE64 }}
-        run: node ohos/scripts/ci-signing.mjs restore
+        run: python3 ohos/scripts/restore-signing.py
 
       - name: Build signed phone and desktop App Pack
         run: ./scripts/build-ohos.sh
 
       - name: Remove signing inputs
-        if: always()
-        run: node ohos/scripts/ci-signing.mjs clean
+        if: always() && steps.signing.outcome == 'success'
+        run: |
+          rm -rf ohos/app/signing.local.json ohos/app/signing \
+            app/gen/ohos/signing.local.json app/gen/ohos/signing
 
       - name: Keep the signed App Pack
         uses: actions/upload-artifact@v4

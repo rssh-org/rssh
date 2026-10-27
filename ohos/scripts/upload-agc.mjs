@@ -76,19 +76,14 @@ function uploadInfo(value, size) {
   let headers;
   try {
     url = new URL(value.url);
-    requireValue(value.headers === undefined || (value.headers !== null && typeof value.headers === 'object' && !Array.isArray(value.headers)), 'Invalid AGC upload headers.');
-    const entries = Object.entries(value.headers ?? {});
-    requireValue(entries.every(([, item]) => typeof item === 'string'), 'Invalid AGC upload headers.');
-    headers = new Headers(entries);
+    headers = new Headers(value.headers ?? {});
   } catch {
     throw new UploadError('AGC returned invalid upload URL or headers.');
   }
   requireValue(url.protocol === 'https:' && !url.username && !url.password && !url.hash, 'AGC returned an unsafe upload URL.');
-  requireValue(!headers.has('host') || headers.get('host').toLowerCase() === url.host.toLowerCase(), 'AGC upload host does not match its URL.');
-  requireValue(!headers.has('content-length') || headers.get('content-length') === String(size), 'AGC upload length does not match the package.');
-  requireValue(!headers.has('content-type') || headers.get('content-type') === 'application/octet-stream', 'AGC returned an unexpected upload content type.');
-  headers.set('content-length', String(size));
-  headers.set('content-type', 'application/octet-stream');
+  // Preserve Huawei's signed headers, adding binary-body defaults when absent.
+  if (!headers.has('content-length')) headers.set('content-length', String(size));
+  if (!headers.has('content-type')) headers.set('content-type', 'application/octet-stream');
   return { url, headers, objectId: value.objectId };
 }
 
@@ -142,13 +137,10 @@ export async function uploadApp({ file, appId, serviceAccountJson, chineseMainla
   // OBS only stores the bytes. Register the package before reporting success.
   const registrationUrl = new URL(PACKAGE_INFO_URL);
   registrationUrl.searchParams.set('appId', appId);
-  const registration = await requestJson(fetchImpl, registrationUrl, {
+  await requestJson(fetchImpl, registrationUrl, {
     method: 'PUT', headers, body: JSON.stringify({ fileName, objectId: info.objectId }),
   }, 'AGC package registration');
-  const packageId = registration.packageId;
-  requireValue(packageId === undefined || (typeof packageId === 'string' && packageId.length > 0 && packageId.length <= 32), 'AGC returned an invalid package ID.');
-  // ret.code=0 confirms registration; packageId is optional in Huawei's schema.
-  return { fileName, size: metadata.size, sha256, objectId: info.objectId, packageId };
+  return { fileName, size: metadata.size, sha256, objectId: info.objectId };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

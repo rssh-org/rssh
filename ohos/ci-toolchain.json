@@ -1,21 +1,6 @@
 {
   "version": "26.0.0.821",
-  "platform": "linux-x64",
-  "archive": "commandline-tools-linux-x64-26.0.0.821.zip",
   "sha256": "58da7359019e9360a8bb82da0cd1d3b3b26fedc338379f257849f2162e3ac1fc",
-  "archiveSize": 2347882285,
-  "apiVersion": "26",
-  "sdkVersion": "26.0.0.105",
-  "nodeVersion": "24.14.1",
-  "hvigorVersion": "6.26.4",
-  "ohpmVersion": "26.0.0.630",
-  "javaVersion": "17",
-  "downloadUrlSecret": "OHOS_COMMAND_LINE_TOOLS_URL",
-  "sources": {
-    "download": "https://developer.huawei.com/consumer/cn/download/command-line-tools-for-hmos",
-    "versions": "https://developer.huawei.com/consumer/en/doc/harmonyos-releases/deveco-studio-new-features-2600",
-    "pipeline": "https://developer.huawei.com/consumer/en/doc/harmonyos-guides/ide-command-line-building-app",
-    "archive": "https://contentcenter-vali-drcn.dbankcdn.cn/pvt_2/DeveloperAlliance_package_901_9/d1/v3/PCx_dpJhQG63WXNUPT30vg/commandline-tools-linux-x64-26.0.0.821.zip",
-    "checksum": "The official archive GET response x-amz-content-sha256 header; checked 2026-10-27. The signed download URL is stored only in the GitHub environment secret."
-  }
+  "source": "https://developer.huawei.com/consumer/cn/download/command-line-tools-for-hmos",
+  "checksumSource": "Official Linux x64 archive GET response x-amz-content-sha256 header, verified 2026-10-27."
 }

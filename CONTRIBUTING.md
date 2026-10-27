@@ -253,9 +253,11 @@ relative `signing/...` paths in `signing.local.json`. Keep the matching DevEco
 `material/` beside the keystore. Pack and configure the Secret without printing it:
 
 ```bash
-node ohos/scripts/ci-signing.mjs pack /tmp/rssh-signing.base64
-gh secret set OHOS_SIGNING_BUNDLE_BASE64 --env harmonyos-release < /tmp/rssh-signing.base64
-rm /tmp/rssh-signing.base64
+signing_tmp=$(mktemp -d)
+COPYFILE_DISABLE=1 tar -czf "$signing_tmp/signing.tar.gz" -C ohos/app signing.local.json signing
+base64 < "$signing_tmp/signing.tar.gz" | tr -d '\n' > "$signing_tmp/signing.base64"
+gh secret set OHOS_SIGNING_BUNDLE_BASE64 --env harmonyos-release < "$signing_tmp/signing.base64"
+rm -r "$signing_tmp"
 gh secret set AGC_SERVICE_ACCOUNT_JSON --env harmonyos-release < /private/path/private.json
 gh variable set AGC_APP_ID --env harmonyos-release --body YOUR_NUMERIC_APP_ID
 ```

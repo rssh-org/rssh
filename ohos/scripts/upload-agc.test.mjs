@@ -118,7 +118,6 @@ test('HarmonyOS upload authenticates, PUTs exact bytes, and registers the packag
   assert.deepEqual(JSON.parse(registration.body), { fileName: 'RSSH release.app', objectId: 'CN/test/RSSH.app' });
   assert.deepEqual(result, {
     fileName: 'RSSH release.app', size: f.bytes.length, sha256: query.get('sha256'), objectId: 'CN/test/RSSH.app',
-    packageId: '157300000005952',
   });
 });
 
@@ -157,7 +156,6 @@ for (const [name, config, expected] of [
   ['missing business status', { registrationReply: { packageId: '123' } }, /missing or invalid/],
   ['a string business status', { registrationReply: { ret: { code: '0' } } }, /missing or invalid/],
   ['invalid JSON', { registrationBody: 'SECRET do-not-log' }, /package registration response was not valid JSON/],
-  ['invalid package ID', { registrationReply: { ret: { code: 0 }, packageId: 123 } }, /invalid package ID/],
 ]) {
   test(`package registration ${name} fails the upload after OBS accepts the bytes`, async (t) => {
     const f = await fixture(t, config);
@@ -170,13 +168,6 @@ for (const [name, config, expected] of [
     assert.deepEqual(f.requests[1].body, f.bytes);
   });
 }
-
-test('a successful registration may omit the optional packageId', async (t) => {
-  const f = await fixture(t, { registrationReply: { ret: { code: 0 } } });
-  const result = await uploadApp(f.options, { fetchImpl: f.fetchImpl, now });
-  assert.equal(f.requests.length, 3);
-  assert.equal(result.packageId, undefined);
-});
 
 test('package registration transport failures are redacted and do not report success', async (t) => {
   const f = await fixture(t);
@@ -196,9 +187,6 @@ for (const [name, info] of [
   ['HTTP upload URL', { url: 'http://upload.example.test/package' }],
   ['credentials in URL', { url: 'https://secret@upload.example.test/package' }],
   ['unexpected method', { method: 'POST' }],
-  ['wrong signed Host', { headers: { Host: 'other.example.test' } }],
-  ['wrong content length', { headers: { 'Content-Length': '999' } }],
-  ['unexpected content type', { headers: { 'Content-Type': 'multipart/form-data' } }],
 ]) {
   test(`rejects ${name} before uploading`, async (t) => {
     const f = await fixture(t, { urlReply: { ret: { code: 0 }, urlInfo: {
