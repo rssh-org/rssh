@@ -53,7 +53,7 @@ jobs:
           OHOS_COMMAND_LINE_TOOLS_URL: ${{ secrets.OHOS_COMMAND_LINE_TOOLS_URL }}
           OHOS_SIGNING_BUNDLE_BASE64: ${{ secrets.OHOS_SIGNING_BUNDLE_BASE64 }}
           AGC_SERVICE_ACCOUNT_JSON: ${{ secrets.AGC_SERVICE_ACCOUNT_JSON }}
-          AGC_APP_ID: ${{ vars.AGC_APP_ID }}
+          AGC_APP_ID: ${{ secrets.AGC_APP_ID }}
         run: |
           for name in OHOS_COMMAND_LINE_TOOLS_URL OHOS_SIGNING_BUNDLE_BASE64 AGC_SERVICE_ACCOUNT_JSON AGC_APP_ID; do
             if [ -z "${!name}" ]; then
@@ -130,7 +130,7 @@ jobs:
 
       - name: Upload and register in AppGallery Connect (no review submission)
         env:
-          AGC_APP_ID: ${{ vars.AGC_APP_ID }}
+          AGC_APP_ID: ${{ secrets.AGC_APP_ID }}
           AGC_SERVICE_ACCOUNT_JSON: ${{ secrets.AGC_SERVICE_ACCOUNT_JSON }}
           AGC_CHINESE_MAINLAND_FLAG: ${{ vars.AGC_CHINESE_MAINLAND_FLAG }}
         run: node ohos/scripts/upload-agc.mjs app/gen/ohos/build/outputs/default/RSSH.app

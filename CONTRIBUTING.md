@@ -240,7 +240,7 @@ Configure the GitHub environment **`harmonyos-release`** under
 | Secret | `OHOS_SIGNING_BUNDLE_BASE64` | Bundle generated below from release signing inputs for `com.rssh.app` |
 | Secret | `AGC_SERVICE_ACCOUNT_JSON` | Complete downloaded Service Account `private.json` |
 | Secret | `OHOS_COMMAND_LINE_TOOLS_URL` | Official Linux tool bundle URL matching `ohos/ci-toolchain.json`; already configured for this repository |
-| Variable | `AGC_APP_ID` | Numeric APP ID from AppGallery Connect, not the bundle identifier |
+| Secret | `AGC_APP_ID` | Numeric APP ID from AppGallery Connect, not the bundle identifier |
 | Variable | `AGC_CHINESE_MAINLAND_FLAG` | For developers registered outside mainland China: `1` for mainland distribution, `0` otherwise; omit for mainland accounts |
 
 For the [AGC Service Account](https://developer.huawei.com/consumer/en/doc/app/agc-help-connect-api-obtain-server-auth-0000002271134661),
@@ -259,7 +259,7 @@ base64 < "$signing_tmp/signing.tar.gz" | tr -d '\n' > "$signing_tmp/signing.base
 gh secret set OHOS_SIGNING_BUNDLE_BASE64 --env harmonyos-release < "$signing_tmp/signing.base64"
 rm -r "$signing_tmp"
 gh secret set AGC_SERVICE_ACCOUNT_JSON --env harmonyos-release < /private/path/private.json
-gh variable set AGC_APP_ID --env harmonyos-release --body YOUR_NUMERIC_APP_ID
+gh secret set AGC_APP_ID --env harmonyos-release --body YOUR_NUMERIC_APP_ID
 ```
 
 CI pins the SDK archive checksum and removes signing inputs after packaging.
