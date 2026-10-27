@@ -224,6 +224,51 @@ decryption.
 `signing.local.json` and `signing/` are Git-ignored and copied into the generated
 project during preparation. `--unsigned` does not require signing configuration.
 
+#### GitHub Actions upload
+
+Stable `vMAJOR.MINOR.PATCH` tags run **HarmonyOS Upload** after the release tests.
+It builds on GitHub's Ubuntu runner, signs both HAPs, archives `RSSH.app`, and
+uploads it and registers the package in AppGallery Connect. It **never submits
+review or publishes**.
+You can also run the workflow manually with a stable version and selected ref.
+
+Configure the GitHub environment **`harmonyos-release`** under
+**Settings > Environments**:
+
+| Type | Name | Value |
+| --- | --- | --- |
+| Secret | `OHOS_SIGNING_BUNDLE_BASE64` | Bundle generated below from release signing inputs for `com.rssh.app` |
+| Secret | `AGC_SERVICE_ACCOUNT_JSON` | Complete downloaded Service Account `private.json` |
+| Secret | `OHOS_COMMAND_LINE_TOOLS_URL` | Official Linux tool bundle URL matching `ohos/ci-toolchain.json`; already configured for this repository |
+| Variable | `AGC_APP_ID` | Numeric APP ID from AppGallery Connect, not the bundle identifier |
+| Variable | `AGC_CHINESE_MAINLAND_FLAG` | For developers registered outside mainland China: `1` for mainland distribution, `0` otherwise; omit for mainland accounts |
+
+For the [AGC Service Account](https://developer.huawei.com/consumer/en/doc/app/agc-help-connect-api-obtain-server-auth-0000002271134661),
+open **Users and permissions > API key > Connect API > Service Account**.
+Create a **developer-level** account with the **App administrator** role and
+download its JSON. Project-level accounts are not supported by the upload API.
+
+Prepare release certificates/profile/keystore in `ohos/app/signing/` and use
+relative `signing/...` paths in `signing.local.json`. Keep the matching DevEco
+`material/` beside the keystore. Pack and configure the Secret without printing it:
+
+```bash
+signing_tmp=$(mktemp -d)
+COPYFILE_DISABLE=1 tar -czf "$signing_tmp/signing.tar.gz" -C ohos/app signing.local.json signing
+base64 < "$signing_tmp/signing.tar.gz" | tr -d '\n' > "$signing_tmp/signing.base64"
+gh secret set OHOS_SIGNING_BUNDLE_BASE64 --env harmonyos-release < "$signing_tmp/signing.base64"
+rm -r "$signing_tmp"
+gh secret set AGC_SERVICE_ACCOUNT_JSON --env harmonyos-release < /private/path/private.json
+gh variable set AGC_APP_ID --env harmonyos-release --body YOUR_NUMERIC_APP_ID
+```
+
+CI pins the SDK archive checksum and removes signing inputs after packaging.
+`versionCode` defaults to `major * 1000000 + minor * 1000 + patch`; minor and patch
+must be below 1000. If existing AGC versions use higher codes, use the manual
+workflow's `version_code` override for each affected release. Success confirms
+upload and package registration; check asynchronous package processing in AGC
+before submitting review yourself.
+
 ## Running outside Tauri (headless server + IDEA plugin)
 
 The frontend can run **outside** the Tauri desktop shell — in a plain browser, or

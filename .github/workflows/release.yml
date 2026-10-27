@@ -10,7 +10,7 @@ permissions:
 jobs:
   # ── Tests (gate for all build jobs) ──────────────────────────────
   # 跑一次 ubuntu 即可：测试是平台无关的纯函数 + 协议解析。
-  # build-desktop / build-android 都 needs: test —— 失败时不浪费 runner。
+  # 各平台构建都 needs: test —— 失败时不浪费 runner。
   test:
     runs-on: ubuntu-22.04
     steps:
@@ -73,6 +73,20 @@ jobs:
               exit 1
             fi
           done
+
+  # Stable releases upload the signed App Pack to AGC, without submitting review.
+  build-ohos:
+    needs: test
+    if: ${{ !contains(github.ref_name, '-') }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-ohos.yml
+    with:
+      version: ${{ github.ref_name }}
+    secrets:
+      OHOS_COMMAND_LINE_TOOLS_URL: ${{ secrets.OHOS_COMMAND_LINE_TOOLS_URL }}
+      OHOS_SIGNING_BUNDLE_BASE64: ${{ secrets.OHOS_SIGNING_BUNDLE_BASE64 }}
+      AGC_SERVICE_ACCOUNT_JSON: ${{ secrets.AGC_SERVICE_ACCOUNT_JSON }}
 
   # ── Desktop (macOS / Linux / Windows) ────────────────────────────
   build-desktop:

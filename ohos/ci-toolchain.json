@@ -1,0 +1,6 @@
+{
+  "version": "26.0.0.821",
+  "sha256": "58da7359019e9360a8bb82da0cd1d3b3b26fedc338379f257849f2162e3ac1fc",
+  "source": "https://developer.huawei.com/consumer/cn/download/command-line-tools-for-hmos",
+  "checksumSource": "Official Linux x64 archive GET response x-amz-content-sha256 header, verified 2026-10-27."
+}
