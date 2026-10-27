@@ -1,0 +1,133 @@
+name: HarmonyOS Upload
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      version_code:
+        required: false
+        type: string
+    secrets:
+      OHOS_COMMAND_LINE_TOOLS_URL:
+        required: true
+      OHOS_SIGNING_BUNDLE_BASE64:
+        required: true
+      AGC_SERVICE_ACCOUNT_JSON:
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Stable version to build from the selected ref (e.g. 0.3.2)'
+        required: true
+        type: string
+      version_code:
+        description: 'Optional override higher than previously uploaded AGC version codes'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# One upload at a time; a later release must not interrupt an in-flight upload.
+concurrency:
+  group: harmonyos-upload
+  cancel-in-progress: false
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: harmonyos-release
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check release configuration
+        env:
+          OHOS_COMMAND_LINE_TOOLS_URL: ${{ secrets.OHOS_COMMAND_LINE_TOOLS_URL }}
+          OHOS_SIGNING_BUNDLE_BASE64: ${{ secrets.OHOS_SIGNING_BUNDLE_BASE64 }}
+          AGC_SERVICE_ACCOUNT_JSON: ${{ secrets.AGC_SERVICE_ACCOUNT_JSON }}
+          AGC_APP_ID: ${{ vars.AGC_APP_ID }}
+        run: |
+          for name in OHOS_COMMAND_LINE_TOOLS_URL OHOS_SIGNING_BUNDLE_BASE64 AGC_SERVICE_ACCOUNT_JSON AGC_APP_ID; do
+            if [ -z "${!name}" ]; then
+              echo "Missing $name in the harmonyos-release GitHub environment. See CONTRIBUTING.md."
+              exit 1
+            fi
+          done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+          cache: npm
+
+      - run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-ohos
+
+      # Tag releases reach this workflow after release.yml's full test gate.
+      - name: Check manually dispatched releases
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          npm test
+          npm run test:build
+
+      - name: Prepare release versions
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          OHOS_VERSION_CODE: ${{ inputs.version_code }}
+        run: node ohos/scripts/prepare-release.mjs "$RELEASE_VERSION"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install pinned HarmonyOS command line tools
+        env:
+          OHOS_COMMAND_LINE_TOOLS_URL: ${{ secrets.OHOS_COMMAND_LINE_TOOLS_URL }}
+        run: bash ohos/scripts/setup-ci-toolchain.sh
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ohos -> ../target/ohos
+          shared-key: ohos-26.0.0.821
+
+      - name: Install pinned Rust build helper
+        run: cargo install ohrs --version 1.5.0 --locked
+
+      - name: Restore release signing inputs
+        env:
+          OHOS_SIGNING_BUNDLE_BASE64: ${{ secrets.OHOS_SIGNING_BUNDLE_BASE64 }}
+        run: node ohos/scripts/ci-signing.mjs restore
+
+      - name: Build signed phone and desktop App Pack
+        run: ./scripts/build-ohos.sh
+
+      - name: Remove signing inputs
+        if: always()
+        run: node ohos/scripts/ci-signing.mjs clean
+
+      - name: Keep the signed App Pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: rssh-${{ env.OHOS_RELEASE_VERSION }}-harmonyos
+          path: app/gen/ohos/build/outputs/default/RSSH.app
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload and register in AppGallery Connect (no review submission)
+        env:
+          AGC_APP_ID: ${{ vars.AGC_APP_ID }}
+          AGC_SERVICE_ACCOUNT_JSON: ${{ secrets.AGC_SERVICE_ACCOUNT_JSON }}
+          AGC_CHINESE_MAINLAND_FLAG: ${{ vars.AGC_CHINESE_MAINLAND_FLAG }}
+        run: node ohos/scripts/upload-agc.mjs app/gen/ohos/build/outputs/default/RSSH.app
