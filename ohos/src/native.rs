@@ -1,21 +1,24 @@
-//! Native services shared by the HarmonyOS app and core transports.
+//! HarmonyOS application context and native implementations supplied to core.
 use std::sync::OnceLock;
 
 use openharmony_ability::OpenHarmonyApp;
 
-use crate::error::{AppError, AppResult};
-
-#[path = "pty.rs"]
-pub mod pty;
-
-#[path = "serial.rs"]
-pub mod serial;
+use rssh_core::error::{AppError, AppResult};
 
 // Ability recreation refreshes the contexts inside this shared handle.
 static APP: OnceLock<OpenHarmonyApp> = OnceLock::new();
 
 pub fn configure(app: OpenHarmonyApp) {
     assert!(APP.set(app).is_ok(), "RSSH native host already configured");
+}
+
+pub fn services() -> rssh_core::state::NativeServices {
+    rssh_core::state::NativeServices {
+        keyring: crate::secret::try_open().map(|store| {
+            std::sync::Arc::new(store) as std::sync::Arc<dyn rssh_core::secret::SecretStore>
+        }),
+        serial: std::sync::Arc::new(crate::serial::OhosSerialBackend),
+    }
 }
 
 pub fn app() -> AppResult<OpenHarmonyApp> {

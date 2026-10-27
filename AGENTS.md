@@ -74,11 +74,11 @@ rg '^let _.*\$state|^export function' frontend/lib/stores frontend/lib/ai fronte
 
 页面排版只看窗口或容器宽度：CSS 用 media/container query，需要切换 DOM 时用 `layout.compact()`；不能用 UA、OS 或触摸能力选择手机/电脑布局。触摸、鼠标、键盘按实际输入事件处理，窄窗口不代表没有硬件键盘，宽窗口也可能需要软键盘。
 
-原生功能必须走 `app.capabilities()`（后端 `get_runtime_capabilities`），不能从宽度推断 PTY、串口、多窗口、目录授权等能力。Rust 只在平台 API、库或实现不同处使用 `#[cfg(...)]`。OHOS 的 Rust 目标同时是 `target_os="linux"` 和 `target_env="ohos"`；Linux 专用的 libudev、Secret Service、WebKitGTK 等必须排除 OHOS；Rust 源码统一使用 `linux` / `macos` / `windows` / `android` / `ios` / `ohos` 六个互斥条件（`windows` 为 Rust 内建，其余由三个 crate 的 build.rs 共用 scripts/platform-cfg.rs 定义）；`linux` 明确排除 OHOS，不使用 Tauri 的 `mobile` / `desktop` 分类。多系统实现显式列举，例如 `any(android, ios)`。鸿蒙两个 HAP 共用一份 Rust 库，手机/平板与电脑由 `ohos::device::DeviceClass` 在运行时区分，不能伪造两个编译期 OS。Cargo.toml 依赖条件仍使用原生 target 表达式（build.rs 的 cfg 不参与依赖解析）。App 成功加载能力后才挂载资源页面。Docker CLI、kubectl、keychain 等外部能力仍应在运行时真实探测。
+原生功能必须走 `app.capabilities()`（后端 `get_runtime_capabilities`），不能从宽度推断 PTY、串口、多窗口、目录授权等能力。Rust 只在平台 API、库或实现不同处使用 `#[cfg(...)]`。OHOS 的 Rust 目标同时是 `target_os="linux"` 和 `target_env="ohos"`；Linux 专用的 libudev、Secret Service、WebKitGTK 等必须排除 OHOS；Rust 源码统一使用 `linux` / `macos` / `windows` / `android` / `ios` / `ohos` 六个互斥条件（`windows` 为 Rust 内建，其余由各 crate 的 build.rs 共用 scripts/platform-cfg.rs 定义）；`linux` 明确排除 OHOS，不使用 Tauri 的 `mobile` / `desktop` 分类。多系统实现显式列举，例如 `any(android, ios)`。鸿蒙两个 HAP 共用一份 Rust 库，手机/平板与电脑由 `ohos/src/device.rs` 的 `DeviceClass` 在运行时区分，不能伪造两个编译期 OS。Cargo.toml 依赖条件仍使用原生 target 表达式（build.rs 的 cfg 不参与依赖解析）。App 成功加载能力后才挂载资源页面。Docker CLI、kubectl、keychain 等外部能力仍应在运行时真实探测。
 
 ```bash
 rg 'layout\.compact|@media|@container|capabilities\(' frontend
-cat scripts/platform-cfg.rs  # 三个 crate 共用的六系统 cfg 定义
+cat scripts/platform-cfg.rs  # 各 crate 共用的六系统 cfg 定义
 rg 'cfg\(|cfg!\(' core/src app/src cli/src ohos/src
 ```
 
@@ -140,25 +140,34 @@ rg 'if version <' core/src/db/schema.rs   # 每个块只加不改
 | Headless 二进制 `rssh-server` | `app/src/server_main.rs`，gated by feature `server` | 同上；给 browser / JetBrains 提供 embedded HTTP + WebSocket IPC |
 | 共享引擎 `rssh_core` | `core/src/lib.rs`，不依赖 Tauri | `cargo tree -p rssh-core` |
 | 应用 lib `rssh_lib` | `app/src/lib.rs`，Tauri / headless 适配入口 | `cat app/Cargo.toml` 看 features |
+| 鸿蒙入口 `rssh-ohos` | `ohos/src/lib.rs`，输出 `librssh_ohos.so` | `cat ohos/Cargo.toml`；独立 workspace，path 依赖共享 app/core |
+
+根 `Cargo.toml` 的 `workspace.dependencies` 统一普通平台共享依赖版本，各 crate
+声明自己使用的依赖与 features。鸿蒙维护独立的 `ohos/Cargo.toml` / `ohos/Cargo.lock`，
+框架 patch 仅作用于这份依赖图；直接依赖原始 app/core 清单，不复制 Rust 源码或生成清单。
+鸿蒙 SDK 实现放在自己的 crate，通过 core 的原生服务接口和 app 的 `NativePlatform`
+注入，不用跨目录 `#[path]` 把鸿蒙实现编进共享 crate。
 
 ### 平台源码与构建产物
 
 | 概念 | 在哪 | 怎么验证 |
 |---|---|---|
 | Android 原生工程 | `android/` | `npm run tauri -- android dev --open` 先准备生成工程再打开 IDE |
-| OHOS 平台实现 | `ohos/app/`、`ohos/src/` | ArkTS 工程与 Rust 适配集中维护；核对 `app/src/lib.rs` 模块入口 |
+| OHOS 平台实现 | `ohos/app/`、`ohos/src/` | ArkTS 工程与独立 Rust crate；核对 `ohos/Cargo.toml` 与 `ohos/src/lib.rs` |
 | OHOS 原生适配测试 | `ohos/tests/` | `npm test` 直接测试 `ohos/app/` 源码，不依赖生成目录 |
-| OHOS 框架与准备工具 | `ohos/framework/`、`ohos/scripts/` | 独立 lock、上游 revision、patch、测试及生成 workspace |
+| OHOS 框架与准备工具 | `ohos/framework/`、`ohos/scripts/` | 上游 revision、patch、测试；准备上游源码与打包元数据，不生成 Cargo 清单 |
 | 图标 | `icons/` | `app/tauri.conf.json` 的 `bundle.icon` 引用；移动端复制进生成工程 |
 | 桌面打包准备 | `desktop/scripts/` | 编译 CLI 后放入 app/bin，再交给 Tauri bundler |
 | iOS 资源 | `ios/` | Info.plist / PrivacyInfo 随打包进入生成项目 |
 | 平台构建入口 | `scripts/build-*.sh`、`scripts/tauri.mjs` | `npm run tauri -- ...` 调用仓库准备流程，勿直接绕过 wrapper |
-| 生成目录 | `app/gen/`、`app/bin/`、`target/` | 全部忽略；源码修改必须回到对应平台目录 |
+| 生成目录 | `app/gen/`、`app/bin/`、`ohos/gen/`、`target/` | 全部忽略；源码修改必须回到对应平台目录 |
 
 `app/capabilities/` 是权限源码，保留跟踪。macOS / Windows / Linux 打包时
 统一编译 CLI、暂存到 `app/bin/` 并装入应用资源，供 GUI 安装。
 普通开发和 Cargo 检查不依赖预编译二进制。各平台构建与打包见
 [CONTRIBUTING.md](CONTRIBUTING.md#build)。
+Android 的 Gradle/Kotlin 源码暂存到生成工程；iOS 只维护资源，Xcode 工程由 Tauri
+生成；IDEA 插件是独立 Gradle 工程，打包已编译的 `rssh-server`。这些目录不是额外 Rust crate。
 
 ### 前端
 
@@ -187,11 +196,11 @@ rg 'if version <' core/src/db/schema.rs   # 每个块只加不改
 | SSH 客户端 | `core/src/ssh/client.rs` | russh wrapper |
 | SSH 认证 / 算法策略 | `core/src/ssh/auth.rs` + `ssh/algorithms.rs` | password/key/agent/kbd-interactive + per-profile algorithms |
 | Telnet | `core/src/terminal/telnet.rs` + `commands/telnet.rs` | 跨平台 TCP transport + profile CRUD |
-| 串口 | `core/src/terminal/serial.rs` + `commands/serial.rs` | desktop-only serialport transport |
+| 串口 | `core/src/terminal/serial.rs` + `commands/serial.rs` | 共享契约与生命周期；桌面 serialport、鸿蒙原生适配由宿主选择 |
 | Docker / K8s 动态发现 | `core/src/commands/discovery.rs` | source 持久化；发现结果临时；connector PTY 见 `commands/pty.rs` |
 | SFTP | `core/src/ssh/sftp.rs` | russh-sftp wrapper |
 | 端口转发 | `core/src/ssh/forward.rs` | local/remote/dynamic |
-| PTY | `core/src/terminal/pty.rs`；入口由 `terminal/mod.rs` 的系统 cfg 选择 | 桌面 portable-pty；OHOS 按运行时能力开放 |
+| PTY | `core/src/terminal/pty.rs` | 共享 portable-pty 实现；OHOS 按运行时能力开放 |
 | 数据库 | `core/src/db/`，rusqlite bundled | 看 `db/schema.rs` |
 | 数据迁移 | `core/src/migration/` + `db/schema.rs` | GUI / CLI 启动都必须走幂等 migration |
 | Secret 抽象 | `core/src/secret/`，HybridStore + master-key backend + 加密 DB | 见 R5 |
@@ -228,6 +237,7 @@ npm run tauri -- dev                                            # 本地 GUI
 node --test ohos/scripts/*.test.mjs                             # OHOS 构建流程回归
 # 固定上游源码准备后：
 node --test ohos/framework/tests/*.test.mjs                     # OHOS 框架契约
+cargo test --manifest-path ohos/Cargo.toml --lib --locked        # OHOS 平台辅助逻辑（可在宿主机运行）
 ```
 
 当前没有 frontend lint script；有 Vitest、Rust unit/integration tests 与 Node 构建流程测试。`npm test` 包含 `ohos/tests/`，但不覆盖 `.mjs` Node 测试；修改打包流程需单独运行后者。UI、真实 SSH/Telnet/serial、Docker/K8s 等环境行为仍要按改动范围手测，不能拿编译替代。

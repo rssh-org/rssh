@@ -4,16 +4,16 @@ version = "0.0.1"
 edition = "2021"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 thiserror = "2"
-rusqlite = { version = "0.31", features = ["bundled"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-dirs = "5"
+rusqlite = { workspace = true, features = ["bundled"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
+chrono = { workspace = true, features = ["serde"] }
+dirs = { workspace = true }
 # `Include` glob expansion when reading ~/.ssh/config (issue #96)
 glob = "0.3"
-log = "0.4"
+log = { workspace = true }
 
 # SSH — 0.49+ merged russh-keys into russh::keys. RSA server-sig-algs
 # support via PrivateKeyWithHashAlg + best_supported_rsa_hash().
@@ -22,8 +22,8 @@ log = "0.4"
 # resolve against stable pkcs5/pkcs8/ed25519 now — the 0.60-era local
 # exact-pins are gone with it.
 russh = "0.62.7"
-tokio = { version = "1", features = ["sync", "macros", "net", "io-util", "rt", "process", "time", "fs", "rt-multi-thread"] }
-async-trait = "0.1"
+tokio = { workspace = true, features = ["sync", "macros", "net", "io-util", "rt", "process", "time", "fs", "rt-multi-thread"] }
+async-trait = { workspace = true }
 
 # SFTP
 russh-sftp = "2"
@@ -33,7 +33,7 @@ russh-sftp = "2"
 zip = "2"
 
 # HTTP + crypto
-base64 = "0.22"
+base64 = { workspace = true }
 # 配置备份/同步走 Argon2id（KDF）+ ChaCha20-Poly1305（AEAD），
 # 标准 RustCrypto 实现；不再手搓。getrandom 用于生成 salt + nonce。
 argon2 = "0.5"
@@ -46,13 +46,13 @@ regex = "1"
 # regex 的伴生 crate（已在依赖树里）。用于 save 时拒绝零宽匹配的脱敏规则
 # （minimum_len()==0 → 会在每个位置 replace → 灾难性 over-replacement）。
 regex-syntax = "0.8"
-futures-util = "0.3"
+futures-util = { workspace = true }
 html2md = "0.2.15"
 
 tree-sitter = "0.26.9"
 tree-sitter-bash = "0.25.1"
 fontdb = "0.23.0"
-url = "2.5.8"
+url = { workspace = true }
 
 # Mobile reqwest carries webpki-roots so TLS works without a probeable
 # system trust store; OHOS rides the same table (ArkWeb devices have no
@@ -82,6 +82,10 @@ libc = "0.2"
 serialport = "4.9.0"
 portable-pty = "0.8"
 
+# The shared PTY implementation also runs on HarmonyOS with its supported version.
+[target.'cfg(target_env = "ohos")'.dependencies]
+portable-pty = "0.9"
+
 # Keychain — Apple platforms share the native Security.framework backend.
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
@@ -92,4 +96,4 @@ keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [dev-dependencies]
 mockito = "1.7.2"
-tempfile = "3"
+tempfile = { workspace = true }

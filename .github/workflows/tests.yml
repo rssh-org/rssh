@@ -53,11 +53,22 @@ jobs:
       - name: Build preparation tests (node)
         run: npm run test:build
 
+      - name: Prepare pinned OHOS framework sources
+        run: node ohos/scripts/prepare-ohos-sources.mjs
+
+      - name: OHOS framework tests (node)
+        run: node --test --test-concurrency=2 ohos/framework/tests/*.test.mjs
+
       - name: Build frontend for embedded server
         run: npm run build
 
       - name: Backend tests (cargo)
         run: cargo test --workspace --all-features
+
+      - name: OHOS native helper tests (host cargo)
+        run: cargo test --manifest-path ohos/Cargo.toml --lib --locked
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
       - name: Check standalone CLI and headless server
         run: |

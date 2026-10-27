@@ -5,11 +5,14 @@ use crate::files::{self, FileFilter};
 
 #[tauri::command]
 pub async fn resolve_local_paths(
+    app: tauri::AppHandle,
     local_root: String,
     relative_paths: Vec<String>,
     write: bool,
 ) -> AppResult<Vec<files::ResolvedPath>> {
-    files::resolve_paths(local_root, relative_paths, write).await
+    crate::platform::host::platform(&app)
+        .resolve_paths(local_root, relative_paths, write)
+        .await
 }
 
 #[tauri::command]

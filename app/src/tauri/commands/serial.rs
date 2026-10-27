@@ -6,13 +6,15 @@ use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 #[tauri::command]
-pub async fn serial_get_capabilities() -> AppResult<serial::SerialCapabilities> {
-    rssh_core::commands::serial::serial_get_capabilities().await
+pub async fn serial_get_capabilities(
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<serial::SerialCapabilities> {
+    rssh_core::commands::serial::serial_get_capabilities(state.inner().as_ref()).await
 }
 
 #[tauri::command]
-pub async fn serial_list_ports() -> AppResult<Vec<String>> {
-    rssh_core::commands::serial::serial_list_ports().await
+pub async fn serial_list_ports(state: State<'_, Arc<AppState>>) -> AppResult<Vec<String>> {
+    rssh_core::commands::serial::serial_list_ports(state.inner().as_ref()).await
 }
 
 #[tauri::command]

@@ -9,8 +9,12 @@ use openharmony_ability::{
     BridgeMainThreadEvent, BridgeNapiType, BridgePlugin, BridgeRuntime, PluginLifecycleEvent,
 };
 
-use crate::error::{locked, AppError, AppResult};
-use crate::terminal::serial::{SerialCapabilities, SerialConfig, SerialOut, SerialSink};
+use rssh_core::error::{locked, AppError, AppResult};
+use rssh_core::resource::{Cleanup, CleanupFuture, CleanupHandle, PendingOperation};
+use rssh_core::terminal::serial::{
+    SerialBackend, SerialCapabilities, SerialConfig, SerialConnection,
+    SerialHandle as EngineSerialHandle, SerialOut, SerialSink,
+};
 
 #[derive(Clone)]
 struct OutputTarget {
@@ -181,6 +185,60 @@ impl Drop for SerialSession {
 
 #[derive(Clone)]
 pub struct SerialHandle(Arc<SerialSession>);
+
+#[async_trait::async_trait]
+impl SerialConnection for SerialHandle {
+    async fn write(&self, data: &[u8]) -> AppResult<()> {
+        SerialHandle::write(self, data).await
+    }
+
+    async fn set_dtr(&self, level: bool) -> AppResult<()> {
+        SerialHandle::set_dtr(self, level).await
+    }
+
+    async fn set_rts(&self, level: bool) -> AppResult<()> {
+        SerialHandle::set_rts(self, level).await
+    }
+
+    async fn send_break(&self) -> AppResult<()> {
+        SerialHandle::send_break(self).await
+    }
+
+    fn port_name(&self) -> &str {
+        SerialHandle::port_name(self)
+    }
+
+    fn cleanup(&self) -> Option<CleanupHandle> {
+        Some(CleanupHandle::new(Arc::new(self.clone())))
+    }
+}
+
+pub struct OhosSerialBackend;
+
+#[async_trait::async_trait]
+impl SerialBackend for OhosSerialBackend {
+    async fn capabilities(&self) -> AppResult<SerialCapabilities> {
+        capabilities().await
+    }
+
+    async fn available_ports(&self) -> AppResult<Vec<String>> {
+        available_ports().await
+    }
+
+    async fn open(
+        &self,
+        session_id: String,
+        port: &str,
+        config: SerialConfig,
+        sink: SerialSink,
+        operation: &PendingOperation,
+    ) -> AppResult<(String, EngineSerialHandle)> {
+        open(session_id, port, config, sink, operation)
+            .await
+            .map(|(id, handle)| (id, EngineSerialHandle::new(handle)))
+    }
+}
+
 impl SerialHandle {
     async fn call<Request: BridgeNapiType>(&self, action: &str, request: Request) -> AppResult<()> {
         let _operation = self.0.operations.lock().await;
@@ -301,7 +359,7 @@ pub async fn open(
     port: &str,
     config: SerialConfig,
     sink: SerialSink,
-    operation: &crate::resource::PendingOperation,
+    operation: &PendingOperation,
 ) -> AppResult<(String, SerialHandle)> {
     let cancellation = operation.cancelled();
     tokio::pin!(cancellation);
@@ -338,9 +396,7 @@ pub async fn open(
     }));
     // The registry owns this clone before native authorization begins. Even
     // an aborted opening task cannot discard a partially opened native port.
-    operation.retain_cleanup(crate::resource::CleanupHandle::new(Arc::new(
-        handle.clone(),
-    )))?;
+    operation.retain_cleanup(CleanupHandle::new(Arc::new(handle.clone())))?;
     let opened = tokio::select! {
         biased;
         _ = &mut cancellation => Err(cancelled()),
@@ -368,8 +424,8 @@ pub async fn open(
     Ok((session_id, handle))
 }
 
-impl crate::resource::Cleanup for SerialHandle {
-    fn close(&self) -> crate::resource::CleanupFuture<'_> {
+impl Cleanup for SerialHandle {
+    fn close(&self) -> CleanupFuture<'_> {
         Box::pin(SerialHandle::close(self))
     }
 }

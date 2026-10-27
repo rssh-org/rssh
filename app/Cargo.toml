@@ -12,20 +12,20 @@ crate-type = ["staticlib", "cdylib", "lib"]
 tauri-build = { version = "2", optional = true , features = [] }
 
 [dependencies]
-rssh-core = { path = "../core" }
+rssh-core = { workspace = true }
 tauri = { version = "2", features = ["protocol-asset"], optional = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-uuid = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-dirs = "5"
-log = "0.4"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+chrono = { workspace = true, features = ["serde"] }
+dirs = { workspace = true }
+log = { workspace = true }
 env_logger = "0.11"
-tokio = { version = "1", features = ["sync", "macros", "net", "io-util", "rt", "process", "time", "fs", "rt-multi-thread"] }
-async-trait = "0.1"
-base64 = "0.22"
-futures-util = "0.3"
-url = "2.5.8"
+tokio = { workspace = true, features = ["sync", "macros", "net", "io-util", "rt", "process", "time", "fs", "rt-multi-thread"] }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+futures-util = { workspace = true }
+url = { workspace = true }
 # Embedded browser frontend and WebSocket adapter for JetBrains/headless.
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"], optional = true }
 include_dir = { version = "0.7", optional = true }
@@ -46,7 +46,7 @@ server = ["dep:tokio-tungstenite", "dep:include_dir"]
 custom-protocol = ["tauri", "tauri/custom-protocol"]
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 
 [[bin]]
 name = "rssh"

@@ -214,7 +214,7 @@ pub async fn resolve_paths(
     uri: String,
     relative_paths: Vec<String>,
     write: bool,
-) -> AppResult<Vec<crate::files::ResolvedPath>> {
+) -> AppResult<Vec<rssh_host::files::ResolvedPath>> {
     let bridge = super::app()?.bridge().map_err(super::native_error)?;
     let generation = directory_generation(&uri, write)?;
     let resolved = bridge
@@ -248,7 +248,7 @@ pub async fn resolve_paths(
                     }),
                 )),
             };
-            crate::files::ResolvedPath::new(file.relative_path, result)
+            rssh_host::files::ResolvedPath::new(file.relative_path, result)
         })
         .collect())
 }
@@ -277,7 +277,7 @@ pub async fn download_path(uri: String) -> AppResult<Option<std::path::PathBuf>>
     Ok(Some(path.path.into()))
 }
 
-pub async fn walk_directory(uri: String) -> AppResult<Vec<crate::files::LocalWalkEntry>> {
+pub async fn walk_directory(uri: String) -> AppResult<Vec<rssh_host::files::LocalWalkEntry>> {
     let bridge = super::app()?.bridge().map_err(super::native_error)?;
     let generation = directory_generation(&uri, false)?;
     let tree = bridge
@@ -297,7 +297,7 @@ pub async fn walk_directory(uri: String) -> AppResult<Vec<crate::files::LocalWal
     Ok(tree
         .entries
         .into_iter()
-        .map(|entry| crate::files::LocalWalkEntry {
+        .map(|entry| rssh_host::files::LocalWalkEntry {
             rel_path: entry.relative_path,
             size: entry.size as u64,
             local_path: entry.uri,

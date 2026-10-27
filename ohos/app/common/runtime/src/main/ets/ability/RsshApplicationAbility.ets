@@ -3,7 +3,7 @@ import { rsshPlugins } from './RsshPlugins';
 
 /** Desktop UIAbility instances are peer windows sharing one native application runtime. */
 export class RsshApplicationAbility extends NativeApplicationAbility {
-  public moduleName: string = 'rssh_lib';
+  public moduleName: string = 'rssh_ohos';
   public peerAbilityName: string = 'WindowAbility';
   public bridgePlugins = rsshPlugins();
 

@@ -1,5 +1,5 @@
 {
-  "name": "librssh_lib.so",
+  "name": "librssh_ohos.so",
   "version": "1.0.0",
   "types": "./Index.d.ts"
 }

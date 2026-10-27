@@ -3,16 +3,85 @@
 
 use crate::error::AppResult;
 
-#[cfg(not(all(feature = "tauri", ohos)))]
-#[path = "native.rs"]
-mod backend;
-#[cfg(all(feature = "tauri", ohos))]
-#[path = "ohos.rs"]
-mod backend;
-
-pub use backend::walk_directory;
+#[cfg(not(ohos))]
+pub(crate) mod native;
 #[cfg(feature = "tauri")]
-pub use backend::{download_target, open_file, pick_save, OpenedFile};
+use crate::platform::host::platform;
+
+// Browser/headless file operations use filesystem paths directly.
+#[cfg(not(ohos))]
+pub use native::walk_directory;
+
+#[cfg(feature = "tauri")]
+pub struct OpenedFile {
+    backend: FileBackend,
+}
+
+#[cfg(feature = "tauri")]
+enum FileBackend {
+    #[cfg(not(ohos))]
+    Native(native::OpenedFile),
+    Provider(tokio::fs::File),
+}
+
+#[cfg(feature = "tauri")]
+impl OpenedFile {
+    /// The host has transferred an owned descriptor; closing it releases access.
+    pub fn from_std(file: std::fs::File) -> Self {
+        Self {
+            backend: FileBackend::Provider(tokio::fs::File::from_std(file)),
+        }
+    }
+
+    #[cfg(not(ohos))]
+    pub(crate) fn from_native(file: native::OpenedFile) -> Self {
+        Self {
+            backend: FileBackend::Native(file),
+        }
+    }
+
+    pub fn stream(&mut self) -> &mut tokio::fs::File {
+        match &mut self.backend {
+            #[cfg(not(ohos))]
+            FileBackend::Native(file) => file.stream(),
+            FileBackend::Provider(file) => file,
+        }
+    }
+
+    pub async fn metadata(&self) -> std::io::Result<std::fs::Metadata> {
+        match &self.backend {
+            #[cfg(not(ohos))]
+            FileBackend::Native(file) => file.metadata().await,
+            FileBackend::Provider(file) => file.metadata().await,
+        }
+    }
+}
+
+#[cfg(feature = "tauri")]
+pub async fn pick_save(
+    app: &tauri::AppHandle,
+    default_name: String,
+    filters: Vec<FileFilter>,
+) -> AppResult<Option<String>> {
+    platform(app).pick_save(app, default_name, filters).await
+}
+
+#[cfg(feature = "tauri")]
+pub async fn open_file(
+    app: &tauri::AppHandle,
+    location: String,
+    write: bool,
+) -> AppResult<OpenedFile> {
+    platform(app).open_file(app, location, write).await
+}
+
+#[cfg(feature = "tauri")]
+pub async fn download_target(
+    app: &tauri::AppHandle,
+    location: String,
+) -> AppResult<DownloadTarget> {
+    platform(app).download_target(app, location).await
+}
 
 #[cfg(feature = "tauri")]
 #[derive(serde::Serialize)]
@@ -32,8 +101,8 @@ pub struct LocalWalkEntry {
 #[cfg(feature = "tauri")]
 #[derive(serde::Deserialize)]
 pub struct FileFilter {
-    name: String,
-    extensions: Vec<String>,
+    pub name: String,
+    pub extensions: Vec<String>,
 }
 
 /// Backends classify locations without opening or truncating the destination.
@@ -47,7 +116,7 @@ pub enum DownloadTarget {
 
 #[cfg(feature = "tauri")]
 async fn describe_location(app: &tauri::AppHandle, location: String) -> AppResult<PickedLocation> {
-    let name = backend::file_name(app, &location).await?;
+    let name = platform(app).file_name(app, &location).await?;
     Ok(PickedLocation {
         location,
         name: name.filter(|name| valid_display_name(name)),
@@ -63,7 +132,7 @@ fn valid_display_name(name: &str) -> bool {
 
 #[cfg(feature = "tauri")]
 pub async fn pick_open(app: &tauri::AppHandle) -> AppResult<Option<PickedLocation>> {
-    match backend::select_open(app).await? {
+    match platform(app).pick_open(app).await? {
         Some(location) => describe_location(app, location).await.map(Some),
         None => Ok(None),
     }
@@ -71,7 +140,7 @@ pub async fn pick_open(app: &tauri::AppHandle) -> AppResult<Option<PickedLocatio
 
 #[cfg(feature = "tauri")]
 pub async fn pick_open_files(app: &tauri::AppHandle) -> AppResult<Option<Vec<PickedLocation>>> {
-    let Some(locations) = backend::select_open_files(app).await? else {
+    let Some(locations) = platform(app).pick_open_files(app).await? else {
         return Ok(None);
     };
     let mut files = Vec::with_capacity(locations.len());
@@ -84,7 +153,7 @@ pub async fn pick_open_files(app: &tauri::AppHandle) -> AppResult<Option<Vec<Pic
 #[cfg(any(windows, macos, linux, ohos))]
 #[cfg(feature = "tauri")]
 pub async fn pick_folder(app: &tauri::AppHandle, write: bool) -> AppResult<Option<PickedLocation>> {
-    match backend::select_folder(app, write).await? {
+    match platform(app).pick_folder(app, write).await? {
         Some(location) => describe_location(app, location).await.map(Some),
         None => Ok(None),
     }
@@ -120,12 +189,13 @@ impl ResolvedPath {
     }
 }
 
+#[cfg(not(ohos))]
 pub async fn resolve_paths(
     local_root: String,
     relative_paths: Vec<String>,
     write: bool,
 ) -> AppResult<Vec<ResolvedPath>> {
-    backend::resolve_paths(local_root, relative_paths, write).await
+    native::resolve_paths(local_root, relative_paths, write).await
 }
 
 /// Remote names are relative names, never authority to escape a selected root.
@@ -197,6 +267,29 @@ pub async fn save_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "tauri")]
+    #[tokio::test]
+    async fn provider_descriptor_uses_the_shared_transfer_stream() {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+        let source = tempfile::NamedTempFile::new().unwrap();
+        let mut file = OpenedFile::from_std(source.reopen().unwrap());
+        // Downloads write through OpenedFile; uploads read its same owned stream.
+        file.write_all(b"provider content").await.unwrap();
+        file.flush().await.unwrap();
+        assert_eq!(file.metadata().await.unwrap().len(), 16);
+        file.stream()
+            .seek(std::io::SeekFrom::Start(0))
+            .await
+            .unwrap();
+        let mut content = Vec::new();
+        file.stream().read_to_end(&mut content).await.unwrap();
+        assert_eq!(content, b"provider content");
+        drop(file);
+        assert_eq!(std::fs::read(source.path()).unwrap(), content);
+    }
+
     #[test]
     fn provider_names_are_single_names_not_remote_paths() {
         for name in ["", ".", "..", "../key", "a/b", "a\0b"] {

@@ -86,6 +86,26 @@ pub struct OwnedWaiter<T> {
     pub sender: tokio::sync::oneshot::Sender<T>,
 }
 
+/// Native implementations selected by the application before opening its engine.
+pub struct NativeServices {
+    /// A successful native probe, or None when that backend is unavailable.
+    pub keyring: Option<Arc<dyn SecretStore>>,
+    #[cfg(any(windows, macos, linux, ohos))]
+    pub serial: Arc<dyn crate::terminal::serial::SerialBackend>,
+}
+
+impl NativeServices {
+    pub fn native() -> crate::error::AppResult<Self> {
+        Ok(Self {
+            // Resolve the serial adapter first: an OHOS host must inject its
+            // native implementations before opening or migrating user storage.
+            #[cfg(any(windows, macos, linux, ohos))]
+            serial: crate::terminal::serial::native_backend()?,
+            keyring: crate::secret::probe_keyring(),
+        })
+    }
+}
+
 pub struct AppState {
     pub db: Arc<Db>,
     pub secret_store: Arc<dyn SecretStore>,
@@ -98,6 +118,8 @@ pub struct AppState {
     pub pty_sessions: Mutex<HashMap<String, PtyHandle>>,
     #[cfg(any(windows, macos, linux, ohos))]
     pub serial_sessions: Mutex<HashMap<String, SerialHandle>>,
+    #[cfg(any(windows, macos, linux, ohos))]
+    pub serial_backend: Arc<dyn crate::terminal::serial::SerialBackend>,
     /// Telnet is plain TCP — available on every platform, no mobile gate.
     pub telnet_sessions: Mutex<HashMap<String, TelnetHandle>>,
     pub sftp_sessions: Mutex<HashMap<String, Arc<SftpHandle>>>,
@@ -134,10 +156,17 @@ pub struct AppState {
 impl AppState {
     /// Open one engine instance in the directory selected by its application.
     pub fn open(data_dir: PathBuf) -> crate::error::AppResult<Self> {
+        Self::open_with_services(data_dir, NativeServices::native()?)
+    }
+
+    pub fn open_with_services(
+        data_dir: PathBuf,
+        services: NativeServices,
+    ) -> crate::error::AppResult<Self> {
         #[cfg(any(windows, macos, linux, ohos))]
         crate::terminal::pty::init_available_shells();
         let db = Arc::new(Db::open(&data_dir)?);
-        let secrets = crate::secret::open(db.clone(), &data_dir)?;
+        let secrets = crate::secret::open_with_keyring(db.clone(), &data_dir, services.keyring)?;
         if let Err(error) = crate::migration::run_migrations(
             &db,
             secrets.raw_keyring.as_deref(),
@@ -159,6 +188,8 @@ impl AppState {
             pty_sessions: Mutex::new(HashMap::new()),
             #[cfg(any(windows, macos, linux, ohos))]
             serial_sessions: Mutex::new(HashMap::new()),
+            #[cfg(any(windows, macos, linux, ohos))]
+            serial_backend: services.serial,
             telnet_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
             transfer_cancels: Mutex::new(HashMap::new()),

@@ -57,13 +57,13 @@ pub async fn query() -> AppResult<DeviceResponse> {
         .map_err(super::native_error)
 }
 
-pub use rssh_core::ohos::pty::local_pty_available;
+pub use crate::pty::local_pty_available;
 
 /// Native capability and policy production stays inside the HarmonyOS adapter.
 pub async fn capabilities(
     window_label: &str,
-) -> AppResult<crate::platform::runtime::RuntimeCapabilities> {
-    use crate::platform::runtime::{RuntimeCapabilities, TerminalRuntimePolicy};
+) -> AppResult<rssh_host::platform::runtime::RuntimeCapabilities> {
+    use rssh_host::platform::runtime::{RuntimeCapabilities, TerminalRuntimePolicy};
     let device = query().await?;
     let pc = device.class() == DeviceClass::Desktop;
     let mut capabilities = RuntimeCapabilities::native();

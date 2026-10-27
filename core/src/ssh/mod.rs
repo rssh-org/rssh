@@ -43,6 +43,8 @@ pub(crate) mod test_support {
             pty_sessions: Mutex::new(HashMap::new()),
             #[cfg(any(windows, macos, linux, ohos))]
             serial_sessions: Mutex::new(HashMap::new()),
+            #[cfg(any(windows, macos, linux, ohos))]
+            serial_backend: crate::terminal::serial::native_backend().unwrap(),
             telnet_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
             transfer_cancels: Mutex::new(HashMap::new()),

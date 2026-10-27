@@ -1,15 +1,11 @@
 //! External-link policy is shared; opening mechanics belong to the host.
 use crate::error::{AppError, AppResult};
 
-#[cfg(ohos)]
-use crate::ohos::external as backend;
-#[cfg(not(ohos))]
-#[path = "tauri/external.rs"]
-mod backend;
+use super::host::platform;
 
 pub async fn open_url(app: &tauri::AppHandle, url: String) -> AppResult<()> {
     validate_url(&url)?;
-    backend::open_url(app, url).await
+    platform(app).open_url(app, url).await
 }
 
 fn validate_url(url: &str) -> AppResult<()> {

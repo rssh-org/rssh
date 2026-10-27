@@ -66,8 +66,13 @@ pub async fn sftp_walk_remote_dir(
 }
 
 #[tauri::command]
-pub async fn walk_local_dir(local_root: String) -> AppResult<Vec<crate::files::LocalWalkEntry>> {
-    crate::files::walk_directory(local_root).await
+pub async fn walk_local_dir(
+    app: tauri::AppHandle,
+    local_root: String,
+) -> AppResult<Vec<crate::files::LocalWalkEntry>> {
+    crate::platform::host::platform(&app)
+        .walk_directory(local_root)
+        .await
 }
 
 #[tauri::command]

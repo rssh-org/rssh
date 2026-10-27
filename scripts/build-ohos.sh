@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 TARGET="aarch64-unknown-linux-ohos"
 OHOS_PROJECT="$ROOT/app/gen/ohos"
-WORKSPACE="$ROOT/target/ohos-workspace"
+WORKSPACE="$ROOT/ohos"
 STAGING="$ROOT/target/ohos-staging"
 FRONTEND="$ROOT/target/ohos-frontend"
 RUNTIME="$OHOS_PROJECT/common/runtime"
@@ -101,20 +101,29 @@ echo "Building OHOS frontend"
 npm run build -- --outDir "$FRONTEND"
 node ohos/scripts/prepare-ohos-sources.mjs
 node ohos/scripts/prepare-ohos.mjs
-echo "Building OHOS Rust library (isolated Cargo workspace)"
+export TAURI_CONFIG="$(cat "$STAGING/tauri-config.json")"
+cp "$WORKSPACE/Cargo.lock" "$STAGING/Cargo.lock.expected"
+echo "Building OHOS Rust library (maintained Cargo workspace)"
 (
     cd "$WORKSPACE"
-    # ohrs performs cargo metadata internally; check the lock before it can
-    # resolve anything, then verify that it left the normalized lock unchanged.
-    # Only local package release versions differ from the checked-in lock.
+    # Check even when a build command fails. Report unexpected mutations without
+    # restoring a snapshot over a user's lockfile changes.
+    check_lock() {
+        build_status=$?
+        if ! cmp -s Cargo.lock "$STAGING/Cargo.lock.expected"; then
+            echo "OHOS Cargo.lock changed during the build; no packages were assembled." >&2
+            exit 1
+        fi
+        exit "$build_status"
+    }
+    trap check_lock EXIT
+    # ohrs performs cargo metadata internally; validate the fixed lock first.
     cargo metadata --locked --format-version 1 --filter-platform "$TARGET" >/dev/null
     ohrs build --arch arm64 --release --dist "$STAGING" --target-dir "$CARGO_TARGET_DIR" -- \
         --locked --lib --features custom-protocol
-    cmp Cargo.lock Cargo.lock.expected
 )
-[ -s "$STAGING/arm64-v8a/librssh_lib.so" ] || { echo "Build produced no librssh_lib.so." >&2; exit 1; }
+[ -s "$STAGING/arm64-v8a/librssh_ohos.so" ] || { echo "Build produced no librssh_ohos.so." >&2; exit 1; }
 [ -s "$FRONTEND/index.html" ] || { echo "Build produced no frontend index.html." >&2; exit 1; }
-
 # ohrs also stages required C++ runtime libraries. Replace the entire ABI set.
 rm -rf "$RUNTIME/libs/arm64-v8a" "$RUNTIME/src/main/resources/rawfile"
 mkdir -p "$RUNTIME/libs" "$RUNTIME/src/main/resources/rawfile"
@@ -122,7 +131,7 @@ cp -R "$STAGING/arm64-v8a" "$RUNTIME/libs/"
 cp -R "$FRONTEND/." "$RUNTIME/src/main/resources/rawfile/"
 # Only the generated project receives release metadata. Canonical sources stay
 # unchanged on success, failure and interruption.
-cp "$WORKSPACE/app.json5" "$OHOS_PROJECT/AppScope/app.json5"
+cp "$STAGING/app.json5" "$OHOS_PROJECT/AppScope/app.json5"
 echo "Assembling OHOS phone/tablet and desktop HAPs and App Pack"
 (
     cd "$OHOS_PROJECT"

@@ -1,4 +1,6 @@
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(test)]
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,6 +69,59 @@ pub struct SerialHandle {
     /// Last clone dropped → guard drops → close flag set → reader thread exits.
     _guard: Arc<CloseGuard>,
     port_name: Arc<str>,
+}
+
+#[async_trait::async_trait]
+impl super::SerialConnection for SerialHandle {
+    async fn write(&self, data: &[u8]) -> AppResult<()> {
+        SerialHandle::write(self, data).await
+    }
+
+    async fn set_dtr(&self, level: bool) -> AppResult<()> {
+        SerialHandle::set_dtr(self, level).await
+    }
+
+    async fn set_rts(&self, level: bool) -> AppResult<()> {
+        SerialHandle::set_rts(self, level).await
+    }
+
+    async fn send_break(&self) -> AppResult<()> {
+        SerialHandle::send_break(self).await
+    }
+
+    fn port_name(&self) -> &str {
+        SerialHandle::port_name(self)
+    }
+}
+
+pub struct DesktopSerialBackend;
+
+#[async_trait::async_trait]
+impl super::SerialBackend for DesktopSerialBackend {
+    async fn capabilities(&self) -> AppResult<SerialCapabilities> {
+        capabilities().await
+    }
+
+    async fn available_ports(&self) -> AppResult<Vec<String>> {
+        available_ports().await
+    }
+
+    async fn open(
+        &self,
+        session_id: String,
+        port: &str,
+        config: SerialConfig,
+        sink: SerialSink,
+        _operation: &crate::resource::PendingOperation,
+    ) -> AppResult<(String, super::SerialHandle)> {
+        let port = port.to_owned();
+        tokio::task::spawn_blocking(move || {
+            open(session_id, &port, config, sink)
+                .map(|(id, handle)| (id, super::SerialHandle::new(handle)))
+        })
+        .await
+        .map_err(serial_op_err)?
+    }
 }
 
 /// Map any serial I/O failure (write / control-line / break) to a uniform error.

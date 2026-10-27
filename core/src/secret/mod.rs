@@ -54,9 +54,6 @@ mod hybrid_store;
 #[cfg(any(macos, ios, windows, linux))]
 mod keyring_store;
 mod master_key;
-#[cfg(any(ohos, test))]
-#[path = "../../../ohos/src/secret.rs"]
-mod ohos_asset;
 
 pub use db_store::DbStore;
 pub use hybrid_store::HybridStore;
@@ -106,11 +103,18 @@ pub struct SecretSystem {
 }
 
 pub fn open(db: Arc<Db>, data_dir: &Path) -> AppResult<SecretSystem> {
+    open_with_keyring(db, data_dir, probe_keyring())
+}
+
+/// Open the encrypted store using a native backend already probed by the host.
+/// The persisted selection remains authoritative if that backend is unavailable.
+pub fn open_with_keyring(
+    db: Arc<Db>,
+    data_dir: &Path,
+    probed: Option<Arc<dyn SecretStore>>,
+) -> AppResult<SecretSystem> {
     let db_store = Arc::new(DbStore::new(db.clone()));
     let recorded = db::settings::get(&db, BACKEND_MARKER)?;
-
-    // 运行期探测：原生 keychain / Asset 后端 + 真能 probe 写读
-    let probed: Option<Arc<dyn SecretStore>> = probe_keyring();
 
     match (recorded.as_deref(), probed) {
         // ── sticky keyring + 可用 → 用 keyring ──
@@ -166,9 +170,9 @@ pub fn open(db: Arc<Db>, data_dir: &Path) -> AppResult<SecretSystem> {
     }
 }
 
-/// 运行期探测系统 keychain / Asset。没有原生后端的平台（例如 Android）
-/// 不参与；其他平台靠 `try_open()` 真探测（写 probe key + 读回 + 删）。
-fn probe_keyring() -> Option<Arc<dyn SecretStore>> {
+/// Probe the native keychain implementations supplied by core. Other hosts
+/// provide their probed backend through `open_with_keyring`.
+pub(crate) fn probe_keyring() -> Option<Arc<dyn SecretStore>> {
     #[cfg(any(macos, ios, windows, linux))]
     {
         keyring_store::try_open().map(|kr| {
@@ -176,11 +180,7 @@ fn probe_keyring() -> Option<Arc<dyn SecretStore>> {
             arc as Arc<dyn SecretStore>
         })
     }
-    #[cfg(ohos)]
-    {
-        ohos_asset::try_open().map(|store| Arc::new(store) as Arc<dyn SecretStore>)
-    }
-    #[cfg(not(any(macos, ios, windows, linux, ohos)))]
+    #[cfg(not(any(macos, ios, windows, linux)))]
     {
         None
     }
@@ -252,6 +252,76 @@ mod tests {
     //! 故意用字面量字符串断言（而不是 `format!("cred:{}:secret", id)` 自我比对）——
     //! 那种"测试 mirror 实现"的写法过不了变更，是无效测试。这里是真协议钉住。
     use super::*;
+
+    #[derive(Default)]
+    struct MemoryKeyring(std::sync::Mutex<std::collections::HashMap<String, String>>);
+
+    impl SecretStore for MemoryKeyring {
+        fn get(&self, key: &str) -> AppResult<Option<String>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+
+        fn set(&self, key: &str, value: &str) -> AppResult<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        fn delete(&self, key: &str) -> AppResult<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "test-keyring"
+        }
+    }
+
+    #[test]
+    fn injected_keyring_preserves_secrets_and_sticky_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let keyring: Arc<dyn SecretStore> = Arc::new(MemoryKeyring::default());
+        let system = open_with_keyring(db.clone(), dir.path(), Some(keyring.clone())).unwrap();
+        system.store.set("cred:one:secret", "saved-secret").unwrap();
+        assert_eq!(system.store.backend_name(), "test-keyring");
+        assert_ne!(
+            DbStore::new(db.clone()).get("cred:one:secret").unwrap(),
+            Some("saved-secret".into())
+        );
+        let error = open_with_keyring(db.clone(), dir.path(), None)
+            .err()
+            .unwrap();
+        assert_eq!(error.code(), "keychain_unavailable_but_required");
+        assert!(!dir.path().join("master.key").exists());
+        let reopened = open_with_keyring(db, dir.path(), Some(keyring)).unwrap();
+        assert_eq!(
+            reopened.store.get("cred:one:secret").unwrap(),
+            Some("saved-secret".into())
+        );
+    }
+
+    #[test]
+    fn newly_available_injected_keyring_does_not_replace_sticky_file_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let first = open_with_keyring(db.clone(), dir.path(), None).unwrap();
+        first
+            .store
+            .set("setting:github_token", "saved-token")
+            .unwrap();
+        let keyring = Arc::new(MemoryKeyring::default());
+        let reopened = open_with_keyring(db, dir.path(), Some(keyring.clone())).unwrap();
+        assert_eq!(reopened.store.backend_name(), "file");
+        assert_eq!(
+            reopened.store.get("setting:github_token").unwrap(),
+            Some("saved-token".into())
+        );
+        assert!(keyring.0.lock().unwrap().is_empty());
+        assert!(reopened.raw_keyring.is_some());
+    }
 
     // ── 服务名 ────────────────────────────────────────────────────
 

@@ -178,7 +178,8 @@ does not claim a background execution mode it cannot guarantee.
 ### HarmonyOS packaging
 
 Maintain HarmonyOS sources in `ohos/`. The build script prepares the ignored
-`app/gen/ohos/` project automatically.
+`app/gen/ohos/` native project automatically and builds the maintained Rust
+workspace at `ohos/Cargo.toml` with its committed `ohos/Cargo.lock`.
 
 ```bash
 ./scripts/build-ohos.sh             # Signed packages; configure signing below first
@@ -298,7 +299,7 @@ launcher appearance. HarmonyOS keeps its platform-specific app icon under
 ## Project Structure
 
 ```text
-Cargo.toml / Cargo.lock       # shared Rust workspace and dependency lock
+Cargo.toml / Cargo.lock       # ordinary platform workspace; shared dependency versions
 frontend/                     # shared Svelte 5 frontend
 core/                         # Tauri-free Rust business logic and connection engine
   src/commands/               # shared operations used by host adapters
@@ -312,24 +313,42 @@ app/                          # application adapters; library name remains rssh_
   bin/                        # ignored CLI staging for desktop packaging
 cli/                          # standalone rssh-cli binary, depends on rssh-core
 desktop/scripts/              # desktop CLI resource preparation
-android/                      # maintained Android project and preparation tools
+android/                      # maintained Gradle/Kotlin sources, staged into app/gen/android
 ios/                          # maintained iOS plist and privacy manifest
 icons/                        # shared source images and platform icon sets
 ohos/
+  Cargo.toml / Cargo.lock      # independent workspace, directly depends on app/core
+  tauri.conf.json              # maintained OHOS application configuration
   app/                        # maintained phone / desktop HAPs and common runtime
-  src/                        # Rust platform adapters, loaded through cfg
-  framework/                  # OHOS lockfile, upstream revisions, patches and tests
-  scripts/                    # OHOS preparation tools and build regression tests
+  src/                        # native entry point and injected platform implementations
+  framework/                  # upstream revisions, patches and tests
+  scripts/                    # native project, upstream source and package metadata preparation
   tests/                      # Vitest tests against maintained ArkTS sources
 idea-plugin/                  # IntelliJ plugin and browser development launcher
 scripts/                      # shared build entry points, staging and platform cfg
-target/                       # ignored workspace Cargo outputs and OHOS workspaces
+target/                       # ignored Cargo outputs, dependency caches and packaging files
 ```
 
-The three Rust crates have separate responsibilities: `rssh-core` owns the shared
-engine, `rssh-app` supplies Tauri and headless adapters, and `rssh-cli` uses the core
-directly. GUI commands enable the app's `tauri` feature through `app/tauri.conf.json`;
-CLI and headless builds do not pull in Tauri or a WebView.
+The root workspace contains `rssh-core` (shared engine), `rssh-app` (Tauri and
+headless adapters), and `rssh-cli` (CLI). Each crate declares its own dependencies;
+common versions come from the root's `workspace.dependencies`. GUI commands enable
+the app's `tauri` feature through `app/tauri.conf.json`. CLI and headless builds do
+not pull in Tauri or a WebView.
+
+`rssh-ohos` has a separate workspace so its Tauri/Wry/Tao patches do not affect
+other platforms. It depends directly on the original app/core crates and supplies
+native services through their interfaces. Rust source files, manifests and lockfiles
+are maintained in place; preparation only generates packaging metadata and resources.
+To update a locked OHOS dependency, prepare its source checkouts first, then use
+`cargo update` in that workspace and commit the resulting lockfile:
+
+```bash
+node ohos/scripts/prepare-ohos-sources.mjs
+cargo update --manifest-path ohos/Cargo.toml -p <package>
+```
+
+The OHOS helper tests run on the development host after preparing those sources:
+`cargo test --manifest-path ohos/Cargo.toml --lib --locked`.
 
 ```bash
 cargo check -p rssh-cli
@@ -339,8 +358,12 @@ cargo check -p rssh-app --features tauri
 cargo test --workspace --all-features
 ```
 
+Android's native source project is staged for Tauri; iOS maintains plist and privacy
+resources for a generated Xcode project. The IDEA plugin is a separate Gradle project
+that packages the compiled headless server. These directories do not need Rust crates.
+
 Only the maintained source directories are edited and committed. `app/gen/`,
-`app/bin/` and build caches are disposable outputs. The build entry points
+`app/bin/`, `ohos/gen/` and build caches are disposable outputs. The build entry points
 prepare them from source before invoking the platform tools. Desktop icons are
 referenced directly from `icons/`; mobile packaging copies the required assets
 into the generated native projects. `roadmap.md` remains at the repository root.
