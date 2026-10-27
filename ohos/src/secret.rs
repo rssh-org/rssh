@@ -5,10 +5,10 @@
 //! require no extra permission. We never request uninstall-persistent storage,
 //! user authentication, or cross-device/cloud synchronization.
 
-use crate::error::{AppError, AppResult};
+use rssh_core::error::{AppError, AppResult};
 
 #[cfg(ohos)]
-use super::SecretStore;
+use rssh_core::secret::SecretStore;
 
 const SUCCESS: i32 = 0;
 const NOT_FOUND: i32 = 24_000_002;
@@ -104,7 +104,7 @@ fn error(op: &str, detail: impl std::fmt::Display) -> AppError {
 }
 
 fn alias(key: &str) -> AppResult<Vec<u8>> {
-    let alias = format!("{}:{key}", super::SERVICE).into_bytes();
+    let alias = format!("{}:{key}", rssh_core::secret::SERVICE).into_bytes();
     if key.is_empty() || alias.len() > MAX_ALIAS_BYTES {
         return Err(error(
             "entry",

@@ -16,7 +16,10 @@ pub async fn local_pty_available() -> bool {
 
 fn probe_local_pty() -> bool {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-    let Some(shell) = crate::terminal::pty::available_shells().into_iter().next() else {
+    let Some(shell) = rssh_core::terminal::pty::available_shells()
+        .into_iter()
+        .next()
+    else {
         log::info!("local PTY unavailable: no executable shell in the application sandbox");
         return false;
     };

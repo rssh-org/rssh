@@ -23,7 +23,7 @@ pub struct RuntimeCapabilities {
 }
 
 impl RuntimeCapabilities {
-    pub(crate) fn native() -> Self {
+    pub fn native() -> Self {
         Self {
             local_pty: cfg!(any(windows, macos, linux)),
             serial: cfg!(any(windows, macos, linux)),
@@ -75,7 +75,7 @@ pub struct TerminalRuntimePolicy {
 }
 
 impl TerminalRuntimePolicy {
-    pub(crate) fn desktop() -> Self {
+    pub fn desktop() -> Self {
         Self {
             image_storage_limit_mb: 128,
             image_pixel_limit: 16_000_000,
@@ -84,7 +84,7 @@ impl TerminalRuntimePolicy {
         }
     }
 
-    pub(crate) fn constrained() -> Self {
+    pub fn constrained() -> Self {
         Self {
             image_storage_limit_mb: 32,
             image_pixel_limit: 4_000_000,
@@ -96,15 +96,10 @@ impl TerminalRuntimePolicy {
 
 #[cfg(feature = "tauri")]
 pub async fn capabilities(window: &tauri::Window) -> AppResult<RuntimeCapabilities> {
-    #[cfg(ohos)]
-    {
-        crate::ohos::device::capabilities(window.label()).await
-    }
-    #[cfg(not(ohos))]
-    {
-        let _ = window;
-        Ok(RuntimeCapabilities::native())
-    }
+    use tauri::Manager;
+    super::host::platform(window.app_handle())
+        .capabilities(window.label())
+        .await
 }
 
 /// Android/iOS retain their existing diagnosis policy for private artifacts.

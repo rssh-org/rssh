@@ -1,3 +1,21 @@
 [workspace]
 members = ["core", "app", "cli"]
+exclude = ["ohos", "target"]
 resolver = "2"
+
+# Shared versions; each crate still selects its own dependencies and features.
+[workspace.dependencies]
+rssh-core = { path = "core" }
+serde = "1"
+serde_json = "1"
+uuid = "1"
+chrono = "0.4"
+dirs = "5"
+log = "0.4"
+tokio = "1"
+async-trait = "0.1"
+base64 = "0.22"
+futures-util = "0.3"
+url = "2.5.8"
+rusqlite = "0.31"
+tempfile = "3"

@@ -3,7 +3,7 @@ import { window } from '@kit.ArkUI';
 import { rsshPlugins } from './RsshPlugins';
 
 export class RsshAbility extends NativeAbility {
-  public moduleName: string = 'rssh_lib';
+  public moduleName: string = 'rssh_ohos';
   public bridgePlugins = rsshPlugins();
 
   protected override async loadWindowStageContent(windowStage: window.WindowStage): Promise<void> {

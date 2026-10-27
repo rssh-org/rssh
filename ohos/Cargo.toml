@@ -1,0 +1,60 @@
+[package]
+name = "rssh-ohos"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[lib]
+# Distinct from the shared application's library and loaded by ArkTS.
+name = "rssh_ohos"
+crate-type = ["cdylib", "rlib"]
+
+# Isolate the patched framework from the ordinary platform workspace.
+[workspace]
+resolver = "2"
+
+[features]
+default = []
+custom-protocol = ["rssh-host/custom-protocol", "tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = "=2.6.3"
+
+[dependencies]
+rssh-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time", "fs", "io-util"] }
+async-trait = "0.1"
+log = "0.4"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_env = "ohos")'.dependencies]
+rssh-host = { package = "rssh-app", path = "../app", features = ["tauri"] }
+tauri = { version = "=2.11.5", features = ["protocol-asset"] }
+portable-pty = "0.9"
+napi-derive-ohos = "=1.2.0"
+napi-ohos = { version = "=1.2.0", features = ["napi8"] }
+zeroize = "1"
+openharmony-ability = { path = "../target/ohos-sources/ability/crates/ability" }
+openharmony-ability-derive = { path = "../target/ohos-sources/ability/crates/derive" }
+openharmony-ability-plugin-app-control = { path = "../target/ohos-sources/ability/crates/plugin-app-control" }
+openharmony-ability-plugin-files = { path = "../target/ohos-sources/ability/crates/plugin-files" }
+openharmony-ability-plugin-permission = { path = "../target/ohos-sources/ability/crates/plugin-permission" }
+openharmony-ability-plugin-url = { path = "../target/ohos-sources/ability/crates/plugin-url" }
+openharmony-ability-plugin-webview = { path = "../target/ohos-sources/ability/crates/plugin-webview" }
+openharmony-ability-plugin-window = { path = "../target/ohos-sources/ability/crates/plugin-window" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[patch.crates-io]
+tauri = { path = "../target/ohos-sources/tauri/crates/tauri" }
+tauri-build = { path = "../target/ohos-sources/tauri/crates/tauri-build" }
+tauri-macros = { path = "../target/ohos-sources/tauri/crates/tauri-macros" }
+tauri-codegen = { path = "../target/ohos-sources/tauri/crates/tauri-codegen" }
+tauri-utils = { path = "../target/ohos-sources/tauri/crates/tauri-utils" }
+tauri-runtime = { path = "../target/ohos-sources/tauri/crates/tauri-runtime" }
+tauri-runtime-wry = { path = "../target/ohos-sources/tauri/crates/tauri-runtime-wry" }
+wry = { path = "../target/ohos-sources/wry" }
+tao = { path = "../target/ohos-sources/tao" }

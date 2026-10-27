@@ -4,7 +4,7 @@
   "description": "Shared RSSH native runtime and application assets",
   "main": "Index.ets",
   "dependencies": {
-    "librssh_lib.so": "file:./src/main/cpp/types/librssh_lib",
+    "librssh_ohos.so": "file:./src/main/cpp/types/librssh_ohos",
     "@ohos-rs/ability": "file:../../vendor/ability/native_ability",
     "@ohos-rs/ability-plugin-app-control": "file:../../vendor/ability/plugins/app-control",
     "@ohos-rs/ability-plugin-files": "file:../../vendor/ability/plugins/files",

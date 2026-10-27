@@ -20,7 +20,3 @@ pub mod terminal;
 
 pub use ssh::bastion;
 pub const CLI_VERSION: &str = "1.0.0";
-
-#[cfg(ohos)]
-#[path = "../../ohos/src/core.rs"]
-pub mod ohos;

@@ -14,7 +14,7 @@ const code = ts.transpileModule(readFileSync(sourcePath, "utf8"), {
 function harness() {
   const applicationContext = { filesDir: "/isolated-test/base/files" };
   const context = { filesDir: "/isolated-test/base/haps/entry/files", getApplicationContext: () => applicationContext };
-  const initContext = { basePath: context.filesDir, prefPath: context.filesDir, moduleName: "rssh_lib", resourceManager: {}, preferredLocales: "zh" };
+  const initContext = { basePath: context.filesDir, prefPath: context.filesDir, moduleName: "rssh_ohos", resourceManager: {}, preferredLocales: "zh" };
   const createInitContext = vi.fn((_moduleName: string) => ({ ...initContext }));
   class NativeAbility {
     context = context;
@@ -66,10 +66,10 @@ describe("HarmonyOS framework host", () => {
 
   it("preserves application filesDir while keeping the framework initialization metadata", () => {
     const h = harness();
-    expect(h.ability.createInitContext("rssh_lib")).toEqual({
+    expect(h.ability.createInitContext("rssh_ohos")).toEqual({
       ...h.initContext, basePath: h.applicationContext.filesDir, prefPath: h.applicationContext.filesDir,
     });
-    expect(h.createInitContext).toHaveBeenCalledExactlyOnceWith("rssh_lib");
+    expect(h.createInitContext).toHaveBeenCalledExactlyOnceWith("rssh_ohos");
     expect(h.ability.context.filesDir).toBe("/isolated-test/base/haps/entry/files");
   });
 
@@ -82,7 +82,7 @@ describe("HarmonyOS framework host", () => {
 
   it("assembles framework capabilities and creates independent application plugin instances", () => {
     const h = harness();
-    expect(h.ability.moduleName).toBe("rssh_lib");
+    expect(h.ability.moduleName).toBe("rssh_ohos");
     expect(h.ability.bridgePlugins.map((factory) => factory.create().id).sort()).toEqual([
       "ohos.app-control", "ohos.files", "ohos.permission", "ohos.url", "ohos.webview", "ohos.window",
       "rssh.clipboard", "rssh.files-access", "rssh.runtime", "rssh.serial",

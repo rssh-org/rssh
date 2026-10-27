@@ -1,6 +1,7 @@
 //! ArkUI window creation and rollback. Shared callers see one completed operation.
 
-use crate::platform::window::AppWindowPurpose;
+#[cfg(ohos)]
+use rssh_host::platform::host::AppWindowPurpose;
 
 pub(crate) fn native_title(_requested: &str) -> &str {
     // HarmonyOS main-window setWindowTitle also calls SetMissionLabel. Page or
@@ -12,12 +13,12 @@ fn check_window_capabilities(
     desktop_device: bool,
     multi_window: bool,
     local_pty: bool,
-    purpose: AppWindowPurpose,
+    requires_pty: bool,
 ) -> Result<(), String> {
     if !desktop_device || !multi_window {
         return Err("Additional windows are unavailable on this device".into());
     }
-    if matches!(purpose, AppWindowPurpose::LocalAnalysis) && !local_pty {
+    if requires_pty && !local_pty {
         return Err("Local analysis requires a working local terminal".into());
     }
     Ok(())
@@ -25,16 +26,17 @@ fn check_window_capabilities(
 
 #[cfg(ohos)]
 pub(crate) async fn ensure_available(purpose: AppWindowPurpose) -> Result<(), String> {
-    let device = crate::ohos::device::query().await.map_err(|error| {
+    let device = crate::device::query().await.map_err(|error| {
         log::warn!("Cannot query native window capabilities: {error}");
         "HarmonyOS system services are unavailable; restart RSSH and try again".to_string()
     })?;
-    let desktop_device = device.class() == crate::ohos::device::DeviceClass::Desktop;
+    let desktop_device = device.class() == crate::device::DeviceClass::Desktop;
+    let requires_pty = matches!(purpose, AppWindowPurpose::LocalAnalysis);
     let local_pty = desktop_device
         && device.multi_window
-        && matches!(purpose, AppWindowPurpose::LocalAnalysis)
-        && crate::ohos::device::local_pty_available().await;
-    check_window_capabilities(desktop_device, device.multi_window, local_pty, purpose)
+        && requires_pty
+        && crate::device::local_pty_available().await;
+    check_window_capabilities(desktop_device, device.multi_window, local_pty, requires_pty)
 }
 
 #[cfg(ohos)]
@@ -186,9 +188,9 @@ mod tests {
     #[test]
     fn phone_tablet_and_unavailable_window_service_reject_both_entry_points() {
         for (desktop, multi_window) in [(false, false), (false, true), (true, false)] {
-            for purpose in [AppWindowPurpose::Tab, AppWindowPurpose::LocalAnalysis] {
+            for requires_pty in [false, true] {
                 assert_eq!(
-                    check_window_capabilities(desktop, multi_window, true, purpose),
+                    check_window_capabilities(desktop, multi_window, true, requires_pty),
                     Err("Additional windows are unavailable on this device".into()),
                 );
             }
@@ -197,13 +199,11 @@ mod tests {
 
     #[test]
     fn pty_restrictions_block_analysis_but_not_remote_tab_windows() {
-        assert!(check_window_capabilities(true, true, false, AppWindowPurpose::Tab).is_ok());
+        assert!(check_window_capabilities(true, true, false, false).is_ok());
         assert_eq!(
-            check_window_capabilities(true, true, false, AppWindowPurpose::LocalAnalysis),
+            check_window_capabilities(true, true, false, true),
             Err("Local analysis requires a working local terminal".into()),
         );
-        assert!(
-            check_window_capabilities(true, true, true, AppWindowPurpose::LocalAnalysis).is_ok()
-        );
+        assert!(check_window_capabilities(true, true, true, true).is_ok());
     }
 }

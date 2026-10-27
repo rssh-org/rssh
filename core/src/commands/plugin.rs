@@ -958,6 +958,8 @@ mod tests {
             pty_sessions: Default::default(),
             #[cfg(any(windows, macos, linux, ohos))]
             serial_sessions: Default::default(),
+            #[cfg(any(windows, macos, linux, ohos))]
+            serial_backend: crate::terminal::serial::native_backend().unwrap(),
             telnet_sessions: Default::default(),
             sftp_sessions: Default::default(),
             transfer_cancels: Default::default(),

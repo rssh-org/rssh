@@ -681,8 +681,14 @@ async fn dispatch_async(
         }
 
         // ---- serial console ----
-        "serial_get_capabilities" => Ok(json!(serial::capabilities().await.map_err(err_value)?)),
-        "serial_list_ports" => Ok(json!(serial::available_ports().await.map_err(err_value)?)),
+        "serial_get_capabilities" => Ok(json!(crate::commands::serial::serial_get_capabilities(
+            state
+        )
+        .await
+        .map_err(err_value)?)),
+        "serial_list_ports" => Ok(json!(crate::commands::serial::serial_list_ports(state)
+            .await
+            .map_err(err_value)?)),
         "serial_open" => {
             let port: String = arg(&args, "port")?;
             let config: serial::SerialConfig = arg(&args, "config")?;
@@ -709,9 +715,16 @@ async fn dispatch_async(
                 let _ = tx.send(Message::Text(msg.to_string()));
             });
             let operation = reservation.pending_operation().map_err(err_value)?;
-            let opened = serial::open_resource(session_id, &port, config, sink, operation)
-                .await
-                .map_err(err_value)?;
+            let opened = serial::open_resource(
+                state.serial_backend.clone(),
+                session_id,
+                &port,
+                config,
+                sink,
+                operation,
+            )
+            .await
+            .map_err(err_value)?;
             let id = opened
                 .activate(|id, handle| {
                     reservation.activate_returned(
@@ -1810,6 +1823,7 @@ mod tests {
         let secret_store: Arc<dyn crate::secret::SecretStore> =
             Arc::new(crate::secret::DbStore::new(db.clone()));
         let state = AppState {
+            serial_backend: serial::native_backend().unwrap(),
             codex_auth: Arc::new(
                 crate::ai::codex_auth::CodexAuth::new(
                     db.clone(),

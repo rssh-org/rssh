@@ -1,7 +1,5 @@
 //! Native Tauri application adapter.
 
-#[cfg(ohos)]
-use crate::ohos;
 #[cfg(any(windows, macos, linux))]
 use rssh_core::db;
 use rssh_core::{
@@ -42,6 +40,7 @@ impl WindowHost for NativeWindows {
         #[cfg(any(windows, macos, linux, ohos))]
         {
             crate::platform::window::ensure_app_window_available(
+                &self.app,
                 crate::platform::window::AppWindowPurpose::LocalAnalysis,
             )
             .await
@@ -109,15 +108,37 @@ fn apply_linux_wayland_compat() {
 #[cfg(not(linux))]
 fn apply_linux_wayland_compat() {}
 
+#[cfg(not(ohos))]
 #[cfg_attr(any(android, ios), tauri::mobile_entry_point)]
 pub fn run() {
+    run_with(
+        tauri::generate_context!(),
+        Arc::new(crate::platform::tauri::TauriPlatform),
+        |_app| {
+            #[cfg(any(android, ios))]
+            let data_dir = _app.path().app_data_dir()?;
+            #[cfg(any(windows, macos, linux))]
+            let data_dir = db::data_dir()?;
+            Ok(AppState::open(data_dir)?)
+        },
+    );
+}
+
+/// Run the shared command/event adapter with the native host supplied by its entry crate.
+pub fn run_with(
+    context: tauri::Context<tauri::Wry>,
+    platform: Arc<dyn crate::platform::host::NativePlatform>,
+    open_state: impl FnOnce(&tauri::AppHandle) -> Result<AppState, Box<dyn std::error::Error>>
+        + Send
+        + 'static,
+) {
     apply_linux_wayland_compat();
 
     // 默认 info；用 RUST_LOG=debug 等覆盖
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
 
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default().manage(platform);
     // Official plugins ship no OHOS backend (see the Cargo.toml target table
     // that gates them); every other target registers them exactly as before.
     #[cfg(any(macos, windows, linux, android, ios))]
@@ -145,20 +166,12 @@ pub fn run() {
                 _ => {}
             }
         })
-        .setup(|app| {
-            // The UIAbility registers its sandbox path before Tauri starts.
-            #[cfg(ohos)]
-            let data_dir = ohos::data_dir()?;
-            // Android/iOS use Tauri's sandbox path; OHOS registers its own above.
-            #[cfg(any(android, ios))]
-            let data_dir = app.path().app_data_dir()?;
-            #[cfg(any(windows, macos, linux))]
-            let data_dir = db::data_dir()?;
-
+        .setup(move |app| {
+            let state = open_state(app.handle())?;
             // The native host owns asset access; the engine owns shared state.
             app.asset_protocol_scope()
-                .allow_directory(data_dir.join("plugins"), true)?;
-            app.manage(Arc::new(AppState::open(data_dir)?));
+                .allow_directory(state.data_dir.join("plugins"), true)?;
+            app.manage(Arc::new(state));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -385,6 +398,6 @@ pub fn run() {
             commands::ai::ai_codex_login_cancel,
             commands::ai::ai_codex_logout,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("RSSH startup failed");
 }

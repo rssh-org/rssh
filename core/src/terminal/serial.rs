@@ -36,7 +36,6 @@ impl SerialCapabilities {
         Ok(())
     }
 
-    #[cfg(any(ohos, test))]
     pub fn require_signals(&self) -> AppResult<()> {
         if self.signals {
             Ok(())
@@ -90,59 +89,122 @@ fn default_stop_bits() -> u8 {
     1
 }
 
-#[cfg(not(ohos))]
+#[cfg(test)]
+#[path = "serial/backend_tests.rs"]
+mod backend_tests;
+
+#[cfg(any(windows, macos, linux))]
 #[path = "serial/desktop.rs"]
 mod desktop;
-#[cfg(ohos)]
-pub use crate::ohos::serial::{available_ports, capabilities, SerialHandle};
-#[cfg(not(ohos))]
-pub use desktop::{available_ports, capabilities, SerialHandle};
+
+/// A native serial connection. Implementations own I/O ordering and release.
+#[async_trait::async_trait]
+pub trait SerialConnection: Send + Sync {
+    async fn write(&self, data: &[u8]) -> AppResult<()>;
+    async fn set_dtr(&self, level: bool) -> AppResult<()>;
+    async fn set_rts(&self, level: bool) -> AppResult<()>;
+    async fn send_break(&self) -> AppResult<()>;
+    fn port_name(&self) -> &str;
+
+    /// Return an acknowledged cleanup operation when dropping the connection
+    /// alone cannot establish that the native port has been released.
+    fn cleanup(&self) -> Option<crate::resource::CleanupHandle> {
+        None
+    }
+}
+
+#[derive(Clone)]
+pub struct SerialHandle(Arc<dyn SerialConnection>);
+
+impl SerialHandle {
+    pub fn new(connection: impl SerialConnection + 'static) -> Self {
+        Self(Arc::new(connection))
+    }
+
+    pub async fn write(&self, data: &[u8]) -> AppResult<()> {
+        self.0.write(data).await
+    }
+
+    pub async fn set_dtr(&self, level: bool) -> AppResult<()> {
+        self.0.set_dtr(level).await
+    }
+
+    pub async fn set_rts(&self, level: bool) -> AppResult<()> {
+        self.0.set_rts(level).await
+    }
+
+    pub async fn send_break(&self) -> AppResult<()> {
+        self.0.send_break().await
+    }
+
+    pub fn port_name(&self) -> &str {
+        self.0.port_name()
+    }
+}
+
+#[async_trait::async_trait]
+pub trait SerialBackend: Send + Sync {
+    async fn capabilities(&self) -> AppResult<SerialCapabilities>;
+    async fn available_ports(&self) -> AppResult<Vec<String>>;
+
+    /// Register cleanup on `operation` before native authorization or other
+    /// external effects if cancellation requires an acknowledged release.
+    async fn open(
+        &self,
+        session_id: String,
+        port: &str,
+        config: SerialConfig,
+        sink: SerialSink,
+        operation: &crate::resource::PendingOperation,
+    ) -> AppResult<(String, SerialHandle)>;
+}
+
+pub fn native_backend() -> AppResult<Arc<dyn SerialBackend>> {
+    #[cfg(any(windows, macos, linux))]
+    {
+        Ok(Arc::new(desktop::DesktopSerialBackend))
+    }
+    #[cfg(ohos)]
+    {
+        Err(AppError::other(
+            "ohos_native_unavailable",
+            serde_json::json!({}),
+        ))
+    }
+}
 
 /// The platform adapter only opens the resource. This shared coordinator owns
 /// failed-open cleanup and carries that ownership through activation.
 pub async fn open_resource(
+    backend: Arc<dyn SerialBackend>,
     session_id: String,
     port: &str,
     config: SerialConfig,
     sink: SerialSink,
     operation: crate::resource::PendingOperation,
 ) -> AppResult<crate::resource::OpenedResource<SerialHandle>> {
-    #[cfg(ohos)]
-    let result = crate::ohos::serial::open(session_id, port, config, sink, &operation).await;
-    #[cfg(not(ohos))]
-    let (result, operation) = {
-        let port = port.to_owned();
-        // Keep the reservation alive until the native open actually finishes,
-        // including when the caller drops its future while the driver blocks.
-        tokio::task::spawn_blocking(move || {
-            let result = desktop::open(session_id, &port, config, sink);
-            (result, operation)
-        })
-        .await
-        .map_err(|error| {
-            AppError::pty(
-                "serial_op_failed",
-                serde_json::json!({ "err": error.to_string() }),
-            )
-        })?
-    };
-    operation.finish_open(result).await
+    let port = port.to_owned();
+    // This task owns the reservation until native open and cleanup finish,
+    // including when its caller disappears while a blocking driver is opening.
+    tokio::spawn(async move {
+        let result = backend
+            .open(session_id, &port, config, sink, &operation)
+            .await;
+        operation.finish_open(result).await
+    })
+    .await
+    .map_err(|error| {
+        AppError::pty(
+            "serial_op_failed",
+            serde_json::json!({ "err": error.to_string() }),
+        )
+    })?
 }
 
 /// Some native backends require an acknowledged release before a port can be
 /// reopened. Others retain their existing last-handle-drop cleanup behavior.
 pub(crate) fn cleanup(handle: &SerialHandle) -> Option<crate::resource::CleanupHandle> {
-    #[cfg(ohos)]
-    {
-        Some(crate::resource::CleanupHandle::new(Arc::new(
-            handle.clone(),
-        )))
-    }
-    #[cfg(not(ohos))]
-    {
-        let _ = handle;
-        None
-    }
+    handle.0.cleanup()
 }
 
 #[cfg(test)]

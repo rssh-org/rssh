@@ -6,15 +6,14 @@ pub use rssh_core::{
 };
 #[cfg(any(windows, macos, linux))]
 mod cli;
-mod files;
-mod platform;
+pub mod files;
+pub mod platform;
 #[cfg(feature = "tauri")]
 #[path = "tauri/mod.rs"]
 mod tauri_host;
-#[cfg(feature = "tauri")]
+#[cfg(all(feature = "tauri", not(ohos)))]
 pub use tauri_host::run;
-#[cfg(all(feature = "tauri", any(ohos, test)))]
-#[path = "../../ohos/src/mod.rs"]
-mod ohos;
+#[cfg(feature = "tauri")]
+pub use tauri_host::run_with;
 #[cfg(all(feature = "server", any(windows, macos, linux)))]
 pub mod server;

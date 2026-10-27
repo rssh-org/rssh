@@ -8,3 +8,8 @@ pub mod runtime;
 #[cfg(any(windows, macos, linux, ohos))]
 #[cfg(feature = "tauri")]
 pub mod window;
+
+#[cfg(feature = "tauri")]
+pub mod host;
+#[cfg(all(feature = "tauri", not(ohos)))]
+pub(crate) mod tauri;

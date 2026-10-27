@@ -3,12 +3,12 @@ use crate::models::SerialProfile;
 use crate::state::{AppState, SessionKind};
 use crate::terminal::serial;
 
-pub async fn serial_get_capabilities() -> AppResult<serial::SerialCapabilities> {
-    serial::capabilities().await
+pub async fn serial_get_capabilities(state: &AppState) -> AppResult<serial::SerialCapabilities> {
+    state.serial_backend.capabilities().await
 }
 
-pub async fn serial_list_ports() -> AppResult<Vec<String>> {
-    serial::available_ports().await
+pub async fn serial_list_ports(state: &AppState) -> AppResult<Vec<String>> {
+    state.serial_backend.available_ports().await
 }
 
 pub async fn serial_open(
@@ -41,7 +41,15 @@ pub async fn serial_open(
                 let _ = app.emit(&format!("serial:close:{id}"), ());
             }
         });
-    let opened = serial::open_resource(session_id, &port, config, sink, operation).await?;
+    let opened = serial::open_resource(
+        state.serial_backend.clone(),
+        session_id,
+        &port,
+        config,
+        sink,
+        operation,
+    )
+    .await?;
     opened
         .activate(|id, handle| {
             reservation

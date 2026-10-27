@@ -13,7 +13,7 @@ use std::{
 use tauri_plugin_dialog::DialogExt;
 
 #[cfg(feature = "tauri")]
-pub(super) async fn file_name(app: &tauri::AppHandle, location: &str) -> AppResult<Option<String>> {
+pub(crate) async fn file_name(app: &tauri::AppHandle, location: &str) -> AppResult<Option<String>> {
     #[cfg(android)]
     {
         use tauri::Manager;
@@ -52,7 +52,7 @@ pub async fn pick_save(
 }
 
 #[cfg(feature = "tauri")]
-pub(super) async fn select_open(app: &tauri::AppHandle) -> AppResult<Option<String>> {
+pub(crate) async fn select_open(app: &tauri::AppHandle) -> AppResult<Option<String>> {
     let app = app.clone();
     tokio::task::spawn_blocking(move || {
         app.dialog()
@@ -65,7 +65,7 @@ pub(super) async fn select_open(app: &tauri::AppHandle) -> AppResult<Option<Stri
 }
 
 #[cfg(feature = "tauri")]
-pub(super) async fn select_open_files(app: &tauri::AppHandle) -> AppResult<Option<Vec<String>>> {
+pub(crate) async fn select_open_files(app: &tauri::AppHandle) -> AppResult<Option<Vec<String>>> {
     let app = app.clone();
     tokio::task::spawn_blocking(move || {
         app.dialog()
@@ -79,7 +79,7 @@ pub(super) async fn select_open_files(app: &tauri::AppHandle) -> AppResult<Optio
 
 #[cfg(any(windows, macos, linux))]
 #[cfg(feature = "tauri")]
-pub(super) async fn select_folder(
+pub(crate) async fn select_folder(
     app: &tauri::AppHandle,
     write: bool,
 ) -> AppResult<Option<String>> {
@@ -111,7 +111,7 @@ fn filesystem_path(location: String) -> AppResult<PathBuf> {
     Ok(PathBuf::from(location))
 }
 
-pub(super) async fn resolve_paths(
+pub(crate) async fn resolve_paths(
     local_root: String,
     relative_paths: Vec<String>,
     write: bool,
@@ -186,9 +186,7 @@ pub struct OpenedFile {
 
 #[cfg(feature = "tauri")]
 impl OpenedFile {
-    pub fn stream(
-        &mut self,
-    ) -> &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send) {
+    pub fn stream(&mut self) -> &mut tokio::fs::File {
         &mut self.resource.as_mut().expect("file is open").file
     }
 

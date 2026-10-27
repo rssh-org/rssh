@@ -40,12 +40,21 @@ fn register_plugins(app: &OpenHarmonyApp) -> napi_ohos::Result<()> {
 #[openharmony_ability_derive::ability]
 fn configure_ability(app: OpenHarmonyApp) {
     register_plugins(&app).expect("failed to register RSSH native capability plugins");
-    rssh_core::ohos::configure(app.clone());
+    crate::native::configure(app.clone());
     tauri::ohos::APP
         .lock()
         .expect("Tauri host lock poisoned")
         .replace(app);
-    crate::run();
+    rssh_host::run_with(
+        tauri::generate_context!(),
+        std::sync::Arc::new(crate::platform::OhosPlatform),
+        |_app| {
+            Ok(rssh_core::state::AppState::open_with_services(
+                data_dir()?,
+                crate::native::services(),
+            )?)
+        },
+    );
 }
 
 pub fn data_dir() -> AppResult<PathBuf> {
