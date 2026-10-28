@@ -232,8 +232,8 @@ uploads it and registers the package in AppGallery Connect. It **never submits
 review or publishes**.
 You can also run the workflow manually with a stable version and selected ref.
 
-Configure the GitHub environment **`harmonyos-release`** under
-**Settings > Environments**:
+Configure repository secrets and variables under
+**Settings > Secrets and variables > Actions**:
 
 | Type | Name | Value |
 | --- | --- | --- |
@@ -256,10 +256,10 @@ relative `signing/...` paths in `signing.local.json`. Keep the matching DevEco
 signing_tmp=$(mktemp -d)
 COPYFILE_DISABLE=1 tar -czf "$signing_tmp/signing.tar.gz" -C ohos/app signing.local.json signing
 base64 < "$signing_tmp/signing.tar.gz" | tr -d '\n' > "$signing_tmp/signing.base64"
-gh secret set OHOS_SIGNING_BUNDLE_BASE64 --env harmonyos-release < "$signing_tmp/signing.base64"
+gh secret set OHOS_SIGNING_BUNDLE_BASE64 < "$signing_tmp/signing.base64"
 rm -r "$signing_tmp"
-gh secret set AGC_SERVICE_ACCOUNT_JSON --env harmonyos-release < /private/path/private.json
-gh secret set AGC_APP_ID --env harmonyos-release --body YOUR_NUMERIC_APP_ID
+gh secret set AGC_SERVICE_ACCOUNT_JSON < /private/path/private.json
+gh secret set AGC_APP_ID --body YOUR_NUMERIC_APP_ID
 ```
 
 CI pins the SDK archive checksum and removes signing inputs after packaging.

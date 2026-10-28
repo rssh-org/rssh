@@ -287,6 +287,8 @@ jobs:
 
       - name: Setup Android SDK & NDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       # setup-android doesn't export an NDK path, and `${{ env.* }}` can't see the
       # runner image's default ANDROID_NDK_* vars — so point NDK_HOME at the

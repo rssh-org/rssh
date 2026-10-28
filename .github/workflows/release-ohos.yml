@@ -16,6 +16,8 @@ on:
         required: true
       AGC_SERVICE_ACCOUNT_JSON:
         required: true
+      AGC_APP_ID:
+        required: true
   workflow_dispatch:
     inputs:
       version:
@@ -39,7 +41,6 @@ jobs:
   build-and-upload:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    environment: harmonyos-release
     env:
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
@@ -57,7 +58,7 @@ jobs:
         run: |
           for name in OHOS_COMMAND_LINE_TOOLS_URL OHOS_SIGNING_BUNDLE_BASE64 AGC_SERVICE_ACCOUNT_JSON AGC_APP_ID; do
             if [ -z "${!name}" ]; then
-              echo "Missing $name in the harmonyos-release GitHub environment. See CONTRIBUTING.md."
+              echo "Missing repository secret $name. See CONTRIBUTING.md."
               exit 1
             fi
           done
