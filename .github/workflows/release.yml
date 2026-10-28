@@ -87,6 +87,7 @@ jobs:
       OHOS_COMMAND_LINE_TOOLS_URL: ${{ secrets.OHOS_COMMAND_LINE_TOOLS_URL }}
       OHOS_SIGNING_BUNDLE_BASE64: ${{ secrets.OHOS_SIGNING_BUNDLE_BASE64 }}
       AGC_SERVICE_ACCOUNT_JSON: ${{ secrets.AGC_SERVICE_ACCOUNT_JSON }}
+      AGC_APP_ID: ${{ secrets.AGC_APP_ID }}
 
   # ── Desktop (macOS / Linux / Windows) ────────────────────────────
   build-desktop:
@@ -282,6 +283,8 @@ jobs:
 
       - name: Setup Android SDK & NDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       # setup-android doesn't export an NDK path, and `${{ env.* }}` can't see the
       # runner image's default ANDROID_NDK_* vars — so point NDK_HOME at the
