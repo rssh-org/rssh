@@ -16,6 +16,7 @@ export const APP_ICON_NAMES = [
   "kubernetes",
   "link",
   "pin",
+  "play",
   "save",
   "serial",
   "settings",

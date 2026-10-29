@@ -72,6 +72,8 @@
     <path d="m8.5 15.5 7-7" />
   {:else if name === "pin"}
     <path d="m9 3 6 2-1 5 3 3-4 1-3 7-1-7-4-1 4-3Z" />
+  {:else if name === "play"}
+    <path d="m8 4 12 8-12 8Z" />
   {:else if name === "save"}
     <path d="M4 3h13l3 3v15H4Z" />
     <path d="M8 3v6h8V3M8 21v-7h8v7" />

@@ -38,6 +38,17 @@ const en = {
   "common.play": "Play",
   "common.reset": "Reset",
 
+  // ── Color input ──
+  "color_input.choose": "Choose color",
+  "color_input.presets": "Preset colors",
+  "color_input.area": "Saturation and brightness",
+  "color_input.two_dimensional_slider": "Two-dimensional slider",
+  "color_input.area_value": "Saturation {saturation}%, brightness {brightness}%",
+  "color_input.hue": "Hue",
+  "color_input.hue_value": "Hue {hue} degrees",
+  "color_input.hex": "HEX color",
+  "color_input.invalid_hex": "Enter a HEX color in #RGB or #RRGGBB format.",
+
   // ── Sidebar / Tabs ──
   "tab.home": "Home",
   "tab.local": "Local",
@@ -1135,7 +1146,7 @@ const en = {
   "forward.name_placeholder": "Web Forward",
   // Groups
   "group.terminal_background": "Terminal wave background",
-  "group.terminal_background_hint": "Blend group-color gradient waves into the right side of SSH, Telnet and serial terminals without taking up space. Changes apply to newly opened terminals.",
+  "group.terminal_background_hint": "Blend group-color gradient waves into the right side of SSH, Telnet and serial terminals.",
   "group.preview": "Session preview",
   "group.new": "+ New Group",
   "group.empty": "No groups yet",

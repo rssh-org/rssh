@@ -2,6 +2,8 @@
   import type { HighlightRule } from "../stores/app.svelte.ts";
   import { t } from "../i18n/index.svelte.ts";
   import { validateHighlightRule } from "../terminal/highlight.ts";
+  import ColorInput from "./ColorInput.svelte";
+  import { isColorInputValid, normalizeHexColor } from "./color-input.ts";
 
   let {
     rule,
@@ -16,6 +18,7 @@
   let formKw = $state("");
   let formName = $state("");
   let formColor = $state("#FF6B6B");
+  let formColorValid = $derived(isColorInputValid(formColor, rule.color));
   let formEnabled = $state(true);
   let formIsCaseSensitive = $state(false);
 
@@ -34,7 +37,7 @@
   const finalRule = $derived<HighlightRule>({
     keyword: formKw.trim(),
     name: formName.trim(),
-    color: formColor,
+    color: normalizeHexColor(formColor) ?? formColor,
     enabled: formEnabled,
     // Every rule is a regex now; the field is kept for storage/sync compatibility.
     is_regex: true,
@@ -48,7 +51,7 @@
   }
 
   function handleSave() {
-    if (!finalRule.keyword || !finalRule.name || formError) return;
+    if (!finalRule.keyword || !finalRule.name || formError || !formColorValid) return;
     onSave(finalRule);
   }
 
@@ -79,16 +82,10 @@
   <p class="hint">{t("highlight.regex_hint")}</p>
 
   <div class="color-actions-row">
-    <label class="color-picker">
-      <span class="label-text">{t("common.color")}</span>
-      <div class="color-row">
-        <input type="color" bind:value={formColor} />
-        <span class="color-hex">{formColor}</span>
-      </div>
-    </label>
+    <ColorInput bind:value={formColor} savedValue={rule.color} />
 
     <div class="form-actions">
-      <button class="btn btn-accent btn-sm" onclick={handleSave} disabled={!formKw.trim() || !formName.trim() || !!formError}>
+      <button class="btn btn-accent btn-sm" onclick={handleSave} disabled={!formKw.trim() || !formName.trim() || !!formError || !formColorValid}>
         {t("common.save")}
       </button>
       <button class="btn btn-sm" onclick={onCancel}>{t("common.cancel")}</button>
@@ -136,14 +133,6 @@
   .color-actions-row {
     display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap;
   }
-  .color-picker { display: flex; flex-direction: column; gap: 4px; }
-  .color-row { display: flex; align-items: center; gap: 10px; }
-  .color-row input[type="color"] {
-    width: 48px; height: 32px; padding: 2px;
-    border: 1px solid var(--divider); border-radius: 4px;
-    cursor: pointer; box-shadow: none;
-  }
-  .color-hex { font-size: 12px; font-family: var(--term-font); color: var(--text-dim); }
 
   .form-actions {
     display: flex; gap: 10px; margin-left: auto; align-items: center;

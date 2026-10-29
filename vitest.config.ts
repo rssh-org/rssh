@@ -7,7 +7,25 @@ import { svelte } from "@sveltejs/vite-plugin-svelte";
 export default defineConfig({
   plugins: [svelte()],
   test: {
-    include: ["frontend/**/*.test.ts", "ohos/tests/**/*.test.ts"],
-    environment: "node",
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "node",
+          include: ["frontend/**/*.test.ts", "ohos/tests/**/*.test.ts"],
+          exclude: ["frontend/**/*.dom.test.ts"],
+          environment: "node",
+        },
+      },
+      {
+        extends: true,
+        resolve: { conditions: ["browser"] },
+        test: {
+          name: "dom",
+          include: ["frontend/**/*.dom.test.ts"],
+          environment: "happy-dom",
+        },
+      },
+    ],
   },
 });
