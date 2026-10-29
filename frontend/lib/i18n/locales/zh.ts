@@ -40,6 +40,17 @@ const zh: Messages = {
   "common.play": "播放",
   "common.reset": "重置",
 
+  // ── 颜色输入 ──
+  "color_input.choose": "选择颜色",
+  "color_input.presets": "预设颜色",
+  "color_input.area": "饱和度与明度",
+  "color_input.two_dimensional_slider": "二维滑块",
+  "color_input.area_value": "饱和度 {saturation}%，明度 {brightness}%",
+  "color_input.hue": "色相",
+  "color_input.hue_value": "色相 {hue} 度",
+  "color_input.hex": "HEX 颜色",
+  "color_input.invalid_hex": "请输入 #RGB 或 #RRGGBB 格式的 HEX 颜色。",
+
   // ── 侧边栏 / 标签页 ──
   "tab.home": "首页",
   "tab.local": "本地",
@@ -1138,7 +1149,7 @@ const zh: Messages = {
   "forward.name_placeholder": "Web Forward",
   // 分组
   "group.terminal_background": "终端波浪背景",
-  "group.terminal_background_hint": "在此分组的 SSH、Telnet 和串口终端右侧显示分组颜色的渐变波浪，不占用终端空间。修改仅对新打开的终端生效。",
+  "group.terminal_background_hint": "在此分组的 SSH、Telnet 和串口终端右侧显示分组颜色的渐变波浪。",
   "group.preview": "会话预览",
   "group.new": "+ 新建分组",
   "group.empty": "暂无分组",

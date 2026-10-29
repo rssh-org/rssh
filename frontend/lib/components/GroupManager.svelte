@@ -6,8 +6,11 @@
   import { toast } from "../stores/toast.svelte.ts";
   import { t, errMsg } from "../i18n/index.svelte.ts";
   import AppIcon from "./AppIcon.svelte";
+  import ColorInput from "./ColorInput.svelte";
+  import { normalizeHexColor } from "./color-input.ts";
   import EnvironmentWave from "./EnvironmentWave.svelte";
-  import * as theme from "../themes/store.svelte.ts";
+
+  const uid = $props.id();
 
   let groups = $state<Group[]>([]);
   let adding = $state(false);
@@ -16,9 +19,9 @@
   // Form fields
   let formName = $state("");
   let formColor = $state("#4A6CF7");
+  let formColorValid = $derived(normalizeHexColor(formColor) !== null);
   let formOrder = $state(0);
   let formWavesEnabled = $state(false);
-  let previewTheme = $derived(theme.currentTermTheme());
 
   let deleting = $state<string | null>(null);
 
@@ -52,11 +55,11 @@
   }
 
   async function saveNew() {
-    if (!formName.trim()) return;
+    if (!formName.trim() || !formColorValid) return;
     const group: Group = {
       id: crypto.randomUUID(),
       name: formName.trim(),
-      color: formColor,
+      color: normalizeHexColor(formColor)!,
       sort_order: formOrder,
       terminal_waves_enabled: formWavesEnabled,
     };
@@ -68,11 +71,11 @@
   }
 
   async function saveEdit() {
-    if (!editId || !formName.trim()) return;
+    if (!editId || !formName.trim() || !formColorValid) return;
     const group: Group = {
       id: editId,
       name: formName.trim(),
-      color: formColor,
+      color: normalizeHexColor(formColor)!,
       sort_order: formOrder,
       terminal_waves_enabled: formWavesEnabled,
     };
@@ -94,18 +97,30 @@
   }
 </script>
 
-{#snippet backgroundFields()}
-  <label class="background-toggle">
-    <input type="checkbox" bind:checked={formWavesEnabled} />
-    {t("group.terminal_background")}
-  </label>
-  <p class="background-hint">{t("group.terminal_background_hint")}</p>
-  {#if formWavesEnabled}
-    <div class="terminal-preview" style:background={previewTheme.background} style:color={previewTheme.foreground}>
-      <div class="preview-content">{formName || t("group.name_placeholder")} ~ # <span>{t("group.preview")}</span></div>
-      <EnvironmentWave color={formColor} />
+{#snippet groupSettings()}
+  <div class="group-settings">
+    <div class="setting-row background-row">
+      <div class="setting-body">
+        <label for={`${uid}-waves`} class="setting-title" class:on={formWavesEnabled}>{t("group.terminal_background")}</label>
+        <div id={`${uid}-waves-hint`} class="setting-desc">{t("group.terminal_background_hint")}</div>
+      </div>
+      <label class="switch">
+        <input id={`${uid}-waves`} type="checkbox" role="switch" bind:checked={formWavesEnabled} aria-describedby={`${uid}-waves-hint`} />
+        <span class="slider"></span>
+      </label>
+      {#if formWavesEnabled}
+        <EnvironmentWave color={normalizeHexColor(formColor) ?? "transparent"} />
+      {/if}
     </div>
-  {/if}
+    <div class="card-divider"></div>
+    <div class="setting-row">
+      <div class="setting-body">
+        <label for={`${uid}-order`} class="setting-title">{t("group.sort_order")}</label>
+      </div>
+      <input id={`${uid}-order`} type="number" bind:value={formOrder} min="0" />
+    </div>
+    <div class="card-divider"></div>
+  </div>
 {/snippet}
 
 <div class="page">
@@ -115,15 +130,12 @@
 
   {#if adding}
     <div class="card inline-form">
-      <label>{t("common.name")}</label>
-      <input type="text" bind:value={formName} placeholder={t("group.name_placeholder")} />
-      <label>{t("common.color")}</label>
-      <input type="color" bind:value={formColor} />
-      {@render backgroundFields()}
-      <label>{t("group.sort_order")}</label>
-      <input type="number" bind:value={formOrder} min="0" />
+      <label for={`${uid}-name`}>{t("common.name")}</label>
+      <input id={`${uid}-name`} type="text" bind:value={formName} placeholder={t("group.name_placeholder")} />
+      <ColorInput bind:value={formColor} />
+      {@render groupSettings()}
       <div class="form-actions">
-        <button class="btn btn-accent btn-sm" onclick={saveNew} disabled={!formName.trim()}>{t("common.save")}</button>
+        <button class="btn btn-accent btn-sm" onclick={saveNew} disabled={!formName.trim() || !formColorValid}>{t("common.save")}</button>
         <button class="btn btn-sm" onclick={cancelForm}>{t("common.cancel")}</button>
       </div>
     </div>
@@ -132,15 +144,12 @@
   {#each groups as g (g.id)}
     {#if editId === g.id}
       <div class="card inline-form">
-        <label>{t("common.name")}</label>
-        <input type="text" bind:value={formName} placeholder={t("group.name_placeholder")} />
-        <label>{t("common.color")}</label>
-        <input type="color" bind:value={formColor} />
-        {@render backgroundFields()}
-        <label>{t("group.sort_order")}</label>
-        <input type="number" bind:value={formOrder} min="0" />
+        <label for={`${uid}-name`}>{t("common.name")}</label>
+        <input id={`${uid}-name`} type="text" bind:value={formName} placeholder={t("group.name_placeholder")} />
+        <ColorInput bind:value={formColor} />
+        {@render groupSettings()}
         <div class="form-actions">
-          <button class="btn btn-accent btn-sm" onclick={saveEdit} disabled={!formName.trim()}>{t("common.save")}</button>
+          <button class="btn btn-accent btn-sm" onclick={saveEdit} disabled={!formName.trim() || !formColorValid}>{t("common.save")}</button>
           <button class="btn btn-sm" onclick={cancelForm}>{t("common.cancel")}</button>
         </div>
       </div>
@@ -151,9 +160,6 @@
           <div class="item-text">
             <div class="item-name" title={g.name}>{g.name}</div>
             <div class="item-sub">{t("group.order", { n: g.sort_order })}</div>
-            {#if g.terminal_waves_enabled}
-              <div class="item-sub">{t("group.terminal_background")}: {g.color}</div>
-            {/if}
           </div>
         </div>
         <div class="item-actions">
@@ -187,15 +193,20 @@
 
 <style>
   .page { padding: 24px; }
-  .background-toggle { display: flex; align-items: center; gap: 8px; }
-  .background-hint { color: var(--text-sub); font-size: 12px; margin: 0; }
-  .terminal-preview {
+  .group-settings { margin: 0 -14px; }
+  .setting-row { display: flex; align-items: center; gap: 12px; padding: 14px; }
+  .setting-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .setting-title { font-size: 13px; font-weight: 600; color: var(--text); text-transform: uppercase; letter-spacing: 0.04em; }
+  .setting-title.on { color: var(--accent); }
+  .setting-desc { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
+  .background-row {
     position: relative;
     overflow: hidden;
-    border-radius: 4px;
-    font-family: monospace;
+    isolation: isolate;
   }
-  .preview-content { position: relative; z-index: 1; padding: 12px 12px 20px; overflow-wrap: anywhere; }
+  .background-row .setting-body, .background-row .switch { position: relative; z-index: 1; }
+  .switch input:focus-visible + .slider { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .card-divider { height: 1px; background: var(--divider); }
   .toolbar { display: flex; justify-content: flex-end; margin-bottom: 16px; }
   .item-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
   .item-info { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -213,8 +224,7 @@
     display: flex; flex-direction: column; gap: 8px;
     padding: 14px; margin-bottom: 10px;
   }
-  .inline-form input[type="color"] { width: 48px; height: 32px; padding: 2px; border: 1px solid var(--divider); border-radius: 4px; cursor: pointer; }
-  .inline-form input[type="number"] { width: 80px; }
+  .inline-form input[type="number"] { width: 80px; flex-shrink: 0; }
   .form-actions { display: flex; gap: 10px; margin-top: 4px; }
   .empty { text-align: center; color: var(--text-dim); padding: 32px; }
 </style>

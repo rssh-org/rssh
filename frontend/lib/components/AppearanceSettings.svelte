@@ -514,14 +514,15 @@
     }
     /* ── Mini-window preview cards (used by both menu position and AI panel position) ── */
     .layout-grid {
-        display: flex;
-        gap: 14px;
-        flex-wrap: wrap;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 128px), 1fr));
+        gap: 12px;
     }
     .layout-card {
         display: flex;
         flex-direction: column;
         align-items: center;
+        min-width: 0;
         gap: 8px;
         padding: 8px;
         border: 2px solid transparent;
@@ -548,7 +549,7 @@
         background: transparent;
     }
     .mini-window {
-        width: 160px;
+        width: 100%;
         height: 100px;
         border: 1px solid var(--divider);
         border-radius: 6px;
@@ -561,7 +562,7 @@
     /* Palette preview card — same footprint as .mini-window so the
        layout grid stays uniform across palette / position cards. */
     .palette-preview {
-        width: 160px;
+        width: 100%;
         height: 100px;
         border: 1px solid;
         border-radius: 6px;
@@ -589,7 +590,7 @@
        can compare all four side-by-side. Uniform footprint with the
        palette / position cards. */
     .shape-preview {
-        width: 160px;
+        width: 100%;
         height: 100px;
         display: flex;
         align-items: center;
@@ -792,7 +793,7 @@
        span colored by the actual ANSI role (blue=dir, green=exec,
        yellow=warn, red=error). User sees colors in context. */
     .term-preview {
-        width: 160px;
+        width: 100%;
         height: 100px;
         border: 1px solid var(--divider);
         border-radius: 6px;
