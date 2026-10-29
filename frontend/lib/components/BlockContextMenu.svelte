@@ -4,6 +4,9 @@
      * 留通用接口（items 数组）以便后续可加更多操作（如"导出到剪贴板"等）。
      */
     import { onMount } from "svelte";
+    import { createScopedBackHandler } from "../stores/back.svelte.ts";
+
+    const registerBack = createScopedBackHandler();
 
     export interface MenuItem {
         label: string;
@@ -23,6 +26,8 @@
         items: MenuItem[];
         onClose: () => void;
     } = $props();
+
+    onMount(() => registerBack({ handle: () => onClose() }));
 
     let containerEl: HTMLDivElement;
     // 视口边缘 clamp 偏移：先以 (x, y) 渲染，量出尺寸再算修正量，

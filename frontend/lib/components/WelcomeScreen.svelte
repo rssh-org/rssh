@@ -10,6 +10,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { t } from "../i18n/index.svelte.ts";
   import { capabilities } from "../stores/runtime.svelte.ts";
+  import { createScopedBackHandler } from "../stores/back.svelte.ts";
 
   import SceneIntro from "./welcome/SceneIntro.svelte";
   import SceneAi from "./welcome/SceneAi.svelte";
@@ -19,7 +20,12 @@
   import SceneCli from "./welcome/SceneCli.svelte";
   import SceneCta from "./welcome/SceneCta.svelte";
 
+  const registerBack = createScopedBackHandler();
+
   let { onDismiss }: { onDismiss: () => void } = $props();
+
+  // The full-window welcome sits above every workspace overlay.
+  onMount(() => registerBack({ handle: () => onDismiss(), priority: 5 }));
 
   // Linear scene flow. CTA is terminal — its "Next" is dismiss.
   type Scene = "intro" | "ai" | "blocks" | "discovery" | "sync" | "cli" | "cta";

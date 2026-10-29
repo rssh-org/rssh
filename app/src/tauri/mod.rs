@@ -146,7 +146,25 @@ pub fn run_with(
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init());
+    #[cfg(android)]
+    let builder = builder.plugin(crate::platform::tauri::navigation::init());
     builder
+        .on_page_load(|_webview, _payload| {
+            #[cfg(any(android, ohos))]
+            if matches!(_payload.event(), tauri::webview::PageLoadEvent::Started) {
+                let app = _webview.app_handle().clone();
+                let label = _webview.window().label().to_owned();
+                let revision = crate::platform::host::next_back_navigation_revision();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = crate::platform::host::platform(&app)
+                        .set_back_navigation_enabled(&app, &label, false, revision)
+                        .await
+                    {
+                        log::warn!("Failed to reset navigation for {label}: {error}");
+                    }
+                });
+            }
+        })
         // Android/iOS Activity recreation is not a logical window close.
         // The OHOS adapter emits Destroyed only for a real native window close.
         .on_window_event(|_window, event| {
@@ -176,6 +194,7 @@ pub fn run_with(
         })
         .invoke_handler(tauri::generate_handler![
             commands::runtime::get_runtime_capabilities,
+            commands::runtime::set_back_navigation_enabled,
             commands::files::resolve_local_paths,
             // profile & credential
             commands::profile::list_profiles,

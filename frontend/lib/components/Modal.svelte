@@ -6,9 +6,16 @@
      The surface is theme-driven: .surface-popup reads --shadow-popup, which each
      shape overrides — neu = none (the scrim separates the card), material = a
      drop shadow, flat = a border. Context menus use the sibling .surface-menu. -->
+<script module lang="ts">
+    export const modalBackPriority = Symbol("modal-back-priority");
+</script>
+
 <script lang="ts">
-    import type { Snippet } from "svelte";
+    import { onMount, setContext, type Snippet } from "svelte";
     import type { HTMLAttributes } from "svelte/elements";
+    import { createScopedBackHandler } from "../stores/back.svelte.ts";
+
+    const registerBack = createScopedBackHandler();
 
     let {
         onClose,
@@ -22,6 +29,11 @@
         class?: string;
         children: Snippet;
     } & HTMLAttributes<HTMLDivElement> = $props();
+
+    // A modal covers page dropdowns. Its own descendants still dismiss first.
+    const backPriority = 2;
+    setContext(modalBackPriority, backPriority);
+    onMount(() => registerBack({ handle: () => onClose(), priority: backPriority }));
 
     // Esc closes this modal. Capture phase + stopPropagation so it beats the
     // app-level Esc handler (AppShell closes the SFTP panel / drawer on Esc) —

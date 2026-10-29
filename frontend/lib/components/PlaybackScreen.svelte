@@ -4,6 +4,7 @@
   import { FitAddon } from "@xterm/addon-fit";
   import { invoke } from "@tauri-apps/api/core";
   import * as app from "../stores/app.svelte.ts";
+  import * as layout from "../stores/layout.svelte.ts";
   import * as theme from "../themes/store.svelte.ts";
   import { setupTouchScroll } from "../terminal/touch-scroll.ts";
   import { t, errMsg } from "../i18n/index.svelte.ts";
@@ -148,7 +149,9 @@
 
 <div class="playback">
   <div class="controls">
-    <button class="btn btn-sm" onclick={() => app.settingsNavigate("recording-settings")}>{t("playback.back")}</button>
+    {#if !layout.compact()}
+      <button class="btn btn-sm" onclick={() => app.settingsNavigate("recording-settings")}>{t("playback.back")}</button>
+    {/if}
     <span class="file-name">{fileName}</span>
     <div class="spacer"></div>
     {#if playing}

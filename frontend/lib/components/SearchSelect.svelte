@@ -14,7 +14,13 @@
   trigger" trick, which does not fit a panel-below-trigger layout.
 -->
 <script lang="ts">
-    import { onMount, type Snippet } from "svelte";
+    import { getContext, onMount, type Snippet } from "svelte";
+    import { createScopedBackHandler } from "../stores/back.svelte.ts";
+    import { modalBackPriority } from "./Modal.svelte";
+
+    const registerBack = createScopedBackHandler();
+
+    const backPriority = (getContext<number>(modalBackPriority) ?? 0) + 1;
 
     type Option = { value: string; label: string };
 
@@ -80,6 +86,15 @@
     }
     function close() { open = false; }
     function toggle() { open ? close() : openPanel(); }
+
+    $effect(() => {
+        if (!open) return;
+        return registerBack({
+            enabled: () => open,
+            priority: backPriority,
+            handle: () => { close(); triggerEl?.focus(); },
+        });
+    });
 
     // Combobox: when custom values are allowed, the search box edits the value
     // live so typing then saving keeps the entry even without picking a row.

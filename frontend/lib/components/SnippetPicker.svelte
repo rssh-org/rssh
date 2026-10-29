@@ -2,6 +2,14 @@
   import { onMount, onDestroy } from "svelte";
   import * as app from "../stores/app.svelte.ts";
   import type { Snippet } from "../stores/app.svelte.ts";
+  import { createScopedBackHandler } from "../stores/back.svelte.ts";
+
+  const registerBack = createScopedBackHandler();
+
+  onMount(() => registerBack({
+    handle: app.closeSnippetPicker,
+    enabled: app.snippetPickerOpen,
+  }));
 
   let snippets = $state<Snippet[]>([]);
   let focusIdx = $state(0);

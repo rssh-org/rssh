@@ -1,10 +1,11 @@
 <script lang="ts">
-  import type { Component } from "svelte";
+  import { onMount, type Component } from "svelte";
   import * as app from "../stores/app.svelte.ts";
   import * as layout from "../stores/layout.svelte.ts";
   import * as updates from "../stores/updates.svelte.ts";
   import * as syncStatus from "../stores/sync.svelte.ts";
   import * as cliStatus from "../stores/cli.svelte.ts";
+  import { createScopedBackHandler, requestBack } from "../stores/back.svelte.ts";
   import { t, locale, setLocale, AVAILABLE_LOCALES, type Locale } from "../i18n/index.svelte.ts";
   import type { MessageKey } from "../i18n/locales/en";
   import CredentialManager from "./CredentialManager.svelte";
@@ -28,6 +29,14 @@
   import Select from "./Select.svelte";
   import ConnectionList from "./ConnectionList.svelte";
   import ConnectionEditor from "./ConnectionEditor.svelte";
+
+  const registerBack = createScopedBackHandler();
+
+  onMount(() => registerBack({
+    handle: app.settingsBack,
+    enabled: app.settingsCanGoBack,
+    priority: 0,
+  }));
 
   /** locale 下拉选项 —— AVAILABLE_LOCALES 是常量，不需要 $derived。 */
   const localeOptions = AVAILABLE_LOCALES.map((l) => ({ value: l.code, label: l.label }));
@@ -119,12 +128,36 @@
       || (id === "sync" && syncStatus.anyVersionDifference())
       || (id === "cli" && cliStatus.needsAttention());
   }
+
+  function pageTitle(): string {
+    const page = app.settingsPage();
+    if (page === "connection-edit") {
+      const mode = app.connectionEditorIntent().mode;
+      if (mode === "copy") return t("settings.connection_copy");
+      return t(mode === "edit" ? "settings.connection_edit" : "settings.connection_create");
+    }
+    if (page === "credential-edit") {
+      return t(app.editingId() ? "settings.credential_edit" : "settings.credential_create");
+    }
+    if (page === "playback") return t("recording.playback");
+    return allMenu.find(item => item.id === page)?.label ?? t("settings.title");
+  }
 </script>
 
 <div class="settings-layout" class:compact>
+  {#if compact}
+    <header class="settings-header">
+      <button type="button" class="settings-back" onclick={() => requestBack()} aria-label={t("common.back")} title={t("common.back")}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m14 6-6 6 6 6" />
+        </svg>
+      </button>
+      <h1 id="settings-page-title">{pageTitle()}</h1>
+    </header>
+  {/if}
   {#if !compact || app.settingsPage() === "menu"}
-  <nav class="settings-menu">
-    <div class="menu-header">{t("settings.title")}</div>
+  <nav class="settings-menu" aria-label={t("settings.title")}>
+    {#if !compact}<div class="menu-header">{t("settings.title")}</div>{/if}
     {#each sections as s}
       <div class="section-label">{t(s.section)}</div>
       {#each s.items as item}
@@ -154,9 +187,6 @@
 
   {#if !compact || app.settingsPage() !== "menu"}
   <div class="settings-content">
-    {#if compact}
-      <button class="mobile-back" onclick={() => app.settingsBack()}>← {t("common.back")}</button>
-    {/if}
     {#if app.settingsPage() === "menu"}
       <div class="welcome">
         <h2>{t("settings.title")}</h2>
@@ -181,6 +211,9 @@
   .settings-layout {
     display: flex;
     height: 100%;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .settings-menu {
@@ -193,12 +226,16 @@
     padding-left: 18px;
     padding-right: 14px;
     overflow-y: auto;
+    min-height: 0;
   }
 
-  .menu-header {
+  .menu-header,
+  .settings-header h1 {
     font-size: 16px;
     font-weight: 700;
     color: var(--text);
+  }
+  .menu-header {
     padding: 4px 0px 4px;
   }
 
@@ -244,6 +281,7 @@
     flex: 1;
     overflow-y: auto;
     min-width: 0;
+    min-height: 0;
   }
 
   .welcome {
@@ -268,28 +306,49 @@
     cursor: pointer;
   }
 
-  /* ── Mobile: stack navigation ── */
+  /* Width changes only the shell around the same mounted page. */
+  .settings-layout.compact {
+    flex-direction: column;
+  }
   .settings-layout.compact .settings-menu {
+    flex: 1;
     width: 100%;
     border-right: none;
   }
   .settings-layout.compact .settings-content {
     width: 100%;
   }
-  .mobile-back {
+  .settings-header {
     display: flex;
     align-items: center;
     gap: 4px;
-    padding: 12px 16px;
-    border: none;
+    flex-shrink: 0;
+    min-height: 44px;
+    padding: 6px 16px 6px 8px;
     border-bottom: 1px solid var(--divider);
     background: var(--bg);
-    color: var(--accent);
-    font-family: inherit;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    width: 100%;
-    text-align: left;
   }
+  .settings-header h1 {
+    min-width: 0;
+    margin: 0;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+  .settings-back {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .settings-back:hover { background: var(--surface); }
+  .settings-back:active { box-shadow: var(--pressed); }
+  .settings-back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>

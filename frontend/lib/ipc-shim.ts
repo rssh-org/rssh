@@ -190,6 +190,7 @@ export function installTauriShim(): void {
                 fileMultiSelect: capabilities.fileMultiSelect && hasPicker,
                 directoryTransfer: capabilities.directoryTransfer && hasPicker,
                 nativeClipboard: false,
+                systemBack: false,
             };
         },
         clipboard_read: () => navigator.clipboard.readText(),

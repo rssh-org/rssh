@@ -3,12 +3,20 @@
 //! The host owns platform SDK objects. Commands use this interface through
 //! Tauri's application state, so each application has one explicit adapter.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
 use super::runtime::RuntimeCapabilities;
 use crate::error::AppResult;
 use crate::files::{DownloadTarget, FileFilter, LocalWalkEntry, OpenedFile, ResolvedPath};
+
+/// Stamp resets before spawning them so a late native call cannot overwrite a
+/// newer frontend update. Native adapters reject revisions older than applied.
+pub fn next_back_navigation_revision() -> u64 {
+    static REVISION: AtomicU64 = AtomicU64::new(0);
+    REVISION.fetch_add(1, Ordering::Relaxed) + 1
+}
 
 #[derive(Clone, Copy)]
 pub enum AppWindowPurpose {
@@ -19,6 +27,15 @@ pub enum AppWindowPurpose {
 #[async_trait::async_trait]
 pub trait NativePlatform: Send + Sync {
     async fn capabilities(&self, window_label: &str) -> AppResult<RuntimeCapabilities>;
+    async fn set_back_navigation_enabled(
+        &self,
+        _app: &AppHandle,
+        _window_label: &str,
+        _enabled: bool,
+        _revision: u64,
+    ) -> AppResult<()> {
+        Ok(())
+    }
     async fn read_clipboard(&self) -> AppResult<String>;
     async fn write_clipboard(&self, text: String) -> AppResult<()>;
     async fn open_url(&self, app: &AppHandle, url: String) -> AppResult<()>;

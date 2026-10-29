@@ -14,6 +14,17 @@ impl NativePlatform for OhosPlatform {
         crate::device::capabilities(window_label).await
     }
 
+    async fn set_back_navigation_enabled(
+        &self,
+        app: &AppHandle,
+        window_label: &str,
+        enabled: bool,
+        revision: u64,
+    ) -> AppResult<()> {
+        crate::navigation::set_enabled(app, window_label, enabled, revision);
+        Ok(())
+    }
+
     async fn read_clipboard(&self) -> AppResult<String> {
         crate::clipboard::read_text().await
     }

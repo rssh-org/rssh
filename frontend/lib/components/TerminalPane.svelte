@@ -11,6 +11,7 @@
     import {listen, type UnlistenFn} from "@tauri-apps/api/event";
     import type {ConnectorSpec, HighlightRule, TelnetProfile} from "../stores/app.svelte.ts";
     import * as app from "../stores/app.svelte.ts";
+    import {createScopedBackHandler} from "../stores/back.svelte.ts";
     import * as layout from "../stores/layout.svelte.ts";
     import { terminalPolicy } from "../stores/runtime.svelte.ts";
     import { isIOS } from "../platform.ts";
@@ -259,6 +260,11 @@
     let telnetLoginScript = $state("");
     let showSearch = $state(false);
     let searchQuery = $state("");
+    const registerBack = createScopedBackHandler();
+    $effect(() => {
+        if (!showSearch) return;
+        return registerBack({ enabled: () => showSearch, handle: closeSearch });
+    });
 
     // Command block overlay state. `paintTick` is a dumb counter we bump
     // whenever something that affects the overlay changes — scroll, render,

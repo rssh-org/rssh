@@ -6,6 +6,8 @@ pub use rssh_core::error;
 mod file_descriptor;
 mod file_grants;
 mod file_name;
+#[cfg(any(ohos, test))]
+mod navigation;
 
 #[cfg(ohos)]
 mod native;

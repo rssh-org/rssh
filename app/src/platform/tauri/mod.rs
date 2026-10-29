@@ -3,6 +3,8 @@
 #[cfg(any(windows, macos, linux))]
 mod clipboard;
 mod external;
+#[cfg(android)]
+pub(crate) mod navigation;
 
 use crate::error::{AppError, AppResult};
 use crate::files::{self, DownloadTarget, FileFilter, LocalWalkEntry, OpenedFile, ResolvedPath};
@@ -16,6 +18,17 @@ pub(crate) struct TauriPlatform;
 impl NativePlatform for TauriPlatform {
     async fn capabilities(&self, _window_label: &str) -> AppResult<RuntimeCapabilities> {
         Ok(RuntimeCapabilities::native())
+    }
+
+    #[cfg(android)]
+    async fn set_back_navigation_enabled(
+        &self,
+        app: &AppHandle,
+        window_label: &str,
+        enabled: bool,
+        revision: u64,
+    ) -> AppResult<()> {
+        navigation::set_enabled(app, window_label, enabled, revision).await
     }
 
     async fn read_clipboard(&self) -> AppResult<String> {
