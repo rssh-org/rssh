@@ -41,26 +41,50 @@ export function softKeyboardInset(paneBottom: number, viewport: ViewportRect): n
  */
 export function applySoftKeyboardInset(pane: HTMLElement): number {
   const vv = window.visualViewport;
-  const inset = softKeyboardInset(
-    pane.getBoundingClientRect().bottom,
+  const bounds = pane.getBoundingClientRect();
+  let inset = softKeyboardInset(
+    bounds.bottom,
     vv ?? { offsetTop: 0, height: window.innerHeight },
   );
-  if (inset > 0) pane.style.paddingBottom = `${inset}px`;
-  else pane.style.removeProperty("padding-bottom");
+  if (inset > 0) {
+    // Padding is a border-box minimum: exceeding the available height would
+    // enlarge the pane, then its ResizeObserver would request even more padding.
+    // Terminal/chat roots fill a separately sized parent; use that allocation
+    // too so an existing inset cannot prevent the pane shrinking with its parent.
+    let height = bounds.height;
+    const parent = pane.parentElement;
+    if (parent) {
+      const style = getComputedStyle(parent);
+      height = Math.min(height, parent.clientHeight
+        - (parseFloat(style.paddingTop) || 0)
+        - (parseFloat(style.paddingBottom) || 0));
+    }
+    const style = getComputedStyle(pane);
+    inset = Math.min(inset, Math.max(0, height
+      - (parseFloat(style.paddingTop) || 0)
+      - (parseFloat(style.borderTopWidth) || 0)
+      - (parseFloat(style.borderBottomWidth) || 0)));
+  }
+  if (inset > 0) {
+    const padding = `${inset}px`;
+    if (pane.style.paddingBottom !== padding) pane.style.paddingBottom = padding;
+  } else {
+    clearSoftKeyboardInset(pane);
+  }
   return inset;
 }
 
 /** Drop the inset — keyboard hidden or the panel going away. */
 export function clearSoftKeyboardInset(pane: HTMLElement): void {
-  pane.style.removeProperty("padding-bottom");
+  if (pane.style.paddingBottom) pane.style.removeProperty("padding-bottom");
 }
 
 /**
  * Keep `panel` clear of the soft keyboard while `input` holds focus, riding
  * the keyboard up AND down (viewport events track the open/close animation
  * frames). Returns a cleanup fn. Listens on the input's focus/blur plus
- * visualViewport resize/scroll; no-op wherever the visual viewport already
- * fills the window (Android's adjustResize, desktop).
+ * visualViewport resize/scroll and panel resizing; no-op wherever the visual
+ * viewport already fills the window (Android's adjustResize, desktop).
  *
  * Settle mode: blur fires while the keyboard is still sliding away, so
  * tracking continues (inset shrinks toward 0) instead of snapping the bottom
@@ -96,7 +120,16 @@ export function setupSoftKeyboardInset(panel: HTMLElement, input: HTMLElement): 
   const vv = window.visualViewport;
   vv?.addEventListener("resize", onViewportChange, { passive: true });
   vv?.addEventListener("scroll", onViewportChange, { passive: true });
+  // Opening a sibling panel can change this panel's geometry while the
+  // keyboard stays stationary, so no visualViewport event follows.
+  const observer = typeof ResizeObserver === "undefined"
+    ? null
+    : new ResizeObserver(onViewportChange);
+  observer?.observe(panel, { box: "border-box" });
+  // Old padding can hold the panel's border-box size while its parent shrinks.
+  if (panel.parentElement) observer?.observe(panel.parentElement, { box: "border-box" });
   return () => {
+    observer?.disconnect();
     clearSoftKeyboardInset(panel);
     input.removeEventListener("focus", onFocus);
     input.removeEventListener("blur", onBlur);

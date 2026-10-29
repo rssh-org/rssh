@@ -1277,8 +1277,27 @@ export function requestSearch(tabId: string) {
   _searchRequest = { tabId, n: (_searchRequest?.n ?? 0) + 1 };
 }
 
-/* ─── SFTP overlay (folder pick + multi-select are desktop-only; single-file
-   transfer also works on mobile via plugin-fs + content:// URIs) ─── */
+/* ─── AI / SFTP panel coordination ─── */
+export function openAiPanel(tabId: string) {
+  const tab = _tabs.find(t => t.id === tabId);
+  if (!tab || !isAiCapableTabType(tab.type)) return;
+  if (layout.compact()) sftpPanel.closePanel(tabId);
+  ai.openPanel(tabId);
+}
+
+export async function toggleAiPanel(tabId: string): Promise<void> {
+  if (ai.isOpen(tabId)) await ai.closePanel(tabId);
+  else openAiPanel(tabId);
+}
+
+/** Narrowing a wide workspace keeps AI when both panels were open. */
+export function reconcileCompactPanels() {
+  if (!layout.compact()) return;
+  for (const tab of _tabs) {
+    if (ai.isOpen(tab.id) && sftpPanel.isOpen(tab.id)) sftpPanel.closePanel(tab.id);
+  }
+}
+
 /** 给当前活跃 tab 开 SFTP。仅 ssh tab 有意义（共用其 SSH channel；local PTY
  *  没有远端文件系统）。这里 gate tab.type，防止键盘 navigate("sftp") 等路径
  *  绕过 UI，把 home/local/edit tab 错误标为 open。 */
@@ -1286,7 +1305,15 @@ export function openSftp() {
   if (!_activeTabId) return;
   const tab = _tabs.find(t => t.id === _activeTabId);
   if (!tab || tab.type !== "ssh") return;
-  sftpPanel.openPanel(_activeTabId);
+  if (layout.compact() && ai.isOpen(tab.id)) {
+    // Closing hides AI synchronously. Its teardown must not delay opening SFTP
+    // or later reopen it after another user action has changed the panel.
+    ai.closePanel(tab.id).catch((error) => {
+      console.warn("[app] close AI panel before SFTP:", error);
+      toast.error(errMsg(error));
+    });
+  }
+  sftpPanel.openPanel(tab.id);
 }
 export function closeSftp() {
   if (!_activeTabId || !sftpPanel.isOpen(_activeTabId)) return;

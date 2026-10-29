@@ -221,7 +221,7 @@
                     }
                     const canOpen = !!tab && app.isAiCapableTabType(tab.type) && !!app.sessionIdForTab(tab.id);
                     if (!canOpen) return false;
-                    ai.openPanel(tab.id);
+                    app.openAiPanel(tab.id);
                 },
             },
             {
@@ -356,7 +356,7 @@
         // 1. 开本地 shell tab
         const tabId = `local:${crypto.randomUUID()}`;
         app.addTab({type: "local", id: tabId, label: t("ai.handoff.tab_label"), meta: {}});
-        ai.openPanel(tabId);
+        app.openAiPanel(tabId);
         const lease = ai.captureSessionLease(tabId);
 
         // 2. Wait for the local PTY to register itself. The store fires
@@ -506,6 +506,7 @@
         return n > 0 ? String(n) : null;
     });
     let aiPos = $derived(ai.position());
+    $effect(() => app.reconcileCompactPanels());
 
     // SFTP per-tab：tabsWithSftp 是所有"开了 SFTP"的 tab（每个挂一个 SftpBrowser 实例保活）。
     // sftpVisible 只控制 aside 视觉是否展开 + 哪个 pane 显示 —— 切到无 SFTP 的 tab 时实例不 unmount。
@@ -565,7 +566,34 @@
     let sftpPanelWidth = $derived(app.sftpPanelWidthForTab(app.activePaneId()));
     let contentEl = $state<HTMLDivElement | null>(null);
     let contentWidth = $state(layout.viewportWidth());
+    let compactContentMaxHeight = $state<number | undefined>();
     let panelFitPriorityByTab = $state<Record<string, PanelFitPriority>>({});
+
+    // Overlay keyboards shrink only the visual viewport. Split the space above
+    // the keyboard, otherwise it can cover the entire lower terminal half.
+    $effect(() => {
+        const el = contentEl;
+        const viewport = window.visualViewport;
+        sbPos;
+        if (!el || !viewport || !layout.compact() || (!aiVisible && !sftpVisible)) {
+            compactContentMaxHeight = undefined;
+            return;
+        }
+        const sync = () => {
+            compactContentMaxHeight = Math.max(0,
+                viewport.offsetTop + viewport.height - el.getBoundingClientRect().top);
+        };
+        sync();
+        const observer = new ResizeObserver(sync);
+        observer.observe(el);
+        viewport.addEventListener("resize", sync);
+        viewport.addEventListener("scroll", sync);
+        return () => {
+            observer.disconnect();
+            viewport.removeEventListener("resize", sync);
+            viewport.removeEventListener("scroll", sync);
+        };
+    });
 
     $effect(() => {
         const el = contentEl;
@@ -594,8 +622,8 @@
         defaultWidth: defaultPanelWidth(layout.viewportWidth()),
         pluginVisible: pluginSideVisible,
         pluginWidth: plugins.sideWidth(app.activePaneId()),
-        aiVisible,
-        sftpVisible,
+        aiVisible: !layout.compact() && aiVisible,
+        sftpVisible: !layout.compact() && sftpVisible,
     }));
     let fittedPanelWidths = $derived(fitPanelWidths({
         containerWidth: pluginSideFitted.remainingContainerWidth,
@@ -616,6 +644,7 @@
         aiVisible;
         sftpVisible;
         pluginSideVisible;
+        layout.compact();
         app.settingsActive();
         activePanelResizeStop?.();
     });
@@ -749,7 +778,7 @@
             sign: resizeSign(pluginSidePos),
             minWidth: panelMinWidth,
             minMain: mainPanelMinWidth,
-            otherPanelVisible: aiVisible || sftpVisible,
+            otherPanelVisible: !layout.compact() && (aiVisible || sftpVisible),
             stillActive: () => pluginSideVisible && app.activePaneId() === tabId,
             setWidth: plugins.setSideWidth,
             commitWidth: () => {},
@@ -1148,7 +1177,7 @@
                     label: t("tab.context.ai"),
                     shortcut: keymap.format("ai.toggle"),
                     disabled: !sid,
-                    onClick: () => { app.setActivePane(tab.id); ai.openPanel(tab.id); },
+                    onClick: () => { app.setActivePane(tab.id); app.openAiPanel(tab.id); },
                 },
             ]);
         }
@@ -1429,6 +1458,7 @@
                     {side}
                     width={fittedPanelWidths.sftp}
                     hidden={!sftpVisible}
+                    stackOnCompact
                     onResizeStart={startSftpResize}
                     onResetWidth={resetSftpWidth}
                     panes={sftpTabs.map((tab) => ({
@@ -1467,7 +1497,7 @@
                     width={fittedPanelWidths.ai}
                     hidden={!aiVisible}
                     bordered={false}
-                    mobileFullWidth
+                    stackOnCompact
                     onResizeStart={startAiResize}
                     onResetWidth={resetAiWidth}
                     panes={aiTabs.map((tab) => ({
@@ -1500,6 +1530,7 @@
         bind:this={contentEl}
         class:ai-on={aiVisible}
         class:sftp-on={sftpVisible}
+        style:max-height={compactContentMaxHeight === undefined ? undefined : `${compactContentMaxHeight}px`}
     >
         <!-- 左右栈由 sideStacks(aiPos, pluginSidePos) 决定：SFTP 永远在 AI 对侧，
              插件侧栏贴终端（所选侧最内层）。DOM 顺序 = 视觉顺序，不再用 row-reverse。 -->
@@ -1770,9 +1801,8 @@
     .shell.sb-right .content { border-right: 1px solid var(--divider); }
     .shell.settings-fullscreen .content { border: 0; }
 
-    /* 终端区——所有 .pane 挂在 .terminal-region（绝对定位由它提供 position:
-       relative），插件横条区作为兄弟节点贴其上/下边缘。min-width: 0 让 flex
-       能把它压到 0（窄屏 AI 接管时）。 */
+    /* Terminal panes remain mounted inside .terminal-region; plugin strips
+       stay on its top/bottom edges. Both axes must be allowed to shrink. */
     .startup-error {
         display: flex;
         align-items: center;
@@ -1800,10 +1830,21 @@
         min-height: 0;
     }
 
-    /* 竖屏手机：AI 接管整块内容区，main-area 挤到 0（终端实例保留，关 AI 后恢复）。
-       aside 自身的接管样式在 SidePanel（mobileFullWidth prop）。 */
-    @media (max-width: 480px) {
-        .content.ai-on .main-area { flex: 0; }
+    /* AI/SFTP take the first row; the terminal and optional plugin side panel
+       share the second. CSS placement keeps terminal instances mounted. */
+    @media (max-width: 639px) {
+        .content {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            grid-template-rows: minmax(0, 1fr);
+        }
+        .content.ai-on, .content.sftp-on {
+            grid-template-rows: repeat(2, minmax(0, 1fr));
+        }
+        .main-area {
+            grid-column: 2;
+            grid-row: -2 / -1;
+        }
     }
 
     .pane {

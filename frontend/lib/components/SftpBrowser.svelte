@@ -34,6 +34,7 @@
     let {meta}: { meta: Record<string, string> } = $props();
 
     let sftpId = $state<string | null>(null);
+    let destroyed = false;
     let cwd = $state("/");
     let home = $state("/");
     let pathInput = $state("/");
@@ -96,20 +97,31 @@
                     username: meta.username, authType: meta.authType, secret: meta.secret || null,
                 });
             }
+            if (destroyed) {
+                await invoke("sftp_close", { sftpId: id }).catch((error) => {
+                    console.warn("[sftp] close abandoned connection:", error);
+                });
+                return;
+            }
             sftpId = id;
             const h = await invoke<string>("sftp_home", {sftpId: id});
+            if (destroyed) return;
             home = h;
             cwd = h;
             pathInput = h;
             await listDir(h);
         } catch (e: any) {
+            if (destroyed) return;
             error = errMsg(e);
             loading = false;
         }
     });
 
     onDestroy(() => {
-        if (sftpId) invoke("sftp_close", {sftpId});
+        destroyed = true;
+        if (sftpId) invoke("sftp_close", {sftpId}).catch((error) => {
+            console.warn("[sftp] close browser connection:", error);
+        });
     });
 
     async function listDir(path: string) {

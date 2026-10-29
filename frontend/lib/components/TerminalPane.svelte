@@ -558,7 +558,7 @@
         if (!terminal || blocks.length === 0) return;
         const text = extractBlocksText(terminal, blocks, foldStore);
         if (!text) return;
-        ai.openPanel(tabId);
+        app.openAiPanel(tabId);
         ai.prefillInput(tabId, text);
         clearBlockSelection();
     }
