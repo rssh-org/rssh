@@ -6,6 +6,8 @@
     import * as app from "../stores/app.svelte.ts";
     import * as startupSettings from "../stores/startup.svelte.ts";
     import * as layout from "../stores/layout.svelte.ts";
+    import * as back from "../stores/back.svelte.ts";
+    import {connectSystemBack} from "../system-back.ts";
     import * as updates from "../stores/updates.svelte.ts";
     import * as syncStatus from "../stores/sync.svelte.ts";
     import * as serial from "../stores/serial.svelte.ts";
@@ -17,6 +19,7 @@
     import DownloadsScreen from "./DownloadsScreen.svelte";
     import SnippetPicker from "./SnippetPicker.svelte";
     import Modal from "./Modal.svelte";
+    import BackScope from "./BackScope.svelte";
     import * as transfers from "../stores/transfers.svelte.ts";
     import TabContextMenu, {type CtxMenuItem} from "./TabContextMenu.svelte";
     import MenuButton, {type NavItem, navItemKey} from "./MenuButton.svelte";
@@ -226,6 +229,7 @@
                 description: t("shortcut.tab.cycle"),
                 match: e => TAB_CYCLE.some(b => matchBinding(e, b)),
                 handler: e => {
+                    if (app.settingsFullscreen()) return;
                     if (keymap.recording()) return false;
                     const dir = e.shiftKey ? -1 : 1;
                     if (!tabCycling) {
@@ -246,6 +250,7 @@
                 description: t("shortcut.tab.goto"),
                 match: e => digitTabIndex(e, keymap.isMac) !== null,
                 handler: e => {
+                    if (app.settingsFullscreen()) return;
                     if (keymap.recording()) return false;
                     const idx = digitTabIndex(e, keymap.isMac);
                     if (idx === null) return false;
@@ -281,6 +286,17 @@
         }
 
         const detachKeydown = attachShortcuts(shortcutsTable());
+        const detachBack = back.registerBackHandler({
+            priority: 0,
+            enabled: () => !app.settingsActive() && (drawerOpen || sftpVisible || pluginSideVisible || pluginStripVisible || aiVisible),
+            handle: () => {
+                if (drawerOpen) closeDrawer();
+                else if (sftpVisible) app.closeSftp();
+                else if (pluginSideVisible) plugins.closeSide(app.activePaneId());
+                else if (pluginStripVisible) plugins.closeStrip(app.activePaneId());
+                else if (aiVisible) void ai.closePanel(aiTabId).catch(e => toast.error(errMsg(e)));
+            },
+        });
         const detachKeyup = attachKeyup((e) => {
             if (tabCycling && e.key === "Control") {
                 const item = navItems[focusIdx];
@@ -293,7 +309,27 @@
             startup.abort();
             detachKeydown();
             detachKeyup();
+            detachBack();
         };
+    });
+
+    let systemBackSupported = $derived(app.capabilities().systemBack);
+    $effect(() => {
+        if (!systemBackSupported) return;
+        const connection = connectSystemBack(
+            getCurrentWindow().label,
+            () => { back.requestBack(); },
+            error => toast.error(errMsg(error)),
+        );
+        $effect(() => { connection.setEnabled(back.canHandleBack()); });
+        return () => connection.dispose();
+    });
+
+    $effect(() => {
+        if (!app.settingsFullscreen()) return;
+        closeDrawer();
+        menuCtx = null;
+        pinnedMenu = null;
     });
 
     $effect(() => {
@@ -1220,11 +1256,13 @@
     }
 
     function handleTouchStart(e: TouchEvent) {
+        if (app.settingsFullscreen()) return;
         touchStartX = e.touches[0].clientX;
         touchStartY = e.touches[0].clientY;
     }
 
     function handleTouchEnd(e: TouchEvent) {
+        if (app.settingsFullscreen()) return;
         const dx = e.changedTouches[0].clientX - touchStartX;
         const dy = Math.abs(e.changedTouches[0].clientY - touchStartY);
         const pos = app.sidebarPosition();
@@ -1237,6 +1275,7 @@
     }
 
     function handleKeydown(e: KeyboardEvent) {
+        if (e.defaultPrevented || app.settingsFullscreen()) return;
         if (e.key === "Escape") {
             // The Transfers popover has its own Esc handler. When it's open,
             // a single Esc should only close the topmost overlay (the popover),
@@ -1282,6 +1321,7 @@
 
 <div
     class="shell"
+    class:settings-fullscreen={app.settingsFullscreen()}
     class:sb-left={sbPos === "left"}
     class:sb-right={sbPos === "right"}
     class:sb-top={sbPos === "top"}
@@ -1297,6 +1337,7 @@
 
     <!-- Sidebar: 40px rail; each row expands on hover (cliff) or Ctrl+Tab
          (ripple). Touch swipe opens the full drawer. Position = left | right. -->
+    {#if !app.settingsFullscreen()}
     {#if sbPos === "left" || sbPos === "right"}
     <div class="sidebar-rail">
     <nav
@@ -1376,6 +1417,7 @@
             onDrop={handleDrop}
             onDragEnd={handleDragEnd}
         />
+    {/if}
     {/if}
 
     {#snippet sideAside(kind: PanelKind, side: "left" | "right")}
@@ -1489,21 +1531,24 @@
                     {@const layout = app.layoutForWorkspace(workspace.id)}
                     <div
                         class="pane terminal-layout-pane"
+                        inert={app.settingsActive() || workspace.id !== app.activeWorkspaceId()}
                         class:visible={!app.settingsActive() && workspace.id === app.activeWorkspaceId() && resourcePanesAllowed && !!layout}
                         role="presentation"
                     >
                         {#if resourcePanesAllowed && layout}
-                            <TerminalSplitLayout
-                                {layout}
-                                activePaneId={workspace.id === app.activeWorkspaceId() ? app.activePaneId() : workspace.id}
-                                onActivate={(tabId) => {
-                                    if (workspace.id === app.activeWorkspaceId()) app.setActivePane(tabId);
-                                }}
-                                onResize={(path, ratio) => app.resizeLayoutPath(workspace.id, path, ratio)}
-                                onClose={closeTerminalPane}
-                                onContextMenu={openPaneContextMenu}
-                                onInitialConnectionFailure={handleInitialConnectionFailure}
-                            />
+                            <BackScope active={!app.settingsActive() && workspace.id === app.activeWorkspaceId()}>
+                                <TerminalSplitLayout
+                                    {layout}
+                                    activePaneId={workspace.id === app.activeWorkspaceId() ? app.activePaneId() : workspace.id}
+                                    onActivate={(tabId) => {
+                                        if (workspace.id === app.activeWorkspaceId()) app.setActivePane(tabId);
+                                    }}
+                                    onResize={(path, ratio) => app.resizeLayoutPath(workspace.id, path, ratio)}
+                                    onClose={closeTerminalPane}
+                                    onContextMenu={openPaneContextMenu}
+                                    onInitialConnectionFailure={handleInitialConnectionFailure}
+                                />
+                            </BackScope>
                         {/if}
                     </div>
                 {/each}
@@ -1514,11 +1559,13 @@
                         class:visible={!app.settingsActive() && tab.id === app.activeWorkspaceId()}
                         role="presentation"
                     >
-                        {#await loadEditPane() then { default: EditPane }}
-                            <EditPane tabId={tab.id} active={tab.id === app.activeWorkspaceId() && !app.settingsActive()} />
-                        {:catch error}
-                            <div>{t("pane.load_failed", { error: errMsg(error) })}</div>
-                        {/await}
+                        <BackScope active={!app.settingsActive() && tab.id === app.activeWorkspaceId()}>
+                            {#await loadEditPane() then { default: EditPane }}
+                                <EditPane tabId={tab.id} active={tab.id === app.activeWorkspaceId() && !app.settingsActive()} />
+                            {:catch error}
+                                <div>{t("pane.load_failed", { error: errMsg(error) })}</div>
+                            {/await}
+                        </BackScope>
                     </div>
                 {/each}
 
@@ -1529,7 +1576,9 @@
                         role="presentation"
                     >
                         {#if resourcePanesAllowed}
-                            <ForwardPane tabId={tab.id} meta={tab.meta ?? {}}/>
+                            <BackScope active={!app.settingsActive() && tab.id === app.activeWorkspaceId()}>
+                                <ForwardPane tabId={tab.id} meta={tab.meta ?? {}}/>
+                            </BackScope>
                         {/if}
                     </div>
                 {/each}
@@ -1603,6 +1652,12 @@
     .shell.sb-right  { flex-direction: row-reverse;    --sb-right:  40px; }
     .shell.sb-top    { flex-direction: column;         --sb-top:    44px; }
     .shell.sb-bottom { flex-direction: column-reverse; --sb-bottom: 44px; }
+    .shell.settings-fullscreen {
+        --sb-left: 0px;
+        --sb-right: 0px;
+        --sb-top: 0px;
+        --sb-bottom: 0px;
+    }
 
     /* ── Sidebar: rail (40px flow footprint) + transparent overlay ── */
     /* The rail is a 40px flex item that reserves the sidebar's space in normal
@@ -1713,6 +1768,7 @@
        row never paints over it; an expanded row floats above it, as intended. */
     .shell.sb-left  .content { border-left: 1px solid var(--divider); }
     .shell.sb-right .content { border-right: 1px solid var(--divider); }
+    .shell.settings-fullscreen .content { border: 0; }
 
     /* 终端区——所有 .pane 挂在 .terminal-region（绝对定位由它提供 position:
        relative），插件横条区作为兄弟节点贴其上/下边缘。min-width: 0 让 flex

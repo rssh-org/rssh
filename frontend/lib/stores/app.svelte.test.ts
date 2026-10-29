@@ -435,6 +435,93 @@ describe("MRU toggle disables reordering", () => {
   });
 });
 
+describe("settings navigation", () => {
+  it("returns through settings parents before restoring the same workspace and pane", async () => {
+    vi.stubGlobal("window", Object.assign(new EventTarget(), { innerWidth: 400 }));
+    const app = await loadAppModule();
+    app.addTab(local("workspace"));
+    app.addPane("workspace", "right", local("pane"));
+    app.openConnectionEdit("ssh", "connection-1");
+    const tabs = app.tabs().map(tab => tab.id);
+
+    expect(app.settingsFullscreen()).toBe(true);
+    expect(app.settingsCanGoBack()).toBe(true);
+    expect(app.settingsBack()).toBe(true);
+    expect(app.settingsPage()).toBe("connections");
+    expect(app.settingsBack()).toBe(true);
+    expect(app.settingsPage()).toBe("menu");
+    expect(app.settingsActive()).toBe(true);
+    expect(app.settingsBack()).toBe(true);
+    expect(app.settingsActive()).toBe(false);
+    expect(app.settingsFullscreen()).toBe(false);
+    expect(app.settingsCanGoBack()).toBe(false);
+    expect(app.settingsBack()).toBe(false);
+    expect(app.activeWorkspaceId()).toBe("workspace");
+    expect(app.activePaneId()).toBe("pane");
+    expect(app.tabs().map(tab => tab.id)).toEqual(tabs);
+  });
+
+  it.each([
+    ["credential-edit", "credentials"],
+    ["playback", "recording-settings"],
+    ["recording-settings", "menu"],
+    ["appearance", "menu"],
+    ["shell-settings", "menu"],
+  ] as const)("returns from %s to %s", async (page, parent) => {
+    const app = await loadAppModule();
+    app.navigate(page, "item-1");
+
+    expect(app.settingsBack()).toBe(true);
+
+    expect(app.settingsPage()).toBe(parent);
+    expect(app.editingId()).toBeNull();
+    expect(app.settingsActive()).toBe(true);
+  });
+
+  it("opens the menu on a fresh compact entry and retains the chosen page across resize", async () => {
+    const viewport = Object.assign(new EventTarget(), { innerWidth: 900 });
+    vi.stubGlobal("window", viewport);
+    const app = await loadAppModule();
+    const layout = await import("./layout.svelte.ts");
+    const stop = layout.observeViewport();
+    app.navigate("credential-edit", "credential-1");
+
+    viewport.innerWidth = 400;
+    viewport.dispatchEvent(new Event("resize"));
+    expect(app.settingsFullscreen()).toBe(true);
+    expect(app.settingsPage()).toBe("credential-edit");
+    expect(app.editingId()).toBe("credential-1");
+    app.openSettings();
+    expect(app.settingsPage()).toBe("credential-edit");
+
+    viewport.innerWidth = 900;
+    viewport.dispatchEvent(new Event("resize"));
+    expect(app.settingsFullscreen()).toBe(false);
+    expect(app.settingsPage()).toBe("credential-edit");
+    expect(app.editingId()).toBe("credential-1");
+    app.closeSettings();
+    app.openSettings();
+    expect(app.settingsPage()).toBe("credential-edit");
+
+    app.closeSettings();
+    viewport.innerWidth = 400;
+    viewport.dispatchEvent(new Event("resize"));
+    app.openSettings();
+    expect(app.settingsPage()).toBe("menu");
+    expect(app.editingId()).toBeNull();
+    stop();
+  });
+
+  it("does not change the retained settings page when back is unhandled", async () => {
+    const app = await loadAppModule();
+    app.navigate("appearance");
+    app.closeSettings();
+
+    expect(app.settingsBack()).toBe(false);
+    expect(app.settingsPage()).toBe("appearance");
+  });
+});
+
 describe("connection editor navigation", () => {
   it("opens a new connection with a selectable SSH type by default", async () => {
     const app = await loadAppModule();

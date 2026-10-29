@@ -25,6 +25,7 @@ export interface RuntimeCapabilities {
   plugins: boolean;
   nativeClipboard: boolean;
   releaseUpdateCheck: boolean;
+  systemBack: boolean;
 }
 
 export interface RuntimeResponse extends RuntimeCapabilities {
@@ -46,6 +47,7 @@ let _capabilities = $state<Readonly<RuntimeCapabilities>>({
   plugins: false,
   nativeClipboard: false,
   releaseUpdateCheck: false,
+  systemBack: false,
 });
 let _terminalPolicy = $state<Readonly<TerminalRuntimePolicy> | null>(null);
 let _loaded = $state(false);

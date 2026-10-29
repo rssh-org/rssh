@@ -8,7 +8,13 @@
   options 用数组而不是 children，因为大多数使用点都是动态构造（profiles, credentials, locales）。
 -->
 <script lang="ts">
-    import { onMount } from "svelte";
+    import { getContext, onMount } from "svelte";
+    import { createScopedBackHandler } from "../stores/back.svelte.ts";
+    import { modalBackPriority } from "./Modal.svelte";
+
+    const registerBack = createScopedBackHandler();
+
+    const backPriority = (getContext<number>(modalBackPriority) ?? 0) + 1;
 
     type OptionValue = string | number | null;
     type Option = { value: OptionValue; label: string; disabled?: boolean };
@@ -77,6 +83,15 @@
     function close() {
         open = false;
     }
+
+    $effect(() => {
+        if (!open) return;
+        return registerBack({
+            enabled: () => open,
+            priority: backPriority,
+            handle: () => { close(); triggerEl?.focus(); },
+        });
+    });
 
     function select(opt: Option) {
         if (opt.disabled) return;

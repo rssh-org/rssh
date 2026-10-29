@@ -301,6 +301,8 @@ export function tabs() { return _tabs; }
 export function activeTabId() { return _activeTabId; }
 export function activeTab() { return _tabs.find(t => t.id === _activeTabId); }
 export function settingsActive() { return _settingsActive; }
+export function settingsFullscreen() { return layout.compact() && _settingsActive; }
+export function settingsCanGoBack() { return _settingsActive; }
 export function settingsPage() { return _settingsPage; }
 export function editingId() { return _editingId; }
 export function connectionEditorIntent(): ConnectionEditorIntent { return _connectionEditorIntent; }
@@ -617,10 +619,13 @@ export function setTerminalTitle(tabId: string, title: string) {
 
 /* ─── Settings Navigation ─── */
 export function openSettings() {
+  if (!_settingsActive && layout.compact()) settingsNavigate("menu");
   _settingsActive = true;
   // SFTP 不强制关 —— settings 路径下走可见性 derived 隐藏，state 保留
   // Transfers popover state is independent — leave it untouched here.
 }
+
+export function closeSettings() { _settingsActive = false; }
 
 /** Open the transfers popover. State is independent from settings/tab — the
  *  popover is itself an overlay. */
@@ -648,10 +653,14 @@ export function openConnectionCopy(kind: ConnectionKind, sourceId: string) {
   navigate("connection-edit");
 }
 
-export function settingsBack() {
-  if (_settingsPage === "connection-edit") _settingsPage = "connections";
-  else if (_settingsPage === "credential-edit") _settingsPage = "credentials";
-  else _settingsPage = "menu";
+export function settingsBack(): boolean {
+  if (!_settingsActive) return false;
+  if (_settingsPage === "menu") closeSettings();
+  else if (_settingsPage === "connection-edit") settingsNavigate("connections");
+  else if (_settingsPage === "credential-edit") settingsNavigate("credentials");
+  else if (_settingsPage === "playback") settingsNavigate("recording-settings");
+  else settingsNavigate("menu");
+  return true;
 }
 
 /* ─── Sidebar position (wide / compact layout) ─── */
@@ -1296,13 +1305,13 @@ export function isProfilePinned(id: string) { return _pinnedProfileIds.includes(
 
 /* ─── Legacy navigate (redirect to settings) ─── */
 export function navigate(s: string, editId?: string) {
-  if (s === "main") { _settingsActive = false; return; }
+  if (s === "main") { closeSettings(); return; }
   if (s === "settings") { openSettings(); _settingsPage = "menu"; return; }
   if (s === "sftp") { openSftp(); return; }
   openSettings();
   settingsNavigate(s as SettingsPage, editId);
 }
-export function goBack() { settingsBack(); }
+export function goBack() { return settingsBack(); }
 
 /* ═══════════════════════════════════════════════════════
    Data fetching helpers

@@ -1,7 +1,18 @@
 <script lang="ts">
+    import { onMount } from "svelte";
     import * as transfers from "../stores/transfers.svelte.ts";
     import * as app from "../stores/app.svelte.ts";
     import { t } from "../i18n/index.svelte.ts";
+    import { createScopedBackHandler } from "../stores/back.svelte.ts";
+
+    const registerBack = createScopedBackHandler();
+
+    // The transfer popover is drawn above dialogs and their dropdowns.
+    onMount(() => registerBack({
+        handle: app.closeDownloads,
+        enabled: app.downloadsActive,
+        priority: 4,
+    }));
 
     let popEl: HTMLDivElement | undefined;
     let list = $derived(transfers.list());

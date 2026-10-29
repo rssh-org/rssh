@@ -133,6 +133,11 @@ const en = {
 
   // ── Settings menu ──
   "settings.title": "Settings",
+  "settings.connection_create": "New Connection",
+  "settings.connection_edit": "Edit Connection",
+  "settings.connection_copy": "Copy Connection",
+  "settings.credential_create": "New Credential",
+  "settings.credential_edit": "Edit Credential",
   "settings.locale.aria": "Language",
   "settings.section.connection_list": "Connection List",
   "settings.section.profiles": "Profiles",
@@ -1095,6 +1100,7 @@ const en = {
   "error.window_clone_encode_failed": "Encode tab clone payload failed: {err}",
   "error.window_open_failed": "Open window failed: {err}",
   "error.window_title_failed": "Update window title failed: {err}",
+  "error.navigation_update_failed": "Update system back navigation failed: {err}",
   "error.window_non_https_url": "Refusing non-http(s) URL: {url}",
   "error.window_open_url_failed": "Open URL failed: {err}",
   "error.update_invalid_repo": "Invalid repo: {repo}",

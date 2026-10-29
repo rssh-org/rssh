@@ -10,7 +10,7 @@ import { FilesAccessPlugin } from '../plugins/FilesAccessPlugin';
 import { RuntimePlugin } from '../plugins/RuntimePlugin';
 import { SerialPlugin } from '../plugins/SerialPlugin';
 
-export function rsshPlugins(): BridgePluginFactory[] {
+export function rsshPlugins(systemBack: boolean = false): BridgePluginFactory[] {
   return [
     new LazyPlugin(() => new AppControlPlugin()),
     new LazyPlugin(() => new FilesPlugin()),
@@ -20,7 +20,7 @@ export function rsshPlugins(): BridgePluginFactory[] {
     new LazyPlugin(() => new WindowPlugin()),
     new LazyPlugin(() => new ClipboardPlugin()),
     new LazyPlugin(() => new FilesAccessPlugin()),
-    new LazyPlugin(() => new RuntimePlugin()),
+    new LazyPlugin(() => new RuntimePlugin(systemBack)),
     new LazyPlugin(() => new SerialPlugin()),
   ];
 }

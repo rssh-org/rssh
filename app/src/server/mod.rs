@@ -617,6 +617,10 @@ fn dispatch(
         "get_runtime_capabilities" => ok(Ok::<_, AppError>(
             crate::platform::runtime::RuntimeCapabilities::headless(),
         )),
+        "set_back_navigation_enabled" => {
+            let _: bool = arg(&args, "enabled")?;
+            Ok(Value::Null)
+        }
         "cli_status" => ok(Ok::<_, AppError>(crate::cli::cli_status_headless())),
         "cli_install" => Err(json!("cli_install_not_applicable_embedded")),
 

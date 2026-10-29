@@ -4,7 +4,7 @@ import { rsshPlugins } from './RsshPlugins';
 
 export class RsshAbility extends NativeAbility {
   public moduleName: string = 'rssh_ohos';
-  public bridgePlugins = rsshPlugins();
+  public bridgePlugins = rsshPlugins(true);
 
   protected override async loadWindowStageContent(windowStage: window.WindowStage): Promise<void> {
     await windowStage.loadContent('pages/Index');

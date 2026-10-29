@@ -11,6 +11,9 @@
     import AppIcon from "./AppIcon.svelte";
     import {writeText as writeClipboard} from "../clipboard.ts";
     import {toast} from "../stores/toast.svelte.ts";
+    import { createScopedBackHandler } from "../stores/back.svelte.ts";
+
+    const registerBack = createScopedBackHandler();
 
     /** Mirrors the backend WalkEntry; rel_path is always '/'-separated. */
     interface WalkEntry { rel_path: string; size: number; }
@@ -55,6 +58,11 @@
     let ctxDx = $state(0);
     let ctxDy = $state(0);
     let ctxReady = $state(false);
+
+    onMount(() => registerBack({
+        enabled: () => !!ctxMenu || uploadMenuOpen,
+        handle: () => { if (ctxMenu) closeCtxMenu(); else closeUploadMenu(); },
+    }));
 
     /** Properties dialog state. */
     let propsStat = $state<FileStat | null>(null);

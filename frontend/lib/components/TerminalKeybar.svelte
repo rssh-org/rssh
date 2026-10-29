@@ -1,5 +1,6 @@
 <script lang="ts">
     import * as app from "../stores/app.svelte.ts";
+    import { createScopedBackHandler } from "../stores/back.svelte.ts";
     import * as ai from "../ai/store.svelte.ts";
     import { toast } from "../stores/toast.svelte.ts";
     import { t, errMsg } from "../i18n/index.svelte.ts";
@@ -72,6 +73,11 @@
         { label: "Del", seq: "\x1b[3~" },
     ];
     let extOpen = $state(false);
+    const registerBack = createScopedBackHandler();
+    $effect(() => {
+        if (!extOpen) return;
+        return registerBack({ enabled: () => extOpen, handle: () => { extOpen = false; } });
+    });
 
     // 当前 tab 是否有活跃 SSH/local session——AI 面板要求已连接的终端做诊断对象。
     // 没连接就让按钮 disabled，避免点了没反应（aiVisible 在 AppShell 层会因 session 缺失静默不渲染）。

@@ -13,13 +13,13 @@ const folderCapability = "SystemCapability.FileManagement.UserFileService.Folder
 const usbSerialCapability = "SystemCapability.USB.USBManager.Serial";
 const busSerialCapability = "SystemCapability.BusManager.Serial";
 
-function harness(deviceType: string, supported: string[], sdkApiVersion = 25) {
+function harness(deviceType: string, supported: string[], sdkApiVersion = 25, systemBack = false) {
   const canIUse = vi.fn((capability: string) => supported.includes(capability));
   const modules: Record<string, unknown> = {
     "@ohos.deviceInfo": { default: { deviceType, sdkApiVersion } },
     "@ohos-rs/ability": { AsyncPluginBase: class {} },
   };
-  type RuntimeModule = { RuntimePlugin: new () => {
+  type RuntimeModule = { RuntimePlugin: new (systemBack: boolean) => {
     invokeAsync(action: string, payload: { typeName: string }, context: {
       isActive: () => boolean; isCancelled: () => boolean;
     }): Promise<unknown>;
@@ -42,7 +42,7 @@ function harness(deviceType: string, supported: string[], sdkApiVersion = 25) {
     return exports;
   }
   const exports = load(sourcePath) as RuntimeModule;
-  return { plugin: new exports.RuntimePlugin(), canIUse, context };
+  return { plugin: new exports.RuntimePlugin(systemBack), canIUse, context };
 }
 
 describe("HarmonyOS runtime capability bridge", () => {
@@ -50,7 +50,7 @@ describe("HarmonyOS runtime capability bridge", () => {
     const h = harness("2in1", [windowCapability, folderCapability]);
     await expect(h.plugin.invokeAsync("device", { typeName: "rssh.runtime.DeviceRequest" }, h.context))
       .resolves.toEqual({ typeName: "rssh.runtime.DeviceResponse", value: {
-        serial: false, deviceType: "2in1", multiWindow: true, folderSelection: true,
+        serial: false, deviceType: "2in1", multiWindow: true, folderSelection: true, systemBack: false,
       } });
     expect(h.canIUse.mock.calls).toEqual([[usbSerialCapability], [windowCapability], [folderCapability]]);
   });
@@ -59,7 +59,7 @@ describe("HarmonyOS runtime capability bridge", () => {
     const h = harness("2in1", [windowCapability]);
     await expect(h.plugin.invokeAsync("device", { typeName: "rssh.runtime.DeviceRequest" }, h.context))
       .resolves.toEqual({ typeName: "rssh.runtime.DeviceResponse", value: {
-        serial: false, deviceType: "2in1", multiWindow: true, folderSelection: false,
+        serial: false, deviceType: "2in1", multiWindow: true, folderSelection: false, systemBack: false,
       } });
   });
 
@@ -84,8 +84,14 @@ describe("HarmonyOS runtime capability bridge", () => {
     const h = harness("phone", []);
     await expect(h.plugin.invokeAsync("device", { typeName: "rssh.runtime.DeviceRequest" }, h.context))
       .resolves.toEqual({ typeName: "rssh.runtime.DeviceResponse", value: {
-        serial: false, deviceType: "phone", multiWindow: false, folderSelection: false,
+        serial: false, deviceType: "phone", multiWindow: false, folderSelection: false, systemBack: false,
       } });
+  });
+
+  it("reports the installed back handler independently from device shape", async () => {
+    const h = harness("tablet", [], 12, true);
+    await expect(h.plugin.invokeAsync("device", { typeName: "rssh.runtime.DeviceRequest" }, h.context))
+      .resolves.toMatchObject({ value: { deviceType: "tablet", systemBack: true } });
   });
 
   it.each([

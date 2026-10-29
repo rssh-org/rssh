@@ -39,6 +39,7 @@ fn register_plugins(app: &OpenHarmonyApp) -> napi_ohos::Result<()> {
 
 #[openharmony_ability_derive::ability]
 fn configure_ability(app: OpenHarmonyApp) {
+    crate::navigation::register(&app);
     register_plugins(&app).expect("failed to register RSSH native capability plugins");
     crate::native::configure(app.clone());
     tauri::ohos::APP

@@ -12,6 +12,7 @@
      */
     import type { Snippet } from "svelte";
     import { t } from "../i18n/index.svelte.ts";
+    import BackScope from "./BackScope.svelte";
 
     let {
         side,
@@ -64,7 +65,9 @@
     ></div>
     {#each panes as p (p.id)}
         <div class="pane" class:visible={p.visible}>
-            {@render pane(p)}
+            <BackScope active={!hidden && p.visible}>
+                {@render pane(p)}
+            </BackScope>
         </div>
     {/each}
 </aside>

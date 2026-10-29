@@ -148,6 +148,7 @@ describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
             fileMultiSelect: serverSupport,
             directoryTransfer: serverSupport,
             nativeClipboard: true,
+            systemBack: true,
             releaseUpdateCheck: true,
             terminalPolicy,
         } });
@@ -156,6 +157,7 @@ describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
             fileMultiSelect: expected,
             directoryTransfer: expected,
             nativeClipboard: false,
+            systemBack: false,
             releaseUpdateCheck: true,
             terminalPolicy,
         });

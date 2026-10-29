@@ -2,6 +2,7 @@ use crate::error::AppResult;
 use napi_derive_ohos::napi;
 use openharmony_ability::{
     impl_bridge_napi_type, AsyncBridge, BridgeCallOptions, BridgeContextRequirement, BridgePlugin,
+    PluginLifecycleEvent,
 };
 
 pub struct RuntimePlugin;
@@ -10,6 +11,18 @@ impl BridgePlugin for RuntimePlugin {
     const ID: &'static str = "rssh.runtime";
     const REQUIRED_CONTEXTS: &'static [BridgeContextRequirement] =
         &[BridgeContextRequirement::Ability];
+
+    fn on_lifecycle(&self, event: &PluginLifecycleEvent) -> napi_ohos::Result<()> {
+        if matches!(
+            event,
+            PluginLifecycleEvent::UiContextDestroyed
+                | PluginLifecycleEvent::WindowStageDestroyed
+                | PluginLifecycleEvent::AbilityDestroyed
+        ) {
+            crate::navigation::reset();
+        }
+        Ok(())
+    }
 }
 
 #[napi(object)]
@@ -22,6 +35,7 @@ pub struct DeviceResponse {
     pub multi_window: bool,
     pub folder_selection: bool,
     pub serial: bool,
+    pub system_back: bool,
 }
 impl_bridge_napi_type!(DeviceResponse, "rssh.runtime.DeviceResponse");
 
@@ -67,6 +81,12 @@ pub async fn capabilities(
     let device = query().await?;
     let pc = device.class() == DeviceClass::Desktop;
     let mut capabilities = RuntimeCapabilities::native();
+    capabilities.system_back = crate::navigation::supports_system_back(
+        &device.device_type,
+        device.system_back,
+        window_label,
+    );
+    crate::navigation::set_supported(window_label, capabilities.system_back);
     capabilities.serial = pc && device.serial;
     capabilities.local_pty = pc && local_pty_available().await;
     capabilities.local_discovery = capabilities.local_pty;

@@ -135,6 +135,11 @@ const zh: Messages = {
 
   // ── 设置菜单 ──
   "settings.title": "设置",
+  "settings.connection_create": "新建连接",
+  "settings.connection_edit": "编辑连接",
+  "settings.connection_copy": "复制连接",
+  "settings.credential_create": "新建凭据",
+  "settings.credential_edit": "编辑凭据",
   "settings.locale.aria": "语言",
   "settings.section.connection_list": "连接清单",
   "settings.section.profiles": "Profile",
@@ -1098,6 +1103,7 @@ const zh: Messages = {
   "error.window_clone_encode_failed": "编码 Tab 克隆数据失败：{err}",
   "error.window_open_failed": "打开窗口失败：{err}",
   "error.window_title_failed": "更新窗口标题失败：{err}",
+  "error.navigation_update_failed": "更新系统返回状态失败：{err}",
   "error.window_non_https_url": "拒绝打开非 http(s) 链接：{url}",
   "error.window_open_url_failed": "打开链接失败：{err}",
   "error.update_invalid_repo": "仓库格式不合法：{repo}",

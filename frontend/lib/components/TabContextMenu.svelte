@@ -11,6 +11,9 @@
 
 <script lang="ts">
     import {onMount} from "svelte";
+    import { createScopedBackHandler } from "../stores/back.svelte.ts";
+
+    const registerBack = createScopedBackHandler();
 
     let {x, y, sections, onClose}: {
         x: number;
@@ -18,6 +21,8 @@
         sections: CtxMenuItem[][];
         onClose: () => void;
     } = $props();
+
+    onMount(() => registerBack({ handle: () => onClose() }));
 
     let menuEl: HTMLDivElement | undefined;
     let dx = $state(0);
