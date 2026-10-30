@@ -9,6 +9,7 @@ pub mod files;
 pub mod forward;
 pub mod group;
 pub mod lifecycle;
+pub mod mcp;
 pub mod plugin;
 pub mod profile;
 #[cfg(any(windows, macos, linux, ohos))]

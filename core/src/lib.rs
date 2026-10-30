@@ -1,5 +1,6 @@
 //! Shared RSSH business logic, storage, and connection engine.
 
+pub mod agent;
 pub mod ai;
 pub mod commands;
 pub mod crypto;

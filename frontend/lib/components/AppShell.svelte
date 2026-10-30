@@ -1,5 +1,5 @@
 <script lang="ts">
-    import {onMount} from "svelte";
+    import {onMount, untrack} from "svelte";
     import {invoke} from "@tauri-apps/api/core";
     import {getCurrentWindow} from "@tauri-apps/api/window";
     import type {Profile, Tab, Group} from "../stores/app.svelte.ts";
@@ -26,7 +26,7 @@
     import StripBar from "./StripBar.svelte";
     import { rippleWidth } from "./sidebar-ripple.ts";
     import * as ai from "../ai/store.svelte.ts";
-    import type { AiTargetKind } from "../ai/types.ts";
+    import * as mcp from "../mcp/store.svelte.ts";
     import PluginSide from "../plugins/PluginSide.svelte";
     import PluginStrip from "../plugins/PluginStrip.svelte";
     import SidePanel from "./SidePanel.svelte";
@@ -270,6 +270,9 @@
 
     onMount(() => {
         keymap.init();
+        if (app.capabilities().mcpServer) {
+            void mcp.refresh().catch(e => toast.error(errMsg(e)));
+        }
         // Crash recovery must settle before any pane can create a replacement
         // backend resource. Otherwise reconcile([]) can race that new session.
         if (!bypassStartupReconcile) {
@@ -307,10 +310,19 @@
         });
         return () => {
             startup.abort();
+            mcp.disconnect();
             detachKeydown();
             detachKeyup();
             detachBack();
         };
+    });
+
+    $effect(() => {
+        if (!app.capabilities().mcpServer) return;
+        const connected = app.connectedSessions();
+        untrack(() => {
+            void mcp.reconcileSessions(connected).catch(e => toast.error(errMsg(e)));
+        });
     });
 
     let systemBackSupported = $derived(app.capabilities().systemBack);
@@ -1170,7 +1182,7 @@
             ]);
         }
 
-        // AI 排障入口（ssh/local/serial/telnet tab 才有，且需要已经连上 = 有 sessionId）
+        // AI 排障入口：终端需要已经连上（有 sessionId）。
         if (app.isAiCapableTabType(tab.type)) {
             const sid = app.sessionIdForTab(tab.id);
             sections.push([
@@ -1514,7 +1526,7 @@
                             {#await loadChatPanel() then { default: ChatPanel }}
                                 <ChatPanel
                                     tabId={tab.id}
-                                    targetKind={tab.type as AiTargetKind}
+                                    targetKind={app.aiTargetKind(tab.type as app.AiCapableTabType)}
                                     targetId={app.sessionIdForTab(tab.id) ?? null}
                                     active={aiVisible && tab.id === aiTabId}
                                 />

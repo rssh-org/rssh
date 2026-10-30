@@ -7,6 +7,7 @@ pub use rssh_core::{
 #[cfg(any(windows, macos, linux))]
 mod cli;
 pub mod files;
+pub mod mcp;
 pub mod platform;
 #[cfg(feature = "tauri")]
 #[path = "tauri/mod.rs"]

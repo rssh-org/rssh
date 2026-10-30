@@ -674,6 +674,49 @@ async fn dispatch_async(
     tx: &mpsc::UnboundedSender<Message>,
 ) -> Result<Value, Value> {
     match cmd {
+        "mcp_start" => ok(crate::mcp::start(state.clone(), owner.clone()).await),
+        "mcp_status" => ok(crate::mcp::status(state, owner)),
+        "mcp_stop" => ok(crate::mcp::stop(state, owner)),
+        "mcp_register_session" => {
+            let tx = tx.clone();
+            let sink = Arc::new(move |event: &str, payload: Value| {
+                tx.send(Message::Text(
+                    json!({"type":"event", "event":event, "payload":payload}).to_string(),
+                ))
+                .is_ok()
+            });
+            ok(rssh_core::agent::register_session(
+                state,
+                owner,
+                sink,
+                arg(&args, "sessionId")?,
+                arg(&args, "tabId")?,
+                arg(&args, "label")?,
+            ))
+        }
+        "mcp_unregister_session" => ok(rssh_core::agent::unregister_session(
+            state,
+            owner,
+            &arg::<String>(&args, "sessionId")?,
+        )),
+        "mcp_accept_session" => ok(rssh_core::agent::accept_session(
+            state,
+            headless_host(state, tx),
+            owner,
+            &arg::<String>(&args, "requestId")?,
+        )
+        .await),
+        "mcp_session_ready" => ok(rssh_core::agent::session_ready(
+            state,
+            owner,
+            &arg::<String>(&args, "requestId")?,
+            &arg::<String>(&args, "instanceId")?,
+        )),
+        "mcp_reject_session" => ok(rssh_core::agent::reject_session(
+            state,
+            owner,
+            &arg::<String>(&args, "requestId")?,
+        )),
         // ---- orphan-session reap on (re)mount: the server outlives a page reload,
         //      so stale ssh/sftp/forward/pty from before the reload get cleaned ----
         "reconcile_sessions" => {
@@ -1853,9 +1896,58 @@ mod tests {
             ai_sessions: Mutex::new(HashMap::new()),
             ai_session_owners: Arc::new(Mutex::new(HashMap::new())),
             ai_remote_shell_cache: Mutex::new(HashMap::new()),
+            agent_bridge: rssh_core::agent::AgentBridge::default(),
             data_dir: dir.path().into(),
         };
         (Arc::new(state), dir)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_mcp_commands_preserve_owner_isolation() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let other = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let initial = dispatch_async(&state, &owner, "mcp_status", json!({}), &tx)
+            .await
+            .unwrap();
+        assert!(initial["endpoint"].is_null());
+        let started = dispatch_async(&state, &owner, "mcp_start", json!({}), &tx)
+            .await
+            .unwrap();
+        assert!(started["endpoint"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://127.0.0.1:"));
+        assert_eq!(started["sessions"], json!([]));
+        let isolated = dispatch_async(&state, &other, "mcp_status", json!({}), &tx)
+            .await
+            .unwrap();
+        assert!(isolated["endpoint"].is_null());
+        assert_eq!(initial["requests"], json!([]));
+        assert!(dispatch_async(
+            &state,
+            &other,
+            "mcp_register_session",
+            json!({"sessionId":"missing", "tabId":"tab", "label":"test"}),
+            &tx
+        )
+        .await
+        .is_err());
+        dispatch_async(&state, &other, "mcp_stop", json!({}), &tx)
+            .await
+            .unwrap();
+        assert!(dispatch_async(&state, &owner, "mcp_status", json!({}), &tx)
+            .await
+            .unwrap()["endpoint"]
+            .is_object());
+        dispatch_async(&state, &owner, "mcp_stop", json!({}), &tx)
+            .await
+            .unwrap();
+        assert!(dispatch_async(&state, &owner, "mcp_status", json!({}), &tx)
+            .await
+            .unwrap()["endpoint"]
+            .is_null());
     }
 
     #[tokio::test(flavor = "current_thread")]

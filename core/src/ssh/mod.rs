@@ -56,6 +56,7 @@ pub(crate) mod test_support {
             ai_sessions: Mutex::new(HashMap::new()),
             ai_session_owners: Arc::new(Mutex::new(HashMap::new())),
             ai_remote_shell_cache: Mutex::new(HashMap::new()),
+            agent_bridge: crate::agent::AgentBridge::default(),
             data_dir: PathBuf::new(),
         });
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

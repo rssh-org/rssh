@@ -184,6 +184,8 @@ export interface ModelInfo {
 }
 
 export interface AiSessionInfo {
+  /** Older sessions without this field are built-in AI conversations. */
+  source?: "ai" | "mcp";
   /** Tab 内的会话身份；切 Tab / SSH 重连不变，显式关闭 AI 面板时结束。 */
   tab_id: string;
   /** 后端 actor 的不可复用身份；同一 tab 关闭重开会得到新值。 */
@@ -199,6 +201,7 @@ export interface AiSessionInfo {
 
 /** 历史对话列表项（无 blob，给 picker 用）。时间戳为 epoch 毫秒。 */
 export interface ConversationMeta {
+  source?: "ai" | "mcp";
   id: string;
   title: string;
   created_at: number;

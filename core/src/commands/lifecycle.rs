@@ -282,6 +282,11 @@ pub async fn prepare_ai_session_stop(
                 serde_json::json!({ "id": tab_id }),
             )
         })?;
+        state.agent_bridge.close_ai_session(
+            expected_owner,
+            tab_id,
+            &session.instance_id.to_string(),
+        )?;
         session.request_stop();
         (
             session.actor_done_rx.clone(),
@@ -328,6 +333,10 @@ pub async fn close_ai_session(
         }
         let nonce = record.nonce;
         let phase = record.phase;
+
+        state
+            .agent_bridge
+            .close_ai_session(expected_owner, tab_id, &nonce.to_string())?;
 
         if phase == SessionPhase::Pending {
             owners.remove(tab_id);
@@ -393,6 +402,10 @@ fn close_owned_ai(
             .get(id)
             .expect("id came from AI owner registry")
             .phase;
+        let record = owners.get(id).expect("id came from AI owner registry");
+        state
+            .agent_bridge
+            .close_ai_session(owner, id, &record.nonce.to_string())?;
         match phase {
             SessionPhase::Pending => {
                 owners.remove(id);
@@ -1079,6 +1092,9 @@ fn begin_resource_close(
     session_id: &str,
     record: &mut SessionRecord,
 ) -> AppResult<(Option<ReadySession>, Option<Arc<ResourceCleanup>>)> {
+    state
+        .agent_bridge
+        .close_session(&record.owner, session_id)?;
     let cleanup = match &mut record.state {
         ResourceState::Closing(cleanup) => return Ok((None, Some(cleanup.clone()))),
         ResourceState::Pending(operation) => operation.take().map(ResourceCleanup::pending),
@@ -1229,6 +1245,9 @@ pub async fn reconcile_owner(
 }
 
 pub fn close_owner(state: &AppState, owner: &SessionOwner) {
+    if let Err(error) = state.agent_bridge.stop_endpoint(owner) {
+        log::warn!("close owner agent bridge failed: {error}");
+    }
     match remove_owned_resources(state, owner, None) {
         Ok((_, removed, cleanups)) => {
             close_removed(removed);
@@ -1408,6 +1427,7 @@ mod tests {
             ai_sessions: Mutex::new(HashMap::new()),
             ai_session_owners: Arc::new(Mutex::new(HashMap::new())),
             ai_remote_shell_cache: Mutex::new(HashMap::new()),
+            agent_bridge: crate::agent::AgentBridge::default(),
             data_dir: PathBuf::new(),
         }
     }
@@ -1437,9 +1457,9 @@ mod tests {
                 system_prompt: "test".into(),
                 user_skills_cache: Vec::new(),
                 model: "test".into(),
-                client: Box::new(CommandProposalClient {
+                driver: crate::ai::session::SessionDriver::Ai(Box::new(CommandProposalClient {
                     calls: std::sync::atomic::AtomicUsize::new(0),
-                }),
+                })),
                 redact_rules: Vec::new(),
                 blacklist: crate::ai::sanitize::Blacklist::default(),
                 max_output_bytes: crate::ai::sanitize::DEFAULT_MAX_OUTPUT_BYTES,
@@ -1483,7 +1503,7 @@ mod tests {
                 system_prompt: "test".into(),
                 user_skills_cache: Vec::new(),
                 model: "test".into(),
-                client: Box::new(StreamingClient),
+                driver: crate::ai::session::SessionDriver::Ai(Box::new(StreamingClient)),
                 redact_rules: Vec::new(),
                 blacklist: crate::ai::sanitize::Blacklist::default(),
                 max_output_bytes: crate::ai::sanitize::DEFAULT_MAX_OUTPUT_BYTES,
@@ -1527,9 +1547,9 @@ mod tests {
                 system_prompt: "test".into(),
                 user_skills_cache: Vec::new(),
                 model: "test".into(),
-                client: Box::new(FileOpClient {
+                driver: crate::ai::session::SessionDriver::Ai(Box::new(FileOpClient {
                     calls: std::sync::atomic::AtomicUsize::new(0),
-                }),
+                })),
                 redact_rules: Vec::new(),
                 blacklist: crate::ai::sanitize::Blacklist::default(),
                 max_output_bytes: crate::ai::sanitize::DEFAULT_MAX_OUTPUT_BYTES,
@@ -2366,6 +2386,7 @@ mod tests {
                 skill: "general".to_owned(),
                 model: "model".to_owned(),
                 provider: "provider".to_owned(),
+                source: crate::ai::session::SessionSource::Ai,
                 action_tx,
                 audit: Arc::new(Mutex::new(crate::ai::audit::AuditLog::default())),
                 cancel_slot: Arc::new(Mutex::new(None)),
@@ -2432,6 +2453,7 @@ mod tests {
                 skill: "general".to_owned(),
                 model: "model".to_owned(),
                 provider: "provider".to_owned(),
+                source: crate::ai::session::SessionSource::Ai,
                 action_tx,
                 audit: Arc::new(Mutex::new(crate::ai::audit::AuditLog::default())),
                 cancel_slot: Arc::new(Mutex::new(Some(stream_cancel))),
@@ -2483,11 +2505,28 @@ mod tests {
         assert_eq!(timeline, r#"[{"role":"user"}]"#);
     }
 
-    #[test]
-    fn scoped_timeline_fetch_rejects_target_mismatch() {
+    #[tokio::test]
+    async fn scoped_timeline_fetch_rejects_target_mismatch() {
         let state = empty_state();
         crate::db::ai_conversation::create(&state.db, "conversation", "ssh:profile").unwrap();
-        let target = crate::ai::commands::AiTarget::Local("pty".into());
+        let owner = SessionOwner::Window("main".into());
+        let id = uuid::Uuid::new_v4().to_string();
+        let reservation =
+            reserve_resource(&state, &id, SessionKind::Telnet, owner.clone()).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (_, handle) = crate::terminal::telnet::open(
+            id.clone(),
+            "127.0.0.1",
+            listener.local_addr().unwrap().port(),
+            80,
+            24,
+            "crlf",
+            Arc::new(|_, _| {}),
+        )
+        .unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        reservation.activate(ReadySession::Telnet(handle)).unwrap();
+        let target = crate::ai::commands::AiTarget::Telnet(id.clone());
 
         let error = crate::ai::commands::ai_conversation_timeline_impl(
             &state,
@@ -2497,6 +2536,9 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.code(), "conversation_target_mismatch");
+        close_resource_and_wait(&state, &id, SessionKind::Telnet, &owner)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
