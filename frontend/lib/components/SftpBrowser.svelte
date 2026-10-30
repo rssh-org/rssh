@@ -60,10 +60,15 @@
     let ctxDy = $state(0);
     let ctxReady = $state(false);
 
-    onMount(() => registerBack({
-        enabled: () => !!ctxMenu || uploadMenuOpen,
-        handle: () => { if (ctxMenu) closeCtxMenu(); else closeUploadMenu(); },
-    }));
+    $effect(() => {
+        if (!ctxMenu) return;
+        return registerBack({ enabled: () => !!ctxMenu, handle: closeCtxMenu });
+    });
+
+    $effect(() => {
+        if (!uploadMenuOpen) return;
+        return registerBack({ enabled: () => uploadMenuOpen, handle: closeUploadMenu });
+    });
 
     /** Properties dialog state. */
     let propsStat = $state<FileStat | null>(null);

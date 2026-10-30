@@ -92,6 +92,70 @@ describe("AppShell compact panels", () => {
     expect(plugins.sideWidth(tabId)).toBe(319);
   });
 
+  it.each(["ai", "sftp"] as const)("keeps the %s split visible with bottom navigation after repeated keyboard resize notifications", async (panel) => {
+    const viewport = Object.assign(new EventTarget(), { offsetTop: 30, height: 500 });
+    vi.stubGlobal("visualViewport", viewport);
+    const observers: Array<{ notify: () => void; targets: Set<Element> }> = [];
+    vi.stubGlobal("ResizeObserver", class {
+      targets = new Set<Element>();
+      constructor(public notify: () => void) { observers.push(this); }
+      observe(target: Element) { this.targets.add(target); }
+      disconnect() { this.targets.clear(); }
+    });
+    await resize(400);
+    app.setSidebarPosition("bottom");
+    const tabId = "ssh:bottom-viewport";
+    app.addTab({ id: tabId, type: "ssh", label: "Bottom viewport" });
+    app.registerSession({ tabId, sessionId: "ssh:bottom", type: "ssh" });
+    const target = document.createElement("div");
+    document.body.append(target);
+    component = mount(AppShell, { target });
+    await settle();
+
+    const shell = target.querySelector<HTMLElement>(".shell")!;
+    const content = target.querySelector<HTMLElement>(".content")!;
+    // Model the existing column-reverse layout: the bottom bar takes 44px,
+    // and capping content alone moves its top down instead of its bottom up.
+    const cappedHeight = (el: HTMLElement, available: number) =>
+      Math.min(available, el.style.maxHeight ? parseFloat(el.style.maxHeight) : available);
+    vi.spyOn(shell, "getBoundingClientRect").mockImplementation(() =>
+      new DOMRect(0, 40, 400, cappedHeight(shell, 760)));
+    vi.spyOn(content, "getBoundingClientRect").mockImplementation(() => {
+      const bounds = shell.getBoundingClientRect();
+      const height = cappedHeight(content, bounds.height - 44);
+      return new DOMRect(0, bounds.bottom - 44 - height, 400, height);
+    });
+    const settleGeometry = async () => {
+      for (let i = 0; i < 5; i++) {
+        for (const observer of observers) {
+          if (observer.targets.has(shell) || observer.targets.has(content)) observer.notify();
+        }
+        await settle();
+      }
+    };
+    if (panel === "ai") app.openAiPanel(tabId);
+    else app.openSftp();
+    await settle();
+    await settleGeometry();
+    expect(content.getBoundingClientRect().height).toBe(446);
+    expect(content.getBoundingClientRect().top).toBe(40);
+    expect(shell.getBoundingClientRect().bottom).toBe(530);
+
+    viewport.height = 320;
+    viewport.dispatchEvent(new Event("resize"));
+    await settle();
+    await settleGeometry();
+    expect(content.getBoundingClientRect().height).toBe(266);
+    expect(shell.getBoundingClientRect().bottom).toBe(350);
+
+    viewport.height = 800;
+    viewport.dispatchEvent(new Event("resize"));
+    await settle();
+    await settleGeometry();
+    expect(content.getBoundingClientRect().height).toBe(716);
+    expect(shell.getBoundingClientRect().bottom).toBe(800);
+  });
+
   it.each(["ai", "sftp"] as const)("fits the %s split above the visual viewport bottom and releases the constraint when inactive", async (panel) => {
     const viewport = Object.assign(new EventTarget(), { offsetTop: 30, height: 500 });
     vi.stubGlobal("visualViewport", viewport);
@@ -105,10 +169,10 @@ describe("AppShell compact panels", () => {
     component = mount(AppShell, { target });
     await settle();
 
-    const content = target.querySelector<HTMLElement>(".content")!;
-    let contentTop = 40;
-    const bounds = vi.spyOn(content, "getBoundingClientRect")
-      .mockImplementation(() => new DOMRect(0, contentTop, 400, 700));
+    const shell = target.querySelector<HTMLElement>(".shell")!;
+    let shellTop = 40;
+    const bounds = vi.spyOn(shell, "getBoundingClientRect")
+      .mockImplementation(() => new DOMRect(0, shellTop, 400, 700));
     const openPanel = () => panel === "ai" ? app.openAiPanel(tabId) : app.openSftp();
     const closePanel = () => panel === "ai" ? ai.closePanel(tabId) : app.closeSftp();
     await resize(400);
@@ -117,28 +181,34 @@ describe("AppShell compact panels", () => {
     addListener.mockClear();
     openPanel();
     await settle();
-    expect(content.style.maxHeight).toBe("490px");
+    expect(shell.style.maxHeight).toBe("490px");
     const sync = addListener.mock.calls.find(([type]) => type === "resize")![1];
     expect(addListener).toHaveBeenCalledWith("scroll", sync);
 
     viewport.height = 320;
     viewport.dispatchEvent(new Event("resize"));
     await settle();
-    expect(content.style.maxHeight).toBe("310px");
+    expect(shell.style.maxHeight).toBe("310px");
     viewport.offsetTop = 45;
     viewport.dispatchEvent(new Event("scroll"));
     await settle();
-    expect(content.style.maxHeight).toBe("325px");
+    expect(shell.style.maxHeight).toBe("325px");
 
-    contentTop = 80;
-    app.setSidebarPosition("top");
+    for (const position of ["top", "right", "bottom", "left"] as const) {
+      app.setSidebarPosition(position);
+      await settle();
+      expect(shell.style.maxHeight).toBe("325px");
+      expect(target.querySelector<HTMLElement>(".content")!.style.maxHeight).toBe("");
+    }
+    shellTop = 80;
+    viewport.dispatchEvent(new Event("scroll"));
     await settle();
-    expect(content.style.maxHeight).toBe("285px");
+    expect(shell.style.maxHeight).toBe("285px");
     const currentSync = addListener.mock.calls.filter(([type]) => type === "resize").at(-1)![1];
 
     await closePanel();
     await settle();
-    expect(content.style.maxHeight).toBe("");
+    expect(shell.style.maxHeight).toBe("");
     expect(removeListener).toHaveBeenCalledWith("resize", currentSync);
     expect(removeListener).toHaveBeenCalledWith("scroll", currentSync);
     bounds.mockClear();
@@ -146,15 +216,15 @@ describe("AppShell compact panels", () => {
     viewport.dispatchEvent(new Event("scroll"));
     await settle();
     expect(bounds).not.toHaveBeenCalled();
-    expect(content.style.maxHeight).toBe("");
+    expect(shell.style.maxHeight).toBe("");
 
     addListener.mockClear();
     openPanel();
     await settle();
-    expect(content.style.maxHeight).toBe("285px");
+    expect(shell.style.maxHeight).toBe("285px");
     const reopenedSync = addListener.mock.calls.find(([type]) => type === "resize")![1];
     await resize(640);
-    expect(content.style.maxHeight).toBe("");
+    expect(shell.style.maxHeight).toBe("");
     expect(removeListener).toHaveBeenCalledWith("resize", reopenedSync);
     expect(removeListener).toHaveBeenCalledWith("scroll", reopenedSync);
     bounds.mockClear();
@@ -162,7 +232,7 @@ describe("AppShell compact panels", () => {
     viewport.dispatchEvent(new Event("scroll"));
     await settle();
     expect(bounds).not.toHaveBeenCalled();
-    expect(content.style.maxHeight).toBe("");
+    expect(shell.style.maxHeight).toBe("");
   });
 
   it.each(["left", "right"] as const)("keeps the terminal mounted while switching %s AI and SFTP across the breakpoint", async (position) => {

@@ -566,21 +566,22 @@
     let sftpPanelWidth = $derived(app.sftpPanelWidthForTab(app.activePaneId()));
     let contentEl = $state<HTMLDivElement | null>(null);
     let contentWidth = $state(layout.viewportWidth());
-    let compactContentMaxHeight = $state<number | undefined>();
+    let shellEl = $state<HTMLDivElement | null>(null);
+    let compactShellMaxHeight = $state<number | undefined>();
     let panelFitPriorityByTab = $state<Record<string, PanelFitPriority>>({});
 
-    // Overlay keyboards shrink only the visual viewport. Split the space above
-    // the keyboard, otherwise it can cover the entire lower terminal half.
+    // Constrain the whole shell above overlay keyboards. Its top is stable;
+    // capping content in a bottom-navigation column-reverse layout would move
+    // content.top down and repeatedly shrink the cap to zero.
     $effect(() => {
-        const el = contentEl;
+        const el = shellEl;
         const viewport = window.visualViewport;
-        sbPos;
         if (!el || !viewport || !layout.compact() || (!aiVisible && !sftpVisible)) {
-            compactContentMaxHeight = undefined;
+            compactShellMaxHeight = undefined;
             return;
         }
         const sync = () => {
-            compactContentMaxHeight = Math.max(0,
+            compactShellMaxHeight = Math.max(0,
                 viewport.offsetTop + viewport.height - el.getBoundingClientRect().top);
         };
         sync();
@@ -1350,6 +1351,8 @@
 
 <div
     class="shell"
+    bind:this={shellEl}
+    style:max-height={compactShellMaxHeight === undefined ? undefined : `${compactShellMaxHeight}px`}
     class:settings-fullscreen={app.settingsFullscreen()}
     class:sb-left={sbPos === "left"}
     class:sb-right={sbPos === "right"}
@@ -1530,7 +1533,6 @@
         bind:this={contentEl}
         class:ai-on={aiVisible}
         class:sftp-on={sftpVisible}
-        style:max-height={compactContentMaxHeight === undefined ? undefined : `${compactContentMaxHeight}px`}
     >
         <!-- 左右栈由 sideStacks(aiPos, pluginSidePos) 决定：SFTP 永远在 AI 对侧，
              插件侧栏贴终端（所选侧最内层）。DOM 顺序 = 视觉顺序，不再用 row-reverse。 -->

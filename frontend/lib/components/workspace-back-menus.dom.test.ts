@@ -10,6 +10,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 let component: ReturnType<typeof mount> | undefined;
 let removePage: (() => void) | undefined;
+let removeSearch: (() => void) | undefined;
 let target: HTMLDivElement;
 const closePanel = vi.fn();
 
@@ -37,11 +38,48 @@ afterEach(async () => {
   component = undefined;
   removePage?.();
   removePage = undefined;
+  removeSearch?.();
+  removeSearch = undefined;
   document.body.innerHTML = "";
   vi.restoreAllMocks();
 });
 
 describe("workspace menus consume back before their page", () => {
+  it.each(["context", "upload"] as const)("closes a newly opened SFTP %s menu before an existing terminal search", async (menu) => {
+    vi.spyOn(app, "capabilities").mockReturnValue({ ...app.capabilities(), directoryTransfer: true });
+    component = mount(SftpBrowser, { target, props: { meta: { sessionId: "ssh:back-test" } } });
+    await vi.waitFor(() => expect(target.querySelector(".file-name")).not.toBeNull());
+
+    // Terminal search registers when opened, after the SFTP pane already exists.
+    let searchOpen = true;
+    const closeSearch = vi.fn(() => { searchOpen = false; });
+    removeSearch = registerBackHandler({ enabled: () => searchOpen, handle: closeSearch });
+    const menuSelector = menu === "context" ? ".ctx-menu" : ".upload-menu";
+
+    // Reopening a menu on the same mounted pane must put it on top again.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (menu === "context") {
+        target.querySelector(".file-name")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+      } else {
+        target.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')!.click();
+      }
+      await settle();
+      expect(target.querySelector(menuSelector)).not.toBeNull();
+
+      expect(requestBack()).toBe(true);
+      await settle();
+      expect(target.querySelector(menuSelector)).toBeNull();
+      expect(closeSearch).not.toHaveBeenCalled();
+      expect(closePanel).not.toHaveBeenCalled();
+    }
+
+    expect(requestBack()).toBe(true);
+    expect(closeSearch).toHaveBeenCalledOnce();
+    expect(closePanel).not.toHaveBeenCalled();
+    expect(requestBack()).toBe(true);
+    expect(closePanel).toHaveBeenCalledOnce();
+  });
+
   it("closes the SFTP file menu before hiding the SFTP panel", async () => {
     component = mount(SftpBrowser, { target, props: { meta: { sessionId: "ssh:back-test" } } });
     await vi.waitFor(() => expect(target.querySelector(".file-name")).not.toBeNull());
