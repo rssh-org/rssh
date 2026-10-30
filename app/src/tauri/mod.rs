@@ -193,6 +193,14 @@ pub fn run_with(
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::mcp::mcp_start,
+            commands::mcp::mcp_status,
+            commands::mcp::mcp_stop,
+            commands::mcp::mcp_register_session,
+            commands::mcp::mcp_unregister_session,
+            commands::mcp::mcp_accept_session,
+            commands::mcp::mcp_session_ready,
+            commands::mcp::mcp_reject_session,
             commands::runtime::get_runtime_capabilities,
             commands::runtime::set_back_navigation_enabled,
             commands::files::resolve_local_paths,

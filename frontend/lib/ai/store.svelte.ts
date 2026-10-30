@@ -35,6 +35,7 @@ import type {
   ConversationMeta,
   PtyExecution,
   AiProviderRecord,
+  LlmProtocol,
   ModelInfo,
   RedactRuleRecord,
   ShellKind,
@@ -51,11 +52,13 @@ import type {
 } from "./types.ts";
 import { isRawDeviceKind } from "./types.ts";
 import { bracketedPasteEnabled } from "../terminal/bracketed-paste.ts";
-import { alternateScreenActive, flushTerminalOutput } from "../terminal/alternate-screen.ts";
+import { alternateScreenActive, captureTerminalGuard, flushTerminalOutput } from "../terminal/alternate-screen.ts";
 
 const ALTERNATE_SCREEN_ERROR = "Command was not executed: the target terminal is in alternate screen mode "
   + "(for example, Vim, less, or top). Ask the user to exit the full-screen application and return to "
   + "the normal command prompt before retrying. Do not send shell commands or exit keystrokes to that application.";
+
+const TERMINAL_UNAVAILABLE_ERROR = "Command was not executed: the target terminal was closed or replaced, or access was revoked.";
 
 /** DECSET 2004 bracketed-paste markers. When the target shell has enabled
  *  bracketed paste, a paste is wrapped so zsh/bash/PowerShell treat it as one
@@ -663,6 +666,18 @@ export async function startSession(args: StartSessionArgs): Promise<AiSessionInf
   return launchSession(args, null);
 }
 
+/** MCP uses the same actor lifecycle, listeners, timeline and command cards. */
+export async function startMcpSession(
+  args: Omit<StartSessionArgs, "skill" | "provider" | "model">,
+  requestId: string,
+): Promise<AiSessionInfo> {
+  return launchSession(
+    { ...args, skill: "general", provider: "", model: "" },
+    null,
+    () => invoke<AiSessionInfo>("mcp_accept_session", { requestId }),
+  );
+}
+
 /** 恢复持久化的对话：actor 带旧 history 出生，UI 灌回存储的 timeline。 */
 export async function resumeSession(
   args: StartSessionArgs,
@@ -674,6 +689,7 @@ export async function resumeSession(
 async function launchSession(
   args: StartSessionArgs,
   resumeId: string | null,
+  start?: () => Promise<AiSessionInfo>,
 ): Promise<AiSessionInfo> {
   const generation = generationForLease(args.tabId, args.lease);
   assertTabLive(args.tabId, generation);
@@ -684,7 +700,7 @@ async function launchSession(
     await teardown;
     assertTabLive(args.tabId, generation);
   }
-  const launch = launchSessionAtGeneration(args, resumeId, generation);
+  const launch = launchSessionAtGeneration(args, resumeId, generation, start);
   const launches = _sessionLaunchesByTab[args.tabId] ?? new Set<Promise<AiSessionInfo>>();
   _sessionLaunchesByTab[args.tabId] = launches;
   launches.add(launch);
@@ -702,10 +718,11 @@ async function launchSessionAtGeneration(
   args: StartSessionArgs,
   resumeId: string | null,
   generation: number,
+  start?: () => Promise<AiSessionInfo>,
 ): Promise<AiSessionInfo> {
   let info: AiSessionInfo;
   try {
-    info = await invoke<AiSessionInfo>("ai_session_start", {
+    info = await (start ? start() : invoke<AiSessionInfo>("ai_session_start", {
       tabId: args.tabId,
       target: { kind: args.targetKind, id: args.targetId },
       skill: args.skill,
@@ -713,7 +730,7 @@ async function launchSessionAtGeneration(
       model: args.model,
       locale: currentLocale(),
       resume: resumeId,
-    });
+    }));
   } catch (error) {
     // Closing can cancel a Rust Pending reservation before start returns. The
     // backend then reports reservation_lost; expose the stable frontend
@@ -1319,6 +1336,7 @@ type Execution = {
   submit: () => Promise<void>;
   deliver: () => Promise<void>;
   teardown: () => Promise<void>;
+  cancel: () => void;
   dispose: () => void;
 };
 
@@ -1366,6 +1384,15 @@ export function commandExecutionStatus(
 function clearCommandExecution(session: SessionInstanceRef, command_id: string): void {
   const key = sessionCommandKey(session, command_id);
   removeCommandExecution(key);
+}
+
+/** A rejected command must stop setup/collection without reporting to the actor again. */
+function cancelCommandExecution(session: SessionInstanceRef, command_id: string): void {
+  const key = sessionCommandKey(session, command_id);
+  const execution = _commandExecutions.get(key);
+  if (!execution) return;
+  execution.cancel();
+  removeCommandExecution(key, execution);
 }
 
 function clearCommandExecutionsForSession(session: SessionInstanceRef): void {
@@ -1422,6 +1449,25 @@ async function executePtyCommand(
     }
   }
 
+  // Capture before awaiting listener registration: a replacement pane/actor or
+  // a rejected card must never authorize a late command write.
+  const terminalCurrent = captureTerminalGuard(session.tabId);
+  const targetCurrent = () => {
+    const current = _sessionByTab[session.tabId];
+    // stopSession clears UI state before terminating the original transport.
+    return terminalCurrent() && (!current
+      || (current.instance_id === session.instanceId && current.target_id === target_session_id));
+  };
+  const isCurrent = () => {
+    const current = _sessionByTab[session.tabId];
+    if (!targetCurrent() || current?.instance_id !== session.instanceId) return false;
+    const item = _chatByTab[session.tabId]?.find(item =>
+      (item.kind === "command" && item.cmd.id === cardId)
+      || ((item.kind === "patch" || item.kind === "match") && item.proposal.id === cardId));
+    // Internal probes have no card; they still require the exact actor/target.
+    return !item || (!("result" in item && item.result) && !("rejected" in item && item.rejected));
+  };
+
   // Transport per kind. Record<AiTargetKind, …> so adding a kind is a compile
   // error here until routed — no silent fall-through to the wrong write command.
   const TRANSPORT: Record<AiTargetKind, { write: string; data: string }> = {
@@ -1451,6 +1497,13 @@ async function executePtyCommand(
   let deliver!: () => Promise<void>;
   let transportStarted = false;
 
+  function interruptShell() {
+    if (transportStarted && targetCurrent() && !isRawDeviceKind(target_kind)) {
+      void invoke(writeCmd, { sessionId: target_session_id, data: [3] })
+        .catch((err) => console.warn("[ai] terminate Ctrl+C failed:", err));
+    }
+  }
+
   const exec: Execution = {
     key: executionKey,
     commandId: cardId,
@@ -1472,11 +1525,7 @@ async function executePtyCommand(
       // A serial/telnet peer is not a shell. Injecting ETX while closing the UI
       // can reboot or reconfigure a bare device; raw teardown only detaches and
       // reports interruption. Shell transports retain the explicit Ctrl+C path.
-      if (transportStarted && !isRawDeviceKind(exec.targetKind)) {
-        const ctrlC = Array.from(new TextEncoder().encode("\x03"));
-        void invoke(writeCmd, { sessionId: target_session_id, data: ctrlC })
-            .catch((err) => console.warn("[ai] terminate Ctrl+C failed:", err));
-      }
+      interruptShell();
       await finish(extractOutput(exec.buffer.view(), undefined, dropEcho), -1, false);
     },
     submit: async () => {
@@ -1495,6 +1544,12 @@ async function executePtyCommand(
         case "delivery_failed": return exec.deliver();
         case "delivered": return Promise.resolve();
       }
+    },
+    cancel: () => {
+      if (exec.status === "running") interruptShell();
+      setCommandExecutionStatus(exec, "delivered");
+      exec.dispose();
+      resolveDone();
     },
     dispose: () => {
       if (exec.unlisten) {
@@ -1537,7 +1592,9 @@ async function executePtyCommand(
     return tracked;
   };
 
-  finish = async (output: string, exit_code: number, timed_out: boolean) => {
+  // Keep callback failures on the caller's promise instead of creating an
+  // unobserved rejection when a sentinel/timer completes the command.
+  finish = (output: string, exit_code: number, timed_out: boolean) => {
     if (exec.status !== "running") return exec.done;
     exec.dispose();
     exec.result = {
@@ -1555,6 +1612,7 @@ async function executePtyCommand(
 
   // A refusal is a recorded result, so retries never start transport later.
   if (blockedReason) return finish(blockedReason, -1, false);
+  if (!isCurrent()) return finish(TERMINAL_UNAVAILABLE_ERROR, -1, false);
 
   try {
     const unlisten = await listen<string>(dataEvent, (e) => {
@@ -1584,15 +1642,16 @@ async function executePtyCommand(
 
   // listen() can resolve before xterm parses queued output (in headless it is
   // local bookkeeping). Drain received output before authorizing the write.
-  const pendingOutput = flushTerminalOutput(session.tabId, () => exec.status === "running");
+  const pendingOutput = flushTerminalOutput(session.tabId, () => exec.status === "running" && isCurrent());
   if (pendingOutput) {
     // Cancel/close must settle the command even if parsing is still pending.
     const ready = await Promise.race([pendingOutput, done.then(() => false)]);
     if (exec.status !== "running") return done;
     if (!ready) {
-      return finish("Command was not executed: the target terminal was closed or replaced.", -1, false);
+      return finish(TERMINAL_UNAVAILABLE_ERROR, -1, false);
     }
   }
+  if (!isCurrent()) return finish(TERMINAL_UNAVAILABLE_ERROR, -1, false);
   if (alternateScreenActive(session.tabId)) {
     return finish(ALTERNATE_SCREEN_ERROR, -1, false);
   }
@@ -2347,7 +2406,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
       if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download" && item.kind !== "analyze" && item.kind !== "patch" && item.kind !== "match") continue;
       const itemId = item.kind === "command" ? item.cmd.id : item.proposal.id;
       if (itemId === e.payload.id) {
-        clearCommandExecution(
+        cancelCommandExecution(
           { tabId: tab, instanceId: info.instance_id },
           e.payload.id,
         );

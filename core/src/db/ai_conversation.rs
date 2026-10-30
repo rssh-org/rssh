@@ -8,11 +8,41 @@
 //! lost-update hazard.
 
 use rusqlite::{params, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::AppResult;
 
 use super::Db;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConversationSource {
+    #[default]
+    Ai,
+    Mcp,
+}
+
+impl ConversationSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ai => "ai",
+            Self::Mcp => "mcp",
+        }
+    }
+}
+
+fn source_from_row(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<ConversationSource> {
+    let value: String = row.get(index)?;
+    match value.as_str() {
+        "ai" => Ok(ConversationSource::Ai),
+        "mcp" => Ok(ConversationSource::Mcp),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            format!("unknown conversation source: {value}").into(),
+        )),
+    }
+}
 
 /// Listing entry — everything except the two blobs, so the picker UI never
 /// drags megabytes of history across the IPC boundary.
@@ -22,6 +52,7 @@ pub struct ConversationMeta {
     pub title: String,
     pub created_at: i64,
     pub updated_at: i64,
+    pub source: ConversationSource,
 }
 
 /// Full row, fetched once on resume.
@@ -33,13 +64,14 @@ pub struct ConversationRow {
     pub history_json: String,
     pub timeline_json: String,
     pub audit_json: String,
+    pub source: ConversationSource,
 }
 
 /// Most recently active first — the picker shows "continue where I left off".
 pub fn list(db: &Db, target_key: &str) -> AppResult<Vec<ConversationMeta>> {
     let conn = db.lock()?;
     let mut stmt = conn.prepare(
-        "SELECT id, title, created_at, updated_at FROM ai_conversations
+        "SELECT id, title, created_at, updated_at, source FROM ai_conversations
          WHERE target_key = ?1 ORDER BY updated_at DESC, id",
     )?;
     let rows = stmt
@@ -49,6 +81,7 @@ pub fn list(db: &Db, target_key: &str) -> AppResult<Vec<ConversationMeta>> {
                 title: r.get(1)?,
                 created_at: r.get(2)?,
                 updated_at: r.get(3)?,
+                source: source_from_row(r, 4)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -59,7 +92,7 @@ pub fn get(db: &Db, id: &str) -> AppResult<Option<ConversationRow>> {
     let conn = db.lock()?;
     let row = conn
         .query_row(
-            "SELECT id, target_key, title, history_json, timeline_json, audit_json
+            "SELECT id, target_key, title, history_json, timeline_json, audit_json, source
              FROM ai_conversations WHERE id = ?1",
             [id],
             |r| {
@@ -70,6 +103,7 @@ pub fn get(db: &Db, id: &str) -> AppResult<Option<ConversationRow>> {
                     history_json: r.get(3)?,
                     timeline_json: r.get(4)?,
                     audit_json: r.get(5)?,
+                    source: source_from_row(r, 6)?,
                 })
             },
         )
@@ -84,12 +118,21 @@ pub fn get(db: &Db, id: &str) -> AppResult<Option<ConversationRow>> {
 /// would resurrect a conversation the user just deleted. With UPDATE-only
 /// autosaves that race is structurally impossible.
 pub fn create(db: &Db, id: &str, target_key: &str) -> AppResult<()> {
+    create_with_source(db, id, target_key, ConversationSource::Ai)
+}
+
+pub fn create_with_source(
+    db: &Db,
+    id: &str,
+    target_key: &str,
+    source: ConversationSource,
+) -> AppResult<()> {
     let conn = db.lock()?;
     let now = chrono::Utc::now().timestamp_millis();
     conn.execute(
-        "INSERT OR IGNORE INTO ai_conversations (id, target_key, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?3)",
-        params![id, target_key, now],
+        "INSERT OR IGNORE INTO ai_conversations (id, target_key, created_at, updated_at, source)
+         VALUES (?1, ?2, ?3, ?3, ?4)",
+        params![id, target_key, now, source.as_str()],
     )?;
     Ok(())
 }
