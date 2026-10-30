@@ -93,7 +93,7 @@
             toast.info(t("ai.no_session"));
             return;
         }
-        void ai.togglePanel(app.activeTabId()).catch((e) => {
+        void app.toggleAiPanel(app.activeTabId()).catch((e) => {
             console.warn("[ai] toggle panel:", e);
             toast.error(errMsg(e));
         });

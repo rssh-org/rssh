@@ -400,6 +400,176 @@ describe("SFTP panel state", () => {
   });
 });
 
+describe("compact AI and SFTP panels", () => {
+  beforeEach(() => {
+    vi.stubGlobal("window", Object.assign(new EventTarget(), { innerWidth: 400 }));
+  });
+
+  it("opening AI closes only the target tab's SFTP panel", async () => {
+    const app = await loadAppModule();
+    const ai = await import("../ai/store.svelte.ts");
+    app.addTab({ id: "a", type: "ssh", label: "A" });
+    app.openSftp();
+    app.addTab({ id: "b", type: "ssh", label: "B" });
+    app.openSftp();
+
+    app.openAiPanel("a");
+
+    expect(ai.isOpen("a")).toBe(true);
+    expect(app.sftpOpenForTab("a")).toBe(false);
+    expect(app.sftpOpenForTab("b")).toBe(true);
+    expect(app.activeTabId()).toBe("b");
+  });
+
+  it("opening SFTP ends only the current tab's AI conversation", async () => {
+    const app = await loadAppModule();
+    const ai = await import("../ai/store.svelte.ts");
+    app.addTab({ id: "a", type: "ssh", label: "A" });
+    app.openAiPanel("a");
+    ai.prefillInput("a", "draft A");
+    app.addTab({ id: "b", type: "ssh", label: "B" });
+    app.openAiPanel("b");
+    ai.prefillInput("b", "draft B");
+
+    app.openSftp();
+
+    expect(app.sftpOpenForTab("b")).toBe(true);
+    expect(ai.isOpen("b")).toBe(false);
+    expect(ai.pendingPrefill("b")).toBeNull();
+    expect(ai.isOpen("a")).toBe(true);
+    expect(ai.pendingPrefill("a")?.text).toBe("draft A");
+  });
+
+  it("the AI toggle uses the same exclusive open and existing close behavior", async () => {
+    const app = await loadAppModule();
+    const ai = await import("../ai/store.svelte.ts");
+    app.addTab({ id: "a", type: "ssh", label: "A" });
+    app.openSftp();
+
+    await app.toggleAiPanel("a");
+    expect(ai.isOpen("a")).toBe(true);
+    expect(app.sftpOpenForTab("a")).toBe(false);
+
+    ai.prefillInput("a", "draft");
+    await app.toggleAiPanel("a");
+    expect(ai.isOpen("a")).toBe(false);
+    expect(ai.pendingPrefill("a")).toBeNull();
+  });
+
+  it("allows both panels from either opening order at the wide breakpoint", async () => {
+    window.innerWidth = 640;
+    const app = await loadAppModule();
+    const ai = await import("../ai/store.svelte.ts");
+    app.addTab({ id: "a", type: "ssh", label: "A" });
+    app.openSftp();
+    app.openAiPanel("a");
+    app.addTab({ id: "b", type: "ssh", label: "B" });
+    app.openAiPanel("b");
+    app.openSftp();
+    app.reconcileCompactPanels();
+
+    for (const tabId of ["a", "b"]) {
+      expect(ai.isOpen(tabId)).toBe(true);
+      expect(app.sftpOpenForTab(tabId)).toBe(true);
+    }
+  });
+
+  it("keeps AI on narrowing without changing preferences or reopening SFTP on widening", async () => {
+    window.innerWidth = 900;
+    const app = await loadAppModule();
+    const ai = await import("../ai/store.svelte.ts");
+    const layout = await import("./layout.svelte.ts");
+    const stop = layout.observeViewport();
+    app.addTab({ id: "a", type: "ssh", label: "A" });
+    app.openSftp();
+    app.openAiPanel("a");
+    app.setSftpPanelWidth("a", 460);
+    ai.setPanelWidth("a", 420);
+    ai.setPosition("left");
+    app.addTab({ id: "b", type: "ssh", label: "B" });
+    app.openSftp();
+
+    window.innerWidth = 639;
+    window.dispatchEvent(new Event("resize"));
+    app.reconcileCompactPanels();
+    expect(ai.isOpen("a")).toBe(true);
+    expect(app.sftpOpenForTab("a")).toBe(false);
+    expect(app.sftpOpenForTab("b")).toBe(true);
+    expect(ai.panelWidth("a")).toBe(420);
+    expect(app.sftpPanelWidthForTab("a")).toBe(460);
+    expect(ai.position()).toBe("left");
+
+    window.innerWidth = 900;
+    window.dispatchEvent(new Event("resize"));
+    app.reconcileCompactPanels();
+    expect(app.sftpOpenForTab("a")).toBe(false);
+    stop();
+  });
+
+  it("keeps unsupported targets closed without closing an existing AI panel", async () => {
+    const app = await loadAppModule();
+    const ai = await import("../ai/store.svelte.ts");
+    app.addTab(local("local"));
+    app.openAiPanel("local");
+
+    app.openSftp();
+    app.openAiPanel("home");
+    app.openAiPanel("missing");
+
+    expect(ai.isOpen("local")).toBe(true);
+    expect(app.sftpOpen()).toBe(false);
+    expect(ai.isOpen("home")).toBe(false);
+    expect(ai.isOpen("missing")).toBe(false);
+  });
+
+  it("a delayed AI teardown cannot reopen SFTP after the user switches back", async () => {
+    const app = await loadAppModule();
+    const ai = await import("../ai/store.svelte.ts");
+    app.addTab({ id: "a", type: "ssh", label: "A" });
+    app.openAiPanel("a");
+    const closePanel = ai.closePanel;
+    let finish!: () => void;
+    const teardown = new Promise<void>((resolve) => { finish = resolve; });
+    vi.spyOn(ai, "closePanel").mockImplementationOnce((tabId) => {
+      void closePanel(tabId);
+      return teardown;
+    });
+
+    app.openSftp();
+    expect(app.sftpOpenForTab("a")).toBe(true);
+    expect(ai.isOpen("a")).toBe(false);
+    app.openAiPanel("a");
+    finish();
+    await teardown;
+
+    expect(ai.isOpen("a")).toBe(true);
+    expect(app.sftpOpenForTab("a")).toBe(false);
+  });
+
+  it("reports an automatic AI close failure without delaying SFTP visibility", async () => {
+    const app = await loadAppModule();
+    const ai = await import("../ai/store.svelte.ts");
+    const { toasts } = await import("./toast.svelte.ts");
+    app.addTab({ id: "a", type: "ssh", label: "A" });
+    app.openAiPanel("a");
+    const closePanel = ai.closePanel;
+    vi.spyOn(ai, "closePanel").mockImplementationOnce((tabId) => {
+      void closePanel(tabId);
+      return Promise.reject(new Error("conversation archive failed"));
+    });
+
+    app.openSftp();
+
+    expect(app.sftpOpenForTab("a")).toBe(true);
+    expect(ai.isOpen("a")).toBe(false);
+    await vi.waitFor(() => {
+      expect(toasts()).toContainEqual(expect.objectContaining({
+        kind: "error", message: "conversation archive failed",
+      }));
+    });
+  });
+});
+
 describe("MRU toggle disables reordering", () => {
   it("appends new tabs at the end and does not move on focus when off", async () => {
     const app = await loadAppModule();

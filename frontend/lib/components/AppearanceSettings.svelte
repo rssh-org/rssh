@@ -438,34 +438,36 @@
         </div>
     </div>
 
-    <div class="section-label">{t("settings.appearance.ai_panel_position")}</div>
-    <div class="layout-grid">
-        {#each ["left", "right"] as const as side}
-            <button class="layout-card" class:active={aiPos === side} onclick={() => pickAiPos(side)}>
-                <div class="mini-window">
-                    <div class="mini-titlebar">
-                        <span class="mini-dot red"></span>
-                        <span class="mini-dot yellow"></span>
-                        <span class="mini-dot green"></span>
-                    </div>
-                    <div class="mini-body dir-{side}">
-                        <div class="mini-ai">
-                            <div class="mini-ai-line w70"></div>
-                            <div class="mini-ai-line w50"></div>
-                            <div class="mini-ai-line w60"></div>
+    {#if !layout.compact()}
+        <div class="section-label">{t("settings.appearance.ai_panel_position")}</div>
+        <div class="layout-grid">
+            {#each ["left", "right"] as const as side}
+                <button class="layout-card" class:active={aiPos === side} onclick={() => pickAiPos(side)}>
+                    <div class="mini-window">
+                        <div class="mini-titlebar">
+                            <span class="mini-dot red"></span>
+                            <span class="mini-dot yellow"></span>
+                            <span class="mini-dot green"></span>
                         </div>
-                        <div class="mini-main">
-                            <div class="mini-main-line w40"></div>
-                            <div class="mini-main-line w80"></div>
-                            <div class="mini-main-line w60"></div>
-                            <div class="mini-main-line w70"></div>
+                        <div class="mini-body dir-{side}">
+                            <div class="mini-ai">
+                                <div class="mini-ai-line w70"></div>
+                                <div class="mini-ai-line w50"></div>
+                                <div class="mini-ai-line w60"></div>
+                            </div>
+                            <div class="mini-main">
+                                <div class="mini-main-line w40"></div>
+                                <div class="mini-main-line w80"></div>
+                                <div class="mini-main-line w60"></div>
+                                <div class="mini-main-line w70"></div>
+                            </div>
                         </div>
                     </div>
-                </div>
-                <div class="layout-label">{t(side === "left" ? "settings.appearance.pos.left" : "settings.appearance.pos.right")}</div>
-            </button>
-        {/each}
-    </div>
+                    <div class="layout-label">{t(side === "left" ? "settings.appearance.pos.left" : "settings.appearance.pos.right")}</div>
+                </button>
+            {/each}
+        </div>
+    {/if}
 
 </div>
 

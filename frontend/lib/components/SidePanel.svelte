@@ -8,7 +8,7 @@
      *
      * Panels differ only in policy, passed as props: what renders inside a
      * pane (snippet), whether the aside carries the divider border (AI's
-     * ChatPanel draws its own), and the AI-only mobile takeover.
+     * ChatPanel draws its own), and whether it stacks above a compact terminal.
      */
     import type { Snippet } from "svelte";
     import { t } from "../i18n/index.svelte.ts";
@@ -20,7 +20,7 @@
         hidden,
         label,
         bordered = true,
-        mobileFullWidth = false,
+        stackOnCompact = false,
         onResizeStart,
         onResetWidth,
         panes,
@@ -36,8 +36,8 @@
         /** Draw the divider on the inner edge; false when the pane content
          *  carries its own (AI's ChatPanel). */
         bordered?: boolean;
-        /** Portrait phones: panel takes over the content area, no resizing. */
-        mobileFullWidth?: boolean;
+        /** Compact AI/SFTP: full-width upper half, without a resize handle. */
+        stackOnCompact?: boolean;
         onResizeStart: (e: MouseEvent) => void;
         onResetWidth: () => void;
         /** One entry per tab that ever opened the panel. */
@@ -51,8 +51,8 @@
     class:bordered
     class:dock-right={side === "right"}
     class:hidden
-    class:mobile-full={mobileFullWidth}
-    style="flex: 0 0 {width}px; max-width: {width}px;"
+    class:compact-top={stackOnCompact}
+    style="flex: 0 0 {width}px; width: {width}px; max-width: {width}px;"
     aria-label={label}
 >
     <div
@@ -75,6 +75,8 @@
 <style>
     .side-panel {
         position: relative;
+        min-width: 0;
+        min-height: 0;
         background: var(--bg);
     }
     .side-panel.bordered {
@@ -119,20 +121,29 @@
         position: absolute;
         inset: 0;
         display: none;
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
     }
     .pane.visible {
         display: flex;
         flex-direction: column;
     }
 
-    /* Portrait phones (AI takeover): the panel fills the content area and
-       the handle disappears. */
-    @media (max-width: 480px) {
-        .side-panel.mobile-full:not(.hidden) {
-            flex: 1 1 auto !important;
-            max-width: none !important;
+    @media (max-width: 639px) {
+        .side-panel { grid-column: 1; grid-row: -2 / -1; }
+        .side-panel.dock-right { grid-column: 3; }
+        .side-panel.hidden { display: none; }
+        .side-panel.compact-top:not(.hidden) {
+            grid-column: 1 / -1;
+            grid-row: 1;
+            width: 100% !important;
+            max-width: 100% !important;
+            border-left: none;
+            border-right: none;
+            border-bottom: 1px solid var(--divider);
         }
-        .side-panel.mobile-full .resize-handle {
+        .compact-top .resize-handle {
             display: none;
         }
     }
