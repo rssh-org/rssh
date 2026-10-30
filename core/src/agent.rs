@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 use crate::ai::{
     commands::AiSessionInfo,
@@ -123,7 +123,7 @@ struct PendingSession {
     sink: Sink,
     accepting: bool,
     binding: Option<Binding>,
-    result: watch::Sender<Option<AppResult<OpenSessionResult>>>,
+    result: oneshot::Sender<AppResult<OpenSessionResult>>,
 }
 
 struct Command {
@@ -325,11 +325,8 @@ fn close_requests(
     matches: impl Fn(&PendingSession) -> bool,
     code: &'static str,
 ) {
-    inner.pending.retain(|_, pending| {
-        if !matches(pending) {
-            return true;
-        }
-        pending.result.send_replace(Some(Err(error(code))));
+    for (_, pending) in inner.pending.extract_if(|_, pending| matches(pending)) {
+        let _ = pending.result.send(Err(error(code)));
         if let Some(binding) = &pending.binding {
             binding.shutdown.send_replace(true);
         }
@@ -337,8 +334,7 @@ fn close_requests(
             &format!("agent:session_cancelled:{}", pending.request.session_id),
             json!({"id":pending.request.id}),
         );
-        false
-    });
+    }
 }
 
 fn cancel_commands(inner: &mut Inner, matches: impl Fn(&Command) -> bool) {
@@ -554,7 +550,7 @@ pub async fn open_mcp_session(
     if input.title.trim().is_empty() || input.title.len() > 512 {
         return Err(error("agent_invalid_session"));
     }
-    let (request, sink, mut receiver, is_new) = {
+    let (request, sink, receiver) = {
         let registry = locked(&state.lifecycle_sessions)?;
         let mut inner = locked(&state.agent_bridge.inner)?;
         if !endpoint_matches(&inner, owner, token) {
@@ -572,69 +568,49 @@ pub async fn open_mcp_session(
         }) {
             return Ok(binding.opened.clone());
         }
-        if let Some(pending) = inner
+        if inner
             .pending
             .values()
-            .find(|p| &p.owner == owner && p.request.session_id == input.session_id)
+            .any(|p| &p.owner == owner && p.request.session_id == input.session_id)
         {
-            if pending.request.title != input.title {
-                return Err(error("agent_session_busy"));
-            }
-            (
-                pending.request.clone(),
-                sink,
-                pending.result.subscribe(),
-                false,
-            )
-        } else {
-            let request = SessionRequest {
-                id: uuid::Uuid::new_v4().to_string(),
-                session_id: input.session_id,
-                tab_id: info.tab_id,
-                nonce: info.nonce,
-                kind: info.kind,
-                title: input.title,
-            };
-            let (result, receiver) = watch::channel(None);
-            inner.pending.insert(
-                request.id.clone(),
-                PendingSession {
-                    owner: owner.clone(),
-                    request: request.clone(),
-                    sink: sink.clone(),
-                    accepting: false,
-                    binding: None,
-                    result,
-                },
-            );
-            (request, sink, receiver, true)
+            return Err(error("agent_session_busy"));
         }
+        let request = SessionRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: input.session_id,
+            tab_id: info.tab_id,
+            nonce: info.nonce,
+            kind: info.kind,
+            title: input.title,
+        };
+        let (result, receiver) = oneshot::channel();
+        inner.pending.insert(
+            request.id.clone(),
+            PendingSession {
+                owner: owner.clone(),
+                request: request.clone(),
+                sink: sink.clone(),
+                accepting: false,
+                binding: None,
+                result,
+            },
+        );
+        (request, sink, receiver)
     };
-    let _guard = is_new.then(|| OpenGuard {
+    let _guard = OpenGuard {
         bridge: &state.agent_bridge,
         id: request.id.clone(),
-    });
-    if is_new
-        && !sink(
-            &format!("agent:session_requested:{}", request.session_id),
-            serde_json::to_value(&request).expect("session request serializes"),
-        )
-    {
+    };
+    if !sink(
+        &format!("agent:session_requested:{}", request.session_id),
+        serde_json::to_value(&request).expect("session request serializes"),
+    ) {
         return Err(error("agent_frontend_unavailable"));
     }
-    tokio::time::timeout(APPROVAL_TIMEOUT, async {
-        loop {
-            if let Some(result) = receiver.borrow().clone() {
-                return result;
-            }
-            receiver
-                .changed()
-                .await
-                .map_err(|_| error("agent_session_unavailable"))?;
-        }
-    })
-    .await
-    .map_err(|_| error("agent_session_timeout"))?
+    tokio::time::timeout(APPROVAL_TIMEOUT, receiver)
+        .await
+        .map_err(|_| error("agent_session_timeout"))?
+        .map_err(|_| error("agent_session_unavailable"))?
 }
 
 pub async fn accept_session(
@@ -772,9 +748,14 @@ pub fn session_ready(
     let session_id = binding.info.session_id.clone();
     let mut pending = inner.pending.remove(request_id).expect("validated above");
     let binding = pending.binding.take().expect("validated above");
-    pending
-        .result
-        .send_replace(Some(Ok(binding.opened.clone())));
+    if pending.result.send(Ok(binding.opened.clone())).is_err() {
+        binding.shutdown.send_replace(true);
+        (pending.sink)(
+            &format!("agent:session_cancelled:{}", pending.request.session_id),
+            json!({"id":pending.request.id}),
+        );
+        return Err(error("agent_session_unavailable"));
+    }
     inner.bindings.insert(session_id, binding);
     Ok(())
 }
@@ -1068,6 +1049,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplicate_session_requests_are_busy_until_ready() {
+        let mut fixture = Fixture::new();
+        let host = fixture.host.clone();
+        let owner = fixture.owner.clone();
+        let input = OpenSessionInput {
+            session_id: fixture.info.session_id.clone(),
+            title: "Inspect".into(),
+        };
+        let opening = open_mcp_session(host.state(), &owner, "test-token", input.clone());
+        tokio::pin!(opening);
+        let request = tokio::select! {
+            _ = &mut opening => panic!("must wait for approval"),
+            request = fixture.event("agent:session_requested:") => request,
+        };
+        let id = request["id"].as_str().unwrap();
+        for title in ["Inspect", "Another task"] {
+            let duplicate = OpenSessionInput {
+                title: title.into(),
+                ..input.clone()
+            };
+            let error = tokio::time::timeout(
+                Duration::from_millis(100),
+                open_mcp_session(host.state(), &owner, "test-token", duplicate),
+            )
+            .await
+            .expect("a duplicate request must return without waiting for approval")
+            .unwrap_err();
+            assert_eq!(error.code(), "agent_session_busy");
+        }
+        let pending = pending_sessions(host.state(), &owner).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id);
+
+        let info = accept_session(host.state(), host.clone(), &owner, id)
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_millis(100),
+            open_mcp_session(host.state(), &owner, "test-token", input.clone()),
+        )
+        .await
+        .expect("accepting still occupies the terminal until the frontend is ready")
+        .unwrap_err();
+        assert_eq!(error.code(), "agent_session_busy");
+        session_ready(host.state(), &owner, id, &info.instance_id).unwrap();
+        let opened = opening.await.unwrap();
+        assert_eq!(opened.instance_id, info.instance_id);
+        let reused = open_mcp_session(host.state(), &owner, "test-token", input)
+            .await
+            .unwrap();
+        assert_eq!(reused.instance_id, opened.instance_id);
+        assert_eq!(reused.conversation_id, opened.conversation_id);
+        assert!(pending_sessions(host.state(), &owner).unwrap().is_empty());
+        while let Ok((event, _)) = fixture.events.try_recv() {
+            assert!(!event.starts_with("agent:session_requested:"));
+            assert!(!event.starts_with("agent:session_cancelled:"));
+        }
+    }
+
+    #[tokio::test]
     async fn permission_is_owner_scoped_and_cancellation_removes_late_accept() {
         let mut fixture = Fixture::new();
         let host = fixture.host.clone();
@@ -1085,11 +1126,19 @@ mod tests {
             id
         )
         .is_err());
+        let info = accept_session(host.state(), host.clone(), &owner, id)
+            .await
+            .unwrap();
         drop(opening);
         assert!(pending_sessions(host.state(), &owner).unwrap().is_empty());
+        assert!(session_ready(host.state(), &owner, id, &info.instance_id).is_err());
         assert!(accept_session(host.state(), host.clone(), &owner, id)
             .await
             .is_err());
+        let sessions = locked(&host.state().ai_sessions).unwrap();
+        assert!(sessions
+            .get(&fixture.info.tab_id)
+            .is_none_or(|session| session.is_stopping()));
     }
 
     #[tokio::test]
