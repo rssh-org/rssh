@@ -7,6 +7,7 @@ on:
         required: true
         type: string
       version_code:
+        description: 'Leave empty to use the highest AGC versionCode + 1; required if lookup fails'
         required: false
         type: string
     secrets:
@@ -25,7 +26,7 @@ on:
         required: true
         type: string
       version_code:
-        description: 'Optional override higher than previously uploaded AGC version codes'
+        description: 'Leave empty to use the highest AGC versionCode + 1; required if lookup fails'
         required: false
         type: string
 
@@ -68,6 +69,14 @@ jobs:
           node-version: 24.14.1
           cache: npm
 
+      - name: Prepare release versions
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          OHOS_VERSION_CODE: ${{ inputs.version_code }}
+          AGC_APP_ID: ${{ secrets.AGC_APP_ID }}
+          AGC_SERVICE_ACCOUNT_JSON: ${{ secrets.AGC_SERVICE_ACCOUNT_JSON }}
+        run: node ohos/scripts/prepare-release.mjs "$RELEASE_VERSION"
+
       - run: npm ci
 
       - uses: dtolnay/rust-toolchain@stable
@@ -80,12 +89,6 @@ jobs:
         run: |
           npm test
           npm run test:build
-
-      - name: Prepare release versions
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          OHOS_VERSION_CODE: ${{ inputs.version_code }}
-        run: node ohos/scripts/prepare-release.mjs "$RELEASE_VERSION"
 
       - uses: actions/setup-java@v4
         with:

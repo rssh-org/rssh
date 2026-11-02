@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-import { uploadApp } from './upload-agc.mjs';
+import { nextVersionCode, uploadApp } from './upload-agc.mjs';
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const account = {
@@ -17,7 +17,7 @@ const serviceAccountJson = JSON.stringify(account);
 const appId = '123456789';
 const now = () => 1_800_000_000_000;
 
-async function fixture(t, { urlReply, uploadStatus = 200, apiStatus = 200, registrationReply, registrationStatus = 200, registrationBody } = {}) {
+async function fixture(t, { urlReply, uploadStatus = 200, apiStatus = 200, registrationReply, registrationStatus = 200, registrationBody, versionReply, versionStatus = 200, versionBody } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'rssh agc upload '));
   const file = path.join(dir, 'RSSH release.app');
   // Binary fixture exercises byte preservation (NUL and non-UTF8 included).
@@ -28,6 +28,13 @@ async function fixture(t, { urlReply, uploadStatus = 200, apiStatus = 200, regis
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     requests.push({ method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks) });
+    if (req.url === '/api/publish/v3/version/brief-info/list') {
+      res.writeHead(versionStatus, { 'content-type': 'application/json' });
+      res.end(versionBody ?? JSON.stringify(versionReply ?? {
+        ret: { code: 0 }, versionList: [{ packageList: [{ versionCode: 41 }] }],
+      }));
+      return;
+    }
     if (req.url.startsWith('/api/publish/v2/upload-url/for-obs?')) {
       res.writeHead(apiStatus, { 'content-type': 'application/json' });
       res.end(JSON.stringify(urlReply ?? {
@@ -77,6 +84,110 @@ async function fixture(t, { urlReply, uploadStatus = 200, apiStatus = 200, regis
   const options = { file, appId, serviceAccountJson };
   return { file, bytes, requests, options, fetchImpl };
 }
+
+test('next version code authenticates and queries every release type and state before incrementing the largest package code', async (t) => {
+  const f = await fixture(t, { versionReply: { ret: { code: 0 }, versionList: [
+    { versionName: 'newer draft' },
+    { versionName: 'commercial', packageList: [{ versionCode: 12 }, { versionCode: 5000 }] },
+    { versionName: 'empty draft', packageList: null },
+    { versionName: 'beta', packageList: [{ versionCode: 700 }] },
+    { versionName: 'unuploaded', packageList: [] },
+  ] } });
+  assert.equal(await nextVersionCode(f.options, { fetchImpl: f.fetchImpl, now }), 5001);
+  assert.equal(f.requests.length, 1, 'Version lookup must not upload, register, submit review, or publish.');
+  const [request] = f.requests;
+  assert.equal(request.method, 'POST');
+  assert.equal(request.url, '/api/publish/v3/version/brief-info/list');
+  assert.equal(request.headers.appid, appId);
+  assert.equal(request.headers['content-type'], 'application/json');
+  assert.equal(request.headers.client_id, undefined);
+  assert.deepEqual(JSON.parse(request.body), {}, 'Do not filter out test releases or unpublished versions.');
+  const token = request.headers.authorization.replace(/^Bearer /, '');
+  const [header, payload, signature] = token.split('.');
+  assert.deepEqual(JSON.parse(Buffer.from(header, 'base64url')), { alg: 'PS256', kid: account.key_id, typ: 'JWT' });
+  assert.equal(verify('sha256', Buffer.from(`${header}.${payload}`), {
+    key: publicKey, padding: constants.RSA_PKCS1_PSS_PADDING, saltLength: 32,
+  }, Buffer.from(signature, 'base64url')), true);
+});
+
+test('the last available positive int32 version code can be allocated', async (t) => {
+  const f = await fixture(t, { versionReply: { ret: { code: 0 }, versionList: [{ packageList: [{ versionCode: 2147483646 }] }] } });
+  assert.equal(await nextVersionCode(f.options, { fetchImpl: f.fetchImpl, now }), 2147483647);
+});
+
+for (const [name, versionList] of [
+  ['no version list', undefined],
+  ['a null version list', null],
+  ['an object instead of a version list', {}],
+  ['no versions', []],
+  ['only empty drafts', [{}, { packageList: null }, { packageList: [] }]],
+  ['a null version', [null]],
+  ['a malformed package list', [{ packageList: {} }]],
+  ['a null package', [{ packageList: [null] }]],
+  ['a package without its version code', [{ packageList: [{ versionCode: 41 }, {}] }]],
+]) {
+  test(`next version code refuses to guess from ${name}`, async (t) => {
+    const f = await fixture(t, { versionReply: { ret: { code: 0 }, versionList } });
+    await assert.rejects(nextVersionCode(f.options, { fetchImpl: f.fetchImpl, now }), /version|package/i);
+    assert.equal(f.requests.length, 1);
+  });
+}
+
+for (const code of [null, '42', 'SECRET', 0, -1, 1.5, 2147483648]) {
+  test(`next version code rejects invalid package code ${JSON.stringify(code)}`, async (t) => {
+    const f = await fixture(t, { versionReply: { ret: { code: 0 }, versionList: [{ packageList: [{ versionCode: 41 }, { versionCode: code }] }] } });
+    await assert.rejects(nextVersionCode(f.options, { fetchImpl: f.fetchImpl, now }), (error) => {
+      assert.match(error.message, /versionCode/);
+      assert.doesNotMatch(error.message, /SECRET/);
+      return true;
+    });
+  });
+}
+
+test('an exhausted version code range cannot wrap or return an invalid next code', async (t) => {
+  const f = await fixture(t, { versionReply: { ret: { code: 0 }, versionList: [{ packageList: [{ versionCode: 2147483647 }] }] } });
+  await assert.rejects(nextVersionCode(f.options, { fetchImpl: f.fetchImpl, now }), /versionCode/);
+});
+
+for (const [name, config, expected] of [
+  ['HTTP failure', { versionStatus: 403 }, /HTTP 403/],
+  ['business failure', { versionReply: { ret: { code: 204144666, msg: 'SECRET do-not-log' } } }, /code 204144666/],
+  ['missing business status', { versionReply: { versionList: [] } }, /missing or invalid/],
+  ['a string business status', { versionReply: { ret: { code: '0' } } }, /missing or invalid/],
+  ['invalid JSON', { versionBody: 'SECRET do-not-log' }, /response was not valid JSON/],
+]) {
+  test(`version lookup ${name} fails without exposing the response`, async (t) => {
+    const f = await fixture(t, config);
+    await assert.rejects(nextVersionCode(f.options, { fetchImpl: f.fetchImpl, now }), (error) => {
+      assert.match(error.message, expected);
+      assert.doesNotMatch(error.message, /SECRET|do-not-log/);
+      return true;
+    });
+    assert.equal(f.requests.length, 1);
+  });
+}
+
+test('version lookup transport errors never expose the JWT', async () => {
+  const fetchImpl = async (url, options) => {
+    throw new Error(`${url} ${options.headers.Authorization} SECRET`);
+  };
+  await assert.rejects(nextVersionCode({ appId, serviceAccountJson }, { fetchImpl, now }), {
+    message: 'AGC version lookup request failed (network, redirect, or timeout).',
+  });
+});
+
+test('version lookup validates app and credentials before any network request', async () => {
+  const fetchImpl = async () => assert.fail('Invalid input must not use the network');
+  for (const change of [
+    { appId: '' }, { appId: 'SECRET' }, { serviceAccountJson: 'SECRET invalid JSON' },
+    { serviceAccountJson: JSON.stringify({ ...account, project_id: 'project-scope' }) },
+  ]) {
+    await assert.rejects(nextVersionCode({ appId, serviceAccountJson, ...change }, { fetchImpl, now }), (error) => {
+      assert.doesNotMatch(error.message, /SECRET/);
+      return true;
+    });
+  }
+});
 
 // Huawei's Publishing API guide requires registering the uploaded OBS object:
 // https://developer.huawei.com/consumer/cn/doc/app/agc-help-publish-api-app-package-info-update-0000002236201250

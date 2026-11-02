@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const UPLOAD_URL = 'https://connect-api.cloud.huawei.com/api/publish/v2/upload-url/for-obs';
 const PACKAGE_INFO_URL = 'https://connect-api.cloud.huawei.com/api/publish/v3/app-package-info';
+const VERSION_LIST_URL = 'https://connect-api.cloud.huawei.com/api/publish/v3/version/brief-info/list';
 const TOKEN_AUDIENCE = 'https://oauth-login.cloud.huawei.com/oauth2/v3/token';
 const MAX_APP_BYTES = 4 * 1024 ** 3;
 
@@ -66,6 +67,32 @@ async function requestJson(fetchImpl, url, options, stage) {
   const code = result?.ret?.code;
   requireValue(code === 0, `${stage} request failed (code ${Number.isSafeInteger(code) ? code : 'missing or invalid'}).`);
   return result;
+}
+
+// Include every release type and state: an unpublished package can already have
+// a higher versionCode than the current store release. Empty drafts have no code.
+// https://developer.huawei.com/consumer/cn/doc/doccenter-connect-api/agc-help-publish-api-query-brief-info-list-0000002236201254
+export async function nextVersionCode({ appId, serviceAccountJson }, { fetchImpl = fetch, now = Date.now } = {}) {
+  requireValue(typeof appId === 'string' && /^[0-9]{1,32}$/.test(appId), 'AGC_APP_ID must be the numeric APP ID from AppGallery Connect.');
+  const token = serviceAccountToken(serviceAccountJson, now);
+  const result = await requestJson(fetchImpl, VERSION_LIST_URL, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', appId }, body: '{}',
+  }, 'AGC version lookup');
+  requireValue(Array.isArray(result.versionList), 'AGC returned no valid version list.');
+  let maximum = 0;
+  for (const version of result.versionList) {
+    requireValue(version && typeof version === 'object' && !Array.isArray(version), 'AGC returned an invalid version entry.');
+    if (version.packageList == null) continue;
+    requireValue(Array.isArray(version.packageList), 'AGC returned an invalid package list.');
+    for (const pkg of version.packageList) {
+      const code = pkg?.versionCode;
+      requireValue(Number.isInteger(code) && code >= 1 && code <= 2147483647, 'AGC returned an invalid package versionCode.');
+      maximum = Math.max(maximum, code);
+    }
+  }
+  requireValue(maximum > 0, 'AGC returned no package versionCode to increment.');
+  requireValue(maximum < 2147483647, 'AGC versionCode has reached the positive int32 limit.');
+  return maximum + 1;
 }
 
 function uploadInfo(value, size) {

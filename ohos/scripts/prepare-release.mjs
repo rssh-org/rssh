@@ -1,14 +1,14 @@
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { nextVersionCode } from './upload-agc.mjs';
 
-export function releaseVersion(tag, override = '') {
+export function releaseVersion(tag, code) {
   const match = /^v?((0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))$/.exec(tag);
   if (!match) throw new Error('HarmonyOS releases require a stable version such as v0.3.2.');
-  const [, version, major, minor, patch] = match;
-  if (+minor > 999 || +patch > 999) throw new Error('HarmonyOS minor and patch versions must be below 1000.');
-  if (override !== '' && !/^[1-9]\d*$/.test(String(override))) throw new Error('OHOS_VERSION_CODE must be a positive integer.');
-  const versionCode = override === '' ? +major * 1000000 + +minor * 1000 + +patch : Number(override);
+  const [, version] = match;
+  if (!/^[1-9]\d*$/.test(String(code))) throw new Error('OHOS_VERSION_CODE is required and must be a positive integer.');
+  const versionCode = Number(code);
   if (!Number.isSafeInteger(versionCode) || versionCode < 1 || versionCode > 2147483647) {
     throw new Error('HarmonyOS versionCode must fit a positive int32.');
   }
@@ -42,8 +42,8 @@ function lockVersions(text, names, version) {
 
 // This runs only in the disposable release checkout. Both committed lockfiles
 // retain every dependency version/revision; only our path-package versions change.
-export function prepareRelease(root, tag, override) {
-  const release = releaseVersion(tag, override);
+export function prepareRelease(root, tag, code) {
+  const release = releaseVersion(tag, code);
   const changes = new Map();
   const read = (name) => readFileSync(path.join(root, name), 'utf8');
   const json = (name, mutate) => {
@@ -72,7 +72,15 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (process.env.CI !== 'true') throw new Error('Release version preparation is restricted to CI checkouts.');
     if (process.argv.length !== 3) throw new Error('Usage: node ohos/scripts/prepare-release.mjs <stable-version-or-tag>');
     const root = fileURLToPath(new URL('../..', import.meta.url));
-    const { version, versionCode } = prepareRelease(root, process.argv[2], process.env.OHOS_VERSION_CODE || '');
+    let code = process.env.OHOS_VERSION_CODE;
+    if (!code) {
+      try {
+        code = await nextVersionCode({ appId: process.env.AGC_APP_ID, serviceAccountJson: process.env.AGC_SERVICE_ACCOUNT_JSON });
+      } catch (error) {
+        throw new Error(`${error.message} Run HarmonyOS Upload manually with version_code set higher than all previously uploaded codes.`);
+      }
+    }
+    const { version, versionCode } = prepareRelease(root, process.argv[2], code);
     if (process.env.GITHUB_ENV) appendFileSync(process.env.GITHUB_ENV, `OHOS_RELEASE_VERSION=${version}\nOHOS_VERSION_CODE=${versionCode}\n`);
     console.log(`HarmonyOS ${version}, versionCode ${versionCode}`);
   } catch (error) {

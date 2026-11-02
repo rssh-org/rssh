@@ -263,11 +263,21 @@ gh secret set AGC_APP_ID --body YOUR_NUMERIC_APP_ID
 ```
 
 CI pins the SDK archive checksum and removes signing inputs after packaging.
-`versionCode` defaults to `major * 1000000 + minor * 1000 + patch`; minor and patch
-must be below 1000. If existing AGC versions use higher codes, use the manual
-workflow's `version_code` override for each affected release. Success confirms
-upload and package registration; check asynchronous package processing in AGC
-before submitting review yourself.
+Before building, CI queries AGC's [version list API](https://developer.huawei.com/consumer/cn/doc/doccenter-connect-api/agc-help-publish-api-query-brief-info-list-0000002236201254)
+with the existing Service Account and sets `versionCode` to the highest package
+version code returned plus one, including commercial and test versions in all
+states. It never derives the code from the release tag. The workflow serializes
+uploads; avoid uploading another build of the same app outside CI while it runs.
+The API does not promise to retain deleted or replaced packages indefinitely.
+If their codes exceed the returned maximum, supply a higher code manually.
+
+If the query fails, returns no package version codes, or contains incomplete or
+invalid package data, CI stops before building. Run **HarmonyOS Upload** manually
+and fill in `version_code` with a positive integer up to `2147483647`, higher than
+all previously uploaded codes. This input is required when automatic lookup
+cannot determine the next code; an explicit value bypasses the lookup.
+Success confirms upload and package registration; check asynchronous package
+processing in AGC before submitting review yourself.
 
 ## Running outside Tauri (headless server + IDEA plugin)
 
