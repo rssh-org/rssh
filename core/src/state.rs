@@ -150,6 +150,7 @@ pub struct AppState {
     /// 命中即用，不重发探针；用户切了远端 DefaultShell 注册表后需要重启 app
     /// 才能让 rssh 重新探测（可接受 —— 这是罕见的运维变更）。
     pub ai_remote_shell_cache: Mutex<HashMap<String, crate::ai::shell::ShellKind>>,
+    pub agent_bridge: crate::agent::AgentBridge,
     pub data_dir: PathBuf,
 }
 
@@ -201,6 +202,7 @@ impl AppState {
             ai_sessions: Mutex::new(HashMap::new()),
             ai_session_owners: Arc::new(Mutex::new(HashMap::new())),
             ai_remote_shell_cache: Mutex::new(HashMap::new()),
+            agent_bridge: crate::agent::AgentBridge::default(),
             data_dir,
         })
     }

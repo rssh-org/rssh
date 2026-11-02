@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppResult;
 
-const SCHEMA_VERSION: u32 = 33;
+const SCHEMA_VERSION: u32 = 34;
 
 fn column_exists(conn: &Connection, table: &str, col: &str) -> AppResult<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
@@ -709,6 +709,16 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
         )?;
     }
 
+    if version < 34
+        && table_exists(conn, "ai_conversations")?
+        && !column_exists(conn, "ai_conversations", "source")?
+    {
+        conn.execute_batch(
+            "ALTER TABLE ai_conversations ADD COLUMN source TEXT NOT NULL DEFAULT 'ai'
+             CHECK (source IN ('ai', 'mcp'));",
+        )?;
+    }
+
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -718,6 +728,28 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn migration_34_preserves_existing_conversations_as_ai() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL);
+             INSERT INTO ai_conversations VALUES ('existing', 'Old conversation');
+             PRAGMA user_version = 33;",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        migrate(&conn).unwrap();
+        let (title, source): (String, String) = conn
+            .query_row(
+                "SELECT title, source FROM ai_conversations WHERE id = 'existing'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "Old conversation");
+        assert_eq!(source, "ai");
+    }
+
     fn startup_settings_fixture(restore: Option<&str>, local: Option<&str>) -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(

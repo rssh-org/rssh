@@ -141,6 +141,52 @@ them automatically. Provider and model settings can sync through GitHub or
 WebDAV, but subscription credentials are excluded from sync and configuration
 exports. An expired or revoked authorization requires signing in again.
 
+## Local coding agents (MCP)
+
+In **Settings → AI → Local agent (MCP)**, manually start the service. Copy the connection details into your
+agent's **Streamable HTTP** MCP configuration: the URL and the
+`Authorization: Bearer …` header. The loopback endpoint and token belong to
+this RSSH window and expire when the service stops or the window closes.
+
+RSSH exposes four tools:
+
+- `list_sessions` lists connected terminals in this window with their existing
+  shell metadata. Listing a terminal does not authorize control.
+- After selecting a connected terminal, `open_session(session_id, title)` requests control. Accept or reject the request
+  below the AI panel's toolbar. Accepting opens an MCP conversation in the same
+  chat view, without a message input or send button.
+- `run_command` uses the accepted conversation's existing AI command pipeline:
+  command validation, approval cards, terminal execution, output collection,
+  redaction and audit. Its response includes sanitized output and execution status.
+- `download_file(session_id, remote_path, max_mb)` uses the accepted SSH session's
+  existing SFTP download, approval card and audit. `max_mb` must be 1–100; inspect
+  the remote file size first and transfer larger files manually. The response
+  reports success or failure, downloaded bytes and `local_path` under RSSH's data
+  directory. It returns no file contents. This path is on the **RSSH host**, which
+  may differ from the agent's machine in Headless/JetBrains. Local shell, serial
+  and Telnet sessions cannot provide SFTP downloads.
+
+MCP conversations share the AI panel's danger mode and per-tool auto-approval
+settings, audit and conversation history. Viewing saved MCP history does not
+restore agent control. The agent uses its own access to your code; no RSSH AI
+provider or model is required.
+
+Commands use the terminal's existing shell and working directory. Docker and
+Kubernetes terminals use their configured container shell and keep conversation
+history separate from the host and other containers. Confirm the
+terminal is at a shell prompt before approving; full-screen programs and
+concurrent agent commands are blocked. A timeout ends output collection and
+does **not** guarantee the process stopped. Check the terminal before retrying.
+Shell metadata follows RSSH's existing configuration/detection and may be stale
+after switching shells; no shell version is advertised. Do not automatically
+repeat a command after a timeout or lost response; check the terminal first.
+
+Available in the desktop GUI and Headless/JetBrains while the corresponding
+frontend remains open. Closing the conversation, reconnecting the terminal or
+stopping the service revokes control. Serial/Telnet keep the AI panel's existing
+manual approval and output-submission behavior. Mobile hosts and standalone CLI
+sessions do not provide this MCP endpoint.
+
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). For HarmonyOS builds and signing, see [CONTRIBUTING.md — HarmonyOS](CONTRIBUTING.md#harmonyos-packaging).

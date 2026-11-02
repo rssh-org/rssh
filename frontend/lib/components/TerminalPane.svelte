@@ -1738,7 +1738,7 @@
                 const aiInfo = ai.sessionForTab(tabId);
                 if (aiInfo && aiInfo.target_id !== sid && app.isAiCapableTabType(tabType) && tabType !== "serial") {
                     const lease = ai.captureSessionLease(tabId);
-                    ai.rebindTarget(tabId, tabType, sid, lease).catch((e) =>
+                    ai.rebindTarget(tabId, app.aiTargetKind(tabType), sid, lease).catch((e) =>
                         console.warn("[ai] rebind on reconnect:", e),
                     );
                 }

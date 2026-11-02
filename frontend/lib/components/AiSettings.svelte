@@ -2,9 +2,11 @@
     import { onMount, onDestroy } from "svelte";
     import { invoke } from "@tauri-apps/api/core";
     import * as ai from "../ai/store.svelte.ts";
+    import * as app from "../stores/app.svelte.ts";
     import { t, errMsg } from "../i18n/index.svelte.ts";
     import type { AiProviderRecord, CategoryGroup, LlmProtocol, RedactRuleRecord, SkillRecord } from "../ai/types.ts";
     import AiProviderForm from "./AiProviderForm.svelte";
+    import McpSettings from "./McpSettings.svelte";
     import DangerModeToggle from "../ai/DangerModeToggle.svelte";
     import AppIcon from "./AppIcon.svelte";
 
@@ -660,6 +662,13 @@
         {#if byokNote}<span class="note">{byokNote}</span>{/if}
     </div>
 
+    {#if app.capabilities().mcpServer}
+        <div id="mcp-settings-title" class="section-label">{t("mcp.title")}</div>
+        <section class="card surface-raised mcp-card" aria-labelledby="mcp-settings-title">
+            <McpSettings />
+        </section>
+    {/if}
+
     <div class="section-label">{t("ai.settings.danger.section")}</div>
     <!-- 危险模式 + 8 个 per-tool 自动批准合在一个 .card.surface-raised（参考 SyncScreen）。
          视觉上是一组语义关联的配置，不再拆成两个浮空卡片。 -->
@@ -1147,6 +1156,7 @@
     /* Provider / Danger 卡片：复用全局 .card.surface-raised 提供 bg + 阴影 + 圆角，
        本地只加 padding + 内布局，跟 SyncScreen 同款。 */
     .provider-card,
+    .mcp-card,
     .danger-card,
     .list-card {
         padding: 18px;

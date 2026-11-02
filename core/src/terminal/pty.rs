@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 use crate::error::{locked, AppError, AppResult};
+use crate::models::ConnectorSpec;
 
 /// PTY output destined for the host. The Tauri command turns these into
 /// `app.emit("pty:data:<id>")` / `pty:close:<id>`; the headless ws server
@@ -43,13 +44,14 @@ impl Drop for ChildReaper {
 
 /// 本地 PTY 会话句柄，Clone + Send + Sync。
 /// `_reaper` 跟着 PtyHandle 走，最后一份 clone 消失时回收子进程。
-/// `shell_path` 是 spawn 时实际使用的 shell 二进制路径——AI session 用它
+/// `shell_path()` 是 spawn 时实际使用的 shell 二进制路径——AI session 用它
 /// 推断 ShellKind（无需探测，因为本地 shell 是用户在 UI 里显式选的）。
 #[derive(Clone)]
 pub struct PtyHandle {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     shell_path: Arc<str>,
+    connector: Option<Arc<ConnectorSpec>>,
     _reaper: Arc<ChildReaper>,
 }
 
@@ -76,7 +78,21 @@ impl PtyHandle {
     /// spawn 时实际使用的 shell 路径（用户在 UI 选的，或 default_shell 兜底）。
     /// AI 模块用这个判定本地 PTY 的 ShellKind，无需探测。
     pub fn shell_path(&self) -> &str {
-        &self.shell_path
+        match self.connector() {
+            Some(
+                ConnectorSpec::DockerExec { shell, .. } | ConnectorSpec::KubectlExec { shell, .. },
+            ) => shell,
+            None => &self.shell_path,
+        }
+    }
+
+    pub fn with_connector(mut self, connector: ConnectorSpec) -> Self {
+        self.connector = Some(Arc::new(connector));
+        self
+    }
+
+    pub fn connector(&self) -> Option<&ConnectorSpec> {
+        self.connector.as_deref()
     }
 }
 
@@ -405,6 +421,7 @@ fn spawn_builder(
         writer: Arc::new(Mutex::new(writer)),
         master: Arc::new(Mutex::new(pair.master)),
         shell_path: Arc::from(shell_path.as_str()),
+        connector: None,
         _reaper: Arc::new(ChildReaper {
             child: Mutex::new(Some(child)),
         }),
@@ -477,5 +494,21 @@ mod tests {
         assert!(output.contains("PTY_INPUT:hello-pty"), "{output}");
         assert!(output.contains("41 103"), "{output}");
         assert_eq!(handle.shell_path(), "/bin/sh");
+        for (shell, expected) in [
+            ("pwsh", crate::ai::shell::ShellKind::Powershell),
+            ("cmd.exe", crate::ai::shell::ShellKind::Cmd),
+        ] {
+            let connector = handle.clone().with_connector(ConnectorSpec::DockerExec {
+                context: "test".into(),
+                container_id: "container".into(),
+                container_name: "test".into(),
+                shell: shell.into(),
+            });
+            assert_eq!(connector.shell_path(), shell);
+            assert_eq!(
+                crate::ai::shell::ShellKind::from_local_path(connector.shell_path()),
+                expected
+            );
+        }
     }
 }

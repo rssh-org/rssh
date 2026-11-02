@@ -107,7 +107,7 @@ pub fn pty_spawn_connector(
     session_id: Option<String>,
 ) -> AppResult<String> {
     let session_id = crate::commands::lifecycle::resolve_session_id(session_id)?;
-    let (platform, args) = connector_command(spec)?;
+    let (platform, args) = connector_command(spec.clone())?;
     let program = crate::commands::discovery::resolve_dynamic_discovery_program(platform)?;
     let reservation =
         crate::commands::lifecycle::reserve_resource(&state, &session_id, SessionKind::Pty, owner)?;
@@ -128,7 +128,10 @@ pub fn pty_spawn_connector(
         program.search_path,
         args,
     )?;
-    reservation.activate_returned(&id, crate::commands::lifecycle::ReadySession::Pty(handle))?;
+    reservation.activate_returned(
+        &id,
+        crate::commands::lifecycle::ReadySession::Pty(handle.with_connector(spec)),
+    )?;
     Ok(id)
 }
 

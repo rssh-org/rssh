@@ -21,6 +21,13 @@ export function unregisterAlternateScreenProvider(tabId: string): void {
   providers.delete(tabId);
 }
 
+/** Capture a pane before asynchronous execution setup. Missing, closed and
+ * replaced providers cannot authorize a command for that captured pane. */
+export function captureTerminalGuard(tabId: string): () => boolean {
+  const provider = providers.get(tabId);
+  return () => provider !== undefined && providers.get(tabId) === provider;
+}
+
 /** Read at the point of use: a pending approval can outlive a buffer switch. */
 export function alternateScreenActive(tabId: string): boolean {
   return providers.get(tabId)?.read() ?? false;

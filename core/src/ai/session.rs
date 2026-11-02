@@ -1,10 +1,10 @@
 //! AI 排障会话 actor。
 //!
 //! 重设计（2026-04-26）：命令不在后端执行。后端职责：
-//! 1. 收 LLM 工具调用 → 生成 sentinel uuid → emit 给前端
+//! 1. 收 LLM / MCP 工具调用 → 生成 sentinel uuid → emit 给前端
 //! 2. 前端把 `cmd; echo "<sentinel>:$?"` 粘到 active terminal 自动回车
 //! 3. 前端监听 PTY 数据流找 sentinel → 提取 output + exit code → invoke ai_command_result
-//! 4. 后端收 result → 脱敏 + 截断 + 入审计 + 作为 tool_result 推进 LLM 对话
+//! 4. 后端收 result → 脱敏 + 截断 + 入审计 → 返回给 LLM / MCP 调用方
 //!
 //! 这样命令在用户的交互终端里完整可见，没有任何后端注入或 byte 监控。
 
@@ -33,6 +33,58 @@ use super::web_search::WebSearchResponse;
 mod file_ops;
 
 use file_ops::RemoteCapabilities;
+
+pub use crate::db::ai_conversation::ConversationSource as SessionSource;
+
+/// The actor owns command execution for either a model or an external agent.
+/// An MCP conversation has no model client and can never initiate a model call.
+pub enum SessionDriver {
+    Ai(Box<dyn LlmClient>),
+    Mcp { title: String },
+}
+
+impl SessionDriver {
+    pub fn source(&self) -> SessionSource {
+        match self {
+            Self::Ai(_) => SessionSource::Ai,
+            Self::Mcp { .. } => SessionSource::Mcp,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RunCommandResult {
+    pub id: String,
+    pub exit_code: Option<i32>,
+    pub output: String,
+    pub timed_out: bool,
+    pub early_terminated: bool,
+    pub rejected: Option<String>,
+    pub original_bytes: usize,
+    pub truncated_bytes: usize,
+}
+
+#[derive(Debug)]
+pub enum ExternalToolInput {
+    RunCommand(RunCommandInput),
+    DownloadFile(DownloadFileInput),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum ExternalToolResult {
+    RunCommand(RunCommandResult),
+    DownloadFile(DownloadFileResult),
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DownloadFileResult {
+    pub id: String,
+    pub ok: bool,
+    pub local_path: Option<String>,
+    pub bytes: Option<u64>,
+    pub message: String,
+}
 
 /// 工具命令在前端 PTY 跑完后的两种结果。file_ops 子模块的 `run_file_op` 也用它。
 #[derive(Debug)]
@@ -127,6 +179,13 @@ fn resolve_loadable_skill(id: &str, user_skills: &[SkillRecord]) -> Result<Skill
 // 不可读字段，只标 variant）就够用了。当前代码里没人真的 fmt UserAction，但 enum
 // 暴露给 mpsc 后将来的诊断很可能需要它，保留有 Debug 比未来出问题再加好。
 pub enum UserAction {
+    /// The MCP bridge owns authorization and cancellation; the actor owns the
+    /// tool pipeline. Dropping the reply receiver cancels the active request.
+    ExternalTool {
+        tool_id: String,
+        input: ExternalToolInput,
+        reply: oneshot::Sender<AppResult<ExternalToolResult>>,
+    },
     Message {
         text: String,
         ack: Option<oneshot::Sender<AppResult<()>>>,
@@ -185,6 +244,9 @@ pub struct AiTerminalMutation {
 impl std::fmt::Debug for UserAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            UserAction::ExternalTool { tool_id, .. } => {
+                write!(f, "ExternalTool({tool_id})")
+            }
             UserAction::Message { .. } => f.write_str("Message"),
             UserAction::RejectCommand { command_id, .. } => {
                 write!(f, "RejectCommand({command_id})")
@@ -223,6 +285,7 @@ pub struct DiagnoseSession {
     pub skill: String,
     pub model: String,
     pub provider: String,
+    pub source: SessionSource,
     pub action_tx: mpsc::UnboundedSender<UserAction>,
     pub audit: Arc<Mutex<AuditLog>>,
     /// 流式响应的取消句柄。actor 在 chat() 前把 Notify 装进 slot，chat 完成/取消后清空。
@@ -302,7 +365,7 @@ pub struct SessionConfig {
     /// timeline / audit 都靠它对上当时的 provider。协议归 client 管，
     /// 身份归这里 —— client 不再自带 provider 概念。
     pub provider: String,
-    pub client: Box<dyn LlmClient>,
+    pub driver: SessionDriver,
     pub redact_rules: Vec<RedactRule>,
     /// 命令黑名单：启动时从 DB 一次性物化（fail-closed，见 command_blacklist::load）。
     /// 同 redact_rules —— 会话期内不变，用户中途改黑名单不影响运行中的会话。
@@ -412,6 +475,7 @@ pub fn start(mut cfg: SessionConfig, app: crate::emitter::Host) -> AppResult<Pen
         skill: cfg.skill.clone(),
         model: cfg.model.clone(),
         provider,
+        source: cfg.driver.source(),
         action_tx,
         audit: audit.clone(),
         cancel_slot: cancel_slot.clone(),
@@ -514,6 +578,7 @@ fn rollback_history(
 
 impl Actor {
     async fn run(mut self, mut shutdown_rx: watch::Receiver<bool>) {
+        self.persist();
         loop {
             let action = match tokio::select! {
                 biased;
@@ -524,7 +589,57 @@ impl Actor {
                 None => break,
             };
             match action {
+                UserAction::ExternalTool {
+                    tool_id,
+                    input,
+                    mut reply,
+                } => {
+                    if self.cfg.driver.source() != SessionSource::Mcp {
+                        let _ = reply.send(Err(AppError::other(
+                            "ai_external_command_not_allowed",
+                            json!({}),
+                        )));
+                        continue;
+                    }
+                    if *shutdown_rx.borrow() {
+                        let _ = reply.send(Err(AppError::other("ai_session_stopped", json!({}))));
+                        break;
+                    }
+                    if reply.is_closed() {
+                        continue;
+                    }
+                    let result = tokio::select! {
+                        biased;
+                        result = async {
+                            match input {
+                                ExternalToolInput::RunCommand(input) => self
+                                    .execute_run_command(tool_id.clone(), input)
+                                    .await.map(ExternalToolResult::RunCommand),
+                                ExternalToolInput::DownloadFile(input) => self
+                                    .execute_download_file(tool_id.clone(), input)
+                                    .await.map(ExternalToolResult::DownloadFile),
+                            }
+                        } => result,
+                        _ = reply.closed() => {
+                            self.record_rejection(&tool_id, "MCP request cancelled");
+                            Err(AppError::other("ai_command_cancelled", json!({})))
+                        }
+                        _ = wait_for_shutdown(&mut shutdown_rx) => {
+                            self.record_rejection(&tool_id, "Session closed");
+                            Err(AppError::other("ai_session_stopped", json!({})))
+                        }
+                    };
+                    self.persist();
+                    let _ = reply.send(result);
+                }
                 UserAction::Message { text, ack } => {
+                    if self.cfg.driver.source() == SessionSource::Mcp {
+                        Self::complete_action(
+                            ack,
+                            Err(AppError::other("ai_read_only_conversation", json!({}))),
+                        );
+                        continue;
+                    }
                     self.history.push(ChatMessage::User {
                         content: text.clone(),
                     });
@@ -576,6 +691,7 @@ impl Actor {
         self.drain_accepted_idle_actions();
         self.finish_interrupted_history();
         self.audit_push(AuditKind::SessionEnded);
+        self.persist();
         self.emit("session_ended", json!({}));
     }
 
@@ -586,7 +702,17 @@ impl Actor {
     fn drain_accepted_idle_actions(&mut self) {
         loop {
             match self.action_rx.try_recv() {
+                Ok(UserAction::ExternalTool { reply, .. }) => {
+                    let _ = reply.send(Err(AppError::other("ai_session_stopped", json!({}))));
+                }
                 Ok(UserAction::Message { text, ack }) => {
+                    if self.cfg.driver.source() == SessionSource::Mcp {
+                        Self::complete_action(
+                            ack,
+                            Err(AppError::other("ai_read_only_conversation", json!({}))),
+                        );
+                        continue;
+                    }
                     self.close_interrupted_history_tail();
                     self.history.push(ChatMessage::User {
                         content: text.clone(),
@@ -620,6 +746,13 @@ impl Actor {
     }
 
     fn clear_context(&mut self, ack: Option<oneshot::Sender<AppResult<()>>>) {
+        if self.cfg.driver.source() == SessionSource::Mcp {
+            Self::complete_action(
+                ack,
+                Err(AppError::other("ai_read_only_conversation", json!({}))),
+            );
+            return;
+        }
         // 清空对话历史。audit log 保留 —— "曾经发生过什么"是审计应当
         // 留痕的，用户清的是 LLM 的记忆窗口，不是审计记录。
         // remote_caps 一起清掉 —— 假如用户清完后立即触发 file_ops，
@@ -648,6 +781,13 @@ impl Actor {
         expected_user_messages: &[String],
         ack: Option<oneshot::Sender<AppResult<Vec<AiTerminalMutation>>>>,
     ) {
+        if self.cfg.driver.source() == SessionSource::Mcp {
+            Self::complete_action(
+                ack,
+                Err(AppError::other("ai_read_only_conversation", json!({}))),
+            );
+            return;
+        }
         let result = rollback_history(
             &mut self.history,
             user_message_index,
@@ -848,7 +988,10 @@ impl Actor {
 
             self.emit("assistant_message_start", json!({ "id": msg_id }));
 
-            let chat_future = self.cfg.client.chat(req, sink);
+            let SessionDriver::Ai(client) = &self.cfg.driver else {
+                return Err(AppError::other("ai_read_only_conversation", json!({})));
+            };
+            let chat_future = client.chat(req, sink);
             let chat_result = tokio::select! {
                 biased;
                 r = chat_future => Some(r),
@@ -1224,7 +1367,7 @@ impl Actor {
     /// `command_proposed` 弹审批）。本函数只负责等结果回报。
     ///
     /// `pub(in crate::ai::session)` 给 `file_ops` 子模块的 `ensure_remote_caps` / `run_file_op` 共用。
-    /// `handle_run_command` 用自己的 loop（要做不同的 audit/emit）—— 没复用这里。
+    /// `execute_run_command` 用自己的 loop（要做不同的 audit/emit）—— 没复用这里。
     pub(in crate::ai::session) async fn wait_command_outcome(
         &mut self,
         card_id: &str,
@@ -1307,6 +1450,9 @@ impl Actor {
                     Self::reject_pending_action(ack, "clear_context", card_id);
                     continue;
                 }
+                UserAction::ExternalTool { reply, .. } => {
+                    let _ = reply.send(Err(AppError::other("ai_command_busy", json!({}))));
+                }
                 UserAction::RollbackContext { ack, .. } => {
                     self.audit_push(AuditKind::Note {
                         message: format!("context rollback dropped during tool call {card_id}"),
@@ -1379,11 +1525,46 @@ impl Actor {
             }
         };
 
+        let result = self
+            .execute_download_file(uuid::Uuid::new_v4().to_string(), input)
+            .await?;
+        Ok(ChatMessage::ToolResult {
+            tool_call_id: tc.id,
+            content: result.message,
+            is_error: !result.ok,
+            pre_redacted: true,
+        })
+    }
+
+    fn download_error(&self, id: &str, message: String) -> DownloadFileResult {
+        self.audit_push(AuditKind::Note {
+            message: format!("[tool_error {id}] {message}"),
+        });
+        DownloadFileResult {
+            id: id.to_string(),
+            ok: false,
+            local_path: None,
+            bytes: None,
+            message,
+        }
+    }
+
+    async fn execute_download_file(
+        &mut self,
+        dl_id: String,
+        input: DownloadFileInput,
+    ) -> AppResult<DownloadFileResult> {
+        if input.max_mb == 0 {
+            return Ok(self.download_error(
+                &dl_id,
+                format!("max_mb must be between 1 and {MAX_DOWNLOAD_MB}."),
+            ));
+        }
         // 100MB hard cap. Reject up front so we don't open SFTP only to abort.
         if input.max_mb > MAX_DOWNLOAD_MB {
-            return Ok(self.make_tool_error(
-                &tc.id,
-                &format!(
+            return Ok(self.download_error(
+                &dl_id,
+                format!(
                     "rssh caps download_file at {MAX_DOWNLOAD_MB} MB (you requested max_mb={}). \
                      Don't retry with a smaller max_mb if the actual file is larger — `ls -l` it first. \
                      For artifacts >{MAX_DOWNLOAD_MB} MB, tell the user to transfer {} via scp / rsync / sz \
@@ -1397,26 +1578,21 @@ impl Actor {
         let ssh_handle = match self.cfg.ssh_handle.as_ref() {
             Some(h) => h.clone(),
             None => {
-                return Ok(self.make_tool_error(
-                    &tc.id,
-                    "This session's target is a local shell, so SFTP isn't needed. Just tell the user the path.",
+                return Ok(self.download_error(
+                    &dl_id,
+                    "This session's target is a local shell, so SFTP isn't needed. Just tell the user the path.".into(),
                 ));
             }
         };
 
-        let dl_id = uuid::Uuid::new_v4().to_string();
         self.audit_push(AuditKind::DownloadProposed {
             id: dl_id.clone(),
             remote_path: input.remote_path.clone(),
             max_mb: input.max_mb,
         });
 
-        // 审批卡片：跟 run_command / patch_file 同一个 command_proposed 事件，前端按
-        // kind="download_file" 决定是否走 auto_download_file 自动批准。SFTP 不走 PTY，
-        // 所以 full_cmd/sentinel 填空——前端识别 kind 后直接 ack 不发命令到终端。
-        //
-        // side_effect 展示实际写入目录前缀（绝对路径），避免用 `~/.../` 这种省略号文案
-        // 让用户误以为是真路径片段。
+        // download_proposed 复用审核卡片及 auto_download_file；批准后由后端 SFTP
+        // 下载，不向 PTY 写命令。展示实际落地目录，让用户确认写入位置。
         let dest_dir = self.cfg.data_dir.join("diagnose").join(&self.cfg.tab_id);
         self.emit(
             "download_proposed",
@@ -1436,9 +1612,9 @@ impl Actor {
             CommandOutcome::Rejected { reason } => {
                 self.record_rejection(&dl_id, &reason);
                 Self::complete_action(ack, Ok(()));
-                return Ok(self.make_tool_error(
-                    &tc.id,
-                    &format!("User rejected download_file. Reason: {reason}."),
+                return Ok(self.download_error(
+                    &dl_id,
+                    format!("User rejected download_file. Reason: {reason}."),
                 ));
             }
             CommandOutcome::Result { .. } => {
@@ -1503,14 +1679,16 @@ impl Actor {
                         "duration_ms": started_at.elapsed().as_millis() as u64,
                     }),
                 );
-                Ok(Self::make_tool_result(
-                    &tc.id,
-                    format!(
+                Ok(DownloadFileResult {
+                    id: dl_id,
+                    ok: true,
+                    local_path: Some(local_str.clone()),
+                    bytes: Some(bytes),
+                    message: format!(
                         "Download complete: {} ({} bytes). The file is now on the user's machine; tell the user the path and let them analyze it with local tools.",
                         local_str, bytes
                     ),
-                    true,
-                ))
+                })
             }
             Err(e) => {
                 self.audit_push(AuditKind::Note {
@@ -1555,7 +1733,7 @@ impl Actor {
                         input.remote_path
                     )
                 };
-                Ok(self.make_tool_error(&tc.id, &msg))
+                Ok(self.download_error(&dl_id, msg))
             }
         }
     }
@@ -1698,6 +1876,39 @@ impl Actor {
             }
         };
 
+        let command_id = uuid::Uuid::new_v4().to_string();
+        match self.execute_run_command(command_id, input).await {
+            Ok(result) => match result.rejected {
+                Some(reason) => Ok(self.make_tool_error(
+                    &tc.id,
+                    &format!("User rejected the command. Reason: {reason}. Adjust your plan based on this reason."),
+                )),
+                None => Ok(ChatMessage::ToolResult {
+                    tool_call_id: tc.id,
+                    content: format!(
+                        "exit={} timed_out={} early_terminated={}\n--- output ---\n{}",
+                        result.exit_code.unwrap_or(0), result.timed_out, result.early_terminated, result.output,
+                    ),
+                    is_error: result.timed_out || result.early_terminated || result.exit_code.unwrap_or(0) != 0,
+                    pre_redacted: true,
+                }),
+            },
+            Err(AppError::Other(error)) if error.code == "ai_command_blocked" => {
+                let reason = error.params["reason"].as_str().unwrap_or("command rejected");
+                Ok(self.make_tool_error(
+                    &tc.id, &format!("rssh refused the command: {reason}. Try a compliant rewrite."),
+                ))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// One command pipeline for both model tool calls and MCP requests.
+    async fn execute_run_command(
+        &mut self,
+        cmd_id: String,
+        input: RunCommandInput,
+    ) -> AppResult<RunCommandResult> {
         if let Err(e) = sanitize::validate_with(&input.cmd, &self.cfg.blacklist) {
             // rssh blocked this before it ever became an approval card. Surface it
             // in both panels (chat note + audit) — otherwise the safety layer fires
@@ -1711,13 +1922,12 @@ impl Actor {
                 "command_blocked",
                 json!({ "cmd": input.cmd, "reason": reason }),
             );
-            return Ok(self.make_tool_error(
-                &tc.id,
-                &format!("rssh refused the command: {e}. Try a compliant rewrite."),
+            return Err(AppError::other(
+                "ai_command_blocked",
+                json!({ "reason": reason }),
             ));
         }
 
-        let cmd_id = uuid::Uuid::new_v4().to_string();
         let timeout_s = input.timeout_s.unwrap_or(60).clamp(1, 300);
         // (sentinel marker, full_cmd to paste). 模板按 cfg.shell_kind 选 ——
         // POSIX `;$?` / cmd `&%errorlevel%` / PS `;$LASTEXITCODE`. 两个值必须配对生成。
@@ -1763,10 +1973,16 @@ impl Actor {
                 } if command_id == cmd_id => {
                     self.record_rejection(&cmd_id, &reason);
                     Self::complete_action(ack, Ok(()));
-                    return Ok(self.make_tool_error(
-                        &tc.id,
-                        &format!("User rejected the command. Reason: {reason}. Adjust your plan based on this reason."),
-                    ));
+                    return Ok(RunCommandResult {
+                        id: cmd_id,
+                        exit_code: None,
+                        output: String::new(),
+                        timed_out: false,
+                        early_terminated: false,
+                        rejected: Some(sanitize::redact(&reason, &self.cfg.redact_rules)),
+                        original_bytes: 0,
+                        truncated_bytes: 0,
+                    });
                 }
                 UserAction::CommandResult {
                     command_id,
@@ -1794,7 +2010,7 @@ impl Actor {
                     );
 
                     self.audit_push(AuditKind::CommandExecuted {
-                        id: cmd_id,
+                        id: cmd_id.clone(),
                         exit_code,
                         output_redacted: trunc.text.clone(),
                         original_bytes: trunc.original_bytes,
@@ -1805,18 +2021,15 @@ impl Actor {
                     // audit entry exist before the invoke resolves.
                     Self::complete_action(ack, Ok(()));
 
-                    let tool_payload = format!(
-                        "exit={exit_code} timed_out={timed_out} early_terminated={early_terminated}\n--- output ---\n{}",
-                        trunc.text
-                    );
-                    // Output was redacted + truncated above — mark pre_redacted
-                    // so `redact_message` doesn't run regex a second time on
-                    // an already-cleaned payload.
-                    return Ok(ChatMessage::ToolResult {
-                        tool_call_id: tc.id,
-                        content: tool_payload,
-                        is_error: timed_out || early_terminated || exit_code != 0,
-                        pre_redacted: true,
+                    return Ok(RunCommandResult {
+                        id: cmd_id,
+                        exit_code: Some(exit_code),
+                        output: trunc.text,
+                        timed_out,
+                        early_terminated,
+                        rejected: None,
+                        original_bytes: trunc.original_bytes,
+                        truncated_bytes: trunc.truncated_bytes,
                     });
                 }
                 UserAction::CommandResult {
@@ -1869,6 +2082,9 @@ impl Actor {
                     );
                     Self::reject_pending_action(ack, "clear_context", &cmd_id);
                     continue;
+                }
+                UserAction::ExternalTool { reply, .. } => {
+                    let _ = reply.send(Err(AppError::other("ai_command_busy", json!({}))));
                 }
                 UserAction::RollbackContext { ack, .. } => {
                     self.audit_push(AuditKind::Note {
@@ -1970,22 +2186,25 @@ impl Actor {
         };
         // Title = first line of the first user message. Recomputed every save,
         // so a cleared-then-restarted conversation re-titles itself.
-        let title: String = self
-            .history
-            .iter()
-            .find_map(|m| match m {
-                ChatMessage::User { content } => Some(
-                    content
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .chars()
-                        .take(60)
-                        .collect(),
-                ),
-                _ => None,
-            })
-            .unwrap_or_default();
+        let title: String = match &self.cfg.driver {
+            SessionDriver::Mcp { title } => title.clone(),
+            SessionDriver::Ai(_) => self
+                .history
+                .iter()
+                .find_map(|m| match m {
+                    ChatMessage::User { content } => Some(
+                        content
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(60)
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+        };
         if let Err(e) = crate::db::ai_conversation::save_history_and_audit(
             &self.cfg.db,
             &self.cfg.conversation_id,
@@ -2025,6 +2244,621 @@ impl Actor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type TestEvents = mpsc::UnboundedReceiver<(String, serde_json::Value)>;
+
+    #[tokio::test]
+    async fn run_command_tool_result_preserves_execution_failure_status() {
+        for (exit_code, timed_out, early_terminated, expected_error) in [
+            (0, false, false, false),
+            (7, false, false, true),
+            (0, true, false, true),
+            (0, false, true, true),
+        ] {
+            let (host, mut events) = crate::ssh::test_support::headless_host();
+            let mut pending = start(
+                SessionConfig {
+                    tab_id: "tool-result-test".into(),
+                    target_id: "target".into(),
+                    skill: "general".into(),
+                    system_prompt: String::new(),
+                    user_skills_cache: Vec::new(),
+                    model: "test".into(),
+                    provider: "test".into(),
+                    driver: SessionDriver::Ai(Box::new(
+                        crate::ai::llm::OpenAiCompletionsClient::new(
+                            String::new(),
+                            "http://127.0.0.1:1".into(),
+                        ),
+                    )),
+                    redact_rules: Vec::new(),
+                    blacklist: Blacklist::builtin(),
+                    max_output_bytes: sanitize::DEFAULT_MAX_OUTPUT_BYTES,
+                    ssh_handle: None,
+                    data_dir: PathBuf::new(),
+                    shell_kind: Default::default(),
+                    db: host.state().db.clone(),
+                    conversation_id: "conversation".into(),
+                    target_key: "local".into(),
+                    initial_history: Vec::new(),
+                    initial_audit: AuditLog::default(),
+                },
+                host,
+            )
+            .unwrap();
+            let action_tx = pending.info().action_tx.clone();
+            let respond = async {
+                let (event, proposal) = events.recv().await.unwrap();
+                assert_eq!(event, "ai:command_proposed:tool-result-test");
+                action_tx
+                    .send(UserAction::CommandResult {
+                        command_id: proposal["id"].as_str().unwrap().into(),
+                        exit_code,
+                        output: "command output".into(),
+                        timed_out,
+                        early_terminated,
+                        ack: None,
+                    })
+                    .unwrap();
+            };
+            let command = ToolCall {
+                id: "tool-call".into(),
+                name: "run_command".into(),
+                input: json!({
+                    "cmd": "pwd",
+                    "explain": "Inspect working directory",
+                    "side_effect": "read-only",
+                }),
+            };
+            let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(pending.actor.handle_run_command(command), respond)
+            })
+            .await
+            .unwrap();
+            let ChatMessage::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+                pre_redacted,
+            } = result.unwrap()
+            else {
+                panic!("run_command must return a tool result");
+            };
+            assert_eq!(tool_call_id, "tool-call");
+            assert_eq!(
+                is_error, expected_error,
+                "exit={exit_code}, timed_out={timed_out}, early_terminated={early_terminated}"
+            );
+            assert_eq!(content, format!("exit={exit_code} timed_out={timed_out} early_terminated={early_terminated}\n--- output ---\ncommand output"));
+            assert!(pre_redacted);
+        }
+    }
+
+    fn pending_mcp_session() -> (PendingSession, TestEvents, Arc<crate::db::Db>) {
+        let (host, events) = crate::ssh::test_support::headless_host();
+        let db = host.state().db.clone();
+        crate::db::ai_conversation::create_with_source(
+            &db,
+            "mcp-conversation",
+            "local",
+            SessionSource::Mcp,
+        )
+        .unwrap();
+        let pending = start(
+            SessionConfig {
+                tab_id: "mcp-tab".into(),
+                target_id: "target".into(),
+                skill: "general".into(),
+                system_prompt: String::new(),
+                user_skills_cache: Vec::new(),
+                model: String::new(),
+                provider: String::new(),
+                driver: SessionDriver::Mcp {
+                    title: "Inspect startup failure".into(),
+                },
+                redact_rules: vec![RedactRule::new("secret-token", "[redacted]").unwrap()],
+                blacklist: Blacklist::builtin(),
+                max_output_bytes: 32,
+                ssh_handle: None,
+                data_dir: PathBuf::new(),
+                shell_kind: super::super::shell::ShellKind::Powershell,
+                db: db.clone(),
+                conversation_id: "mcp-conversation".into(),
+                target_key: "local".into(),
+                initial_history: Vec::new(),
+                initial_audit: AuditLog::default(),
+            },
+            host,
+        )
+        .unwrap();
+        (pending, events, db)
+    }
+
+    fn mcp_session() -> (DiagnoseSession, TestEvents, Arc<crate::db::Db>) {
+        let (pending, events, db) = pending_mcp_session();
+        (pending.launch(uuid::Uuid::new_v4()), events, db)
+    }
+
+    #[tokio::test]
+    async fn download_rejects_zero_limit_before_target_or_approval() {
+        let (mut pending, mut events, _) = pending_mcp_session();
+        let result = pending
+            .actor
+            .handle_download_file(ToolCall {
+                id: "zero-limit".into(),
+                name: "download_file".into(),
+                input: json!({ "remote_path": "/artifact.log", "max_mb": 0 }),
+            })
+            .await
+            .unwrap();
+        let ChatMessage::ToolResult {
+            content, is_error, ..
+        } = result
+        else {
+            panic!("download must return a tool result");
+        };
+        assert!(is_error);
+        assert!(
+            content.contains("max_mb must be between 1 and 100"),
+            "{content}"
+        );
+        assert!(events.try_recv().is_err());
+    }
+
+    fn request_command(
+        session: &DiagnoseSession,
+        id: &str,
+        cmd: &str,
+    ) -> oneshot::Receiver<AppResult<ExternalToolResult>> {
+        let (reply, rx) = oneshot::channel();
+        session
+            .action_tx
+            .send(UserAction::ExternalTool {
+                tool_id: id.into(),
+                input: ExternalToolInput::RunCommand(RunCommandInput {
+                    cmd: cmd.into(),
+                    explain: "Inspect state".into(),
+                    side_effect: "read-only".into(),
+                    timeout_s: Some(10),
+                }),
+                reply,
+            })
+            .unwrap();
+        rx
+    }
+
+    const DOWNLOAD_BYTES: &[u8] = b"download fixture: secret-token\n";
+    const DOWNLOAD_REMOTE_PATH: &str = "/home/test/artifact.log";
+
+    #[derive(Default)]
+    struct DownloadSshServer {
+        channels: std::collections::HashMap<russh::ChannelId, russh::Channel<russh::server::Msg>>,
+    }
+
+    impl russh::server::Handler for DownloadSshServer {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _: &str) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            channel: russh::Channel<russh::server::Msg>,
+            reply: russh::server::ChannelOpenHandle,
+            _: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            self.channels.insert(channel.id(), channel);
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn subsystem_request(
+            &mut self,
+            id: russh::ChannelId,
+            name: &str,
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            assert_eq!(name, "sftp");
+            session.channel_success(id)?;
+            let channel = self.channels.remove(&id).unwrap();
+            russh_sftp::server::run(channel.into_stream(), DownloadSftpServer).await;
+            Ok(())
+        }
+    }
+
+    struct DownloadSftpServer;
+
+    impl russh_sftp::server::Handler for DownloadSftpServer {
+        type Error = russh_sftp::protocol::StatusCode;
+
+        fn unimplemented(&self) -> Self::Error {
+            russh_sftp::protocol::StatusCode::OpUnsupported
+        }
+
+        async fn realpath(
+            &mut self,
+            id: u32,
+            path: String,
+        ) -> Result<russh_sftp::protocol::Name, Self::Error> {
+            assert_eq!(path, ".");
+            Ok(russh_sftp::protocol::Name {
+                id,
+                files: vec![russh_sftp::protocol::File::dummy("/home/test")],
+            })
+        }
+
+        async fn stat(
+            &mut self,
+            id: u32,
+            path: String,
+        ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
+            if path != DOWNLOAD_REMOTE_PATH && path != "/home/test/pending.log" {
+                return Err(russh_sftp::protocol::StatusCode::NoSuchFile);
+            }
+            Ok(russh_sftp::protocol::Attrs {
+                id,
+                attrs: russh_sftp::protocol::FileAttributes {
+                    size: Some(DOWNLOAD_BYTES.len() as u64),
+                    ..Default::default()
+                },
+            })
+        }
+
+        async fn open(
+            &mut self,
+            id: u32,
+            path: String,
+            flags: russh_sftp::protocol::OpenFlags,
+            _: russh_sftp::protocol::FileAttributes,
+        ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
+            assert!(path == DOWNLOAD_REMOTE_PATH || path == "/home/test/pending.log");
+            assert_eq!(flags.bits(), russh_sftp::protocol::OpenFlags::READ.bits());
+            Ok(russh_sftp::protocol::Handle { id, handle: path })
+        }
+
+        async fn read(
+            &mut self,
+            id: u32,
+            handle: String,
+            offset: u64,
+            len: u32,
+        ) -> Result<russh_sftp::protocol::Data, Self::Error> {
+            if handle == "/home/test/pending.log" {
+                std::future::pending::<()>().await;
+            }
+            assert_eq!(handle, DOWNLOAD_REMOTE_PATH);
+            let offset = offset as usize;
+            if offset >= DOWNLOAD_BYTES.len() {
+                return Err(russh_sftp::protocol::StatusCode::Eof);
+            }
+            let end = (offset + len as usize).min(DOWNLOAD_BYTES.len());
+            Ok(russh_sftp::protocol::Data {
+                id,
+                data: DOWNLOAD_BYTES[offset..end].to_vec(),
+            })
+        }
+
+        async fn close(
+            &mut self,
+            id: u32,
+            _: String,
+        ) -> Result<russh_sftp::protocol::Status, Self::Error> {
+            Ok(russh_sftp::protocol::Status {
+                id,
+                status_code: russh_sftp::protocol::StatusCode::Ok,
+                error_message: String::new(),
+                language_tag: String::new(),
+            })
+        }
+    }
+
+    async fn download_ssh_handle(dir: &std::path::Path) -> crate::ssh::client::SshHandle {
+        use crate::ssh::client::{default_client_config, null_logger, ssh_connect_stream, DialCtx};
+        let key: russh::keys::PrivateKey =
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[21; 32]).into();
+        let known_hosts_path = dir.join("known_hosts");
+        russh::keys::known_hosts::learn_known_hosts_path(
+            "download-test",
+            22,
+            key.public_key(),
+            &known_hosts_path,
+        )
+        .unwrap();
+        let (client, server) = tokio::io::duplex(65_536);
+        tokio::spawn(async move {
+            let config = russh::server::Config {
+                keys: vec![key],
+                ..Default::default()
+            };
+            let running = russh::server::run_stream(
+                std::sync::Arc::new(config),
+                server,
+                DownloadSshServer::default(),
+            )
+            .await
+            .unwrap();
+            let _ = running.await;
+        });
+        let ctx = DialCtx {
+            config: default_client_config(),
+            known_hosts_path,
+            timeout_secs: 5,
+            log: null_logger(),
+            prompt_ctx: None,
+        };
+        let (mut handle, _) = ssh_connect_stream(ctx, client, "download-test".into(), 22)
+            .await
+            .unwrap();
+        assert!(handle.authenticate_none("test").await.unwrap().success());
+        std::sync::Arc::new(tokio::sync::Mutex::new(handle))
+    }
+
+    fn request_download(
+        session: &DiagnoseSession,
+        id: &str,
+        remote_path: &str,
+    ) -> oneshot::Receiver<AppResult<ExternalToolResult>> {
+        let (reply, rx) = oneshot::channel();
+        session
+            .action_tx
+            .send(UserAction::ExternalTool {
+                tool_id: id.into(),
+                input: ExternalToolInput::DownloadFile(DownloadFileInput {
+                    remote_path: remote_path.into(),
+                    max_mb: 1,
+                }),
+                reply,
+            })
+            .unwrap();
+        rx
+    }
+
+    #[tokio::test]
+    async fn mcp_download_reuses_approval_cancellation_sftp_and_audit() {
+        let directory = tempfile::Builder::new()
+            .prefix("secret-token")
+            .tempdir()
+            .unwrap();
+        let (mut pending, mut events, db) = pending_mcp_session();
+        pending.actor.cfg.ssh_handle = Some(download_ssh_handle(directory.path()).await);
+        pending.actor.cfg.data_dir = directory.path().to_path_buf();
+        let session = pending.launch(uuid::Uuid::new_v4());
+        let local_path = directory.path().join("diagnose/mcp-tab/artifact.log");
+
+        let rejected = request_download(&session, "download-denied", "~/artifact.log");
+        let proposal = next_event(&mut events, "download_proposed").await;
+        assert_eq!(proposal["id"], "download-denied");
+        assert_eq!(proposal["remote_path"], "~/artifact.log");
+        assert!(!local_path.parent().unwrap().exists());
+        session
+            .action_tx
+            .send(UserAction::RejectCommand {
+                command_id: "download-denied".into(),
+                reason: "No download".into(),
+                ack: None,
+            })
+            .unwrap();
+        let ExternalToolResult::DownloadFile(result) = rejected.await.unwrap().unwrap() else {
+            panic!("expected download result");
+        };
+        assert!(!result.ok);
+        assert_eq!(result.id, "download-denied");
+        assert!(result.message.contains("No download"));
+        assert!(result.local_path.is_none());
+        assert_eq!(
+            next_event(&mut events, "command_rejected").await["id"],
+            "download-denied"
+        );
+
+        let cancelled = request_download(&session, "download-cancelled", "~/artifact.log");
+        next_event(&mut events, "download_proposed").await;
+        drop(cancelled);
+        assert_eq!(
+            next_event(&mut events, "command_rejected").await["id"],
+            "download-cancelled"
+        );
+        assert!(!local_path.parent().unwrap().exists());
+
+        let accepted = request_download(&session, "download-accepted", "~/artifact.log");
+        assert_eq!(
+            next_event(&mut events, "download_proposed").await["id"],
+            "download-accepted"
+        );
+        session
+            .action_tx
+            .send(UserAction::CommandResult {
+                command_id: "download-accepted".into(),
+                exit_code: 0,
+                output: String::new(),
+                timed_out: false,
+                early_terminated: false,
+                ack: None,
+            })
+            .unwrap();
+        let ExternalToolResult::DownloadFile(result) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), accepted)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected download result");
+        };
+        assert!(result.ok, "{}", result.message);
+        assert_eq!(result.id, "download-accepted");
+        assert_eq!(result.local_path.as_deref(), local_path.to_str());
+        assert_eq!(result.bytes, Some(DOWNLOAD_BYTES.len() as u64));
+        assert_eq!(std::fs::read(&local_path).unwrap(), DOWNLOAD_BYTES);
+        assert!(!local_path.with_extension("log.part").exists());
+        let completed = next_event(&mut events, "download_completed").await;
+        assert_eq!(completed["id"], "download-accepted");
+        assert_eq!(completed["local_path"], result.local_path.unwrap());
+        assert_eq!(completed["bytes"], DOWNLOAD_BYTES.len());
+        let row = crate::db::ai_conversation::get(&db, "mcp-conversation")
+            .unwrap()
+            .unwrap();
+        assert!(row.audit_json.contains("download_proposed"));
+        assert!(row.audit_json.contains("download_completed"));
+        assert!(!row.audit_json.contains("llm_request"));
+
+        let pending_path = local_path.with_file_name("pending.log");
+        std::fs::write(&pending_path, b"existing artifact").unwrap();
+        let transferring = request_download(&session, "download-transferring", "~/pending.log");
+        next_event(&mut events, "download_proposed").await;
+        session
+            .action_tx
+            .send(UserAction::CommandResult {
+                command_id: "download-transferring".into(),
+                exit_code: 0,
+                output: String::new(),
+                timed_out: false,
+                early_terminated: false,
+                ack: None,
+            })
+            .unwrap();
+        let partial_path = pending_path.with_extension("log.part");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !partial_path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(transferring);
+        assert_eq!(
+            next_event(&mut events, "command_rejected").await["id"],
+            "download-transferring"
+        );
+        assert!(!partial_path.exists());
+        assert_eq!(std::fs::read(&pending_path).unwrap(), b"existing artifact");
+
+        let shutdown = request_download(&session, "download-shutdown", "~/artifact.log");
+        next_event(&mut events, "download_proposed").await;
+        session.stop().await;
+        assert_eq!(
+            shutdown.await.unwrap().unwrap_err().code(),
+            "ai_session_stopped"
+        );
+        assert_eq!(
+            next_event(&mut events, "command_rejected").await["id"],
+            "download-shutdown"
+        );
+    }
+
+    async fn next_event(events: &mut TestEvents, suffix: &str) -> serde_json::Value {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let (event, value) = events.recv().await.expect("event stream closed");
+                if event == format!("ai:{suffix}:mcp-tab") {
+                    return value;
+                }
+            }
+        })
+        .await
+        .expect("actor event timed out")
+    }
+
+    #[tokio::test]
+    async fn mcp_command_uses_shared_proposal_redaction_audit_and_persistence() {
+        let (session, mut events, db) = mcp_session();
+        assert_eq!(session.source, SessionSource::Mcp);
+        assert!(session.provider.is_empty());
+        let reply = request_command(&session, "command-1", "Get-Location");
+        let proposal = next_event(&mut events, "command_proposed").await;
+        assert_eq!(proposal["id"], "command-1");
+        assert_eq!(proposal["kind"], "run_command");
+        assert!(proposal["execution"]["full_cmd"]
+            .as_str()
+            .unwrap()
+            .contains("LASTEXITCODE"));
+        let (ack, processed) = oneshot::channel();
+        session
+            .action_tx
+            .send(UserAction::CommandResult {
+                command_id: "command-1".into(),
+                exit_code: 7,
+                output: format!("secret-token {}", "x".repeat(80)),
+                timed_out: false,
+                early_terminated: false,
+                ack: Some(ack),
+            })
+            .unwrap();
+        processed.await.unwrap().unwrap();
+        let ExternalToolResult::RunCommand(result) = reply.await.unwrap().unwrap() else {
+            panic!("expected run_command result");
+        };
+        let completed = next_event(&mut events, "command_completed").await;
+        assert_eq!(result.exit_code, Some(7));
+        assert!(!result.output.contains("secret-token"));
+        assert!(result.output.contains("[redacted]"));
+        assert!(result.truncated_bytes > 0);
+        assert_eq!(completed["output"], result.output);
+        let row = crate::db::ai_conversation::get(&db, "mcp-conversation")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.title, "Inspect startup failure");
+        assert_eq!(row.source, SessionSource::Mcp);
+        assert!(row.audit_json.contains("command_executed"));
+        assert!(!row.audit_json.contains("secret-token"));
+        assert!(!row.audit_json.contains("llm_request"));
+        session.stop().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_dropped_request_rejects_pending_card_and_releases_actor() {
+        let (session, mut events, _) = mcp_session();
+        let reply = request_command(&session, "cancelled", "Get-Location");
+        next_event(&mut events, "command_proposed").await;
+        drop(reply);
+        assert_eq!(
+            next_event(&mut events, "command_rejected").await["id"],
+            "cancelled"
+        );
+        let next = request_command(&session, "next", "Get-Location");
+        assert_eq!(
+            next_event(&mut events, "command_proposed").await["id"],
+            "next"
+        );
+        session
+            .action_tx
+            .send(UserAction::RejectCommand {
+                command_id: "next".into(),
+                reason: "secret-token not allowed".into(),
+                ack: None,
+            })
+            .unwrap();
+        let ExternalToolResult::RunCommand(result) = next.await.unwrap().unwrap() else {
+            panic!("expected run_command result");
+        };
+        assert_eq!(result.rejected.as_deref(), Some("[redacted] not allowed"));
+        session.stop().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_blacklist_blocks_before_approval_and_shutdown_releases_waiter() {
+        let (session, mut events, db) = mcp_session();
+        let blocked = request_command(&session, "blocked", "rm -rf /");
+        assert_eq!(
+            blocked.await.unwrap().unwrap_err().code(),
+            "ai_command_blocked"
+        );
+        next_event(&mut events, "command_blocked").await;
+        let row = crate::db::ai_conversation::get(&db, "mcp-conversation")
+            .unwrap()
+            .unwrap();
+        assert!(row.audit_json.contains("command_blocked"));
+        assert!(!row.audit_json.contains("command_proposed"));
+        let reply = request_command(&session, "stopping", "Get-Location");
+        next_event(&mut events, "command_proposed").await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), session.stop())
+            .await
+            .unwrap();
+        assert_eq!(
+            reply.await.unwrap().unwrap_err().code(),
+            "ai_session_stopped"
+        );
+    }
 
     fn user(content: &str) -> ChatMessage {
         ChatMessage::User {

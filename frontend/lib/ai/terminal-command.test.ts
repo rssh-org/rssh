@@ -21,8 +21,20 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
+async function startSession(ai: typeof import("./store.svelte.ts")) {
+  ai.activateTab(session.tabId);
+  invokeMock.mockResolvedValueOnce({
+    tab_id: session.tabId, instance_id: session.instanceId, target_id: "target",
+    skill: "general", provider: "openai", model: "model", conversation_id: "conversation",
+  });
+  await ai.startSession({ tabId: session.tabId, targetKind: "local", targetId: "target",
+    skill: "general", provider: "openai", model: "model", lease: ai.captureSessionLease(session.tabId) });
+  invokeMock.mockClear();
+}
+
 async function terminalFixture() {
   const ai = await import("./store.svelte.ts");
+  await startSession(ai);
   const screen = await import("../terminal/alternate-screen.ts");
   const terminal = new Terminal({ allowProposedApi: true });
   const feeder = createOutputFeeder({ write: (data, done) => terminal.write(data, done), maxPendingBytes: 10000 });
@@ -72,6 +84,7 @@ it("waits for queued DECRST before allowing a command at the restored prompt", a
 
 it("cancels while output is parsing without sending shell input or Ctrl+C", async () => {
   const ai = await import("./store.svelte.ts");
+  await startSession(ai);
   const screen = await import("../terminal/alternate-screen.ts");
   let drained!: (ready: boolean) => void;
   const pending = new Promise<boolean>(resolve => { drained = resolve; });
@@ -90,13 +103,6 @@ it("cancels while output is parsing without sending shell input or Ctrl+C", asyn
 
 it("refuses a proposal after queued output is parsed without mounting an approval card", async () => {
   const f = await terminalFixture();
-  f.ai.activateTab(session.tabId);
-  invokeMock.mockImplementation(async cmd => cmd === "ai_session_start" ? {
-    tab_id: session.tabId, instance_id: session.instanceId, target_id: "target",
-    skill: "general", provider: "openai", model: "model", conversation_id: "conversation",
-  } : null);
-  await f.ai.startSession({ tabId: session.tabId, targetKind: "ssh", targetId: "target",
-    skill: "general", provider: "openai", model: "model", lease: f.ai.captureSessionLease(session.tabId) });
   const proposed = listenMock.mock.calls.find(([event]) => event === `ai:command_proposed:${session.tabId}`)![1];
   invokeMock.mockClear();
   f.feeder.push("output\r\n");

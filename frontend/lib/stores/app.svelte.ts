@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import * as ai from "../ai/store.svelte.ts";
+import type { AiTargetKind } from "../ai/types.ts";
 import * as pluginStore from "../plugins/store.svelte.ts";
 import { errMsg, t } from "../i18n/index.svelte.ts";
 import { capabilities } from "./runtime.svelte.ts";
@@ -37,9 +38,13 @@ export function isTerminalTabType(type: TabType): type is TerminalTabType {
   return type === "ssh" || type === "local" || type === "serial" || type === "telnet"
     || type === "docker_exec" || type === "kubectl_exec";
 }
-export type AiCapableTabType = "ssh" | "local" | "serial" | "telnet";
+export type AiCapableTabType = TerminalTabType;
 export function isAiCapableTabType(type: TabType): type is AiCapableTabType {
-  return type === "ssh" || type === "local" || type === "serial" || type === "telnet";
+  return isTerminalTabType(type);
+}
+/** Connector tabs use their existing PTY, including the container's shell. */
+export function aiTargetKind(type: AiCapableTabType): AiTargetKind {
+  return type === "docker_exec" || type === "kubectl_exec" ? "local" : type;
 }
 export interface Tab {
   id: string;

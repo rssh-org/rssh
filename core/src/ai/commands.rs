@@ -296,6 +296,7 @@ pub struct AiSessionInfo {
     pub skill: String,
     pub model: String,
     pub provider: String,
+    pub source: session::SessionSource,
     /// Persistent row id in ai_conversations — the front-end keys its
     /// timeline autosaves on this.
     pub conversation_id: String,
@@ -316,6 +317,7 @@ impl AiSessionInfo {
             skill: s.skill.clone(),
             model: s.model.clone(),
             provider: s.provider.clone(),
+            source: s.source,
             conversation_id: s.conversation_id.clone(),
         }
     }
@@ -465,6 +467,51 @@ pub async fn ai_session_start_impl(
     locale: Option<String>,
     resume: Option<String>,
 ) -> AppResult<AiSessionInfo> {
+    start_session_impl(
+        state, host, owner, tab_id, target, skill, provider, model, locale, resume, None,
+    )
+    .await
+}
+
+/// Start a providerless conversation after the MCP bridge has obtained consent.
+pub async fn ai_mcp_session_start_impl(
+    state: &AppState,
+    host: crate::emitter::Host,
+    owner: crate::state::SessionOwner,
+    tab_id: String,
+    target: AiTarget,
+    title: String,
+) -> AppResult<AiSessionInfo> {
+    start_session_impl(
+        state,
+        host,
+        owner,
+        tab_id,
+        target,
+        String::new(),
+        String::new(),
+        String::new(),
+        None,
+        None,
+        Some(title),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_session_impl(
+    state: &AppState,
+    host: crate::emitter::Host,
+    owner: crate::state::SessionOwner,
+    tab_id: String,
+    target: AiTarget,
+    skill: String,
+    provider: String,
+    model: String,
+    locale: Option<String>,
+    resume: Option<String>,
+    mcp_title: Option<String>,
+) -> AppResult<AiSessionInfo> {
     let mut owner_reservation =
         crate::commands::lifecycle::reserve_ai_owner(state, tab_id.clone(), owner.clone())?;
     {
@@ -480,18 +527,44 @@ pub async fn ai_session_start_impl(
         }
     }
 
-    // 1. Provider 行（协议 + endpoint）及对应的本机凭据。
-    // provider 参数是行 id —— 协议分发行查，不在请求里猜。
-    let provider_row = crate::db::ai_provider::get(&state.db, &provider)?.ok_or_else(|| {
-        AppError::not_found("provider_not_found", json!({ "provider": provider }))
-    })?;
-    let client = provider_client(state, &provider_row)?;
-    if model.trim().is_empty() {
-        return Err(AppError::config(
-            "provider_field_required",
-            json!({ "field": "model" }),
-        ));
-    }
+    // Claim and load a resumed conversation before choosing its driver. MCP
+    // history remains providerless even if the user has since configured a model.
+    let resumed = match resume.as_deref() {
+        Some(id) => {
+            owner_reservation.claim_conversation(id)?;
+            Some(
+                crate::db::ai_conversation::get(&state.db, id)?
+                    .ok_or_else(|| AppError::not_found("conversation_not_found", json!({})))?,
+            )
+        }
+        None => None,
+    };
+    let mcp_title = mcp_title.or_else(|| {
+        resumed
+            .as_ref()
+            .filter(|row| row.source == session::SessionSource::Mcp)
+            .map(|row| row.title.clone())
+    });
+    let (driver, provider, model) = match mcp_title {
+        Some(title) => (
+            session::SessionDriver::Mcp { title },
+            String::new(),
+            String::new(),
+        ),
+        None => {
+            let row = crate::db::ai_provider::get(&state.db, &provider)?.ok_or_else(|| {
+                AppError::not_found("provider_not_found", json!({ "provider": provider }))
+            })?;
+            let client = provider_client(state, &row)?;
+            if model.trim().is_empty() {
+                return Err(AppError::config(
+                    "provider_field_required",
+                    json!({ "field": "model" }),
+                ));
+            }
+            (session::SessionDriver::Ai(client), row.id, model)
+        }
+    };
 
     // 2. 校验 target 存在 + 抓 SSH handle（给 download_file 工具复用）+ 推断初始 shell。
     //
@@ -583,17 +656,22 @@ pub async fn ai_session_start_impl(
     // 其它内置 Skill 和用户 Skill 走 load_skill 工具按需加载，
     // 用户写多个 skill 也不会让启动 prompt 爆炸。
     let _ = skill; // 前端不再选；保留参数兼容
-    let locale_lbl = locale_label(locale.as_deref().unwrap_or("en"));
-    // Use the same host check as analyze_locally: OHOS phone and PC share one
-    // library, but native windows and a local terminal depend on the device.
-    let local_analysis_unavailable = host.ensure_local_analysis_available().await.err();
-    let system_prompt = skills::build_catalog_prompt(
-        &state.db,
-        locale_lbl,
-        local_analysis_unavailable.as_deref(),
-        host.allows_diagnosis_downloads(),
-    )?;
-    let user_skills_cache = skills::list_user(&state.db)?;
+    let (system_prompt, user_skills_cache) = match &driver {
+        session::SessionDriver::Ai(_) => {
+            let locale_lbl = locale_label(locale.as_deref().unwrap_or("en"));
+            let local_analysis_unavailable = host.ensure_local_analysis_available().await.err();
+            (
+                skills::build_catalog_prompt(
+                    &state.db,
+                    locale_lbl,
+                    local_analysis_unavailable.as_deref(),
+                    host.allows_diagnosis_downloads(),
+                )?,
+                skills::list_user(&state.db)?,
+            )
+        }
+        session::SessionDriver::Mcp { .. } => (String::new(), Vec::new()),
+    };
 
     // 3. Conversation identity. Resume revives a persisted history under its
     //    old id; otherwise a fresh id with empty history. The target check is
@@ -606,9 +684,7 @@ pub async fn ai_session_start_impl(
             // Claim before reading the row. Otherwise delete or another resume
             // can win the load-to-activation gap and leave two writers (or
             // resurrect a deleted conversation on the next autosave).
-            owner_reservation.claim_conversation(&id)?;
-            let row = crate::db::ai_conversation::get(&state.db, &id)?
-                .ok_or_else(|| AppError::not_found("conversation_not_found", json!({})))?;
+            let row = resumed.expect("resume row was claimed and loaded above");
             if row.target_key != target_key {
                 return Err(AppError::other(
                     "conversation_target_mismatch",
@@ -641,8 +717,8 @@ pub async fn ai_session_start_impl(
         system_prompt,
         user_skills_cache,
         model,
-        provider: provider_row.id.clone(),
-        client,
+        provider,
+        driver,
         // DB 读规则失败直接向上抛 —— fail-closed。脱敏策略读不出来就让会话起步失败、
         // 报错给用户，绝不静默回退默认：用户可能删过 / 改严过默认规则，回退会悄悄套用
         // 一套不同的（更弱的）脱敏策略，给"我的配置生效了"的假象，比报错危险得多。
@@ -693,7 +769,12 @@ pub(crate) fn activate_pending_ai_session(
     if is_new_conversation {
         // Ready actors use UPDATE-only autosaves, so their row must exist before
         // launch/publication. A create failure leaves PendingSession unlaunched.
-        crate::db::ai_conversation::create(&state.db, &conversation_id, target_key)?;
+        crate::db::ai_conversation::create_with_source(
+            &state.db,
+            &conversation_id,
+            target_key,
+            pending.info().source,
+        )?;
     }
 
     match owner_reservation.activate(pending) {
@@ -848,6 +929,28 @@ async fn ai_send_processed_action<T>(
     ack_rx
         .await
         .unwrap_or_else(|_| Err(AppError::other("ai_session_stopped", json!({}))))
+}
+
+pub async fn ai_mcp_tool_impl(
+    state: &AppState,
+    tab_id: &str,
+    expected_owner: &crate::state::SessionOwner,
+    expected_instance_id: &str,
+    tool_id: String,
+    input: session::ExternalToolInput,
+) -> AppResult<session::ExternalToolResult> {
+    ai_send_processed_action(
+        state,
+        tab_id,
+        expected_owner,
+        Some(expected_instance_id),
+        |reply| UserAction::ExternalTool {
+            tool_id,
+            input,
+            reply,
+        },
+    )
+    .await
 }
 
 pub async fn ai_user_message_impl(
@@ -1324,7 +1427,8 @@ pub async fn ai_list_sessions(
 
 // ─── 对话持久化 ────────────────────────────────────────────────────
 
-/// Conversation grouping key — "ssh:<profile_id>" / "local" / "serial:<port>".
+/// Conversation grouping key. Host PTYs share "local"; connector PTYs use
+/// the remote target's identity, independent of its display name and shell.
 /// Requires a live target (same precondition as session start itself): the
 /// profile id / port name live on the connected handle, and both the picker
 /// and resume only make sense on a connected tab.
@@ -1337,7 +1441,37 @@ pub(crate) fn conversation_target_key(state: &AppState, target: &AiTarget) -> Ap
                 .ok_or_else(|| AppError::not_found("ssh_session_not_found", json!({})))?;
             crate::db::ai_conversation::ssh_target_key(h.profile_id())
         }
-        AiTarget::Local(_) => "local".to_string(),
+        #[cfg(any(windows, macos, linux, ohos))]
+        AiTarget::Local(id) => {
+            let sessions = locked(&state.pty_sessions)?;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| AppError::not_found("local_pty_not_found", json!({})))?;
+            match handle.connector() {
+                Some(crate::models::ConnectorSpec::DockerExec {
+                    context,
+                    container_id,
+                    ..
+                }) => {
+                    format!("docker_exec:{}", json!([context, container_id]))
+                }
+                Some(crate::models::ConnectorSpec::KubectlExec {
+                    context,
+                    namespace,
+                    pod,
+                    container,
+                    ..
+                }) => {
+                    format!(
+                        "kubectl_exec:{}",
+                        json!([context, namespace, pod, container])
+                    )
+                }
+                None => "local".to_string(),
+            }
+        }
+        #[cfg(any(android, ios))]
+        AiTarget::Local(_) => return Err(AppError::not_found("local_pty_not_found", json!({}))),
         #[cfg(any(windows, macos, linux, ohos))]
         AiTarget::Serial(id) => {
             let g = locked(&state.serial_sessions)?;
@@ -1896,7 +2030,245 @@ pub async fn ai_settings_set_impl(state: &AppState, patch: AiSettingsPatch) -> A
 
 #[cfg(test)]
 mod tests {
-    use super::{AiSettingsPatch, AiTarget};
+    use super::*;
+
+    #[cfg(any(windows, macos, linux))]
+    #[tokio::test]
+    async fn connector_conversations_keep_their_target_scope() {
+        use crate::commands::lifecycle::{self, ReadySession};
+        use crate::models::ConnectorSpec;
+        use crate::state::{SessionKind, SessionOwner};
+        let (host, _events) = crate::ssh::test_support::headless_host();
+        let state = host.state();
+        let owner = SessionOwner::Window("connector-scope-test".into());
+        let register = |connector| {
+            let id = uuid::Uuid::new_v4().to_string();
+            let reservation =
+                lifecycle::reserve_resource(state, &id, SessionKind::Pty, owner.clone()).unwrap();
+            let (_, handle) = crate::terminal::pty::spawn(
+                id.clone(),
+                80,
+                24,
+                std::sync::Arc::new(|_, _| {}),
+                None,
+            )
+            .unwrap();
+            let handle = match connector {
+                Some(spec) => handle.with_connector(spec),
+                None => handle,
+            };
+            reservation.activate(ReadySession::Pty(handle)).unwrap();
+            AiTarget::Local(id)
+        };
+        let docker = |context: &str, container_id: &str, name: &str, shell: &str| {
+            ConnectorSpec::DockerExec {
+                context: context.into(),
+                container_id: container_id.into(),
+                container_name: name.into(),
+                shell: shell.into(),
+            }
+        };
+        let kubectl = |context: &str, namespace: &str, pod: &str, container: Option<&str>| {
+            ConnectorSpec::KubectlExec {
+                context: context.into(),
+                namespace: namespace.into(),
+                pod: pod.into(),
+                container: container.map(str::to_owned),
+                shell: "sh".into(),
+            }
+        };
+        let target = register(Some(docker("dev", "container", "old name", "pwsh")));
+        let renamed = register(Some(docker("dev", "container", "new name", "cmd.exe")));
+        let others = [
+            register(None),
+            register(Some(docker("prod", "container", "old name", "pwsh"))),
+            register(Some(docker("dev", "other-container", "old name", "pwsh"))),
+            register(Some(docker("dev:other", "container", "same", "sh"))),
+            register(Some(docker("dev", "other:container", "same", "sh"))),
+            register(Some(kubectl("dev", "ns", "pod", None))),
+            register(Some(kubectl("prod", "ns", "pod", None))),
+            register(Some(kubectl("dev", "other-ns", "pod", None))),
+            register(Some(kubectl("dev", "ns", "other-pod", None))),
+            register(Some(kubectl("dev", "ns", "pod", Some("sidecar")))),
+        ];
+        let key = conversation_target_key(state, &target).unwrap();
+        assert_eq!(key, conversation_target_key(state, &renamed).unwrap());
+        let mut keys = std::collections::HashSet::from([key]);
+        for other in &others {
+            assert!(
+                keys.insert(conversation_target_key(state, other).unwrap()),
+                "different targets shared a conversation scope"
+            );
+        }
+        assert_eq!(conversation_target_key(state, &others[0]).unwrap(), "local");
+        let info = ai_mcp_session_start_impl(
+            state,
+            host.clone(),
+            owner.clone(),
+            "connector-tab".into(),
+            target.clone(),
+            "Inspect container".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ai_conversations_list_impl(state, &renamed).unwrap().len(),
+            1
+        );
+        for other in &others {
+            assert!(ai_conversations_list_impl(state, other).unwrap().is_empty());
+            let error = ai_session_rebind_target_impl(
+                state,
+                &owner,
+                info.tab_id.clone(),
+                other.clone(),
+                Some(info.conversation_id.clone()),
+                Some(&info.instance_id),
+            )
+            .unwrap_err();
+            assert_eq!(error.code(), "conversation_target_mismatch");
+        }
+        lifecycle::close_ai_session(state, &info.tab_id, &owner, Some(&info.instance_id))
+            .await
+            .unwrap();
+        for other in &others {
+            let error = ai_session_start_impl(
+                state,
+                host.clone(),
+                owner.clone(),
+                info.tab_id.clone(),
+                other.clone(),
+                String::new(),
+                String::new(),
+                String::new(),
+                None,
+                Some(info.conversation_id.clone()),
+            )
+            .await
+            .err()
+            .expect("cross-target resume must fail");
+            assert_eq!(error.code(), "conversation_target_mismatch");
+        }
+        let resumed = ai_session_start_impl(
+            state,
+            host.clone(),
+            owner.clone(),
+            info.tab_id.clone(),
+            renamed.clone(),
+            String::new(),
+            String::new(),
+            String::new(),
+            None,
+            Some(info.conversation_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed.conversation_id, info.conversation_id);
+        lifecycle::close_ai_session(state, &resumed.tab_id, &owner, Some(&resumed.instance_id))
+            .await
+            .unwrap();
+        for target in others.iter().chain([&target, &renamed]) {
+            lifecycle::close_resource_and_wait(state, target.id(), SessionKind::Pty, &owner)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_conversation_starts_and_restores_without_provider_credentials() {
+        use crate::commands::lifecycle::{self, ReadySession};
+        use crate::state::{SessionKind, SessionOwner};
+        let (host, _events) = crate::ssh::test_support::headless_host();
+        let state = host.state();
+        let owner = SessionOwner::Window("mcp-start-test".into());
+        let id = uuid::Uuid::new_v4().to_string();
+        let reservation =
+            lifecycle::reserve_resource(state, &id, SessionKind::Telnet, owner.clone()).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (_, handle) = crate::terminal::telnet::open(
+            id.clone(),
+            "127.0.0.1",
+            listener.local_addr().unwrap().port(),
+            80,
+            24,
+            "crlf",
+            std::sync::Arc::new(|_, _| {}),
+        )
+        .unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        reservation.activate(ReadySession::Telnet(handle)).unwrap();
+        let target = AiTarget::Telnet(id.clone());
+        let info = ai_mcp_session_start_impl(
+            state,
+            host.clone(),
+            owner.clone(),
+            "mcp-tab".into(),
+            target.clone(),
+            "Inspect switch".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(info.source, session::SessionSource::Mcp);
+        assert!(info.provider.is_empty());
+        assert!(info.model.is_empty());
+        let error = ai_user_message_impl(
+            state,
+            &info.tab_id,
+            &owner,
+            "Should not call a model".into(),
+            Some(&info.instance_id),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), "ai_read_only_conversation");
+        let error =
+            ai_session_clear_context_impl(state, &info.tab_id, &owner, Some(&info.instance_id))
+                .await
+                .unwrap_err();
+        assert_eq!(error.code(), "ai_read_only_conversation");
+        let error = ai_session_rollback_context_impl(
+            state,
+            &info.tab_id,
+            &owner,
+            0,
+            vec![],
+            Some(&info.instance_id),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), "ai_read_only_conversation");
+        lifecycle::close_ai_session(state, &info.tab_id, &owner, Some(&info.instance_id))
+            .await
+            .unwrap();
+        let rows = ai_conversations_list_impl(state, &target).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, session::SessionSource::Mcp);
+        assert_eq!(rows[0].title, "Inspect switch");
+        let resumed = ai_session_start_impl(
+            state,
+            host.clone(),
+            owner.clone(),
+            "mcp-tab".into(),
+            target,
+            String::new(),
+            String::new(),
+            String::new(),
+            None,
+            Some(info.conversation_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed.source, session::SessionSource::Mcp);
+        assert_eq!(resumed.conversation_id, info.conversation_id);
+        assert_ne!(resumed.instance_id, info.instance_id);
+        lifecycle::close_ai_session(state, &resumed.tab_id, &owner, Some(&resumed.instance_id))
+            .await
+            .unwrap();
+        lifecycle::close_resource_and_wait(state, &id, SessionKind::Telnet, &owner)
+            .await
+            .unwrap();
+    }
+
     use serde_json::json;
 
     #[test]

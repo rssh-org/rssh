@@ -1085,9 +1085,11 @@ mod tests {
             model: "test".into(),
             provider: "test".into(),
             // These tests drive the probe directly and never call the LLM.
-            client: Box::new(crate::ai::llm::OpenAiCompletionsClient::new(
-                String::new(),
-                "http://127.0.0.1:1".into(),
+            driver: crate::ai::session::SessionDriver::Ai(Box::new(
+                crate::ai::llm::OpenAiCompletionsClient::new(
+                    String::new(),
+                    "http://127.0.0.1:1".into(),
+                ),
             )),
             redact_rules: Vec::new(),
             blacklist: sanitize::Blacklist::default(),

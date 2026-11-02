@@ -20,6 +20,7 @@ pub struct RuntimeCapabilities {
     pub native_clipboard: bool,
     pub release_update_check: bool,
     pub system_back: bool,
+    pub mcp_server: bool,
     pub terminal_policy: TerminalRuntimePolicy,
 }
 
@@ -45,6 +46,7 @@ impl RuntimeCapabilities {
             // follow their RSSH server's policy, not the browser's operating system.
             release_update_check: !cfg!(ios),
             system_back: cfg!(android),
+            mcp_server: cfg!(any(windows, macos, linux)),
             terminal_policy: if cfg!(any(android, ios)) {
                 TerminalRuntimePolicy::constrained()
             } else {
@@ -134,10 +136,11 @@ mod tests {
             "nativeClipboard",
             "releaseUpdateCheck",
             "systemBack",
+            "mcpServer",
         ] {
             assert!(value[key].is_boolean(), "missing boolean capability {key}");
         }
-        assert_eq!(value.as_object().unwrap().len(), 16);
+        assert_eq!(value.as_object().unwrap().len(), 17);
         assert_eq!(value["fileMultiSelect"], true);
         assert_eq!(value["releaseUpdateCheck"], !cfg!(ios));
         assert_eq!(value["systemBack"], cfg!(android));

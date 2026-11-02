@@ -1,5 +1,6 @@
 <script lang="ts">
     import * as ai from "./store.svelte.ts";
+    import * as mcp from "../mcp/store.svelte.ts";
     import type { AiTargetKind, ChatItem, ConversationMeta } from "./types.ts";
     import CommandConfirmDialog from "./CommandConfirmDialog.svelte";
     import WebToolConfirmCard from "./WebToolConfirmCard.svelte";
@@ -55,6 +56,8 @@
     } | null>(null);
 
     let session = $derived(ai.sessionForTab(tabId));
+    let mcpSession = $derived(session?.source === "mcp");
+    let mcpRequests = $derived(mcp.requestsForTab(tabId));
     let items: ChatItem[] = $derived(ai.chatItems(tabId));
     // 流式响应进行中 —— send 按钮换成"停止"按钮。依赖 items 变化重算（last item 的 streaming flag）。
     let streaming = $derived(ai.isStreaming(tabId));
@@ -67,7 +70,7 @@
     // with (authoritative — a later settings change doesn't affect a live session);
     // fall back to the configured model (what will run) when there's no session yet.
     // Empty string when neither is known — the .model span still works as the spring.
-    let currentModel = $derived(session?.model ?? ai.settings()?.model ?? "");
+    let currentModel = $derived(mcpSession ? t("mcp.title") : (session?.model ?? ai.settings()?.model ?? ""));
 
     // 该 profile 下持久化的历史对话 —— 仅会话未启动时展示（picker）。
     // null = 还没加载完，与空数组（确无历史）区分，避免列表闪现。
@@ -206,18 +209,19 @@
     let deletingId = $state<string | null>(null);
 
     /** 点历史对话：actor 带旧 history 出生，UI 灌回存储的 timeline，直接可续聊。 */
-    async function resumeConversation(id: string) {
+    async function resumeConversation(conversation: ConversationMeta) {
+        const id = conversation.id;
         const owner = snapshotOwner();
         if (busy || session || deletingId === id) return;
         banner = null;
         busy = true;
         try {
             const settings = ai.settings() ?? await ai.loadSettings();
-            if (!settings.provider) {
-                throw new Error(t("ai.error.no_provider"));
-            }
-            if (!ai.hasCredentials(settings)) {
-                throw new Error(t(settings.protocol === "codex-subscription" ? "error.codex_login_required" : "ai.error.no_api_key"));
+            if (conversation.source !== "mcp") {
+                if (!settings.provider) throw new Error(t("ai.error.no_provider"));
+                if (!ai.hasCredentials(settings)) {
+                    throw new Error(t(settings.protocol === "codex-subscription" ? "error.codex_login_required" : "ai.error.no_api_key"));
+                }
             }
             const startedTargetId = liveTargetId();
             await ai.resumeSession({
@@ -225,7 +229,8 @@
                 targetKind: owner.targetKind,
                 targetId: startedTargetId,
                 skill: "general",
-                provider: settings.provider, model: settings.model,
+                provider: conversation.source === "mcp" ? "" : settings.provider,
+                model: conversation.source === "mcp" ? "" : settings.model,
                 lease: owner.lease,
             }, id);
             await rebindIfNeeded(owner, startedTargetId);
@@ -377,9 +382,11 @@
              text on hover). Also the flex spring (flex:1) that pushes the controls
              to the right — replaces the old empty .grow spacer. -->
         <span class="model" title={currentModel}>{currentModel}</span>
+        {#if !mcpSession}
         <span class="tokens" title={t("ai.toolbar.tokens_tip", { tin: tokens.tokens_in, tout: tokens.tokens_out })}>
             ↑{formatTokenCount(tokens.tokens_in)} ↓{formatTokenCount(tokens.tokens_out)}
         </span>
+        {/if}
         <!-- Audit log toggle: file-text icon in chat view, chat bubble in audit view (= go back).
              Toolbar controls render unconditionally (stable layout); they disable until the
              session lazy-starts on first send — no actor, nothing to audit. -->
@@ -420,7 +427,7 @@
              picker state; the panel stays open. Disabled when there is no
              live conversation to end. -->
         <button class="btn-icon" onclick={newSession} disabled={!session}
-                title={t("ai.toolbar.new_session")} aria-label={t("ai.toolbar.new_session")}>
+                title={t(mcpSession ? "mcp.end_session" : "ai.toolbar.new_session")} aria-label={t(mcpSession ? "mcp.end_session" : "ai.toolbar.new_session")}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="3" y="3" width="18" height="18" rx="2"/>
                 <line x1="12" y1="8" x2="12" y2="16"/>
@@ -429,6 +436,21 @@
         </button>
         <button class="btn-icon" onclick={closePanel} title={t("ai.toolbar.close_session")} aria-label={t("ai.toolbar.close_session")}>×</button>
     </div>
+
+    {#each mcpRequests as request (request.id)}
+        <div class="mcp-request" role="region" aria-label={t("mcp.request_title")}>
+            <div class="mcp-request-copy">
+                <strong>{t("mcp.request_title")}</strong>
+                <span>{request.title}</span>
+                <p>{t(session ? "mcp.request_replace_hint" : "mcp.request_hint")}</p>
+                {#if request.error}<p class="request-error" role="alert">{request.error}</p>{/if}
+            </div>
+            <div class="mcp-request-actions">
+                <button class="btn btn-sm" disabled={request.busy} onclick={() => mcp.reject(request.id).catch(e => { banner = errMsg(e); })}>{t("mcp.reject")}</button>
+                <button class="btn btn-sm btn-primary" disabled={request.busy} onclick={() => mcp.accept(request.id).then(() => { auditOpen = false; }).catch(e => { banner = errMsg(e); })}>{t("mcp.accept_session")}</button>
+            </div>
+        </div>
+    {/each}
 
     {#if banner}
         <div class="banner">
@@ -568,9 +590,9 @@
                         <div class="history-title">{t("ai.history.title")}</div>
                         {#each conversations as c (c.id)}
                             <div class="history-row">
-                                <button class="history-item" onclick={() => resumeConversation(c.id)}
+                                <button class="history-item" onclick={() => resumeConversation(c)}
                                         disabled={busy || deletingId === c.id} title={t("ai.history.resume_tip")}>
-                                    <span class="history-name">{c.title || t("ai.history.untitled")}</span>
+                                    <span class="history-name">{#if c.source === "mcp"}<span class="history-source">MCP</span>{/if}{c.title || t("ai.history.untitled")}</span>
                                     <span class="history-time">{fmtDate(c.updated_at)}</span>
                                 </button>
                                 <!-- 删除全局互斥（deletingId 只能追踪一个 in-flight），禁用范围
@@ -585,6 +607,7 @@
             {/if}
         </div>
 
+        {#if !mcpSession}
         <div class="input-area">
             <textarea
                 bind:this={inputEl}
@@ -604,6 +627,7 @@
                 </button>
             {/if}
         </div>
+        {/if}
     {/if}
 </div>
 
@@ -635,6 +659,12 @@
         padding: 8px; border-bottom: 1px solid var(--divider);
         flex-shrink: 0;
     }
+    .mcp-request { flex-shrink: 0; padding: 12px; border-bottom: 1px solid var(--divider); background: var(--raised); }
+    .mcp-request-copy { display: flex; flex-direction: column; gap: 6px; font-size: 12px; overflow-wrap: anywhere; }
+    .mcp-request-copy p { margin: 0; color: var(--text-sub); line-height: 1.5; }
+    .mcp-request-copy .request-error { color: var(--error); }
+    .mcp-request-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+    .history-source { color: var(--text-dim); font-size: 10px; margin-right: 6px; }
     .model {
         flex: 1;
         min-width: 0;
