@@ -10,9 +10,10 @@ use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
 use crate::error::{locked, AppError, AppResult};
-use crate::models::{Credential, Profile};
+use crate::models::{Credential, Profile, TerminalEncoding};
 use crate::terminal::recorder::Recorder;
 
+use super::encoding::{encode_input, OutputDecoder};
 use super::prompt::prompt_host_key;
 
 /// Re-export 旧 path：实现已迁移到 `ssh::auth` / `ssh::prompt`，调用点
@@ -778,6 +779,7 @@ mod tests {
                 credential_id: "credential".into(),
                 bastion_profile_id: None,
                 init_command: None,
+                terminal_encoding: crate::models::TerminalEncoding::Gbk,
                 group_id: None,
                 algorithms: Default::default(),
             },
@@ -821,6 +823,86 @@ mod tests {
         assert!(events.try_recv().is_err());
     }
 
+    #[test]
+    fn gbk_output_is_utf8_for_events_and_recordings() {
+        let (app, mut events) = crate::ssh::test_support::headless_host();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gbk.cast");
+        let mut recorder = Some(Recorder::new(path.clone(), 80, 24).unwrap());
+        let mut decoder =
+            super::super::encoding::OutputDecoder::new(crate::models::TerminalEncoding::Gbk);
+        for bytes in [&b"\x1b[32m\xd6"[..], &b"\xd0\xce\xc4\x1b[0m"[..]] {
+            let decoded = decoder.decode(bytes, false);
+            publish_output(&app, "ssh:data:test", &mut recorder, &decoded);
+        }
+        let remaining = decoder.decode(&[], true);
+        publish_output(&app, "ssh:data:test", &mut recorder, &remaining);
+        recorder.take().unwrap().finish().unwrap();
+
+        let mut emitted = Vec::new();
+        while let Ok((event, payload)) = events.try_recv() {
+            assert_eq!(event, "ssh:data:test");
+            emitted.extend(STANDARD.decode(payload.as_str().unwrap()).unwrap());
+        }
+        let expected = "\x1b[32m中文\x1b[0m";
+        assert_eq!(emitted, expected.as_bytes());
+        let cast = std::fs::read_to_string(path).unwrap();
+        let recorded: String = cast
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                value[2].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_eq!(recorded, expected);
+    }
+
+    #[tokio::test]
+    async fn invalid_gbk_init_command_fails_before_connecting() {
+        let (app, mut events) = crate::ssh::test_support::headless_host();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let error = connect(ConnectParams {
+            session_id: session_id.clone(),
+            profile: Profile {
+                id: "gbk-profile".into(),
+                name: "GBK server".into(),
+                host: "127.0.0.1".into(),
+                port: 0,
+                credential_id: "credential".into(),
+                bastion_profile_id: None,
+                init_command: Some("echo 😀".into()),
+                terminal_encoding: TerminalEncoding::Gbk,
+                group_id: None,
+                algorithms: Default::default(),
+            },
+            credential: Credential {
+                id: "credential".into(),
+                name: "test".into(),
+                username: "test".into(),
+                credential_type: crate::models::CredentialType::None,
+                secret: None,
+                save_to_remote: false,
+            },
+            bastion_chain: Vec::new(),
+            cols: 80,
+            rows: 24,
+            app,
+            owner: crate::state::SessionOwner::Headless(uuid::Uuid::new_v4()),
+            recording_path: None,
+            log_session_id: Some(session_id),
+            prompt_session_id: None,
+            known_hosts_path: dir.path().join("known_hosts"),
+            timeout_secs: 1,
+        })
+        .await
+        .err()
+        .expect("unrepresentable init command must fail before connecting");
+        assert_eq!(error.code(), "terminal_encoding_unmappable");
+        assert!(events.try_recv().is_err());
+    }
+
     // ── map_connect_error ──────────────────────────────────────────
 
     #[test]
@@ -852,6 +934,7 @@ pub enum SessionCmd {
 pub struct SessionHandle {
     tx: mpsc::UnboundedSender<SessionCmd>,
     ssh_handle: SshHandle,
+    terminal_encoding: TerminalEncoding,
     /// 本次连接对应的 Profile.id。AI 模块用它作 remote_shell_cache 的 key ——
     /// 同一 profile 多次重连共享一份探测结果，不重发 probe。
     profile_id: String,
@@ -859,8 +942,9 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     pub fn write(&self, data: &[u8]) -> AppResult<()> {
+        let data = encode_input(self.terminal_encoding, data)?;
         self.tx
-            .send(SessionCmd::Write(data.to_vec()))
+            .send(SessionCmd::Write(data.into_owned()))
             .map_err(|_| AppError::ssh("ssh_session_closed", json!({})))
     }
     pub fn resize(&self, cols: u32, rows: u32) -> AppResult<()> {
@@ -999,6 +1083,11 @@ pub struct ConnectParams {
 /// All inputs are owned, so the returned future carries no caller borrows and
 /// remains Send across both the Tauri and headless adapters.
 pub async fn connect(params: ConnectParams) -> AppResult<ConnectResult> {
+    // Both GUI and headless adapters send the init command after connect but
+    // before lifecycle activation. Reject it here before opening any shell.
+    if let Some(command) = params.profile.init_command.as_deref() {
+        encode_input(params.profile.terminal_encoding, command.as_bytes())?;
+    }
     let ConnectParams {
         session_id,
         profile,
@@ -1084,8 +1173,18 @@ pub async fn connect(params: ConnectParams) -> AppResult<ConnectResult> {
 
     let data_event = format!("ssh:data:{session_id}");
     let close_event = format!("ssh:close:{session_id}");
+    let terminal_encoding = profile.terminal_encoding;
     tokio::spawn(async move {
-        session_task(data_event, close_event, channel, rx, app, recorder).await;
+        session_task(
+            data_event,
+            close_event,
+            channel,
+            rx,
+            app,
+            recorder,
+            terminal_encoding,
+        )
+        .await;
     });
 
     Ok(ConnectResult {
@@ -1093,6 +1192,7 @@ pub async fn connect(params: ConnectParams) -> AppResult<ConnectResult> {
         handle: SessionHandle {
             tx,
             ssh_handle,
+            terminal_encoding,
             profile_id: profile.id.clone(),
         },
     })
@@ -1114,7 +1214,10 @@ async fn session_task(
     mut rx: mpsc::UnboundedReceiver<SessionCmd>,
     app: crate::emitter::Host,
     mut recorder: Option<Recorder>,
+    terminal_encoding: TerminalEncoding,
 ) {
+    let mut stdout = OutputDecoder::new(terminal_encoding);
+    let mut stderr = OutputDecoder::new(terminal_encoding);
     loop {
         let event = tokio::select! {
             msg = channel.wait() => Event::Ssh(msg),
@@ -1123,16 +1226,12 @@ async fn session_task(
 
         match event {
             Event::Ssh(Some(ChannelMsg::Data { data })) => {
-                if let Some(ref mut rec) = recorder {
-                    let _ = rec.record(&data);
-                }
-                let _ = app.emit_bytes(&data_event, &data);
+                let data = stdout.decode(&data, false);
+                publish_output(&app, &data_event, &mut recorder, &data);
             }
             Event::Ssh(Some(ChannelMsg::ExtendedData { data, .. })) => {
-                if let Some(ref mut rec) = recorder {
-                    let _ = rec.record(&data);
-                }
-                let _ = app.emit_bytes(&data_event, &data);
+                let data = stderr.decode(&data, false);
+                publish_output(&app, &data_event, &mut recorder, &data);
             }
             Event::Ssh(Some(ChannelMsg::Eof | ChannelMsg::Close)) | Event::Ssh(None) => {
                 break;
@@ -1150,8 +1249,27 @@ async fn session_task(
             _ => {}
         }
     }
+    for mut decoder in [stdout, stderr] {
+        let remaining = decoder.decode(&[], true);
+        publish_output(&app, &data_event, &mut recorder, &remaining);
+    }
     if let Some(rec) = recorder {
         let _ = rec.finish();
     }
     let _ = app.emit(&close_event, ());
+}
+
+fn publish_output(
+    app: &crate::emitter::Host,
+    data_event: &str,
+    recorder: &mut Option<Recorder>,
+    data: &[u8],
+) {
+    if data.is_empty() {
+        return;
+    }
+    if let Some(rec) = recorder {
+        let _ = rec.record(data);
+    }
+    let _ = app.emit_bytes(data_event, data);
 }

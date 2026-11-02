@@ -891,7 +891,8 @@
             streamSendText(normalized);
             return;
         }
-        invoke(writeCmd, { sessionId, data: Array.from(new TextEncoder().encode(text)) });
+        invoke(writeCmd, { sessionId, data: Array.from(new TextEncoder().encode(text)) })
+            .catch((error) => toast.error(errMsg(error)));
     }
 
     function pasteText(text: string) {
@@ -905,7 +906,8 @@
         const normalized = text.replace(/\r?\n/g, "\r");
         const wrapped = terminal.modes.bracketedPasteMode
             ? `\x1b[200~${normalized}\x1b[201~` : normalized;
-        invoke(writeCmd, { sessionId, data: Array.from(new TextEncoder().encode(wrapped)) });
+        invoke(writeCmd, { sessionId, data: Array.from(new TextEncoder().encode(wrapped)) })
+            .catch((error) => toast.error(errMsg(error)));
     }
 
     async function copySelection(): Promise<boolean> {
@@ -1101,7 +1103,8 @@
             // the release valve must see the transformed bytes, not the raw key.
             const processed = processInput(data);
             maybeReleaseBacklog(processed);
-            invoke(writeCmd, { sessionId: sid, data: Array.from(new TextEncoder().encode(processed)) });
+            invoke(writeCmd, { sessionId: sid, data: Array.from(new TextEncoder().encode(processed)) })
+                .catch((error) => toast.error(errMsg(error)));
         });
         resizeDisposable = terminal.onResize(({ cols, rows }) => {
             if (!destroyed && !disconnected && sessionId === sid && resizeCmd) {
@@ -1365,7 +1368,7 @@
                 streamSendText(text);
             } else {
                 invoke(writeCmd, {sessionId, data: Array.from(new TextEncoder().encode(text))})
-                    .catch((e) => console.warn(`[${tabType}] control write failed:`, e));
+                    .catch((error) => toast.error(errMsg(error)));
             }
         }
     }

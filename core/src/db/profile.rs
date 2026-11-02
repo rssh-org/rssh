@@ -3,7 +3,7 @@ use serde_json::json;
 
 use super::Db;
 use crate::error::{AppError, AppResult};
-use crate::models::{validate_name, Profile, SshAlgorithms};
+use crate::models::{validate_name, Profile, SshAlgorithms, TerminalEncoding};
 
 fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<Profile> {
     Ok(Profile {
@@ -16,6 +16,16 @@ fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<Profile> {
         init_command: row.get(6)?,
         group_id: row.get(7)?,
         algorithms: parse_algorithms(row.get(8)?),
+        terminal_encoding: row
+            .get::<_, String>(9)?
+            .parse::<TerminalEncoding>()
+            .map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    9,
+                    rusqlite::types::Type::Text,
+                    err.into(),
+                )
+            })?,
     })
 }
 
@@ -46,7 +56,7 @@ fn algorithms_json(p: &Profile) -> AppResult<String> {
 pub fn list(db: &Db) -> AppResult<Vec<Profile>> {
     let conn = db.lock()?;
     let mut stmt = conn.prepare(
-        "SELECT id, name, host, port, credential_id, bastion_profile_id, init_command, group_id, algorithms FROM profiles ORDER BY name ASC",
+        "SELECT id, name, host, port, credential_id, bastion_profile_id, init_command, group_id, algorithms, terminal_encoding FROM profiles ORDER BY name ASC",
     )?;
     let rows = stmt.query_map([], |row| row_to_profile(row))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -55,7 +65,7 @@ pub fn list(db: &Db) -> AppResult<Vec<Profile>> {
 pub fn get(db: &Db, id: &str) -> AppResult<Profile> {
     let conn = db.lock()?;
     conn.query_row(
-        "SELECT id, name, host, port, credential_id, bastion_profile_id, init_command, group_id, algorithms FROM profiles WHERE id = ?1",
+        "SELECT id, name, host, port, credential_id, bastion_profile_id, init_command, group_id, algorithms, terminal_encoding FROM profiles WHERE id = ?1",
         params![id],
         |row| row_to_profile(row),
     ).map_err(|e| match e {
@@ -91,13 +101,13 @@ pub fn insert_tx(conn: &rusqlite::Connection, p: &Profile) -> AppResult<()> {
     validate_for_write(p)?;
     let algorithms = algorithms_json(p)?;
     conn.execute(
-        "INSERT INTO profiles (id, name, host, port, credential_id, bastion_profile_id, init_command, group_id, algorithms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+        "INSERT INTO profiles (id, name, host, port, credential_id, bastion_profile_id, init_command, group_id, algorithms, terminal_encoding) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
          ON CONFLICT(id) DO UPDATE SET \
          name=excluded.name, host=excluded.host, port=excluded.port, \
          credential_id=excluded.credential_id, bastion_profile_id=excluded.bastion_profile_id, \
-         init_command=excluded.init_command, group_id=excluded.group_id, algorithms=excluded.algorithms",
-        params![p.id, p.name, p.host, p.port as u32, p.credential_id, p.bastion_profile_id, p.init_command, p.group_id, algorithms],
+         init_command=excluded.init_command, group_id=excluded.group_id, algorithms=excluded.algorithms, terminal_encoding=excluded.terminal_encoding",
+        params![p.id, p.name, p.host, p.port as u32, p.credential_id, p.bastion_profile_id, p.init_command, p.group_id, algorithms, p.terminal_encoding.as_str()],
     )?;
     Ok(())
 }
@@ -112,8 +122,8 @@ pub fn update(db: &Db, p: &Profile) -> AppResult<()> {
     let conn = db.lock()?;
     let algorithms = algorithms_json(p)?;
     conn.execute(
-        "UPDATE profiles SET name=?1, host=?2, port=?3, credential_id=?4, bastion_profile_id=?5, init_command=?6, group_id=?7, algorithms=?8 WHERE id=?9",
-        params![p.name, p.host, p.port as u32, p.credential_id, p.bastion_profile_id, p.init_command, p.group_id, algorithms, p.id],
+        "UPDATE profiles SET name=?1, host=?2, port=?3, credential_id=?4, bastion_profile_id=?5, init_command=?6, group_id=?7, algorithms=?8, terminal_encoding=?9 WHERE id=?10",
+        params![p.name, p.host, p.port as u32, p.credential_id, p.bastion_profile_id, p.init_command, p.group_id, algorithms, p.terminal_encoding.as_str(), p.id],
     )?;
     Ok(())
 }
@@ -158,6 +168,7 @@ mod tests {
             credential_id: "c1".into(),
             bastion_profile_id: None,
             init_command: None,
+            terminal_encoding: Default::default(),
             group_id: None,
             algorithms: SshAlgorithms::default(),
         }
@@ -173,6 +184,32 @@ mod tests {
         assert_eq!(got.host, "h.example");
         assert_eq!(got.port, 22);
         assert_eq!(got.algorithms, SshAlgorithms::default());
+    }
+
+    #[test]
+    fn terminal_encoding_persists_on_insert_update_and_upsert() {
+        let db = Db::open_in_memory().unwrap();
+        let mut profile = mk("p1", "alpha");
+        profile.terminal_encoding = TerminalEncoding::Gbk;
+        insert(&db, &profile).unwrap();
+        assert_eq!(
+            get(&db, "p1").unwrap().terminal_encoding,
+            TerminalEncoding::Gbk
+        );
+
+        profile.terminal_encoding = TerminalEncoding::Utf8;
+        update(&db, &profile).unwrap();
+        assert_eq!(
+            get(&db, "p1").unwrap().terminal_encoding,
+            TerminalEncoding::Utf8
+        );
+
+        profile.terminal_encoding = TerminalEncoding::Gbk;
+        insert(&db, &profile).unwrap();
+        assert_eq!(
+            list(&db).unwrap()[0].terminal_encoding,
+            TerminalEncoding::Gbk
+        );
     }
 
     #[test]

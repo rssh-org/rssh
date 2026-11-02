@@ -33,6 +33,7 @@
   let credentialId = $state("");
   let bastionId = $state<string | null>(null);
   let shellCommand = $state("");
+  let terminalEncoding = $state<Profile["terminal_encoding"]>("utf-8");
   let credentials = $state<Credential[]>([]);
   let profiles = $state<Profile[]>([]);
   let groups = $state<Group[]>([]);
@@ -82,6 +83,7 @@
         host = p.host; port = p.port;
         credentialId = p.credential_id ?? ""; bastionId = p.bastion_profile_id;
         shellCommand = p.init_command ?? "";
+        terminalEncoding = p.terminal_encoding ?? "utf-8";
         groupId = p.group_id ?? null;
         algorithms = cloneAlgorithms(p.algorithms ?? algorithmCatalog.defaults);
       }
@@ -129,6 +131,7 @@
         credential_id: credentialId,
         bastion_profile_id: bastionId || null,
         init_command: shellCommand || null,
+        terminal_encoding: terminalEncoding,
         group_id: groupId || null,
         algorithms,
       };
@@ -158,6 +161,11 @@
     <Select id="profile-group" bind:value={groupId} options={groupOptions} />
     <label for="profile-init-command">{t("profile.init_command")} {t("common.optional")}</label>
     <input id="profile-init-command" type="text" bind:value={shellCommand} placeholder={t("profile.placeholder.init")} />
+    <label for="profile-terminal-encoding">{t("profile.terminal_encoding")}</label>
+    <Select id="profile-terminal-encoding" bind:value={terminalEncoding} options={[
+      { value: "utf-8", label: "UTF-8" },
+      { value: "gbk", label: "GBK" },
+    ]} />
     <details class="algorithm-panel">
       <summary>{t("profile.algorithms")}</summary>
       {#if algorithmCatalog}
