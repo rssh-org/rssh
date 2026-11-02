@@ -41,9 +41,41 @@ pub struct Profile {
     pub bastion_profile_id: Option<String>,
     pub init_command: Option<String>,
     #[serde(default)]
+    pub terminal_encoding: TerminalEncoding,
+    #[serde(default)]
     pub group_id: Option<String>,
     #[serde(default, deserialize_with = "deserialize_ssh_algorithms")]
     pub algorithms: SshAlgorithms,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TerminalEncoding {
+    #[default]
+    #[serde(rename = "utf-8")]
+    Utf8,
+    #[serde(rename = "gbk")]
+    Gbk,
+}
+
+impl TerminalEncoding {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Utf8 => "utf-8",
+            Self::Gbk => "gbk",
+        }
+    }
+}
+
+impl std::str::FromStr for TerminalEncoding {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "utf-8" => Ok(Self::Utf8),
+            "gbk" => Ok(Self::Gbk),
+            _ => Err("unsupported terminal encoding"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -565,6 +597,30 @@ pub struct CastHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_terminal_encoding_defaults_and_validates_json() {
+        let mut value = serde_json::json!({
+            "id": "p1", "name": "P1", "host": "h.example", "port": 22,
+            "credential_id": "c1", "bastion_profile_id": null, "init_command": null
+        });
+        let legacy: Profile = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(legacy).unwrap()["terminal_encoding"],
+            "utf-8"
+        );
+
+        for encoding in ["utf-8", "gbk"] {
+            value["terminal_encoding"] = serde_json::json!(encoding);
+            let profile: Profile = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(profile).unwrap()["terminal_encoding"],
+                encoding
+            );
+        }
+        value["terminal_encoding"] = serde_json::json!("invalid");
+        assert!(serde_json::from_value::<Profile>(value).is_err());
+    }
 
     /// DB credentials.type 列存的就是这套小写字符串——CLI 直接读 DB（AGENT.md P5）。
     /// 改 as_str 字面值 = 数据库里存量 credential 全部解不出。

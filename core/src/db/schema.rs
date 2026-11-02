@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppResult;
 
-const SCHEMA_VERSION: u32 = 34;
+const SCHEMA_VERSION: u32 = 35;
 
 fn column_exists(conn: &Connection, table: &str, col: &str) -> AppResult<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
@@ -719,6 +719,16 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
         )?;
     }
 
+    if version < 35
+        && table_exists(conn, "profiles")?
+        && !column_exists(conn, "profiles", "terminal_encoding")?
+    {
+        conn.execute_batch(
+            "ALTER TABLE profiles ADD COLUMN terminal_encoding TEXT NOT NULL DEFAULT 'utf-8'
+             CHECK (terminal_encoding IN ('utf-8', 'gbk'));",
+        )?;
+    }
+
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -728,6 +738,41 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn migration_35_defaults_profile_terminal_encoding_and_preserves_changes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+             INSERT INTO profiles VALUES ('existing', 'Old server');
+             PRAGMA user_version = 34;",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        let encoding: String = conn
+            .query_row(
+                "SELECT terminal_encoding FROM profiles WHERE id = 'existing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(encoding, "utf-8");
+        conn.execute("UPDATE profiles SET terminal_encoding = 'gbk'", [])
+            .unwrap();
+        migrate(&conn).unwrap();
+        let encoding: String = conn
+            .query_row(
+                "SELECT terminal_encoding FROM profiles WHERE id = 'existing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(encoding, "gbk");
+        assert!(conn
+            .execute("UPDATE profiles SET terminal_encoding = 'invalid'", [])
+            .is_err());
+    }
+
     #[test]
     fn migration_34_preserves_existing_conversations_as_ai() {
         let conn = Connection::open_in_memory().unwrap();

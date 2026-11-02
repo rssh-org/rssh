@@ -102,6 +102,7 @@ export interface SshAlgorithmCatalog {
 export interface Profile {
   id: string; name: string; host: string; port: number;
   credential_id: string; bastion_profile_id: string | null; init_command: string | null;
+  terminal_encoding: "utf-8" | "gbk";
   group_id: string | null;
   algorithms: SshAlgorithms;
 }

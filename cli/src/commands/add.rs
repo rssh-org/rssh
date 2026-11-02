@@ -1,7 +1,9 @@
 //! `rssh <profile|credential|forward> add` —— 交互式新增。
 
 use rssh_core::error::{AppError, AppResult};
-use rssh_core::models::{Credential, CredentialType, Forward, ForwardRule, ForwardType, Profile};
+use rssh_core::models::{
+    Credential, CredentialType, Forward, ForwardRule, ForwardType, Profile, TerminalEncoding,
+};
 
 use crate::ctx::CliCtx;
 use crate::helpers::{
@@ -41,6 +43,7 @@ pub fn cmd_add_profile(conn: &CliCtx) -> AppResult<()> {
     .map(|p| p.id.clone());
 
     let init_command = prompt_optional("Init command (optional): ");
+    let terminal_encoding = prompt_terminal_encoding(TerminalEncoding::default())?;
 
     let groups = rssh_core::db::group::list(conn)?;
     let group_id = menu_select("Group (optional):", "Group", &groups, "", |g| {
@@ -56,12 +59,23 @@ pub fn cmd_add_profile(conn: &CliCtx) -> AppResult<()> {
         credential_id,
         bastion_profile_id,
         init_command,
+        terminal_encoding,
         group_id,
         algorithms: Default::default(),
     };
     rssh_core::db::profile::insert(conn, &p)?;
     println!("Profile '{}' created.", p.name);
     Ok(())
+}
+
+pub(crate) fn prompt_terminal_encoding(current: TerminalEncoding) -> AppResult<TerminalEncoding> {
+    let value = prompt_default("Terminal encoding (utf-8/gbk)", current.as_str());
+    value.parse().map_err(|_| {
+        AppError::config(
+            "profile_terminal_encoding_invalid",
+            serde_json::json!({ "encoding": value }),
+        )
+    })
 }
 
 pub fn cmd_add_credential(conn: &CliCtx) -> AppResult<()> {

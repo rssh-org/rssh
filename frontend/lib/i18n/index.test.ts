@@ -93,6 +93,32 @@ describe("errMsg", () => {
     })}`;
     expect(errMsg(wire)).toBe("SSH session not found");
   });
+
+  it.each([
+    {
+      code: "terminal_encoding_unmappable",
+      encoding: "GBK",
+      en: "Input contains characters that GBK cannot represent; nothing was sent.",
+      zh: "输入包含 GBK 无法表示的字符；本次未发送。",
+    },
+    {
+      code: "terminal_encoding_invalid_utf8",
+      encoding: "GBK",
+      en: "Terminal input is not valid UTF-8 and cannot be converted to GBK; nothing was sent.",
+      zh: "终端输入不是有效的 UTF-8，无法转换为 GBK；本次未发送。",
+    },
+    {
+      code: "profile_terminal_encoding_invalid",
+      encoding: "shift-jis",
+      en: "Unsupported terminal encoding: shift-jis.",
+      zh: "不支持的终端编码：shift-jis。",
+    },
+  ])("localizes $code with the encoding name", ({ code, encoding, en, zh }) => {
+    const wire = `__rssh_err__|${JSON.stringify({ code, params: { encoding } })}`;
+    expect(errMsg(wire)).toBe(en);
+    setLocale("zh");
+    expect(errMsg(wire)).toBe(zh);
+  });
 });
 
 /* ─── end-to-end 协议测试（跨语言契约）─────────────────────────

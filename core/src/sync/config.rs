@@ -839,6 +839,7 @@ mod tests {
             bastion_profile_id: None,
             init_command: None,
             group_id: None,
+            terminal_encoding: Default::default(),
             algorithms: Default::default(),
         }
     }
@@ -956,6 +957,39 @@ mod tests {
 
         let got = profile::get(&db, "p1").unwrap();
         assert_eq!(got.algorithms, crate::models::SshAlgorithms::default());
+    }
+
+    #[test]
+    fn profile_terminal_encoding_imports_legacy_and_roundtrips_sync() {
+        let (db, ss, dir) = fixture();
+        let mut legacy = serde_json::to_value(prof("legacy", "Legacy", "c1")).unwrap();
+        legacy.as_object_mut().unwrap().remove("terminal_encoding");
+        let mut gbk = serde_json::to_value(prof("gbk", "GBK", "c1")).unwrap();
+        gbk["terminal_encoding"] = json!("gbk");
+        let data = payload(json!({ "version": 1, "profiles": [legacy, gbk] }));
+        merge_import(&db, &ss, dir.path(), &data).unwrap();
+
+        for mode in [
+            ExportMode::LocalBackup,
+            ExportMode::RemotePush(read_sync_prefs(&db).unwrap()),
+        ] {
+            let exported = build_payload(&db, &ss, dir.path(), &mode).unwrap();
+            let profiles = exported["profiles"].as_array().unwrap();
+            assert_eq!(
+                profiles.iter().find(|p| p["id"] == "legacy").unwrap()["terminal_encoding"],
+                "utf-8"
+            );
+            assert_eq!(
+                profiles.iter().find(|p| p["id"] == "gbk").unwrap()["terminal_encoding"],
+                "gbk"
+            );
+            let (restored, restored_ss, restored_dir) = fixture();
+            merge_import(&restored, &restored_ss, restored_dir.path(), &exported).unwrap();
+            assert_eq!(
+                serde_json::to_value(profile::list(&restored).unwrap()).unwrap(),
+                exported["profiles"]
+            );
+        }
     }
 
     #[test]

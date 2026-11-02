@@ -3,7 +3,7 @@
 use rssh_core::error::{AppError, AppResult};
 use rssh_core::models::CredentialType;
 
-use crate::commands::add::prompt_forward_rule;
+use crate::commands::add::{prompt_forward_rule, prompt_terminal_encoding};
 use crate::ctx::CliCtx;
 use crate::helpers::{
     confirm, die, load_cred_secrets, prompt_default, read_multiline, read_password,
@@ -73,6 +73,7 @@ pub fn cmd_edit_profile(conn: &CliCtx, name: &str) -> AppResult<()> {
             Some(v)
         }
     };
+    updated.terminal_encoding = prompt_terminal_encoding(p.terminal_encoding)?;
 
     let groups = rssh_core::db::group::list(conn)?;
     if !groups.is_empty() {

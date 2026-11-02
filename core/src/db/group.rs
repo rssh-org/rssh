@@ -201,6 +201,7 @@ mod tests {
             bastion_profile_id: None,
             init_command: None,
             group_id: group_id.map(String::from),
+            terminal_encoding: Default::default(),
             algorithms: Default::default(),
         }
     }
