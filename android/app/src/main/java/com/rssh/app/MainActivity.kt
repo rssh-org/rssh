@@ -4,7 +4,9 @@ import android.os.Bundle
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 class MainActivity : TauriActivity() {
     private var backNavigationEnabled = false
@@ -23,13 +25,29 @@ class MainActivity : TauriActivity() {
 
         val content = findViewById<android.view.View>(android.R.id.content)
         ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
-            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            // Hiding the status bar does not remove the camera cutout's safe area.
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
             imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
             updateBackCallback()
             view.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, ime.bottom))
             WindowInsetsCompat.CONSUMED
         }
+        hideStatusBar()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideStatusBar()
+    }
+
+    private fun hideStatusBar() {
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(WindowInsetsCompat.Type.statusBars())
     }
 
     fun setBackNavigation(enabled: Boolean, onBack: () -> Unit) {

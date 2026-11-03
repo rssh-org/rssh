@@ -43,6 +43,8 @@ impl_bridge_napi_type!(DeviceResponse, "rssh.runtime.DeviceResponse");
 /// never compile-time OS aliases or frontend layout breakpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeviceClass {
+    /// Phones and tablets share one mobile policy, like iPhone and iPad on iOS.
+    /// Do not split out a Tablet class; responsive layout follows window width.
     Mobile,
     Desktop,
     Other,
