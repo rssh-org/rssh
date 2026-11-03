@@ -717,8 +717,8 @@ export function clearModifiers() {
 }
 
 /* ─── Active terminal soft keyboard controller ─── */
-// The system keyboard opens ONLY from the keybar's keyboard button — terminal
-// taps never pop it (issue #225). The pane owns show/hide (it holds the hidden
+// On keybar-enabled platforms, only its keyboard button opens the system keyboard;
+// terminal taps never pop it (issue #225). The pane owns show/hide (it holds the hidden
 // helper textarea); the store just routes the toggle and mirrors the open state
 // for the button's active styling.
 let _softKeyboardOpen = $state(false);

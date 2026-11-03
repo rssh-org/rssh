@@ -1,7 +1,7 @@
 #[cfg(feature = "tauri")]
 use crate::error::AppResult;
 
-/// What this host implements. Device shape is a separate frontend concern.
+/// Host features and input affordances, independent of frontend layout width.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeCapabilities {
@@ -21,6 +21,7 @@ pub struct RuntimeCapabilities {
     pub release_update_check: bool,
     pub system_back: bool,
     pub mcp_server: bool,
+    pub terminal_keybar: bool,
     pub terminal_policy: TerminalRuntimePolicy,
 }
 
@@ -47,6 +48,7 @@ impl RuntimeCapabilities {
             release_update_check: !cfg!(ios),
             system_back: cfg!(android),
             mcp_server: cfg!(any(windows, macos, linux)),
+            terminal_keybar: cfg!(any(android, ios)),
             terminal_policy: if cfg!(any(android, ios)) {
                 TerminalRuntimePolicy::constrained()
             } else {
@@ -64,6 +66,8 @@ impl RuntimeCapabilities {
             plugins: false,
             native_clipboard: false,
             system_back: false,
+            // The browser adapter supplies its client's keyboard affordance.
+            terminal_keybar: false,
             ..Self::native()
         }
     }
@@ -137,13 +141,15 @@ mod tests {
             "releaseUpdateCheck",
             "systemBack",
             "mcpServer",
+            "terminalKeybar",
         ] {
             assert!(value[key].is_boolean(), "missing boolean capability {key}");
         }
-        assert_eq!(value.as_object().unwrap().len(), 17);
+        assert_eq!(value.as_object().unwrap().len(), 18);
         assert_eq!(value["fileMultiSelect"], true);
         assert_eq!(value["releaseUpdateCheck"], !cfg!(ios));
         assert_eq!(value["systemBack"], cfg!(android));
+        assert_eq!(value["terminalKeybar"], cfg!(any(android, ios)));
         let expected = if cfg!(any(android, ios)) {
             TerminalRuntimePolicy::constrained()
         } else {
@@ -165,6 +171,7 @@ mod tests {
         assert!(!capabilities.cli_install);
         assert!(!capabilities.plugins);
         assert!(!capabilities.system_back);
+        assert!(!capabilities.terminal_keybar);
         assert!(capabilities.local_pty);
         assert!(capabilities.release_update_check);
     }

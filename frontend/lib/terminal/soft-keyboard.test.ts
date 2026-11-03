@@ -54,7 +54,7 @@ describe("terminal soft keyboard", () => {
 
   afterEach(() => { dispose?.(); vi.unstubAllGlobals(); });
 
-  function setup(touchAvailable: boolean, beforeInstall?: (helper: FakeElement) => void) {
+  function setup(touchAvailable: boolean, beforeInstall?: (helper: FakeElement) => void, keybarAvailable = true) {
     const helper = new FakeElement();
     const host = new FakeElement();
     const onRequestedChange = vi.fn();
@@ -65,6 +65,7 @@ describe("terminal soft keyboard", () => {
       host: host as unknown as HTMLElement,
       pane: new FakeElement() as unknown as HTMLElement,
       touchAvailable,
+      keybarAvailable,
       onRequestedChange,
     });
     dispose = controller.dispose;
@@ -75,6 +76,25 @@ describe("terminal soft keyboard", () => {
     const { helper, onRequestedChange } = setup(false);
     helper.focus();
     expect(helper.readOnly).toBe(false);
+    expect(onRequestedChange).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [false, "touch"], [true, "touch"],
+    [false, "pen"], [true, "pen"],
+  ] as const)("preserves native focus without a keybar (touch available: %s, pointer: %s)", (touchAvailable, pointerType) => {
+    const { helper, host, controller, onRequestedChange } = setup(touchAvailable, undefined, false);
+    expect(helper.readOnly).toBe(false);
+    helper.focus();
+    pointer(host, pointerType);
+    expect(document.activeElement).toBe(helper);
+    expect(helper.readOnly).toBe(false);
+    expect(helper.getAttribute("inputmode")).toBeNull();
+
+    controller.hide();
+    helper.focus();
+    expect(helper.readOnly).toBe(false);
+    expect(helper.getAttribute("inputmode")).toBeNull();
     expect(onRequestedChange).not.toHaveBeenCalled();
   });
 

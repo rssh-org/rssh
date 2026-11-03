@@ -24,6 +24,7 @@ const desktop = {
   plugins: true,
   nativeClipboard: true,
   systemBack: false,
+  terminalKeybar: false,
   releaseUpdateCheck: true,
   terminalPolicy: {
     imageStorageLimitMb: 128,
