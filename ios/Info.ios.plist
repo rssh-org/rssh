@@ -2,6 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
   <dict>
+    <!-- Keep the status bar hidden app-wide on both iPhone and iPad. Disable
+         view-controller overrides so the initial hidden state remains in effect;
+         safe areas and the home indicator continue to follow system policy. -->
+    <key>UIStatusBarHidden</key>
+    <true/>
+    <key>UIViewControllerBasedStatusBarAppearance</key>
+    <false/>
     <key>NSLocalNetworkUsageDescription</key>
     <string>RSSH uses your local network to connect to SSH, SFTP, and Telnet servers that you configure.</string>
   </dict>

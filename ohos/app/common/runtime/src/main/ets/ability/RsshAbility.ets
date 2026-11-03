@@ -7,6 +7,14 @@ export class RsshAbility extends NativeAbility {
   public bridgePlugins = rsshPlugins(true);
 
   protected override async loadWindowStageContent(windowStage: window.WindowStage): Promise<void> {
+    // This mobile HAP serves both phones and tablets; desktop has its own Ability.
+    // Leave cutout, keyboard and navigation-bar avoidance to ArkUI.
+    try {
+      const mainWindow = await windowStage.getMainWindow();
+      await mainWindow.setSpecificSystemBarEnabled('status', false);
+    } catch (error) {
+      console.error(`[RsshAbility] Failed to hide mobile status bar: ${String(error)}`);
+    }
     await windowStage.loadContent('pages/Index');
   }
 

@@ -8,6 +8,12 @@
       "phone",
       "tablet"
     ],
+    "metadata": [
+      {
+        "name": "avoid_cutout",
+        "value": "true"
+      }
+    ],
     "deliveryWithInstall": true,
     "pages": "$profile:main_pages",
     "installationFree": false,

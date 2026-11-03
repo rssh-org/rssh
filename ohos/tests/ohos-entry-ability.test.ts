@@ -24,6 +24,7 @@ function harness() {
     onWindowStageDestroy() {}
     onDestroy() {}
   }
+  const logError = vi.fn();
   const modules: Record<string, unknown> = {
     "@ohos-rs/ability": {
       NativeAbility,
@@ -51,15 +52,30 @@ function harness() {
   }).outputText;
   runInNewContext(pluginCode, { exports: pluginExports, require: (name: string) => modules[name] });
   modules["./RsshPlugins"] = pluginExports;
-  const exports = {} as { RsshAbility: new () => NativeAbility & { moduleName: string; bridgePlugins: { create: () => { id: string; systemBack?: boolean } }[] } };
+  const exports = {} as { RsshAbility: new () => NativeAbility & {
+    moduleName: string;
+    bridgePlugins: { create: () => { id: string; systemBack?: boolean } }[];
+    loadWindowStageContent(stage: {
+      getMainWindow: () => Promise<{ setSpecificSystemBarEnabled: (name: string, enabled: boolean) => Promise<void> }>;
+      loadContent: (path: string) => Promise<void>;
+    }): Promise<void>;
+  } };
   runInNewContext(code, { exports, require: (name: string) => {
     if (!(name in modules)) throw new Error(`Unexpected native dependency: ${name}`);
     return modules[name];
-  } }, { filename: sourcePath });
-  return { ability: new exports.RsshAbility(), NativeAbility, initContext, createInitContext, applicationContext };
+  }, console: { error: logError } }, { filename: sourcePath });
+  return { ability: new exports.RsshAbility(), NativeAbility, initContext, createInitContext, applicationContext, logError };
 }
 
 describe("HarmonyOS framework host", () => {
+  it("keeps phones and tablets in the mobile HAP with native cutout avoidance", () => {
+    const { module } = JSON.parse(readFileSync(new URL(
+      "../app/products/phone/src/main/module.json5", import.meta.url,
+    ), "utf8"));
+    expect(module.deviceTypes).toEqual(["phone", "tablet"]);
+    expect(module.metadata).toContainEqual({ name: "avoid_cutout", value: "true" });
+  });
+
   it("does not restore a raw database without its device-bound master key", () => {
     const config = JSON.parse(readFileSync(new URL(
       "../app/common/runtime/src/main/resources/base/profile/backup_config.json", import.meta.url,
@@ -81,6 +97,45 @@ describe("HarmonyOS framework host", () => {
     for (const name of ["onCreate", "onWindowStageCreate", "onWindowStageDestroy", "onDestroy"] as const) {
       expect(h.ability[name]).toBe(h.NativeAbility.prototype[name]);
     }
+  });
+
+  it("hides only the mobile status bar before loading the page", async () => {
+    const h = harness();
+    let finishHiding!: () => void;
+    const hidden = new Promise<void>(resolve => { finishHiding = resolve; });
+    const mainWindow = { setSpecificSystemBarEnabled: vi.fn(() => hidden) };
+    const stage = {
+      getMainWindow: vi.fn().mockResolvedValue(mainWindow),
+      loadContent: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const loading = h.ability.loadWindowStageContent(stage);
+    await vi.waitFor(() => {
+      expect(mainWindow.setSpecificSystemBarEnabled).toHaveBeenCalledExactlyOnceWith("status", false);
+    });
+    expect(stage.loadContent).not.toHaveBeenCalled();
+
+    finishHiding();
+    await loading;
+    expect(stage.loadContent).toHaveBeenCalledExactlyOnceWith("pages/Index");
+    expect(h.logError).not.toHaveBeenCalled();
+  });
+
+  it("reports a status-bar failure without preventing the page from loading", async () => {
+    const h = harness();
+    const mainWindow = {
+      setSpecificSystemBarEnabled: vi.fn().mockRejectedValue(new Error("window manager unavailable")),
+    };
+    const stage = {
+      getMainWindow: vi.fn().mockResolvedValue(mainWindow),
+      loadContent: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await h.ability.loadWindowStageContent(stage);
+    expect(h.logError).toHaveBeenCalledExactlyOnceWith(
+      "[RsshAbility] Failed to hide mobile status bar: Error: window manager unavailable",
+    );
+    expect(stage.loadContent).toHaveBeenCalledExactlyOnceWith("pages/Index");
   });
 
   it("assembles framework capabilities and creates independent application plugin instances", () => {
