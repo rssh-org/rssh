@@ -432,7 +432,7 @@
       <p class="cta">{t("home.empty.cta")}</p>
       <div class="empty-actions">
         <button class="btn btn-accent" onclick={() => app.navigate("settings")}>{t("home.empty.go_settings")}</button>
-        <button class="btn" onclick={() => app.navigate("import-export")}>{t("home.empty.migrate")}</button>
+        <button class="btn" onclick={() => app.navigate("connections")}>{t("home.empty.migrate")}</button>
       </div>
     </div>
   {/if}

@@ -155,7 +155,6 @@ const zh: Messages = {
   "settings.section.shell": "Shell",
   "settings.section.command_block": "命令块",
   "settings.section.sync": "同步",
-  "settings.section.import_export": "导入 / 导出",
   "settings.section.appearance": "外观",
   // 设置菜单分组标题（导航里的粗体分隔）。
   "settings.group.connections": "连接",
@@ -1272,11 +1271,8 @@ const zh: Messages = {
   "serial.port_device_hint": "端口名是本机设备专属；换设备后需重新选择。",
   // 导入 / 导出
   "import_export.export_title": "导出配置",
-  "import_export.export_desc": "将所有 Profile、凭证和端口转发保存到 JSON 文件",
   "import_export.migrate_title": "从其他工具导入",
-  "import_export.migrate_desc": "浏览器端转换器，由 GitHub Pages 托管 —— 全程本地运行，零上传",
   "import_export.import_title": "导入配置",
-  "import_export.import_desc": "加载之前导出的 JSON 文件。合并到本地配置：按 id 匹配的条目会被覆盖，其余保留。",
   "import_export.exported_to": "已导出到 {path}",
   "import_export.imported_from": "已从 {path} 导入",
   // Shell 设置
