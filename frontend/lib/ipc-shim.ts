@@ -22,6 +22,7 @@
 
 import type { PickedLocation } from "./file-access.ts";
 import type { RuntimeResponse } from "./stores/runtime.svelte.ts";
+import { browserTerminalKeybar } from "./platform.ts";
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void };
 type CallbackEntry = { cb: (payload: unknown) => void; once: boolean };
@@ -191,6 +192,7 @@ export function installTauriShim(): void {
                 directoryTransfer: capabilities.directoryTransfer && hasPicker,
                 nativeClipboard: false,
                 systemBack: false,
+                terminalKeybar: browserTerminalKeybar(navigator),
             };
         },
         clipboard_read: () => navigator.clipboard.readText(),

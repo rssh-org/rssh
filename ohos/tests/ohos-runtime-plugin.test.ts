@@ -80,11 +80,11 @@ describe("HarmonyOS runtime capability bridge", () => {
       .resolves.toMatchObject({ value: { serial: expected } });
   });
 
-  it("preserves the phone device type", async () => {
-    const h = harness("phone", []);
+  it.each(["phone", "tablet"])("preserves the %s device type for host input policy", async (deviceType) => {
+    const h = harness(deviceType, []);
     await expect(h.plugin.invokeAsync("device", { typeName: "rssh.runtime.DeviceRequest" }, h.context))
       .resolves.toEqual({ typeName: "rssh.runtime.DeviceResponse", value: {
-        serial: false, deviceType: "phone", multiWindow: false, folderSelection: false, systemBack: false,
+        serial: false, deviceType, multiWindow: false, folderSelection: false, systemBack: false,
       } });
   });
 

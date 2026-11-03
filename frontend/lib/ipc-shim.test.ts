@@ -52,6 +52,7 @@ beforeEach(() => {
     vi.stubGlobal("location", { search: "", pathname: "/", hash: "" });
     vi.stubGlobal("WebSocket", FakeWS as unknown as typeof WebSocket);
     vi.stubGlobal("navigator", {
+        userAgent: "Mozilla/5.0 (X11; Linux x86_64)",
         clipboard: {
             readText: vi.fn(async () => clipboardText),
             writeText: vi.fn(async (t: string) => {
@@ -158,9 +159,26 @@ describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
             directoryTransfer: expected,
             nativeClipboard: false,
             systemBack: false,
+            terminalKeybar: false,
             releaseUpdateCheck: true,
             terminalPolicy,
         });
+    });
+
+    it.each([
+        ["Mozilla/5.0 (Linux; Android 16)", 1200, true],
+        ["Mozilla/5.0 (Windows NT 10.0; Win64; x64)", 400, false],
+    ])("uses the browser platform rather than server policy or width: %s", async (userAgent, width, expected) => {
+        vi.stubGlobal("navigator", { userAgent, maxTouchPoints: 5 });
+        fakeWindow.innerWidth = width;
+        const { internals, ws } = installWithServer();
+        ws.open();
+        const result = internals.invoke("get_runtime_capabilities");
+        const request = ws.sentFrames()[0];
+        ws.deliver({ type: "response", id: request.id, ok: true, result: {
+            terminalKeybar: !expected,
+        } });
+        await expect(result).resolves.toMatchObject({ terminalKeybar: expected });
     });
 
     it("provides metadata so getCurrentWindow()/getCurrentWebview() don't throw", () => {

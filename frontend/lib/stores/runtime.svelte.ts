@@ -26,6 +26,7 @@ export interface RuntimeCapabilities {
   nativeClipboard: boolean;
   releaseUpdateCheck: boolean;
   systemBack: boolean;
+  terminalKeybar: boolean;
   mcpServer: boolean;
 }
 
@@ -49,6 +50,7 @@ let _capabilities = $state<Readonly<RuntimeCapabilities>>({
   nativeClipboard: false,
   releaseUpdateCheck: false,
   systemBack: false,
+  terminalKeybar: false,
   mcpServer: false,
 });
 let _terminalPolicy = $state<Readonly<TerminalRuntimePolicy> | null>(null);

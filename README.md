@@ -84,7 +84,7 @@ Keys stay in your local OS keyserver; connection configs are encrypted into your
 - **Connections & Credentials** -- SQLite storage, import from `~/.ssh/config`
 - **Security & Sync** -- secrets encrypted locally with ChaCha20-Poly1305, master key in the platform keychain when available, selective remote sync, encrypted backup to your own GitHub repo or WebDAV server
 - **Snippets** -- reusable command shortcuts (Cmd+E)
-- **Responsive Layout** -- narrow windows show a virtual keybar (Ctrl/Alt/arrows/Tab/Esc) and compact navigation; the layout follows window width on every platform
+- **Responsive Layout** -- navigation follows window width; Android, iOS and HarmonyOS phones/tablets show a virtual keybar (Ctrl/Alt/arrows/Tab/Esc) at every width
 - **IDE Plugin** -- run RSSH inside JetBrains IDEs in a tool window (shared data dir)
 
 Local shells, serial controls, SSH agents and Docker/Kubernetes discovery depend on the host's available APIs, permissions and tools.

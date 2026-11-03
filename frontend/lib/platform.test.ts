@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { isIOSPlatform } from "./platform.ts";
+import { browserTerminalKeybar, isIOSPlatform } from "./platform.ts";
+
+describe("browser terminal keybar", () => {
+  it.each([
+    ["Mozilla/5.0 (Linux; Android 16; Tablet)", 5, true],
+    ["Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)", 5, true],
+    ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1", 5, true],
+    ["Mozilla/5.0 (Phone; OpenHarmony 5.0) ArkWeb/4.1.6.1 Mobile", 5, true],
+    ["Mozilla/5.0 (Tablet; HarmonyOS 6.0) ArkWeb/5.0.0.0", 10, true],
+    ["Mozilla/5.0 (PC; HarmonyOS 6.0) ArkWeb/5.0.0.0", 10, false],
+    ["Mozilla/5.0 (Windows NT 10.0; Win64; x64)", 10, false],
+    ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15)", 0, false],
+    ["Mozilla/5.0 (X11; Linux x86_64)", 0, false],
+  ])("uses the client platform for %s", (userAgent, maxTouchPoints, expected) => {
+    expect(browserTerminalKeybar({ userAgent, maxTouchPoints })).toBe(expected);
+  });
+
+  it("stays disabled without browser platform information", () => {
+    expect(browserTerminalKeybar(undefined)).toBe(false);
+  });
+});
 
 describe("iOS platform restrictions", () => {
   it.each([

@@ -40,7 +40,7 @@
         modPress[mod].fired = false;
     }
     onDestroy(() => {
-        // Width changes and pane switches remove this bar. Neither a pending
+        // Capability changes and pane switches remove this bar. Neither a pending
         // press nor an armed modifier may keep altering input without its UI.
         clearModTimer("ctrl");
         clearModTimer("alt");

@@ -5,18 +5,19 @@ interface SoftKeyboardOptions {
   host: HTMLElement;
   pane: HTMLElement;
   touchAvailable: boolean;
+  keybarAvailable: boolean;
   onRequestedChange: (requested: boolean) => void;
 }
 
 /** Explicit soft-keyboard requests are separate from terminal focus. A locked
  * textarea stays focusable so a hardware keyboard can unlock it on its first key. */
 export function setupTerminalSoftKeyboard({
-  helper, host, pane, touchAvailable, onRequestedChange,
+  helper, host, pane, touchAvailable, keybarAvailable, onRequestedChange,
 }: SoftKeyboardOptions) {
   let unpinnedStyle: string | null | undefined;
   const originalInputMode = helper.getAttribute("inputmode");
   const originalReadOnly = helper.readOnly;
-  let touchInput = touchAvailable;
+  let touchInput = keybarAvailable && touchAvailable;
   let requested = false;
   let scrollResetRaf = 0;
   let helperPinRaf = 0;
@@ -105,6 +106,8 @@ export function setupTerminalSoftKeyboard({
   }
 
   function onPointerDown(event: PointerEvent) {
+    // Without the keybar's keyboard button, preserve native focus and IME input.
+    if (!keybarAvailable) return;
     if (event.pointerType === "touch" || event.pointerType === "pen") {
       touchInput = true;
       hide();

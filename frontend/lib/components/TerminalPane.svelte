@@ -12,7 +12,6 @@
     import type {ConnectorSpec, HighlightRule, TelnetProfile} from "../stores/app.svelte.ts";
     import * as app from "../stores/app.svelte.ts";
     import {createScopedBackHandler} from "../stores/back.svelte.ts";
-    import * as layout from "../stores/layout.svelte.ts";
     import { terminalPolicy } from "../stores/runtime.svelte.ts";
     import { isIOS } from "../platform.ts";
     import { supportsTouch, isTouchContextMenu } from "../input.ts";
@@ -1536,6 +1535,7 @@
         if (helper) {
             softKeyboard = setupTerminalSoftKeyboard({
                 helper, host: containerEl, pane: paneEl, touchAvailable: supportsTouch(),
+                keybarAvailable: app.capabilities().terminalKeybar,
                 onRequestedChange: (requested) => {
                     softKeyboardRequested = requested;
                     if (app.activeTabId() === tabId && !app.settingsActive()) {
@@ -1960,8 +1960,8 @@
             onClose={() => (ctxMenu = null)}
         />
     {/if}
-    <!-- Auxiliary controls follow window width, independently of input hardware. -->
-    {#if app.activeTabId() === tabId && layout.compact()}
+    <!-- Phone/tablet input controls remain available at every window width. -->
+    {#if app.activeTabId() === tabId && app.capabilities().terminalKeybar}
         <TerminalKeybar />
     {/if}
 </div>
