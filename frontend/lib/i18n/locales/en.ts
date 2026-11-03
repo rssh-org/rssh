@@ -153,7 +153,6 @@ const en = {
   "settings.section.shell": "Shell",
   "settings.section.command_block": "Command Blocks",
   "settings.section.sync": "Sync",
-  "settings.section.import_export": "Import / Export",
   "settings.section.appearance": "Appearance",
   // Settings menu group headers (the bold dividers in the nav).
   "settings.group.connections": "Connections",
@@ -1269,11 +1268,8 @@ const en = {
   "serial.port_device_hint": "Port name is specific to this device; on another machine you'll need to reselect it.",
   // Import / Export
   "import_export.export_title": "Export Config",
-  "import_export.export_desc": "Save all Profiles, Credentials, and Port Forwards to a JSON file",
   "import_export.migrate_title": "Import from other tools",
-  "import_export.migrate_desc": "Browser-based converter hosted on GitHub Pages — runs locally, nothing is uploaded",
   "import_export.import_title": "Import Config",
-  "import_export.import_desc": "Load a previously exported JSON file. Merges into local config: matching entries (by id) are overwritten, others stay.",
   "import_export.exported_to": "Exported to {path}",
   "import_export.imported_from": "Imported from {path}",
   // Shell settings

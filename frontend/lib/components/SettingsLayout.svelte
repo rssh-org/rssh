@@ -15,7 +15,6 @@
   import SnippetManager from "./SnippetManager.svelte";
   import HighlightManager from "./HighlightManager.svelte";
   import SyncScreen from "./SyncScreen.svelte";
-  import ImportExportScreen from "./ImportExportScreen.svelte";
   import RecordingSettings from "./RecordingSettings.svelte";
   import PlaybackScreen from "./PlaybackScreen.svelte";
   import ShortcutsScreen from "./ShortcutsScreen.svelte";
@@ -54,7 +53,6 @@
     "snippets":           { component: SnippetManager },
     "highlights":         { component: HighlightManager },
     "sync":               { component: SyncScreen },
-    "import-export":      { component: ImportExportScreen },
     "shell-settings":     { component: ShellSettings },
     "command-blocks":     { component: CommandBlockSettings },
     "recording-settings": { component: RecordingSettings },
@@ -75,7 +73,6 @@
     { id: "dynamic-discovery", label: t("settings.section.dynamic_discovery"), section: "settings.group.connections" },
     { id: "credentials", label: t("settings.section.credentials"), section: "settings.group.connections" },
     { id: "groups", label: t("settings.section.groups"), section: "settings.group.connections" },
-    { id: "import-export", label: t("settings.section.import_export"), section: "settings.group.connections" },
     { id: "shell-settings", label: t("settings.section.shell"), section: "settings.group.sessions" },
     { id: "recording-settings", label: t("settings.section.recording"), section: "settings.group.sessions" },
     { id: "appearance", label: t("settings.section.appearance"), section: "settings.group.appearance" },

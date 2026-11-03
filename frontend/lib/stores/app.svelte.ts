@@ -66,7 +66,6 @@ export type SettingsPage =
   | "snippets"
   | "highlights"
   | "sync"
-  | "import-export"
   | "recording-settings"
   | "playback"
   | "shell-settings"

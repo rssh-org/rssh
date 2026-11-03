@@ -12,6 +12,8 @@
   } from "../stores/app.svelte.ts";
   import { toast } from "../stores/toast.svelte.ts";
   import { errMsg, t } from "../i18n/index.svelte.ts";
+  import { pickTextFile } from "../pick-file.ts";
+  import { saveTextFile, fileStamp } from "../save-file.ts";
   import {
     buildConnectionItems,
     groupConnectionItems,
@@ -27,6 +29,8 @@
   let groups = $state<Group[]>([]);
   let loading = $state(true);
   let deletingKey = $state<string | null>(null);
+  let importing = $state(false);
+  let msg = $state("");
 
   let items = $derived(buildConnectionItems({ profiles, forwards, serialProfiles, telnetProfiles }));
   let sections = $derived(groupConnectionItems(groups, items, t("profile.ungrouped")));
@@ -52,6 +56,51 @@
       loadOrEmpty(app.loadGroups),
     ]);
     loading = false;
+  }
+
+  function openMigrate() {
+    invoke("open_external_url", { url: "https://rssh-org.github.io/migrate/" })
+      .catch((e) => toast.error(errMsg(e)));
+  }
+
+  // Partial import errors list each failure and need longer to read.
+  function clearMsgLater() {
+    const ttl = msg.includes("\n") ? 15000 : 4000;
+    setTimeout(() => (msg = ""), ttl);
+  }
+
+  async function doExport() {
+    try {
+      const json = await invoke<string>("export_config");
+      const path = await saveTextFile(json, {
+        defaultName: `rssh-config-${fileStamp()}.json`,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      msg = path ? t("import_export.exported_to", { path }) : "";
+    } catch (e) { msg = `${t("toast.error.export")}: ${errMsg(e)}`; }
+    clearMsgLater();
+  }
+
+  async function doImport() {
+    importing = true;
+    try {
+      const f = await pickTextFile({ accept: ".json,application/json" });
+      if (!f) {
+        msg = "";
+        return;
+      }
+      try {
+        await invoke("import_config", { json: f.text });
+        msg = t("import_export.imported_from", { path: f.name });
+      } finally {
+        // Partial imports can save entries before reporting an error.
+        await refresh();
+      }
+    } catch (e) { msg = `${t("toast.error.import")}: ${errMsg(e)}`; }
+    finally {
+      importing = false;
+      clearMsgLater();
+    }
   }
 
   function itemKey(item: ConnectionListItem): string {
@@ -92,10 +141,23 @@
 
 <div class="page" aria-busy={loading}>
   <div class="toolbar">
+    <button type="button" class="btn btn-sm" title={t("import_export.export_title")} onclick={doExport}>
+      {t("common.export")}
+    </button>
+    <button type="button" class="btn btn-sm" title={t("import_export.import_title")} onclick={doImport} disabled={importing}>
+      {importing ? t("common.importing") : t("common.import")}
+    </button>
+    <button type="button" class="btn btn-sm" onclick={openMigrate}>
+      {t("import_export.migrate_title")}
+    </button>
     <button type="button" class="btn btn-accent btn-sm" onclick={() => app.openConnectionCreate()}>
       {t("connection.new")}
     </button>
   </div>
+
+  {#if msg}
+    <div class="toast" role="status">{msg}</div>
+  {/if}
 
   {#if loading}
     <p class="empty" aria-live="polite">{t("common.loading")}</p>
@@ -159,7 +221,18 @@
 
 <style>
   .page { padding: 24px; }
-  .toolbar { display: flex; justify-content: flex-end; margin-bottom: 16px; }
+  .toolbar { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-bottom: 16px; }
+  .toast {
+    padding: 8px 14px;
+    margin-bottom: 16px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 500;
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+  }
   .group-head {
     display: flex;
     align-items: center;
