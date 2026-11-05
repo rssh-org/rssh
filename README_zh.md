@@ -128,7 +128,7 @@ macOS、Windows、Linux 和 Android 安装包从 [Releases](https://github.com/r
 
 ## 开发
 
-参见 [CONTRIBUTING.md](CONTRIBUTING.md)。鸿蒙构建与签名说明见 [CONTRIBUTING.md — HarmonyOS](CONTRIBUTING.md#harmonyos-packaging)。
+参见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 协议
 
