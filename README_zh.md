@@ -40,14 +40,22 @@
 </td>
 <td width="50%" valign="top">
 
+### MCP 连接本地 AI Agent
+让 Codex、Claude Code 通过 MCP 复用 RSSH 已连接的终端，结合本地代码排障。命令审核和执行记录保留在 RSSH。
+
+<img src="https://rssh.ofcoder.com/welcome-mcp.gif" alt="MCP：Codex 结合本地代码与已有 RSSH 会话排查登录失败" width="400">
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
 ### 🎨 彩色命令块
 每条命令和它的输出自动成块、左侧按色分隔，一眼找到上一条命令的输出在哪儿。**纯本地渲染**，零远端依赖。
 
 <img src="https://rssh.ofcoder.com/welcome-blocks.gif" alt="彩色命令块" width="400">
 
 </td>
-</tr>
-<tr>
 <td width="50%" valign="top">
 
 ### 🐳 动态发现
@@ -56,12 +64,22 @@
 <img src="https://rssh.ofcoder.com/welcome-discovery.gif" alt="动态发现：容器实时出现在 Home" width="400">
 
 </td>
+</tr>
+<tr>
 <td width="50%" valign="top">
 
 ### 🔐 多平台数据同步
 密钥保存在你本地的 keyserver 程序中，连接配置加密后保存在你的 GitHub 私有仓库里面，不需要保存在第三方服务器。
 
 <img src="https://rssh.ofcoder.com/welcome-sync.gif" alt="安全与同步：密钥进钥匙串，配置加密到 GitHub" width="400">
+
+</td>
+<td width="50%" valign="top">
+
+### 终端插件
+在侧栏或状态条中加入监控、自定义工具或终端宠物。安装现有插件，也可以用 HTML 和 JavaScript 开发自己的插件。
+
+<img src="https://rssh.ofcoder.com/welcome-plugins.gif" alt="终端插件：监控面板、状态条和终端宠物" width="400">
 
 </td>
 </tr>
@@ -108,8 +126,6 @@ macOS、Windows、Linux 和 Android 安装包从 [Releases](https://github.com/r
 | iOS                 |                                          | AppStore，由 [@paradoxie](https://github.com/paradoxie) 维护 |
 | 鸿蒙手机             | [华为应用市场](https://appgallery.huawei.com/app/detail?id=com.rssh.app&channelId=SHARE&source=appshare) | 在手机上搜索 **RSSH**     |
 | 鸿蒙电脑             | [华为应用市场](https://appgallery.huawei.com/app/detail?id=com.rssh.app&channelId=SHARE&source=appshare) | 在电脑上搜索 **RSSH**     |
-
-鸿蒙手机端和电脑端要求 HarmonyOS 5 及以上，使用独立安装包，由应用市场按设备分发。直接在对应设备的应用市场安装和更新即可。
 
 ### IntelliJ / JetBrains 插件
 

@@ -40,14 +40,22 @@ Not another chat box. Nothing to install on your servers — it works like a hum
 </td>
 <td width="50%" valign="top">
 
+### MCP for your local agent
+Let Codex or Claude Code use already connected RSSH terminals over MCP, alongside your local code. Review commands and execution history in RSSH.
+
+<img src="https://rssh.ofcoder.com/welcome-mcp.gif" alt="MCP: Codex investigates a login failure using local code and an existing RSSH session" width="400">
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
 ### 🎨 Color-coded command blocks
 Every command and its output become a block with a color-coded left edge — spot the last command's output at a glance. **Rendered fully locally**, zero remote dependency.
 
 <img src="https://rssh.ofcoder.com/welcome-blocks.gif" alt="Color-coded command blocks" width="400">
 
 </td>
-</tr>
-<tr>
 <td width="50%" valign="top">
 
 ### 🐳 Dynamic discovery
@@ -56,12 +64,22 @@ Containers and pods change by the minute — connecting to servers by static IP 
 <img src="https://rssh.ofcoder.com/welcome-discovery.gif" alt="Dynamic discovery: containers appear live in Home" width="400">
 
 </td>
+</tr>
+<tr>
 <td width="50%" valign="top">
 
 ### 🔐 Multi-platform data sync
 Keys stay in your local OS keyserver; connection configs are encrypted into your own private GitHub repo — nothing sits on a third-party server.
 
 <img src="https://rssh.ofcoder.com/welcome-sync.gif" alt="Security and sync: keys in keychain, profiles encrypted to GitHub" width="400">
+
+</td>
+<td width="50%" valign="top">
+
+### Terminal plugins
+Add monitoring, custom tools or a terminal pet in a side panel or status strip. Install plugins or build your own with HTML and JavaScript.
+
+<img src="https://rssh.ofcoder.com/welcome-plugins.gif" alt="Terminal plugins: a monitoring panel, status strip and terminal pet" width="400">
 
 </td>
 </tr>
@@ -108,8 +126,6 @@ Download macOS, Windows, Linux and Android installers from [Releases](https://gi
 | iOS                 |                                          | AppStore, by [@paradoxie](https://github.com/paradoxie) |
 | HarmonyOS phone     | [Huawei AppGallery](https://appgallery.huawei.com/app/detail?id=com.rssh.app&channelId=SHARE&source=appshare) | Search **RSSH** on your phone |
 | HarmonyOS PC        | [Huawei AppGallery](https://appgallery.huawei.com/app/detail?id=com.rssh.app&channelId=SHARE&source=appshare) | Search **RSSH** on your PC    |
-
-The HarmonyOS phone and PC editions require HarmonyOS 5 or later and have separate installation packages. AppGallery delivers the package for your device; install and update directly from the store.
 
 ### IntelliJ / JetBrains plugin
 
