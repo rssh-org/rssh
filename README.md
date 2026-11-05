@@ -65,6 +65,24 @@ Keys stay in your local OS keyserver; connection configs are encrypted into your
 
 </td>
 </tr>
+<tr>
+<td width="50%" valign="top">
+
+### MCP for your local agent
+Let Codex or Claude Code use already connected RSSH terminals over MCP, alongside your local code. Review commands and execution history in RSSH. Available on macOS, Windows and Linux.
+
+<img src="https://rssh.ofcoder.com/welcome-mcp.gif" alt="MCP: Codex investigates a login failure using local code and an existing RSSH session" width="400">
+
+</td>
+<td width="50%" valign="top">
+
+### Terminal plugins
+Add monitoring, custom tools or a terminal pet in a side panel or status strip. Install plugins or build your own with HTML and JavaScript.
+
+<img src="https://rssh.ofcoder.com/welcome-plugins.gif" alt="Terminal plugins: a monitoring panel, status strip and terminal pet" width="400">
+
+</td>
+</tr>
 </table>
 
 ---

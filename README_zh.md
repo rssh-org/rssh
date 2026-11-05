@@ -65,6 +65,24 @@
 
 </td>
 </tr>
+<tr>
+<td width="50%" valign="top">
+
+### MCP 连接本地 AI Agent
+让 Codex、Claude Code 通过 MCP 复用 RSSH 已连接的终端，结合本地代码排障。命令审核和执行记录保留在 RSSH。支持 macOS、Windows 和 Linux。
+
+<img src="https://rssh.ofcoder.com/welcome-mcp.gif" alt="MCP：Codex 结合本地代码与已有 RSSH 会话排查登录失败" width="400">
+
+</td>
+<td width="50%" valign="top">
+
+### 终端插件
+在侧栏或状态条中加入监控、自定义工具或终端宠物。安装现有插件，也可以用 HTML 和 JavaScript 开发自己的插件。
+
+<img src="https://rssh.ofcoder.com/welcome-plugins.gif" alt="终端插件：监控面板、状态条和终端宠物" width="400">
+
+</td>
+</tr>
 </table>
 
 ---

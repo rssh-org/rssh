@@ -7,9 +7,8 @@
 //
 //     node scripts/record-welcome-gifs.mjs [scene ...]   // e.g. "ai sync"
 //
-// Output: welcome-<scene>.gif in the docs repo root — 1280×800 @ 20fps, same
-// filenames the site and READMEs already reference (in-place refresh, zero doc
-// edits).
+// Output: welcome-<scene>.gif in the docs repo root — 1280px wide @ 20fps;
+// height follows the scene. Existing filenames are refreshed in place.
 import { spawn } from "node:child_process";
 import { mkdtemp, rm, copyFile, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -21,7 +20,7 @@ const DOCS = process.env.RSSH_DOCS_DIR || path.resolve(ROOT, "..", "rssh-docs");
 const PAGE_URL = "file://" + path.join(DOCS, "index.html");
 const CHROME = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const PORT = 9333;
-const VIEW = { width: 1300, height: 1100 }; // scene = min(1020px, 92vw) wide
+const VIEW = { width: 1300, height: 1100 }; // fits both single- and two-window scenes
 const FPS = 20;
 const OUT_SIZE = { w: 1280 };
 
@@ -29,8 +28,10 @@ const OUT_SIZE = { w: 1280 };
 // itself every `loop` ms, which is both our record duration and our trim mark.
 const SCENES = {
     ai: 9600,
+    mcp: 18000,
     blocks: 12100,
     discovery: 11000,
+    plugins: 11000,
     sync: 8700,
     cli: 8900,
 };
@@ -123,7 +124,12 @@ const INSTRUMENT = `
         let had = false;
         return () => { const now = fig.classList.contains(cls); const hit = had && !now; had = now; return hit; };
     };
-    const PROBE = { ai: probeTyped, blocks: probeLit, discovery: probeTyped, cli: probeTyped, sync: (f) => probeFigClass(f, "s-nodes") };
+    const PROBE = {
+        ai: probeTyped, blocks: probeLit, discovery: probeTyped, cli: probeTyped,
+        mcp: (f) => probeFigClass(f, "st-launch"),
+        plugins: (f) => probeFigClass(f, "st-panel"),
+        sync: (f) => probeFigClass(f, "s-nodes"),
+    };
     window.__resets = {};
     for (const fig of document.querySelectorAll("[data-scene]")) {
         const name = fig.dataset.scene;
@@ -148,6 +154,9 @@ async function recordScene(cdp, name, loop) {
     // (threshold 0.3) starts the player.
     await evalJson(cdp, `(() => {
         const fig = document.querySelector('figure[data-scene="${name}"]');
+        if (fig.closest('[data-ai-slide]')?.hidden) {
+            document.querySelector('[data-ai-next]').click();
+        }
         const r = fig.getBoundingClientRect();
         window.scrollTo({ top: Math.max(0, r.top + window.scrollY - (innerHeight - r.height) / 2), behavior: "instant" });
         return true;
@@ -238,8 +247,10 @@ async function recordScene(cdp, name, loop) {
     // over the page's innerWidth. Flags lie; pixels don't.
     const scale = firstPng.readUInt32BE(16) / await evalJson(cdp, "innerWidth");
 
-    // Resample onto a fixed FPS grid: the first frame at or after each tick,
-    // so the GIF opens on the post-reset state (never the old loop's tail).
+    // Resample onto a fixed FPS grid, holding the last presented frame until
+    // a new one arrives. Chrome emits no frames while the scene is still;
+    // choosing the next frame would pull the next loop's reset into that hold.
+    // Drop pre-reset frames so the GIF never opens on the old loop's tail.
     // Frame times are the PRESENTATION timestamps screencast carries (wall
     // clock, seconds) — receipt time would let pre-reset composites leak
     // into frame 0, since PNG-encoding a big surface delays delivery well
@@ -252,13 +263,16 @@ async function recordScene(cdp, name, loop) {
         const span = (timeOf(frames.at(-1)) - timeOf(frames[0])) / 1000;
         console.log(`[screencast] ${frames.length} frames over ${span.toFixed(1)}s = ${(frames.length / span).toFixed(1)} fps delivered`);
     }
-    let n = 0;
-    for (let k = 0; k * 1000 < loop; k += 1 / FPS) {
-        const src = live.find((f) => timeOf(f) >= t0 + k * 1000 - epsilon) ?? live.at(-1);
-        await copyFile(src.file, path.join(seq, `f${String(n++).padStart(5, "0")}.png`));
+    let frame = 0;
+    const count = Math.round(loop * FPS / 1000);
+    for (let n = 0; n < count; n++) {
+        const tick = t0 + n * 1000 / FPS;
+        while (frame + 1 < live.length && timeOf(live[frame + 1]) <= tick) frame++;
+        const src = live[frame];
+        await copyFile(src.file, path.join(seq, `f${String(n).padStart(5, "0")}.png`));
     }
 
-    return { tmp, seq, count: n, rect, scale, loop };
+    return { tmp, seq, count, rect, scale, loop };
 }
 
 /* ── encode ────────────────────────────────────────────────────────── */
