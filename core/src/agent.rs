@@ -1215,9 +1215,15 @@ mod tests {
     #[tokio::test]
     async fn downloads_require_session_acceptance_and_release_failed_requests() {
         let mut fixture = Fixture::new();
+        let directory = tempfile::tempdir().unwrap();
         let input = DownloadFileInput {
             session_id: fixture.info.session_id.clone(),
-            remote_path: "/tmp/sample.log".into(),
+            remote_path: directory
+                .path()
+                .join("missing.log")
+                .to_str()
+                .unwrap()
+                .into(),
             max_mb: 1,
         };
         let denied = download_mcp_file(
@@ -1230,12 +1236,31 @@ mod tests {
         .unwrap_err();
         assert_eq!(denied.code(), "agent_session_unavailable");
 
-        fixture.open().await;
-        let result = download_mcp_file(fixture.host.state(), &fixture.owner, "test-token", input)
-            .await
-            .unwrap();
+        let opened = fixture.open().await;
+        let host = fixture.host.clone();
+        let owner = fixture.owner.clone();
+        let downloading = download_mcp_file(host.state(), &owner, "test-token", input);
+        tokio::pin!(downloading);
+        let proposal = tokio::select! {
+            result = &mut downloading => panic!("must wait for download approval: {result:?}"),
+            proposal = fixture.event("ai:download_proposed:") => proposal,
+        };
+        commands::ai_command_result_impl(
+            host.state(),
+            &fixture.info.tab_id,
+            &owner,
+            proposal["id"].as_str().unwrap().into(),
+            0,
+            String::new(),
+            false,
+            false,
+            Some(&opened.instance_id),
+        )
+        .await
+        .unwrap();
+        let result = downloading.await.unwrap();
         assert_eq!(result.session_id, fixture.info.session_id);
-        assert!(!result.download.ok, "a local shell has no SFTP connection");
+        assert!(!result.download.ok, "the local source file does not exist");
         assert!(result.download.local_path.is_none());
         assert!(locked(&fixture.host.state().agent_bridge.inner)
             .unwrap()

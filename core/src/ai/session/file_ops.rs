@@ -2,22 +2,22 @@
 //!
 //! 拆出来的理由：file_ops 是一坨自成体系的复杂逻辑 ——
 //! - 远端能力探测（python3 / perl / diff）
-//! - 多行脚本 + 多行参数装进单行 ASCII 命令（`$'...'` ANSI-C quoting）
+//! - Base64 数据封装让脚本和多行参数保持单行，兼容标准 sh 与 Windows shell
 //! - 5 张审批卡片编排（match × 1，patch × 4：cp → modify → diff → mv）
 //!
 //! 与会话主框架（dialogue_turn / run_command / SFTP）耦合面很窄（只通过 Actor 的几个
 //! pub(super) 方法和字段），按职责分离更利于阅读。
 //!
 //! **核心不变量**：所有送进 PTY 的 file_ops 命令在 shell 视角下必须是**单行**（无字面
-//! `\n` / `\r`），避开 zsh ZLE multi-line quote race（详见 `ansi_c_quote` 注释）。
-//! 非 ASCII 字符（中文 / emoji）在 `$'...'` 内直接透传 —— bash / zsh 都按 UTF-8
-//! 解释字面字节，只有控制字符 / DEL / 单引号 / 反斜杠需要 `\xHH` 编码。
+//! `\n` / `\r`），避开终端多行粘贴与转义字符注入；解码在目标解释器中完成。
 
+use base64::Engine;
 use serde_json::json;
 
 use crate::ai::audit::AuditKind;
 use crate::ai::llm::{ChatMessage, ToolCall};
 use crate::ai::sanitize;
+use crate::ai::shell::ShellKind;
 use crate::ai::tools::{MatchFileInput, PatchFileInput, MATCH_CONTEXT_DEFAULT, MATCH_CONTEXT_MAX};
 use crate::error::{AppError, AppResult};
 
@@ -25,12 +25,11 @@ use super::{Actor, CommandOutcome};
 
 // ─── 远端能力探测 ─────────────────────────────────────────────────
 
-/// 远端 file_ops 工具能力。lazy 探测一次后缓存到 session 生命周期。
+/// 远端 file_ops 工具能力。只缓存完整可用的工具链，失败或缺项下次重试。
 ///
 /// 设计原则：rssh 后端不再 cat 整文件回 PTY（避免 ANSI/scrollback/buffer 丢内容），
 /// 改为让远端预制脚本读文件 + 算 count/context + 写 tmp，只回小 JSON。
-/// patch_file 的 unified diff 走独立的 `diff -u` 命令算。
-/// 因此 file_ops 整体硬依赖 python3 或 (perl + diff)。
+/// 所有 shell 共用 Python 3 / Perl 脚本；patch 另外需要外部 diff。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RemoteCapabilities {
     /// `python3`（首选）
@@ -41,39 +40,33 @@ pub(super) struct RemoteCapabilities {
     pub(super) diff: bool,
 }
 
-impl RemoteCapabilities {
-    fn none() -> Self {
-        Self {
-            python3: false,
-            perl: false,
-            diff: false,
-        }
-    }
-}
-
 /// 探测命令：一行拿三个工具的可用性。输出形如 `py3=1 perl=1 diff=1`。
-const PROBE_CMD: &str = r#"echo "py3=$(command -v python3 >/dev/null 2>&1 && echo 1 || echo 0) perl=$(command -v perl >/dev/null 2>&1 && echo 1 || echo 0) diff=$(command -v diff >/dev/null 2>&1 && echo 1 || echo 0)""#;
+const PROBE_CMD: &str = r#"echo "py3=$(python3 -c 'import sys;sys.exit(sys.version_info[0] != 3)' >/dev/null 2>&1 && echo 1 || echo 0) perl=$(command -v perl >/dev/null 2>&1 && echo 1 || echo 0) diff=$(command -v diff >/dev/null 2>&1 && echo 1 || echo 0)""#;
 
 /// 解析探测命令输出 —— 找含 `py3=` `perl=` `diff=` 的那一行。
-fn parse_capabilities(output: &str) -> RemoteCapabilities {
-    let mut caps = RemoteCapabilities::none();
+fn parse_capabilities(output: &str) -> Option<RemoteCapabilities> {
     for line in output.lines() {
-        let line = line.trim();
-        if !(line.contains("py3=") && line.contains("perl=") && line.contains("diff=")) {
-            continue;
-        }
-        for token in line.split_whitespace() {
-            if let Some(v) = token.strip_prefix("py3=") {
-                caps.python3 = v == "1";
-            } else if let Some(v) = token.strip_prefix("perl=") {
-                caps.perl = v == "1";
-            } else if let Some(v) = token.strip_prefix("diff=") {
-                caps.diff = v == "1";
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if let [python3, perl, diff] = fields.as_slice() {
+            let flag = |value: &str, prefix: &str| match value.strip_prefix(prefix) {
+                Some("0") => Some(false),
+                Some("1") => Some(true),
+                _ => None,
+            };
+            if let (Some(python3), Some(perl), Some(diff)) = (
+                flag(python3, "py3="),
+                flag(perl, "perl="),
+                flag(diff, "diff="),
+            ) {
+                return Some(RemoteCapabilities {
+                    python3,
+                    perl,
+                    diff,
+                });
             }
         }
-        return caps;
     }
-    caps
+    None
 }
 
 // ─── JSON marker ─────────────────────────────────────────────────
@@ -127,9 +120,7 @@ fn extract_json_payload(pty_output: &str) -> Option<&str> {
 
 /// match_file 的 python3 脚本。位置参数：path find before after
 ///
-/// 不走 base64：find 直接作为 argv 字符串透传。shell 端 `ansi_c_quote(find)` 保证
-/// 引号 / 空格 / 换行等都安全（`$'...'` 把真换行编为 `\n` 字面 escape，命令仍单行）。
-/// Python 拿到的 sys.argv[2] 就是原始 UTF-8 字符串。
+/// 启动包装器先解码 Base64 参数，脚本拿到的 sys.argv[2] 是原始 UTF-8 字符串。
 ///
 /// **远端 cap = 50 matches**：count 仍记真实总命中数，但 matches 数组只装前 50 个 +
 /// `truncated` 标识。理由：后端只在解析后才截断，但前端 PTY 流要在 sentinel 出现前
@@ -137,7 +128,7 @@ fn extract_json_payload(pty_output: &str) -> Option<&str> {
 /// 在 backend 拿到 payload 前先把前端 UI OOM。在远端就 cap 才彻底安全。
 const PYTHON_MATCH_SCRIPT: &str = r#"import sys,json
 M="__RSSH_JSON__"
-def o(x):sys.stdout.write(M+"\n"+json.dumps(x,ensure_ascii=False)+"\n"+M+"\n")
+def o(x):sys.stdout.write(M+"\n"+json.dumps(x,ensure_ascii=True)+"\n"+M+"\n")
 p=sys.argv[1];f=sys.argv[2];b=int(sys.argv[3]);a=int(sys.argv[4])
 try:t=open(p,"rb").read().decode("utf-8")
 except FileNotFoundError:o({"error":"file_not_found"});sys.exit(0)
@@ -160,7 +151,7 @@ o(r)
 /// count 不匹配时删除 tmp，避免半成品残留。
 const PYTHON_PATCH_SCRIPT: &str = r#"import sys,json,os
 M="__RSSH_JSON__"
-def o(x):sys.stdout.write(M+"\n"+json.dumps(x,ensure_ascii=False)+"\n"+M+"\n")
+def o(x):sys.stdout.write(M+"\n"+json.dumps(x,ensure_ascii=True)+"\n"+M+"\n")
 p=sys.argv[1];f=sys.argv[2];r=sys.argv[3];e=int(sys.argv[4])
 try:t=open(p,"rb").read().decode("utf-8")
 except Exception as ex:o({"error":"io_error","message":str(ex)});sys.exit(0)
@@ -179,10 +170,11 @@ o({"count":c})
 /// 同 PYTHON_MATCH_SCRIPT：远端 cap = 50 matches，count 仍记真实总数。
 const PERL_MATCH_SCRIPT: &str = r#"use strict;use warnings;use JSON::PP;
 my $M="__RSSH_JSON__";
-sub o{print $M,"\n",encode_json($_[0]),"\n",$M,"\n"}
-my($p,$f,$b,$a)=@ARGV;utf8::decode($f);
+sub o{print $M,"\n",JSON::PP->new->ascii->encode($_[0]),"\n",$M,"\n"}
+my($p,$f,$b,$a)=@ARGV;
 open(my $h,'<:raw',$p)or do{o({error=>"file_not_found"});exit 0};
-local $/;my $t=<$h>;close $h;utf8::decode($t);
+local $/;my $t=<$h>//'';close $h;
+utf8::decode($t)or do{o({error=>"io_error",message=>"File is not valid UTF-8"});exit 0};
 my @m;my $c=0;my $i=0;my $n=length($f);my $L=length($t);my $K=50;
 while((my $j=index($t,$f,$i))>=0){
  $c++;
@@ -201,10 +193,11 @@ o(\%r);
 /// patch_file Stage 2 的 perl 脚本（降级路径）。位置参数：tmp_path find replace expected
 const PERL_PATCH_SCRIPT: &str = r#"use strict;use warnings;use JSON::PP;
 my $M="__RSSH_JSON__";
-sub o{print $M,"\n",encode_json($_[0]),"\n",$M,"\n"}
-my($p,$f,$r,$e)=@ARGV;utf8::decode($f);utf8::decode($r);
+sub o{print $M,"\n",JSON::PP->new->ascii->encode($_[0]),"\n",$M,"\n"}
+my($p,$f,$r,$e)=@ARGV;
 open(my $h,'<:raw',$p)or do{o({error=>"io_error",message=>"$!"});exit 0};
-local $/;my $t=<$h>;close $h;utf8::decode($t);
+local $/;my $t=<$h>//'';close $h;
+utf8::decode($t)or do{o({error=>"io_error",message=>"File is not valid UTF-8"});exit 0};
 my $c=()=$t=~/\Q$f\E/g;
 if($c!=$e){unlink($p);o({error=>"count_mismatch",actual=>$c,expected=>$e});exit 0}
 my $new=$t;$new=~s/\Q$f\E/$r/g;utf8::encode($new);
@@ -212,9 +205,38 @@ open(my $w,'>:raw',$p)or do{o({error=>"tmp_write_failed",message=>"$!"});exit 0}
 print $w $new;close $w;o({count=>$c});
 "#;
 
+// PowerShell is only a shell adapter: it resolves native applications and
+// invokes the same Python/Perl scripts as POSIX. Never resolve the `diff` alias.
+const POWERSHELL_APPLICATIONS: &str = r#"
+function Rssh-App([string]$name) {
+ $app = Get-Command -Name $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1;
+ if ($null -eq $app) { throw ('Application unavailable: ' + $name); };
+ return $app.Source;
+};
+function Rssh-Python {
+ foreach ($name in @('python3', 'python')) {
+  $app = Get-Command -Name $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1;
+  if ($null -ne $app) {
+   try {
+    $null = & $app.Source -c 'import sys;sys.exit(sys.version_info[0] != 3)' 2>$null;
+    if ($LASTEXITCODE -eq 0) { return $app.Source; };
+   } catch {};
+  };
+ };
+ throw 'Python 3 application unavailable';
+};
+"#;
+
+const POWERSHELL_PATH: &str = r#"
+function Rssh-Path([string]$value) {
+ if ($value -eq '~') { $value = $HOME; }
+ elseif ($value.StartsWith('~/') -or $value.StartsWith('~\')) { $value = Join-Path $HOME $value.Substring(2); }
+ return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($value);
+};
+"#;
+
 // ─── Interpreter ─────────────────────────────────────────────────
 
-/// file_ops 解释器：python3 优先，perl 降级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Interpreter {
     Python3,
@@ -228,24 +250,10 @@ impl Interpreter {
             Self::Perl => "perl",
         }
     }
-    /// `-c`（python3 inline script）或 `-e`（perl inline script）。
     fn script_flag(self) -> &'static str {
         match self {
             Self::Python3 => "-c",
             Self::Perl => "-e",
-        }
-    }
-    /// 脚本字面量和位置参数之间的分隔符。
-    ///
-    /// Perl `-e` 之后 `@ARGV` 首元素若以 `-` 开头会被当未知 switch（"Unrecognized switch"），
-    /// 必须 `--` 强制结束 switch 解析。
-    ///
-    /// Python `-c` 不消耗 `--` —— 加了反而让 `sys.argv[1]` 是字面 `--`，整个 argv 错位 1，
-    /// 路径变成 `'--'` 让脚本读不到文件。
-    fn args_prefix(self) -> &'static str {
-        match self {
-            Self::Python3 => "",
-            Self::Perl => "-- ",
         }
     }
     fn match_script(self) -> &'static str {
@@ -262,8 +270,6 @@ impl Interpreter {
     }
 }
 
-/// 选 file_ops 解释器：python3 优先，perl 降级。都没就 None。
-/// （diff 只有 patch_file 需要，单独在 handle_patch_file 校验。）
 fn select_interpreter(caps: RemoteCapabilities) -> Option<Interpreter> {
     if caps.python3 {
         Some(Interpreter::Python3)
@@ -275,46 +281,6 @@ fn select_interpreter(caps: RemoteCapabilities) -> Option<Interpreter> {
 }
 
 // ─── Quoting & path helpers ──────────────────────────────────────
-
-/// ANSI-C quoting (`$'...'`)：shell 把 `\n` `\t` `\\` 等转义序列展开为真字符，
-/// 但**整段字面量在 shell 视角是单行 ASCII** —— 因此长多行脚本能塞进一条单行命令，
-/// 不触发 zsh ZLE 的 multi-line quote race（粘贴长命令进 PTY 时 p10k 会渲染连续
-/// quote> prompt、ZLE buffer 错乱、命令永不执行）。
-///
-/// **单引号编码为 `\x27`，不是 `\'`** —— 实测含多个 `\'` 的长命令在 zsh + p10k
-/// 下偶发卡死（同一命令含 0 个 `\'` 时稳定通过）。怀疑 ZLE 在 `$'...'` 状态机内
-/// 对 `\'` 的转义切换有 race。两者语义等价，但 transition 路径分离 —— hardening。
-///
-/// **其他 C0 控制字符（0x00-0x1F 中除 `\n`/`\r`/`\t` 外的）和 DEL (0x7F) 也 hex 化** ——
-/// 安全：LLM 可控的 `find` / `replace` 含 ESC (`\x1b`) / BEL (`\x07`) / CSI 序列等会通过
-/// PTY echo 触发 terminal escape injection（隐藏文本、伪造 prompt、改终端 title 等）。
-/// 让 on-wire 命令保持 printable ASCII，回程的 PTY echo 也就不会被解释为 escape sequence。
-/// 程序拿到的 argv 仍是原字节（shell 把 `\xHH` 解码回原 byte）。
-///
-/// 适用 bash / zsh（远端常见 shell）；POSIX 纯 sh / busybox sh / dash 不支持。
-/// file_ops 已经硬依赖 python3 / perl，那些极简环境一般连解释器都没有，能力探测
-/// 阶段就被拒。
-fn ansi_c_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    out.push('$');
-    out.push('\'');
-    for ch in s.chars() {
-        match ch {
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\'' => out.push_str("\\x27"),
-            '\\' => out.push_str("\\\\"),
-            // 其他 C0 controls (0x00-0x1F 中未在上面特处理的) + DEL (0x7F) → \xHH
-            c if (c as u32) < 0x20 || (c as u32) == 0x7F => {
-                out.push_str(&format!("\\x{:02x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('\'');
-    out
-}
 
 /// POSIX 单引号转义。所有 rssh 后端拼装的 PTY 命令都走这个，避免路径含
 /// 空格/特殊字符时被 shell 错误解析。
@@ -331,11 +297,8 @@ fn shell_quote(s: &str) -> String {
 ///
 /// 必须拒：
 /// - `\n` / `\r`：shell_quote 用 POSIX 单引号包，单引号内换行**字面保留**，命令字节流就有
-///   真 `\n` byte，重新触发 zsh ZLE multi-line quote race —— 这正是本 PR 拿 ansi_c_quote 把
-///   脚本/find/replace 全单行化要规避的问题。path 走的是 shell_quote 不经 ansi_c_quote，必须
-///   在入口直接拒。
-/// - 其他 C0 控制字符 (0x00-0x1F) 和 DEL (0x7F)：terminal escape injection 防御（同 ansi_c_quote
-///   注释里 ESC/BEL 的理由）。Unix 文件名理论上允许这些字符，但 rssh 用户场景里它们没合理用法。
+///   真 `\n` byte，重新触发终端多行粘贴问题；POSIX path 走 shell_quote，必须入口直接拒。
+/// - 其他 C0 控制字符 (0x00-0x1F) 和 DEL (0x7F)：避免终端转义字符注入。
 fn validate_path(path: &str) -> Result<(), &'static str> {
     if path.is_empty() {
         return Err("empty path");
@@ -372,47 +335,115 @@ fn prepare_remote_path(path: &str) -> String {
 
 // ─── 命令构造 ────────────────────────────────────────────────────
 
-/// 拼一条 `<interp> -c|-e $'...' [-- ] arg1 arg2 ...` 形态的解释器命令。
-/// 单行 ASCII（脚本里的换行靠 `$'...'` 的 `\n` 编码），避免 PTY ZLE quote race。
-fn build_script_cmd(interp: Interpreter, script: &str, args: &[String]) -> String {
-    let args_part = if args.is_empty() {
-        String::new()
-    } else {
-        format!(" {}{}", interp.args_prefix(), args.join(" "))
+/// Shell quoting is the only difference in interpreter invocation. The loader
+/// contains no double quotes (PowerShell 5's legacy native argument handling
+/// removes them), and every argument, including the path, is Base64 data.
+fn build_script_cmd(shell: ShellKind, interp: Interpreter, script: &str, args: &[&str]) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(script);
+    let loader = match interp {
+        Interpreter::Python3 => format!("import base64,sys,os;sys.argv[1:]=[base64.b64decode(v[1:]).decode('utf-8') for v in sys.argv[1:]];p=sys.argv[1];sys.argv[1]=os.path.expanduser(p) if p=='~' or p.startswith('~/') or (os.name=='nt' and p.startswith('~\\\\')) else p;exec(base64.b64decode('{encoded}'))"),
+        Interpreter::Perl => format!("use MIME::Base64;use Encode;@ARGV=map{{decode('UTF-8',decode_base64(substr($_,1)),Encode::FB_CROAK)}}@ARGV;my $home=$^O eq 'MSWin32'?($ENV{{USERPROFILE}}||($ENV{{HOMEDRIVE}}||'').($ENV{{HOMEPATH}}||'')):$ENV{{HOME}};if(defined($home)&&length($home)&&($ARGV[0] eq '~'||$ARGV[0]=~m{{^~/}}||($^O eq 'MSWin32'&&substr($ARGV[0],0,2) eq '~'.chr(92)))){{$home=decode('UTF-8',$home,Encode::FB_CROAK) if $^O ne 'MSWin32'&&!utf8::is_utf8($home);$ARGV[0]=~s{{^~}}{{$home}}}}eval decode_base64('{encoded}');die $@ if $@;"),
     };
-    format!(
-        "{} {} {}{}",
-        interp.binary(),
-        interp.script_flag(),
-        ansi_c_quote(script),
-        args_part,
-    )
+    let quote = |value: &str| {
+        if shell == ShellKind::Posix {
+            shell_quote(value)
+        } else {
+            powershell_quote(value)
+        }
+    };
+    let args = args
+        .iter()
+        .map(|arg| {
+            quote(&format!(
+                "x{}",
+                base64::engine::general_purpose::STANDARD.encode(arg)
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let separator = if interp == Interpreter::Perl {
+        "-- "
+    } else {
+        ""
+    };
+    if shell == ShellKind::Posix {
+        return format!(
+            "{} {} {} {separator}{args}",
+            interp.binary(),
+            interp.script_flag(),
+            quote(&loader)
+        );
+    }
+    let application = if interp == Interpreter::Python3 {
+        "(Rssh-Python)"
+    } else {
+        "(Rssh-App 'perl')"
+    };
+    powershell_command( &format!("{POWERSHELL_APPLICATIONS} & {application} {} {} {separator}{args}; $global:LASTEXITCODE = $LASTEXITCODE;", interp.script_flag(), quote(&loader)))
 }
 
-/// match_file 命令：搜索 path 中 find 出现的位置，回 JSON。
-///
-/// `find` 走 `ansi_c_quote` —— LLM 提供的 find 文本可能含真换行（如多行 YAML 块），
-/// shell_quote 包后字面 `\n` byte 仍会出现在 shell 输入流里，触发 zsh ZLE 的
-/// multi-line quote race。`$'...'` 把所有换行编码为 `\n` 转义序列，让命令在
-/// shell 视角下保持单行 ASCII。
-fn build_match_cmd(interp: Interpreter, path: &str, find: &str, before: u32, after: u32) -> String {
+fn powershell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn powershell_value(value: &str) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(value);
+    format!("([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')))")
+}
+
+fn powershell_command(body: &str) -> String {
+    let body = body.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+    let command = format!("& {{ $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $false; $global:LASTEXITCODE = 0; try {{ {body} }} catch {{ [Console]::Error.WriteLine($_.Exception.Message); $global:LASTEXITCODE = 2; }} }}");
+    command
+}
+
+fn cmd_powershell_command(command: &str) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(command);
+    format!("powershell.exe -NoProfile -NonInteractive -Command \"[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')))); exit $LASTEXITCODE\"")
+}
+
+/// Keep cmd.exe out of exit-code evaluation: both the operation and completion
+/// marker run in the same PowerShell process. The display command remains
+/// executable on its own, without a completion marker.
+fn file_command(shell: ShellKind, raw: &str) -> (String, String, String) {
+    if shell == ShellKind::Cmd {
+        let sentinel = format!("__rssh_done_{}", uuid::Uuid::new_v4().simple());
+        let full = format!("{raw}; [Console]::WriteLine('{sentinel}:' + $global:LASTEXITCODE);");
+        return (
+            cmd_powershell_command(raw),
+            sentinel,
+            cmd_powershell_command(&full),
+        );
+    }
+    let (sentinel, full) = shell.sentinel_command(raw);
+    (raw.into(), sentinel, full)
+}
+
+fn probe_command(shell: ShellKind) -> String {
+    if shell == ShellKind::Posix {
+        return PROBE_CMD.into();
+    }
+    powershell_command( &format!("{POWERSHELL_APPLICATIONS} $py = 0; try {{ $null = Rssh-Python; $py = 1; }} catch {{}}; $perl = [int]($null -ne (Get-Command -Name perl -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)); $diff = [int]($null -ne (Get-Command -Name diff -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1)); [Console]::WriteLine(('py3={{0}} perl={{1}} diff={{2}}' -f $py, $perl, $diff)); $global:LASTEXITCODE = 0;"))
+}
+
+fn build_match_cmd(
+    shell: ShellKind,
+    interp: Interpreter,
+    path: &str,
+    find: &str,
+    before: u32,
+    after: u32,
+) -> String {
     build_script_cmd(
+        shell,
         interp,
         interp.match_script(),
-        &[
-            prepare_remote_path(path),
-            ansi_c_quote(find),
-            shell_quote(&before.to_string()),
-            shell_quote(&after.to_string()),
-        ],
+        &[path, find, &before.to_string(), &after.to_string()],
     )
 }
 
-/// patch_file modify 命令：脚本在 tmp 上 in-place 替换，校验 count，回 JSON。
-/// 前置：调用方已经独立跑过 `cp_cmd` 把原文复制到 tmp。
-///
-/// `find` / `replace` 都走 `ansi_c_quote`（理由同 `build_match_cmd`）。
 fn build_modify_cmd(
+    shell: ShellKind,
     interp: Interpreter,
     tmp: &str,
     find: &str,
@@ -420,67 +451,84 @@ fn build_modify_cmd(
     expected: u32,
 ) -> String {
     build_script_cmd(
+        shell,
         interp,
         interp.patch_script(),
-        &[
+        &[tmp, find, replace, &expected.to_string()],
+    )
+}
+
+fn build_cp_cmd(shell: ShellKind, path: &str, tmp: &str) -> String {
+    if shell == ShellKind::Posix {
+        return format!(
+            "\\cp -- {} {}",
+            prepare_remote_path(path),
+            prepare_remote_path(tmp)
+        );
+    }
+    powershell_command(&format!(
+        "{POWERSHELL_PATH} [IO.File]::Copy((Rssh-Path {}), (Rssh-Path {}), $false);",
+        powershell_value(path),
+        powershell_value(tmp)
+    ))
+}
+
+/// Use the same external unified diff on every platform. Exit 1 means changes;
+/// exit >= 2 is failure and never advances to final replacement.
+fn build_diff_cmd(shell: ShellKind, path: &str, tmp: &str) -> String {
+    if shell == ShellKind::Posix {
+        return format!(
+            "\\diff -u -- {} {}",
+            prepare_remote_path(path),
+            prepare_remote_path(tmp)
+        );
+    }
+    powershell_command( &format!("{POWERSHELL_PATH} {POWERSHELL_APPLICATIONS} & (Rssh-App 'diff') -u -- (Rssh-Path {}) (Rssh-Path {}); $global:LASTEXITCODE = $LASTEXITCODE;", powershell_value(path), powershell_value(tmp)))
+}
+
+fn build_mv_cmd(shell: ShellKind, tmp: &str, path: &str) -> String {
+    if shell == ShellKind::Posix {
+        return format!(
+            "\\mv -- {} {}",
             prepare_remote_path(tmp),
-            ansi_c_quote(find),
-            ansi_c_quote(replace),
-            shell_quote(&expected.to_string()),
-        ],
-    )
-}
-
-/// `\cp -- path tmp`：patch_file 第一步，把原文复制到同目录 tmp（保证后续 mv 单 rename(2)）。
-///
-/// **`\` 前缀**：远端用户可能配 `alias cp='cp -i'`/`alias mv='mv -i'`，互动询问会让
-/// 命令挂到 timeout。bash/zsh 的转义命令头（`\cp` / `\mv`）跳过 alias 展开但仍命中
-/// 真正可执行文件。`\diff` 同理（虽然 `alias diff='diff --color'` 一般不影响 exit）。
-fn build_cp_cmd(path: &str, tmp: &str) -> String {
-    format!(
-        "\\cp -- {} {}",
-        prepare_remote_path(path),
-        prepare_remote_path(tmp),
-    )
-}
-
-/// `\diff -u path tmp`：patch_file 第三步，给用户审批用的 unified diff。
-/// exit 0=无差异 / 1=有差异（**正常**）/ ≥2=工具失败 —— 调用方必须按此判，不能套
-/// "exit != 0 ⇒ 错误"的通用规则。
-fn build_diff_cmd(path: &str, tmp: &str) -> String {
-    format!(
-        "\\diff -u -- {} {}",
-        prepare_remote_path(path),
-        prepare_remote_path(tmp),
-    )
-}
-
-/// `\mv -- tmp path`：patch_file 最后一步，原子覆盖。
-fn build_mv_cmd(tmp: &str, path: &str) -> String {
-    format!(
-        "\\mv -- {} {}",
-        prepare_remote_path(tmp),
-        prepare_remote_path(path),
-    )
+            prepare_remote_path(path)
+        );
+    }
+    powershell_command( &format!("{POWERSHELL_PATH} [IO.File]::Replace((Rssh-Path {}), (Rssh-Path {}), [NullString]::Value);", powershell_value(tmp), powershell_value(path)))
 }
 
 // ─── Actor 上的 file_ops 方法 ─────────────────────────────────────
 
 impl Actor {
-    /// 第一次 file_ops 时探测远端能力（python3 / perl / diff），结果缓存到 session 结束。
-    /// 后续 file_ops 直接读缓存。
+    async fn file_interpreter(&mut self, needs_diff: bool) -> Result<Interpreter, String> {
+        if !self.cfg.shell_kind.supports_file_operations() {
+            return Err("File operations are unavailable for this terminal shell.".into());
+        }
+        let caps = self
+            .ensure_remote_caps()
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(interp) = select_interpreter(caps) else {
+            return Err("The target lacks Python 3 or Perl required for file operations.".into());
+        };
+        if needs_diff && !caps.diff {
+            return Err("The target lacks diff required for patch review.".into());
+        }
+        Ok(interp)
+    }
+
+    /// 探测 Python 3 / Perl / diff，只缓存完整可用的工具链。
+    /// 缺依赖或执行失败不缓存，不影响后续工具可用性。
     ///
-    /// probe 走 `internal_command`（不弹卡片）—— 一行只读 echo，对用户透明，
+    /// probe 走 `internal_command`（不弹卡片）—— 只读检查程序与 Python 版本，
     /// 没必要让用户为它单独点一次同意。实际的 cp/python/diff/mv 都走 `command_proposed` 弹卡片。
     async fn ensure_remote_caps(&mut self) -> AppResult<RemoteCapabilities> {
         if let Some(c) = self.remote_caps {
             return Ok(c);
         }
         let cmd_id = uuid::Uuid::new_v4().to_string();
-        // PROBE_CMD is a POSIX-only shell script (python3/perl/diff `which` probes).
-        // On Windows targets the probe itself can't succeed, but the sentinel
-        // template still has to match shell_kind so the front-end finds the marker.
-        let (sentinel, full_cmd) = self.cfg.shell_kind.sentinel_command(PROBE_CMD);
+        let (cmd, sentinel, full_cmd) =
+            file_command(self.cfg.shell_kind, &probe_command(self.cfg.shell_kind));
 
         self.audit_push(AuditKind::Note {
             message: "file_ops: probing remote capabilities (python3 / perl / diff)".into(),
@@ -490,7 +538,7 @@ impl Actor {
             json!({
                 "id": cmd_id,
                 "tool_call_id": cmd_id,
-                "cmd": PROBE_CMD,
+                "cmd": cmd,
                 "full_cmd": full_cmd,
                 "sentinel": sentinel,
             }),
@@ -525,14 +573,24 @@ impl Actor {
                 ));
             }
         };
-        let caps = parse_capabilities(&output);
+        let Some(caps) = parse_capabilities(&output) else {
+            Self::complete_action(ack, Ok(()));
+            return Err(AppError::other(
+                "caps_probe_aborted",
+                json!({ "reason": "Invalid capability probe output" }),
+            ));
+        };
         self.audit_push(AuditKind::Note {
             message: format!(
                 "file_ops: caps probed — python3={} perl={} diff={}",
                 caps.python3, caps.perl, caps.diff
             ),
         });
-        self.remote_caps = Some(caps);
+        // Missing tools may become available later. Cache a complete usable
+        // toolchain only, never a failed or partially available probe.
+        if select_interpreter(caps).is_some() && caps.diff {
+            self.remote_caps = Some(caps);
+        }
         // The internal probe has no terminal card mutation. Its processing ack
         // means the output was consumed into the actor's capability state.
         Self::complete_action(ack, Ok(()));
@@ -560,7 +618,7 @@ impl Actor {
         event: &str,
     ) -> AppResult<CommandOutcome> {
         let cmd_id = uuid::Uuid::new_v4().to_string();
-        let (sentinel, full_cmd) = self.cfg.shell_kind.sentinel_command(&cmd);
+        let (cmd, sentinel, full_cmd) = file_command(self.cfg.shell_kind, &cmd);
 
         // Audit reads explain/side_effect from the domain when the caller
         // carries them (match_file). Patch steps carry structured fields
@@ -674,19 +732,19 @@ impl Actor {
             .unwrap_or(MATCH_CONTEXT_DEFAULT)
             .min(MATCH_CONTEXT_MAX);
 
-        let caps = self.ensure_remote_caps().await?;
-        let interp = match select_interpreter(caps) {
-            Some(i) => i,
-            None => {
-                return Ok(self.make_tool_error(
-                    &tc.id,
-                    "match_file: remote system lacks python3 / perl — rssh cannot inspect the file. \
-                     Tell the user to install python3 (preferred) or perl.",
-                ));
-            }
+        let interp = match self.file_interpreter(false).await {
+            Ok(interp) => interp,
+            Err(reason) => return Ok(self.make_tool_error(&tc.id, &reason)),
         };
 
-        let cmd = build_match_cmd(interp, &input.path, &input.find, before, after);
+        let cmd = build_match_cmd(
+            self.cfg.shell_kind,
+            interp,
+            &input.path,
+            &input.find,
+            before,
+            after,
+        );
         let domain = serde_json::Map::from_iter([
             ("path".into(), json!(&input.path)),
             ("find".into(), json!(&input.find)),
@@ -787,36 +845,16 @@ impl Actor {
             return Ok(self.make_tool_error(&tc.id, &format!("patch_file: invalid path — {e}")));
         }
         if input.find.is_empty() {
-            return Ok(self.make_tool_error(
-                &tc.id,
-                "patch_file: `find` must not be empty (use match_file to discover what to change).",
-            ));
+            return Ok(self.make_tool_error(&tc.id, "patch_file: `find` must not be empty."));
         }
         if input.expected_count == 0 {
-            return Ok(self.make_tool_error(
-                &tc.id,
-                "patch_file: `expected_count` must be >= 1. Use match_file first to discover the actual count, then pass it here.",
-            ));
+            return Ok(self.make_tool_error(&tc.id, "patch_file: `expected_count` must be >= 1."));
         }
 
-        let caps = self.ensure_remote_caps().await?;
-        let interp = match select_interpreter(caps) {
-            Some(i) => i,
-            None => {
-                return Ok(self.make_tool_error(
-                    &tc.id,
-                    "patch_file: remote system lacks python3 / perl — rssh cannot patch the file. \
-                     Tell the user to install python3 (preferred) or perl.",
-                ));
-            }
+        let interp = match self.file_interpreter(true).await {
+            Ok(interp) => interp,
+            Err(reason) => return Ok(self.make_tool_error(&tc.id, &reason)),
         };
-        if !caps.diff {
-            return Ok(self.make_tool_error(
-                &tc.id,
-                "patch_file: remote system lacks `diff` — rssh cannot show the diff for approval. \
-                 Tell the user to install diffutils.",
-            ));
-        }
 
         // tmp 与 path 同目录，保证后续 mv 走单 rename(2)（同 filesystem，原子）。
         let tmp_suffix: String = uuid::Uuid::new_v4()
@@ -834,7 +872,12 @@ impl Actor {
             ("tmp_path".into(), json!(&tmp_path)),
         ]);
         let outcome = self
-            .run_file_op(build_cp_cmd(&input.path, &tmp_path), 30, domain, "patch")
+            .run_file_op(
+                build_cp_cmd(self.cfg.shell_kind, &input.path, &tmp_path),
+                30,
+                domain,
+                "patch",
+            )
             .await?;
         match outcome {
             CommandOutcome::Rejected { reason } => {
@@ -869,6 +912,7 @@ impl Actor {
         let outcome = self
             .run_file_op(
                 build_modify_cmd(
+                    self.cfg.shell_kind,
                     interp,
                     &tmp_path,
                     &input.find,
@@ -885,7 +929,7 @@ impl Actor {
                 return Ok(self.make_tool_error(
                     &tc.id,
                     &format!(
-                        "User rejected step 2/4 (modify). Reason: {reason}. Tmp at {tmp_path} (user can inspect / rm)."
+                        "User rejected step 2/4 (modify). Reason: {reason}. Tmp at {tmp_path} (staged file retained)."
                     ),
                 ));
             }
@@ -926,7 +970,7 @@ impl Actor {
         if let Some(err) = parsed.get("error").and_then(|e| e.as_str()) {
             let msg = match err {
                 "count_mismatch" => format!(
-                    "patch_file: count mismatch — file has {} occurrence(s), expected {}. Re-run match_file to refresh, then call patch_file with the correct expected_count.",
+                    "patch_file: count mismatch — file has {} occurrence(s), expected {}.",
                     parsed.get("actual").and_then(|a| a.as_u64()).unwrap_or(0),
                     parsed.get("expected").and_then(|a| a.as_u64()).unwrap_or(0),
                 ),
@@ -952,25 +996,33 @@ impl Actor {
             ("tmp_path".into(), json!(&tmp_path)),
         ]);
         let outcome = self
-            .run_file_op(build_diff_cmd(&input.path, &tmp_path), 30, domain, "patch")
+            .run_file_op(
+                build_diff_cmd(self.cfg.shell_kind, &input.path, &tmp_path),
+                30,
+                domain,
+                "patch",
+            )
             .await?;
         let (diff_exit, diff_raw) = match outcome {
             CommandOutcome::Rejected { reason } => {
                 return Ok(self.make_tool_error(
                     &tc.id,
                     &format!(
-                        "User rejected step 3/4 (diff). Reason: {reason}. Tmp at {tmp_path} (user can inspect / rm)."
+                        "User rejected step 3/4 (diff). Reason: {reason}. Tmp at {tmp_path} (staged file retained)."
                     ),
                 ));
             }
             CommandOutcome::Result {
-                exit_code, output, ..
+                exit_code,
+                output,
+                timed_out,
+                early_terminated,
             } => {
-                if exit_code >= 2 {
+                if !(0..=1).contains(&exit_code) || timed_out || early_terminated {
                     return Ok(self.make_tool_error(
                         &tc.id,
                         &format!(
-                            "patch_file 3/4 (diff) failed (exit {exit_code}). Tmp at {tmp_path}. Output: {}",
+                            "patch_file 3/4 (diff) failed or was incomplete (exit {exit_code}). Tmp at {tmp_path}. Output: {}",
                             output.chars().take(400).collect::<String>()
                         ),
                     ));
@@ -994,7 +1046,7 @@ impl Actor {
                 "diff_truncated_bytes": 0,
                 "changed": 0,
                 "no_op": true,
-                "note": format!("patch_file: no-op (replacement matches original; mv skipped). Tmp at {tmp_path}, user may rm if not needed."),
+                "note": format!("patch_file: no-op (replacement matches original; mv skipped). Tmp at {tmp_path}, staged file retained."),
             })
             .to_string();
             // Redact at insertion boundary, mark pre_redacted so redact_message
@@ -1008,6 +1060,12 @@ impl Actor {
         // 进 LLM history，吃掉 context window。截断后保留前缀供人审 / LLM 概览，丢失尾部
         // 由 `diff_truncated_bytes` 显式告知。
         let diff_trunc = sanitize::truncate(&diff_raw, self.cfg.max_output_bytes);
+        if diff_trunc.truncated_bytes > 0 {
+            return Ok(self.make_tool_error(
+                &tc.id,
+                &format!("patch_file: diff exceeds the complete-review limit; original file unchanged. Staged file retained at {tmp_path}."),
+            ));
+        }
         let diff = diff_trunc.text;
         let diff_truncated_bytes = diff_trunc.truncated_bytes;
 
@@ -1019,14 +1077,19 @@ impl Actor {
             ("diff".into(), json!(&diff)),
         ]);
         let outcome = self
-            .run_file_op(build_mv_cmd(&tmp_path, &input.path), 30, domain, "patch")
+            .run_file_op(
+                build_mv_cmd(self.cfg.shell_kind, &tmp_path, &input.path),
+                30,
+                domain,
+                "patch",
+            )
             .await?;
         match outcome {
             CommandOutcome::Rejected { reason } => {
                 Ok(self.make_tool_error(
                     &tc.id,
                     &format!(
-                        "User rejected step 4/4 (mv). Reason: {reason}. Tmp at {tmp_path} (still staged, user can inspect / rm)."
+                        "User rejected step 4/4 (mv). Reason: {reason}. Tmp at {tmp_path} (staged file retained)."
                     ),
                 ))
             }
@@ -1074,6 +1137,557 @@ mod tests {
 
     type ProbeEvents = mpsc::UnboundedReceiver<(String, serde_json::Value)>;
 
+    fn powershell_available() -> bool {
+        std::process::Command::new("pwsh")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$PSVersionTable.PSVersion",
+            ])
+            .output()
+            .is_ok_and(|result| result.status.success())
+    }
+
+    fn run_powershell(cmd: &str) -> (i32, String) {
+        assert!(
+            !cmd.contains(['\n', '\r']),
+            "PTY commands must stay on one line"
+        );
+        // Exercise the exact PowerShell payload invoked from cmd.exe. The test
+        // host need not be Windows; cmd.exe's own parser needs Windows coverage.
+        if let Some(payload) =
+            cmd.strip_prefix("powershell.exe -NoProfile -NonInteractive -Command \"")
+        {
+            let payload = payload.strip_suffix('"').unwrap();
+            assert!(
+                !payload.contains('"'),
+                "cmd.exe wrapper must contain only the fixed decoder and Base64"
+            );
+            let output = std::process::Command::new("pwsh")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &format!("$global:LASTEXITCODE=97; $PSNativeCommandArgumentPassing='Legacy'; $env:PYTHONIOENCODING='ascii'; {payload}")])
+                .output()
+                .unwrap();
+            return (
+                output.status.code().unwrap(),
+                String::from_utf8(output.stdout).unwrap(),
+            );
+        }
+        let wrapped = crate::ai::shell::ShellKind::Powershell.format_sentinel(
+            &format!(
+                "$global:LASTEXITCODE=97; $PSNativeCommandArgumentPassing='Legacy'; $env:PYTHONIOENCODING='ascii'; {cmd}"
+            ),
+            "__test_done",
+        );
+        let output = std::process::Command::new("pwsh")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &wrapped])
+            .output()
+            .unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        let (body, code) = text.rsplit_once("__test_done:").unwrap_or_else(|| {
+            panic!(
+                "missing result: {text}; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        (code.trim().parse().unwrap(), body.to_string())
+    }
+
+    #[cfg(not(windows))]
+    fn apply_unified_diff(path: &std::path::Path, diff: &str) {
+        use std::io::Write;
+        let mut patch = std::process::Command::new("patch")
+            .arg("--batch")
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        patch
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(diff.as_bytes())
+            .unwrap();
+        assert!(
+            patch.wait().unwrap().success(),
+            "review must be an applicable unified diff"
+        );
+    }
+
+    #[test]
+    fn powershell_uses_shared_scripts_for_literal_unicode_crlf_and_empty_replacement() {
+        if !powershell_available() {
+            return;
+        }
+        for shell in [ShellKind::Powershell, ShellKind::Cmd] {
+            let run = |command: &str| run_powershell(&file_command(shell, command).0);
+            for interp in [Interpreter::Python3, Interpreter::Perl] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("it's [literal] 中文.txt");
+                let tmp = dir.path().join("it's [literal] 中文.txt.tmp");
+                let original =
+                    "\u{feff}header\r\n旧 ' \" $HOME `x` $(throw 'injected') 🦀\r\nnext\r\n";
+                let find = "旧 ' \" $HOME `x` $(throw 'injected') 🦀\r\nnext";
+                let replacement = "新 ' \" $HOME `x` 🦀\r\nline two";
+                std::fs::write(&path, original).unwrap();
+                let path = path.to_str().unwrap();
+                let tmp = tmp.to_str().unwrap();
+                let (code, output) = run(&build_match_cmd(shell, interp, path, find, 80, 80));
+                assert_eq!(code, 0, "{output}");
+                assert!(
+                    output.is_ascii(),
+                    "JSON must not depend on a Windows codepage"
+                );
+                let value: serde_json::Value =
+                    serde_json::from_str(extract_json_payload(&output).unwrap()).unwrap();
+                assert_eq!(value["count"], 1, "{output}");
+                assert_eq!(value["matches"][0]["context"], original);
+                assert_eq!(run(&build_cp_cmd(shell, path, tmp)).0, 0);
+                let (code, output) =
+                    run(&build_modify_cmd(shell, interp, tmp, find, replacement, 1));
+                assert_eq!(code, 0, "{output}");
+                assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+                assert_eq!(
+                    std::fs::read_to_string(tmp).unwrap(),
+                    original.replace(find, replacement)
+                );
+                let (code, diff) = run(&build_diff_cmd(shell, path, tmp));
+                assert_eq!(code, 1, "{diff}");
+                assert!(diff.contains("-旧") && diff.contains("+新"), "{diff}");
+                #[cfg(not(windows))]
+                {
+                    let review = dir.path().join("review.txt");
+                    std::fs::write(&review, original).unwrap();
+                    apply_unified_diff(&review, &diff);
+                    assert_eq!(
+                        std::fs::read_to_string(review).unwrap(),
+                        original.replace(find, replacement)
+                    );
+                }
+                assert_eq!(run(&build_mv_cmd(shell, tmp, path)).0, 0);
+                let (code, output) =
+                    run(&build_modify_cmd(shell, interp, path, replacement, "", 1));
+                assert_eq!(code, 0, "{output}");
+                assert_eq!(
+                    std::fs::read_to_string(path).unwrap(),
+                    original.replace(find, "")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shared_scripts_keep_originals_on_count_mismatch_and_invalid_utf8() {
+        if !powershell_available() {
+            return;
+        }
+        for interp in [Interpreter::Python3, Interpreter::Perl] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("source.txt");
+            let tmp = dir.path().join("source.tmp");
+            let original = "\u{feff}旧\r\n旧";
+            std::fs::write(&path, original).unwrap();
+            let path = path.to_str().unwrap();
+            let tmp = tmp.to_str().unwrap();
+            assert_eq!(
+                run_powershell(&build_cp_cmd(ShellKind::Powershell, path, tmp)).0,
+                0
+            );
+            let (_, output) = run_powershell(&build_modify_cmd(
+                ShellKind::Powershell,
+                interp,
+                tmp,
+                "旧",
+                "新",
+                1,
+            ));
+            let value: serde_json::Value =
+                serde_json::from_str(extract_json_payload(&output).unwrap()).unwrap();
+            assert_eq!(value["error"], "count_mismatch", "{output}");
+            assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+            assert!(!std::path::Path::new(tmp).exists());
+            let invalid = [0xff, b'o', b'l', b'd'];
+            std::fs::write(tmp, invalid).unwrap();
+            let (_, output) = run_powershell(&build_modify_cmd(
+                ShellKind::Powershell,
+                interp,
+                tmp,
+                "old",
+                "new",
+                1,
+            ));
+            let value: serde_json::Value =
+                serde_json::from_str(extract_json_payload(&output).unwrap()).unwrap();
+            assert_eq!(value["error"], "io_error", "{output}");
+            assert_eq!(std::fs::read(tmp).unwrap(), invalid);
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn posix_file_scripts_run_in_sh_without_ansi_c_quoting() {
+        for shell in ["sh", "dash"] {
+            if std::process::Command::new(shell)
+                .args(["-c", "exit 0"])
+                .status()
+                .is_err()
+            {
+                continue;
+            }
+            let run = |cmd: &str| {
+                assert!(!cmd.contains(['\n', '\r']));
+                assert!(!cmd.contains("$'"));
+                let output = std::process::Command::new(shell)
+                    .args(["-c", cmd])
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8(output.stdout).unwrap()
+            };
+            for interp in [Interpreter::Python3, Interpreter::Perl] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("it's [字].txt");
+                let original = "\u{feff}  old ' \" $HOME `no` 🦀\r\n    next";
+                let replacement = "  新\r\n    '$()' \" `no`";
+                std::fs::write(&path, original).unwrap();
+                let path = path.to_str().unwrap();
+                let output = run(&build_match_cmd(
+                    ShellKind::Posix,
+                    interp,
+                    path,
+                    original,
+                    80,
+                    80,
+                ));
+                let value: serde_json::Value =
+                    serde_json::from_str(extract_json_payload(&output).unwrap()).unwrap();
+                assert_eq!(value["count"], 1);
+                assert_eq!(value["matches"][0]["context"], original);
+                run(&build_modify_cmd(
+                    ShellKind::Posix,
+                    interp,
+                    path,
+                    original,
+                    replacement,
+                    1,
+                ));
+                assert_eq!(std::fs::read_to_string(path).unwrap(), replacement);
+                run(&build_modify_cmd(
+                    ShellKind::Posix,
+                    interp,
+                    path,
+                    replacement,
+                    "",
+                    1,
+                ));
+                assert_eq!(std::fs::read(path).unwrap(), b"");
+            }
+        }
+    }
+
+    #[test]
+    fn powershell_probe_and_diff_ignore_aliases() {
+        if !powershell_available() {
+            return;
+        }
+        let (code, output) = run_powershell(&format!(
+            "Set-Alias diff Write-Output; {}",
+            probe_command(ShellKind::Powershell)
+        ));
+        assert_eq!(code, 0, "{output}");
+        let caps = parse_capabilities(&output).unwrap();
+        assert!(caps.python3 && caps.perl && caps.diff, "{output}");
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old");
+        let new = dir.path().join("new");
+        std::fs::write(&old, "old\n").unwrap();
+        std::fs::write(&new, "new\n").unwrap();
+        let (code, diff) = run_powershell(&format!(
+            "Set-Alias diff Write-Output; {}",
+            build_diff_cmd(
+                ShellKind::Powershell,
+                old.to_str().unwrap(),
+                new.to_str().unwrap()
+            )
+        ));
+        assert_eq!(code, 1, "{diff}");
+        assert!(diff.contains("-old\n+new"), "{diff}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn powershell_python3_probe_falls_back_to_validated_python_application() {
+        use std::os::unix::fs::PermissionsExt;
+        if !powershell_available() {
+            return;
+        }
+        let python = std::process::Command::new("python3")
+            .args(["-c", "import sys;print(sys.executable)"])
+            .output()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("python3");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nprintf 'not Python 3\\n'\nprintf 'unavailable\\n' >&2\nexit 42\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(
+            String::from_utf8(python.stdout).unwrap().trim(),
+            dir.path().join("python"),
+        )
+        .unwrap();
+        let setup = format!(
+            "$env:PATH = {};",
+            powershell_value(dir.path().to_str().unwrap())
+        );
+        let (code, output) =
+            run_powershell(&format!("{setup} {}", probe_command(ShellKind::Powershell)));
+        assert_eq!(code, 0, "{output}");
+        assert_eq!(
+            parse_capabilities(&output),
+            Some(RemoteCapabilities {
+                python3: true,
+                perl: false,
+                diff: false
+            })
+        );
+        assert!(
+            !output.contains("not Python"),
+            "candidate stdout must not become a command name"
+        );
+        let path = dir.path().join("中文.txt");
+        std::fs::write(&path, "old").unwrap();
+        let (code, output) = run_powershell(&format!(
+            "{setup} {}",
+            build_match_cmd(
+                ShellKind::Powershell,
+                Interpreter::Python3,
+                path.to_str().unwrap(),
+                "old",
+                0,
+                0
+            )
+        ));
+        assert_eq!(code, 0, "{output}");
+        let value: serde_json::Value =
+            serde_json::from_str(extract_json_payload(&output).unwrap()).unwrap();
+        assert_eq!(value["count"], 1, "{output}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_scripts_expand_unicode_home_without_double_encoding() {
+        if !powershell_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("用户");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(home.join("中文.txt"), "找到\r\n").unwrap();
+        for interp in [Interpreter::Python3, Interpreter::Perl] {
+            let cmd = build_match_cmd(ShellKind::Powershell, interp, "~/中文.txt", "找到", 0, 0);
+            let (code, output) = run_powershell(&format!(
+                "$env:HOME = {}; {cmd}",
+                powershell_value(home.to_str().unwrap())
+            ));
+            assert_eq!(code, 0, "{output}");
+            let value: serde_json::Value =
+                serde_json::from_str(extract_json_payload(&output).unwrap()).unwrap();
+            assert_eq!(value["count"], 1, "{output}");
+            let output = std::process::Command::new("sh")
+                .env("HOME", &home)
+                .args([
+                    "-c",
+                    &build_match_cmd(ShellKind::Posix, interp, "~/中文.txt", "找到", 0, 0),
+                ])
+                .output()
+                .unwrap();
+            let output = String::from_utf8(output.stdout).unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(extract_json_payload(&output).unwrap()).unwrap();
+            assert_eq!(value["count"], 1, "{output}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn perl_absolute_path_does_not_decode_unrelated_home_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, "old").unwrap();
+        let output = std::process::Command::new("sh")
+            .env("HOME", std::ffi::OsString::from_vec(b"/tmp/\xe9".to_vec()))
+            .args([
+                "-c",
+                &build_match_cmd(
+                    ShellKind::Posix,
+                    Interpreter::Perl,
+                    path.to_str().unwrap(),
+                    "old",
+                    0,
+                    0,
+                ),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = String::from_utf8(output.stdout).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(extract_json_payload(&output).unwrap()).unwrap();
+        assert_eq!(value["count"], 1, "{output}");
+    }
+
+    #[test]
+    fn windows_completion_marker_preserves_success_diff_and_error_codes() {
+        if !powershell_available() {
+            return;
+        }
+        for shell in [ShellKind::Powershell, ShellKind::Cmd] {
+            for expected in [0, 1, 2] {
+                let raw = powershell_command(&format!("$global:LASTEXITCODE = {expected};"));
+                let (display, sentinel, full) = file_command(shell, &raw);
+                if shell == ShellKind::Cmd {
+                    assert!(display.starts_with("powershell.exe "));
+                    assert!(full.starts_with("powershell.exe "));
+                    assert!(!full.contains("%errorlevel%"));
+                }
+                let (code, output) = run_powershell(&full);
+                assert_eq!(code, expected, "{output}");
+                assert_eq!(output.trim(), format!("{sentinel}:{expected}"));
+            }
+        }
+    }
+
+    #[test]
+    fn powershell_missing_diff_is_an_error_not_a_change() {
+        if !powershell_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let command = build_diff_cmd(ShellKind::Powershell, "old.txt", "new.txt");
+        let (code, _) = run_powershell(&format!(
+            "$env:PATH = {}; {command}",
+            powershell_value(dir.path().to_str().unwrap())
+        ));
+        assert!(
+            code >= 2,
+            "missing diff must not look like a valid diff (exit {code})"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_never_proposes_replace_after_incomplete_or_oversized_diff() {
+        for (exit_code, output, timed_out, early_terminated) in [
+            (1, "x".repeat(65), false, false),
+            (1, "partial".into(), true, false),
+            (1, "partial".into(), false, true),
+            (-1, "failed".into(), false, false),
+            (2, "diff unavailable".into(), false, false),
+        ] {
+            let (mut pending, mut events) = probe_session();
+            pending.actor.cfg.shell_kind = ShellKind::Powershell;
+            pending.actor.remote_caps = Some(RemoteCapabilities {
+                python3: true,
+                perl: false,
+                diff: true,
+            });
+            pending.actor.cfg.max_output_bytes = 64;
+            let sender = pending.info().action_tx.clone();
+            let respond = async {
+                for (step, code, body, timeout, early) in [
+                    ("cp", 0, String::new(), false, false),
+                    (
+                        "modify",
+                        0,
+                        "__RSSH_JSON__\n{\"count\":1}\n__RSSH_JSON__\n".into(),
+                        false,
+                        false,
+                    ),
+                    ("diff", exit_code, output, timed_out, early_terminated),
+                ] {
+                    let payload = loop {
+                        let (event, payload) = events.recv().await.unwrap();
+                        if event == "ai:patch_proposed:caps-test" {
+                            break payload;
+                        }
+                    };
+                    assert_eq!(payload["step"], step);
+                    sender
+                        .send(UserAction::CommandResult {
+                            command_id: payload["id"].as_str().unwrap().into(),
+                            exit_code: code,
+                            output: body,
+                            timed_out: timeout,
+                            early_terminated: early,
+                            ack: None,
+                        })
+                        .unwrap();
+                }
+            };
+            let call = ToolCall {
+                id: "patch".into(),
+                name: "patch_file".into(),
+                input: json!({"path": "test.txt", "find": "old", "replace": "new", "expected_count": 1}),
+            };
+            let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(pending.actor.handle_patch_file(call), respond)
+            })
+            .await
+            .expect("incomplete review must return without another approval");
+            assert!(matches!(
+                result.unwrap(),
+                ChatMessage::ToolResult { is_error: true, .. }
+            ));
+            while let Ok((event, payload)) = events.try_recv() {
+                assert!(event != "ai:patch_proposed:caps-test" || payload["step"] != "mv");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn windows_file_operations_use_the_shared_interpreters() {
+        let (mut pending, mut events) = probe_session();
+        for shell in [ShellKind::Powershell, ShellKind::Cmd] {
+            pending.actor.cfg.shell_kind = shell;
+            for (python3, perl, expected) in [
+                (true, true, Interpreter::Python3),
+                (false, true, Interpreter::Perl),
+            ] {
+                pending.actor.remote_caps = Some(RemoteCapabilities {
+                    python3,
+                    perl,
+                    diff: true,
+                });
+                assert_eq!(
+                    pending.actor.file_interpreter(false).await.unwrap(),
+                    expected
+                );
+                assert_eq!(
+                    pending.actor.file_interpreter(true).await.unwrap(),
+                    expected
+                );
+            }
+            assert!(events.try_recv().is_err());
+        }
+        for shell in [ShellKind::Serial, ShellKind::Telnet] {
+            pending.actor.cfg.shell_kind = shell;
+            assert!(pending.actor.file_interpreter(false).await.is_err());
+            assert!(events.try_recv().is_err());
+        }
+    }
+
     fn probe_session() -> (PendingSession, ProbeEvents) {
         let (host, events) = crate::ssh::test_support::headless_host();
         let cfg = SessionConfig {
@@ -1081,6 +1695,7 @@ mod tests {
             target_id: "target".into(),
             skill: "general".into(),
             system_prompt: String::new(),
+            response_language: "English".into(),
             user_skills_cache: Vec::new(),
             model: "test".into(),
             provider: "test".into(),
@@ -1159,6 +1774,7 @@ mod tests {
             (1, false, false, "probe failed"),
             (0, true, false, "py3=1 perl=1 diff=1"),
             (0, false, true, "py3=1 perl=1 diff=1"),
+            (0, false, false, "Invalid capability probe output"),
         ] {
             let error = probe_with_result(
                 &mut pending,
@@ -1188,6 +1804,25 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("user cancelled"));
         assert_eq!(pending.actor.remote_caps, None);
+
+        for output in ["py3=0 perl=0 diff=0", "py3=1 perl=0 diff=0"] {
+            probe_with_result(
+                &mut pending,
+                &mut events,
+                CommandOutcome::Result {
+                    exit_code: 0,
+                    output: output.into(),
+                    timed_out: false,
+                    early_terminated: false,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                pending.actor.remote_caps, None,
+                "negative capabilities must be retried"
+            );
+        }
 
         let caps = probe_with_result(
             &mut pending,
@@ -1389,55 +2024,52 @@ mod tests {
 
     #[test]
     fn parse_caps_all_present() {
-        let r = parse_capabilities("py3=1 perl=1 diff=1\n");
+        let r = parse_capabilities("py3=1 perl=1 diff=1\n").unwrap();
         assert!(r.python3 && r.perl && r.diff);
     }
 
     #[test]
     fn parse_caps_only_python3() {
-        let r = parse_capabilities("py3=1 perl=0 diff=0\n");
+        let r = parse_capabilities("py3=1 perl=0 diff=0\n").unwrap();
         assert!(r.python3 && !r.perl && !r.diff);
     }
 
     #[test]
     fn parse_caps_only_perl() {
         // 只有 perl —— match_file 能跑（不需要 diff），patch_file 在 handle 层另外校验 caps.diff
-        let r = parse_capabilities("py3=0 perl=1 diff=0\n");
+        let r = parse_capabilities("py3=0 perl=1 diff=0\n").unwrap();
         assert!(!r.python3 && r.perl && !r.diff);
         assert_eq!(select_interpreter(r), Some(Interpreter::Perl));
     }
 
     #[test]
     fn parse_caps_none() {
-        let r = parse_capabilities("py3=0 perl=0 diff=0\n");
+        let r = parse_capabilities("py3=0 perl=0 diff=0\n").unwrap();
         assert!(!r.python3 && !r.perl && !r.diff);
         assert_eq!(select_interpreter(r), None);
     }
 
     #[test]
     fn parse_caps_tolerates_pty_noise() {
-        let out = "user@host:~$ echo \"py3=...\"\npy3=1 perl=1 diff=1\nuser@host:~$ \n";
-        let r = parse_capabilities(out);
+        let out = format!("{PROBE_CMD}\npy3=1 perl=1 diff=1\nuser@host:~$ \n");
+        let r = parse_capabilities(&out).unwrap();
         assert!(r.python3 && r.perl && r.diff);
     }
 
     #[test]
     fn parse_caps_missing_field_defaults_false() {
         // 缺一个字段 —— 整行不匹配，全部 false
-        let r = parse_capabilities("py3=1 perl=1");
-        assert!(!r.python3 && !r.perl && !r.diff);
+        assert_eq!(parse_capabilities("py3=1 perl=1"), None);
     }
 
     #[test]
     fn parse_caps_non_one_treated_as_false() {
-        let r = parse_capabilities("py3=yes perl=2 diff=true");
-        assert!(!r.python3 && !r.perl && !r.diff);
+        assert_eq!(parse_capabilities("py3=yes perl=2 diff=true"), None);
     }
 
     #[test]
     fn parse_caps_empty_input() {
-        let r = parse_capabilities("");
-        assert!(!r.python3 && !r.perl && !r.diff);
+        assert_eq!(parse_capabilities(""), None);
     }
 
     // ─── select_interpreter ─────────────────────────────────────────
@@ -1559,272 +2191,36 @@ __RSSH_JSON__\n{\"call\":\"second\"}\n__RSSH_JSON__\n";
         assert_eq!(extract_json_payload(pty), Some("{\"call\":\"second\"}"));
     }
 
-    // ─── ansi_c_quote ───────────────────────────────────────────────
-
     #[test]
-    fn ansi_c_quote_empty() {
-        assert_eq!(ansi_c_quote(""), "$''");
+    fn every_shell_transmits_shared_scripts_and_nonempty_encoded_arguments() {
+        for shell in [ShellKind::Posix, ShellKind::Powershell, ShellKind::Cmd] {
+            for interp in [Interpreter::Python3, Interpreter::Perl] {
+                for command in [
+                    build_match_cmd(shell, interp, "~/it's %PATH% [中].txt", "a\n'b`$()", 80, 80),
+                    build_modify_cmd(shell, interp, "~/it's %PATH% [中].tmp", "a\n'b`$()", "", 1),
+                ] {
+                    assert!(!command.contains(['\n', '\r']));
+                    assert!(!command.contains("Rssh-Read"));
+                    assert!(!command.contains("IndexOf"));
+                    assert!(!command.contains("%PATH%"));
+                }
+            }
+        }
     }
 
     #[test]
-    fn ansi_c_quote_plain_ascii() {
-        // 纯 ASCII 无元字符 —— 整段原样塞进 $'...'
-        assert_eq!(ansi_c_quote("hello world"), "$'hello world'");
-    }
-
-    #[test]
-    fn ansi_c_quote_newline_becomes_escape() {
-        // 关键不变量：真换行 → `\n` 两字符序列，shell 拿到的命令是单行 ASCII，
-        // 但 shell 展开后传给程序的 argv 含真实换行。
-        assert_eq!(ansi_c_quote("a\nb"), "$'a\\nb'");
+    fn posix_copy_diff_replace_preserve_literal_paths_and_home_expansion() {
         assert_eq!(
-            ansi_c_quote("line1\nline2\nline3"),
-            "$'line1\\nline2\\nline3'"
+            build_cp_cmd(ShellKind::Posix, "/has space/it's", "/tmp/file"),
+            r"\cp -- '/has space/it'\''s' '/tmp/file'"
         );
-    }
-
-    #[test]
-    fn ansi_c_quote_single_quote_uses_hex_escape() {
-        // 单引号走 `\x27` 而非 `\'`。
-        // 历史教训：含多个 `\'` 的长命令在 zsh + p10k 下偶发卡死（同样命令
-        // 不含 `\'` 时稳定过）。改 hex 后 ZLE 状态机不再有"backslash + 字面
-        // 单引号"和"close-quote"共用 transition 的风险。两者经 shell 解码后
-        // 等价（都是 byte 0x27）。
-        assert_eq!(ansi_c_quote("it's"), r"$'it\x27s'");
-        assert_eq!(ansi_c_quote("'"), r"$'\x27'");
-        // 关键不变量：输出绝不能含 `\'` 序列
-        let q = ansi_c_quote("a'b'c'd");
-        assert!(!q.contains(r"\'"), "must not produce \\' (hardening): {q}");
-    }
-
-    #[test]
-    fn ansi_c_quote_backslash_doubles() {
-        // 反斜杠在 $'...' 内是转义引导，必须 `\\`
-        assert_eq!(ansi_c_quote(r"a\b"), r"$'a\\b'");
-    }
-
-    #[test]
-    fn ansi_c_quote_tab_and_cr() {
-        assert_eq!(ansi_c_quote("a\tb"), "$'a\\tb'");
-        assert_eq!(ansi_c_quote("a\rb"), "$'a\\rb'");
-    }
-
-    #[test]
-    fn ansi_c_quote_hex_escapes_c0_controls() {
-        // 安全 hardening：ESC (0x1B) / BEL (0x07) / 其他 C0 控制字符 + DEL 必须 hex 化，
-        // 防止 LLM 提供含 ESC sequence 的 find/replace 通过 PTY echo 触发 terminal injection。
-        assert_eq!(ansi_c_quote("\x1b[31mRED"), "$'\\x1b[31mRED'");
-        assert_eq!(ansi_c_quote("\x07bell"), "$'\\x07bell'");
-        assert_eq!(ansi_c_quote("\x00NUL"), "$'\\x00NUL'");
-        assert_eq!(ansi_c_quote("\x7fDEL"), "$'\\x7fDEL'");
-        // 已经特殊处理的 \n / \r / \t 不被这条规则覆盖（保持原有 \n / \r / \t）
-        assert_eq!(ansi_c_quote("a\nb"), "$'a\\nb'");
-        // 综合：CSI 序列里夹换行
         assert_eq!(
-            ansi_c_quote("\x1b]0;evil title\x07\nok"),
-            "$'\\x1b]0;evil title\\x07\\nok'"
+            build_diff_cmd(ShellKind::Posix, "~/foo", "~/foo.tmp"),
+            "\\diff -u -- \"$HOME\"/'foo' \"$HOME\"/'foo.tmp'"
         );
-    }
-
-    #[test]
-    fn ansi_c_quote_multibyte_passthrough() {
-        // 非 ASCII（中文 / emoji）原样塞进 $'...'，shell 当字节透传给 argv
-        assert_eq!(ansi_c_quote("中文"), "$'中文'");
-        assert_eq!(ansi_c_quote("🦀"), "$'🦀'");
-    }
-
-    #[test]
-    fn ansi_c_quote_shell_metachars_inert() {
-        // $ ` 等在 $'...' 内不展开（跟 "$..." 不同）
-        assert_eq!(ansi_c_quote("$HOME"), "$'$HOME'");
-        assert_eq!(ansi_c_quote("`whoami`"), "$'`whoami`'");
-    }
-
-    #[test]
-    fn ansi_c_quote_script_stays_single_line_ascii() {
-        // 真实脚本里全是真换行 —— ansi_c_quote 输出必须不含真换行字节，
-        // 否则 zsh ZLE 在 PTY 流里看到 `\n` 进 multi-line quote race。
-        let quoted = ansi_c_quote(PYTHON_MATCH_SCRIPT);
-        assert!(!quoted.contains('\n'), "ansi_c_quote leaked real newline");
-        assert!(!quoted.contains('\r'));
-        // 也确认开头 / 结尾 marker 存在
-        assert!(quoted.starts_with("$'"));
-        assert!(quoted.ends_with('\''));
-    }
-
-    #[test]
-    fn ansi_c_quote_preserves_leading_spaces() {
-        // 回归保护：patch_file 的 replace 经常是 YAML / config 块，缩进 2/4/6 空格混合。
-        // ansi_c_quote 透传空格 byte，不能压缩 / 折叠，否则 shell 解析回来给 Python argv
-        // 的字符串缩进塌掉，patch 写出来的文件就乱了。
-        //
-        // 历史误诊场景：发现 prometheus.yml 改完缩进塌成 2 空格，第一反应怀疑这里。
-        // 实际是 LLM 在 tool input 里就给了塌的缩进 —— rssh 链路本身无损。本测试钉死
-        // 这个不变量，下次遇到类似怀疑直接看这测试是否还过。
-        let yaml = "  - job_name: \"x\"\n    scrape_interval: 1s\n      - targets: [\"h:80\"]";
-        let q = ansi_c_quote(yaml);
-        // 空格 byte 个数：ansi_c_quote 只改 \n/\r/\t/'/\\，空格透传 —— 出入必须相等
-        let orig = yaml.bytes().filter(|&b| b == b' ').count();
-        let got = q.bytes().filter(|&b| b == b' ').count();
-        assert_eq!(orig, got, "spaces lost: {orig} → {got}, quoted={q}");
-        // 行首空格也得在原位（每行的字面前缀应原样保留，不与 \n 混淆）
-        assert!(
-            q.contains("$'  - job_name:"),
-            "L1 leading 2 spaces dropped: {q}"
+        assert_eq!(
+            build_mv_cmd(ShellKind::Posix, "~/foo.tmp", "~/foo"),
+            "\\mv -- \"$HOME\"/'foo.tmp' \"$HOME\"/'foo'"
         );
-        assert!(
-            q.contains("\\n    scrape_interval"),
-            "L2 leading 4 spaces dropped: {q}"
-        );
-        assert!(
-            q.contains("\\n      - targets"),
-            "L3 leading 6 spaces dropped: {q}"
-        );
-    }
-
-    // ─── build_match_cmd / build_modify_cmd / build_cp_cmd / build_diff_cmd / build_mv_cmd ───
-
-    #[test]
-    fn build_match_cmd_python3_form() {
-        let cmd = build_match_cmd(Interpreter::Python3, "/etc/foo.yml", "old", 80, 80);
-        // 形态：python3 -c $'<script>' '/etc/foo.yml' $'old' '80' '80'
-        assert!(cmd.starts_with("python3 -c $'"), "got: {cmd}");
-        // path 走 shell_quote / ~/ 展开
-        assert!(cmd.contains("'/etc/foo.yml'"));
-        // find 走 ansi_c_quote："old" → $'old'
-        assert!(cmd.contains("$'old'"));
-        // before / after 走 shell_quote
-        assert!(cmd.contains("'80'"));
-        // 整条命令必须单行（避免 PTY ZLE quote race）
-        assert!(!cmd.contains('\n'), "cmd has real newline: {cmd}");
-    }
-
-    #[test]
-    fn build_match_cmd_perl_form() {
-        let cmd = build_match_cmd(Interpreter::Perl, "/etc/foo.yml", "old", 80, 80);
-        assert!(cmd.starts_with("perl -e $'"), "got: {cmd}");
-        assert!(!cmd.contains('\n'));
-    }
-
-    #[test]
-    fn build_match_cmd_python3_omits_arg_separator() {
-        // Regression: Python `-c` 不消耗 `--`，加上去会让 sys.argv[1] 变成字面 '--'，
-        // path 错位为 argv[2]。表现为 "io_error: invalid sys.argv".
-        let cmd = build_match_cmd(Interpreter::Python3, "/etc/foo.yml", "old", 80, 80);
-        assert!(
-            !cmd.contains(" -- '/etc/foo.yml'"),
-            "Python 路径 path 前不应有 `--`：{cmd}"
-        );
-    }
-
-    #[test]
-    fn build_match_cmd_perl_keeps_arg_separator() {
-        // Perl `-e` 之后 @ARGV 首元素若以 `-` 开头会被当未知 switch（"Unrecognized switch"），
-        // 必须用 `--` 强制结束 switch 解析。
-        let cmd = build_match_cmd(Interpreter::Perl, "/etc/foo.yml", "old", 80, 80);
-        assert!(
-            cmd.contains(" -- '/etc/foo.yml'"),
-            "Perl 脚本 + path 之间必须有 `--`：{cmd}"
-        );
-    }
-
-    #[test]
-    fn build_match_cmd_tilde_path_expands() {
-        let cmd = build_match_cmd(Interpreter::Python3, "~/foo.yml", "x", 10, 10);
-        // ~/ 展开为 "$HOME"/，rest 部分单引号包
-        assert!(cmd.contains("\"$HOME\"/'foo.yml'"));
-    }
-
-    #[test]
-    fn build_match_cmd_find_with_newline_stays_single_line() {
-        // 真实场景：LLM 提供含换行的 find（如多行 YAML 块）。命令仍须单行 ASCII。
-        let cmd = build_match_cmd(Interpreter::Python3, "/p", "line1\nline2", 0, 0);
-        assert!(!cmd.contains('\n'), "newline leaked into cmd: {cmd}");
-        // find 应当作 ANSI-C escape：$'line1\nline2'
-        assert!(cmd.contains(r"$'line1\nline2'"));
-    }
-
-    #[test]
-    fn build_match_cmd_find_with_shell_metachars_no_expansion() {
-        // find 含 $VAR / 反引号 —— $'...' 内不展开
-        let cmd = build_match_cmd(Interpreter::Python3, "/p", "$HOME `whoami`", 0, 0);
-        assert!(cmd.contains("$'$HOME `whoami`'"));
-    }
-
-    #[test]
-    fn build_modify_cmd_python3_form() {
-        let cmd = build_modify_cmd(Interpreter::Python3, "/p.tmp", "old", "new", 3);
-        // 形态：python3 -c $'<script>' '/p.tmp' $'old' $'new' '3'
-        assert!(cmd.starts_with("python3 -c $'"), "got: {cmd}");
-        assert!(cmd.contains("'/p.tmp'"));
-        assert!(cmd.contains("$'old'"));
-        assert!(cmd.contains("$'new'"));
-        assert!(cmd.contains("'3'"));
-        assert!(!cmd.contains('\n'));
-    }
-
-    #[test]
-    fn build_modify_cmd_perl_form() {
-        let cmd = build_modify_cmd(Interpreter::Perl, "/p.tmp", "old", "new", 1);
-        assert!(cmd.starts_with("perl -e $'"), "got: {cmd}");
-        // Perl 路径必须 `--` 分隔
-        assert!(cmd.contains(" -- '/p.tmp'"), "got: {cmd}");
-        assert!(!cmd.contains('\n'));
-    }
-
-    #[test]
-    fn build_modify_cmd_handles_replace_with_newline() {
-        // 多行 replace（真实场景：YAML block 替换）—— 不进 ZLE quote race
-        let cmd = build_modify_cmd(Interpreter::Python3, "/p.tmp", "k: 1", "k: 2\nk2: 3", 1);
-        assert!(!cmd.contains('\n'), "newline leaked: {cmd}");
-        assert!(cmd.contains(r"$'k: 2\nk2: 3'"));
-    }
-
-    #[test]
-    fn build_modify_cmd_handles_special_chars_in_path() {
-        let cmd = build_modify_cmd(Interpreter::Python3, "/has space/it's.tmp", "x", "y", 1);
-        assert!(cmd.contains(r"'/has space/it'\''s.tmp'"));
-    }
-
-    #[test]
-    fn build_cp_cmd_form() {
-        let cmd = build_cp_cmd("/p", "/p.rssh-abc12345");
-        assert_eq!(cmd, r"\cp -- '/p' '/p.rssh-abc12345'");
-    }
-
-    #[test]
-    fn build_cp_cmd_with_tilde() {
-        let cmd = build_cp_cmd("~/foo", "~/foo.tmp");
-        assert_eq!(cmd, "\\cp -- \"$HOME\"/'foo' \"$HOME\"/'foo.tmp'");
-    }
-
-    #[test]
-    fn build_cp_cmd_with_special_chars() {
-        let cmd = build_cp_cmd("/has space/it's", "/has space/it's.tmp");
-        assert_eq!(cmd, r"\cp -- '/has space/it'\''s' '/has space/it'\''s.tmp'");
-    }
-
-    #[test]
-    fn build_diff_cmd_form() {
-        let cmd = build_diff_cmd("/p", "/p.tmp");
-        assert_eq!(cmd, r"\diff -u -- '/p' '/p.tmp'");
-    }
-
-    #[test]
-    fn build_diff_cmd_with_tilde() {
-        let cmd = build_diff_cmd("~/foo", "~/foo.tmp");
-        assert_eq!(cmd, "\\diff -u -- \"$HOME\"/'foo' \"$HOME\"/'foo.tmp'");
-    }
-
-    #[test]
-    fn build_mv_cmd_form() {
-        let cmd = build_mv_cmd("/p.rssh-abc12345", "/p");
-        assert_eq!(cmd, r"\mv -- '/p.rssh-abc12345' '/p'");
-    }
-
-    #[test]
-    fn build_mv_cmd_with_tilde() {
-        let cmd = build_mv_cmd("~/foo.tmp", "~/foo");
-        assert_eq!(cmd, "\\mv -- \"$HOME\"/'foo.tmp' \"$HOME\"/'foo'");
     }
 }

@@ -274,8 +274,8 @@ pub fn merge_import(db: &Db, ss: &dyn SecretStore, data_dir: &Path, data: &Value
             }
         }
     }
-    // skills — full replace when the key is present (mirror semantics). Null
-    // (the scrubbed form) or a missing key leaves local skills untouched.
+    // User skills mirror the payload.
+    // Null (the scrubbed form) or a missing key leaves local skills untouched.
     if let Some(arr) = data
         .get("skills")
         .filter(|v| !v.is_null())
@@ -766,8 +766,8 @@ fn build_payload_inner(
             to_val(ai_command_blacklist::list(db)?)?,
         );
     }
-    // "AI 配置" — one toggle for the whole AI section: active provider + each
-    // provider's model/endpoint AND api_key, all-or-nothing. The key rides in the
+    // "AI 配置" — one toggle for the whole AI section: system prompt, active provider,
+    // and each provider's model/endpoint AND api_key, all-or-nothing. The key rides in the
     // payload as plaintext, then the whole payload is encrypted with the sync
     // password before upload, so the remote never sees it in clear.
     if on(|p| p.ai) {
@@ -1650,30 +1650,95 @@ mod tests {
     }
 
     #[test]
-    fn merge_skills_replaces_local_set() {
+    fn system_prompt_round_trips_and_legacy_payload_preserves_local_edits() {
         let (db, ss, dir) = fixture();
-        crate::db::ai_skill::upsert(
+        let content = "  自定义系统提示词\nStart with the observed failure.  \n\n";
+        crate::db::settings::set(&db, crate::ai::prompts::SYSTEM_PROMPT_KEY, content).unwrap();
+
+        for data in [
+            json!({ "version": 1 }),
+            json!({ "version": 1, "skills": null }),
+            json!({ "version": 1, "skills": [] }),
+            json!({ "version": 1, "ai": null }),
+            json!({ "version": 1, "ai": { "providers": [] } }),
+        ] {
+            merge_import(&db, &ss, dir.path(), &data).unwrap();
+            assert_eq!(crate::ai::prompts::get(&db).unwrap(), content);
+        }
+
+        for mode in [
+            ExportMode::LocalBackup,
+            ExportMode::RemotePush(read_sync_prefs(&db).unwrap()),
+        ] {
+            let payload = build_payload(&db, &ss, dir.path(), &mode).unwrap();
+            assert_eq!(payload["ai"]["system_prompt"], content);
+            assert!(payload["skills"].as_array().unwrap().is_empty());
+
+            let (restored, restored_ss, restored_dir) = fixture();
+            merge_import(&restored, &restored_ss, restored_dir.path(), &payload).unwrap();
+            assert_eq!(crate::ai::prompts::get(&restored).unwrap(), content);
+            assert!(crate::db::ai_skill::list(&restored).unwrap().is_empty());
+        }
+
+        merge_import(
             &db,
-            &crate::db::ai_skill::UserSkill {
-                id: "local".into(),
-                name: "Local".into(),
-                description: "d".into(),
-                content: "c".into(),
-            },
+            &ss,
+            dir.path(),
+            &json!({ "version": 1, "ai": { "providers": [], "system_prompt": "" } }),
         )
         .unwrap();
+        assert_eq!(crate::ai::prompts::get(&db).unwrap(), "");
+    }
+
+    #[test]
+    fn system_prompt_sync_follows_ai_category_not_skills() {
+        let (db, ss, dir) = fixture();
+        crate::db::settings::set(&db, crate::ai::prompts::SYSTEM_PROMPT_KEY, "custom system")
+            .unwrap();
+        let mut prefs = read_sync_prefs(&db).unwrap();
+        prefs.skills = false;
+        prefs.ai = true;
+        let payload = build_payload(&db, &ss, dir.path(), &ExportMode::RemotePush(prefs)).unwrap();
+        assert!(payload.get("skills").is_none());
+        assert_eq!(payload["ai"]["system_prompt"], "custom system");
+
+        let mut prefs = read_sync_prefs(&db).unwrap();
+        prefs.skills = true;
+        prefs.ai = false;
+        let payload = build_payload(&db, &ss, dir.path(), &ExportMode::RemotePush(prefs)).unwrap();
+        assert!(payload.get("ai").is_none());
+        assert!(payload["skills"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn merge_skills_replaces_local_set() {
+        let (db, ss, dir) = fixture();
+        for id in ["local", "general"] {
+            crate::db::ai_skill::upsert(
+                &db,
+                &crate::db::ai_skill::UserSkill {
+                    id: id.into(),
+                    name: "Local".into(),
+                    description: "d".into(),
+                    content: "c".into(),
+                },
+            )
+            .unwrap();
+        }
         let data = json!({
             "version": 1,
             "skills": [
                 {"id": "s1", "name": "Diagnose", "description": "d", "content": "c", "builtin": false},
                 // hand-edited payload claiming a builtin — skipped, never written
                 {"id": "b1", "name": "Fake builtin", "description": "d", "content": "c", "builtin": true},
+                {"id": "general", "name": "Legacy builtin", "description": "d", "content": "c", "builtin": true},
             ],
         });
         merge_import(&db, &ss, dir.path(), &data).unwrap();
-        let skills = crate::db::ai_skill::list(&db).unwrap();
+        let skills = crate::ai::skills::list_user(&db).unwrap();
         assert_eq!(skills.len(), 1, "skills mirror the payload exactly");
         assert_eq!(skills[0].id, "s1");
+        assert!(crate::ai::skills::get(&db, "general").unwrap().is_none());
     }
 
     #[test]
@@ -1812,9 +1877,12 @@ mod tests {
             },
         )
         .unwrap();
+        crate::db::settings::set(&db, crate::ai::prompts::SYSTEM_PROMPT_KEY, "local system")
+            .unwrap();
         let data = json!({
             "version": 1,
             "ai": {
+                "system_prompt": "replacement must not be applied",
                 "providers": [
                     {"provider": "deepseek", "model": "deepseek-chat",
                      "endpoint": "https://api.deepseek.com/v1"},
@@ -1825,6 +1893,36 @@ mod tests {
         let rows = crate::db::ai_provider::list(&db).unwrap();
         assert_eq!(rows.len(), 1, "local rows untouched by rejected payload");
         assert_eq!(rows[0].id, "provider-keep1");
+        assert_eq!(crate::ai::prompts::get(&db).unwrap(), "local system");
+    }
+
+    #[test]
+    fn merge_ai_invalid_system_prompt_keeps_local_settings_and_providers() {
+        let (db, ss, dir) = fixture();
+        crate::db::settings::set(&db, crate::ai::prompts::SYSTEM_PROMPT_KEY, "local system")
+            .unwrap();
+        crate::db::ai_provider::upsert(
+            &db,
+            &crate::db::ai_provider::ProviderRow {
+                id: "provider-keep1".into(),
+                name: "DeepSeek".into(),
+                protocol: "deepseek-thinking".into(),
+                model: "deepseek-chat".into(),
+                endpoint: "https://api.deepseek.com/v1".into(),
+            },
+        )
+        .unwrap();
+        for invalid in [json!(null), json!(false), json!(42), json!({})] {
+            let data = json!({
+                "version": 1,
+                "ai": { "providers": [], "system_prompt": invalid },
+            });
+            merge_import(&db, &ss, dir.path(), &data).unwrap_err();
+            assert_eq!(crate::ai::prompts::get(&db).unwrap(), "local system");
+            let rows = crate::db::ai_provider::list(&db).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, "provider-keep1");
+        }
     }
 
     #[test]
@@ -1953,6 +2051,7 @@ mod tests {
         )
         .unwrap();
         let expected = json!({
+            "system_prompt": crate::ai::prompts::SYSTEM,
             "active_provider": id,
             "providers": [{
                 "provider": id,
