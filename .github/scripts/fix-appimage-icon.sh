@@ -8,10 +8,6 @@
 # icon file itself sits next to the symlink inside the AppDir, so a relative
 # link is all we need. (issue #91)
 #
-# A symlink with an absolute target is only broken when that target does not
-# resolve inside the AppImage; absolute links into the image itself (e.g.
-# /usr/lib/...) stay untouched.
-#
 # appimagetool refuses to build an AppImage from an AppDir whose root directory
 # is not readable by other users (mode 0700 -> "found 1 ERROR(S) in the
 # AppDir"), and the extracted tree inherits that mode. The tree therefore has to
@@ -43,20 +39,38 @@ fi
 APPIMAGE="$(cd "$(dirname "$APPIMAGE")" && pwd)/$(basename "$APPIMAGE")"
 APPIMAGETOOL="$(cd "$(dirname "$APPIMAGETOOL")" && pwd)/$(basename "$APPIMAGETOOL")"
 
-# Print the symlinks of the given tree that point at a path which does not
-# exist inside it. Those are the broken ones.
+# List the symlinks of the given tree that do not resolve inside it, one per
+# line, prefixed with the kind of breakage:
+#
+#   absolute  the target is absolute and does not exist inside the image
+#             (this is the build path artefact of #91)
+#   relative  the target is relative and does not resolve
+#   self      the link points at itself
+#
+# Resolution is lexical on purpose: following symlinks would resolve outside
+# the image and hide the very breakage we are looking for.
 broken_links() {
-    local tree="$1" link target
+    local tree="$1" link linkrel target resolved linkpath
     while IFS= read -r link; do
         target="$(readlink "$link")"
+        linkrel="${link#"$tree"/}"
         case "$target" in
-            /*) ;;
-            *) continue ;;
+            /*) resolved="${tree}${target}" ;;
+            *)  resolved="${tree}/$(dirname "$linkrel")/${target}" ;;
         esac
-        if [ -e "${tree}${target}" ]; then
+        resolved="$(realpath -ms "$resolved")"
+        linkpath="$(realpath -ms "$link")"
+        if [ "$resolved" = "$linkpath" ]; then
+            printf 'self %s\n' "$link"
             continue
         fi
-        printf '%s\n' "$link"
+        if [ -e "$resolved" ]; then
+            continue
+        fi
+        case "$target" in
+            /*) printf 'absolute %s\n' "$link" ;;
+            *)  printf 'relative %s\n' "$link" ;;
+        esac
     done < <(find "$tree" -type l -print)
 }
 
@@ -65,13 +79,22 @@ broken_links() {
   rm -rf squashfs-root
   "./$base" --appimage-extract >/dev/null
 
-  # Every broken symlink has to become relative: the file it refers to sits
-  # next to the symlink inside the AppDir (that is how .DirIcon refers to the
-  # icon), so a plain file name is enough.
-  while IFS= read -r link; do
+  # The build path artefacts have to become relative: the file they refer to
+  # sits next to the symlink inside the AppDir (that is how .DirIcon refers to
+  # the icon), so a plain file name is enough. The candidate has to be a plain
+  # file: a symlink of the same name would be the link itself, and turning a
+  # link into a self-reference would break it. Relative links are left alone,
+  # they are not build path artefacts.
+  while IFS= read -r entry; do
+      case "$entry" in
+          "absolute "*) ;;
+          *) continue ;;
+      esac
+      link="${entry#absolute }"
       target="$(readlink "$link")"
       name="$(basename "$target")"
-      if [ -e "$(dirname "$link")/$name" ]; then
+      candidate="$(dirname "$link")/$name"
+      if [ "$candidate" != "$link" ] && [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
           ln -sf "$name" "$link"
       else
           echo "ERROR: cannot relativise $link -> $target" >&2
@@ -88,15 +111,25 @@ broken_links() {
 
   # Post-condition: the repacked AppImage must not contain a symlink that
   # fails to resolve inside it, otherwise unpackers fail with "Symlink target
-  # not found" (#91, #318).
+  # not found" (#91, #318). Absolute links and self-references are fatal,
+  # dangling relative links are reported but do not block the release: an
+  # AppImage may carry them without breaking the installation.
   rm -rf squashfs-root
   "./$base" --appimage-extract >/dev/null
-  broken="$(broken_links squashfs-root)"
-  if [ -n "$broken" ]; then
+  fatal=""
+  while IFS= read -r entry; do
+      case "$entry" in
+          "relative "*)
+              link="${entry#relative }"
+              echo "WARNING: $link -> $(readlink "$link") does not resolve inside the AppImage" >&2
+              continue ;;
+      esac
+      link="${entry#* }"
+      fatal="${fatal}${entry}"$'\n'
+  done < <(broken_links squashfs-root)
+  if [ -n "$fatal" ]; then
       echo "ERROR: $base still contains unresolvable symlinks:" >&2
-      while IFS= read -r link; do
-          printf '  %s -> %s\n' "$link" "$(readlink "$link")" >&2
-      done <<< "$broken"
+      printf '%s' "$fatal" >&2
       exit 1
   fi
   rm -rf squashfs-root )
