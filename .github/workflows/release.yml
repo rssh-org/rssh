@@ -157,13 +157,20 @@ jobs:
       # linuxdeploy bakes .DirIcon as an absolute symlink into the runner's
       # build path (/home/runner/work/...), which breaks AppImage unpackers
       # like AppManager ("Symlink target not found"). Make it relative. (#91)
+      # A failure here has to fail the job: the error used to be swallowed,
+      # so a broken AppImage was published with a green build. (#318)
       - name: Fix AppImage icon symlink
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          set -euo pipefail
           BUNDLE="target/${{ matrix.target }}/release/bundle"
-          APPIMAGE="$(ls "${BUNDLE}"/appimage/*.AppImage 2>/dev/null | head -1 || true)"
-          [ -n "$APPIMAGE" ] && bash .github/scripts/fix-appimage-icon.sh "$APPIMAGE" || echo "No AppImage; skipping."
+          APPIMAGE="$(find "${BUNDLE}/appimage" -maxdepth 1 -name '*.AppImage' -print -quit 2>/dev/null || true)"
+          if [ -z "${APPIMAGE}" ]; then
+            echo "No AppImage to fix; skipping."
+            exit 0
+          fi
+          bash .github/scripts/fix-appimage-icon.sh "${APPIMAGE}"
 
       - name: Rename artifacts
         shell: bash
