@@ -1455,6 +1455,7 @@ mod tests {
                 target_id: "target".into(),
                 skill: "general".into(),
                 system_prompt: "test".into(),
+                response_language: "English".into(),
                 user_skills_cache: Vec::new(),
                 model: "test".into(),
                 driver: crate::ai::session::SessionDriver::Ai(Box::new(CommandProposalClient {
@@ -1501,6 +1502,7 @@ mod tests {
                 target_id: "target".into(),
                 skill: "general".into(),
                 system_prompt: "test".into(),
+                response_language: "English".into(),
                 user_skills_cache: Vec::new(),
                 model: "test".into(),
                 driver: crate::ai::session::SessionDriver::Ai(Box::new(StreamingClient)),
@@ -1545,6 +1547,7 @@ mod tests {
                 target_id: "target".into(),
                 skill: "general".into(),
                 system_prompt: "test".into(),
+                response_language: "English".into(),
                 user_skills_cache: Vec::new(),
                 model: "test".into(),
                 driver: crate::ai::session::SessionDriver::Ai(Box::new(FileOpClient {

@@ -43,6 +43,11 @@ pub enum ShellKind {
 }
 
 impl ShellKind {
+    /// File operations have templates for shell targets, not raw device CLIs.
+    pub fn supports_file_operations(self) -> bool {
+        !self.is_raw_device()
+    }
+
     /// Raw-device targets: no shell to carry a sentinel, no exit code, manual
     /// (user-driven) completion. One predicate so the sentinel/separator/prompt
     /// switches can't drift apart as kinds are added.
@@ -92,8 +97,7 @@ impl ShellKind {
             Self::Cmd => format!("{cmd} & echo {marker}:%errorlevel%"),
             // PS 5+: `;` separates, `Write-Output` emits the string.
             // `$LASTEXITCODE` is set ONLY by *native* (external) programs; after
-            // a pure cmdlet (Get-X / Set-X — exactly what `prompt_section` steers
-            // the LLM toward) it is left untouched, and on a fresh session it is
+            // a pure cmdlet (Get-X / Set-X) it is left untouched, and on a fresh session it is
             // `$null`. `$null` interpolates to empty, so the naive
             // `marker:$LASTEXITCODE` yields `marker:` (no digit) → the front-end
             // sentinel regex `:(-?\d+)` never matches → the command false-times-out
@@ -149,16 +153,71 @@ impl ShellKind {
         }
     }
 
-    /// Render the "# Target shell" section appended to the system prompt.
-    /// The LLM uses this to (a) pick shell-appropriate command syntax and
-    /// (b) pick the right separator when batching multiple commands into a
-    /// single `cmd` argument. Update side-by-side with the templates in
-    /// `format_sentinel` if you change conventions.
+    /// Render the body of the system prompt's Target shell section.
+    pub fn system_prompt_block(self) -> String {
+        let (examples, exit_info, tips) = match self {
+            Self::Posix => (
+                "`ps aux`, `df -h`, `which python3`, `cat /etc/os-release`",
+                "Exit code variable for this shell: `$?`.",
+                "Standard POSIX shell. `;` separates statements; `&&` short-circuits on failure. \
+                 Pipes (`|`), redirects (`>`, `2>&1`), and command substitution (`$(...)`) all work as usual.",
+            ),
+            Self::Cmd => (
+                "`ipconfig`, `tasklist`, `dir`, `where python`, `systeminfo`",
+                "Exit code variable for this shell: `%errorlevel%`.",
+                "Windows cmd.exe. **Do NOT use POSIX syntax** — `;` is literal, `$?` is undefined, `$VAR` is not expanded. \
+                 Use `%VAR%` for environment variables (e.g. `%USERPROFILE%`). \
+                 Use `&` to separate statements (run both regardless); `&&` for short-circuit on success. \
+                 No pipes-of-pipes tricks; redirect to `nul` not `/dev/null`.",
+            ),
+            Self::Powershell => (
+                "`Get-Process`, `Get-NetIPAddress`, `Get-Command python`, `Get-ChildItem`, `$PSVersionTable`",
+                "For native commands, `$LASTEXITCODE` is the numeric exit code. For cmdlets, `$?` is a success boolean \
+                 (True/False), not an exit code; cmdlets do not update `$LASTEXITCODE`.",
+                "Windows PowerShell. `;` separates statements. Variables are `$Name`. \
+                 Use cmdlets (`Get-X` / `Set-X`) over external binaries when both exist. \
+                 Redirect to `$null` (PS) not `/dev/null`.",
+            ),
+            Self::Serial => (
+                "`help` on a supported bootloader, or `AT` on an AT-command modem; identify the device before choosing a command",
+                "No exit code. The `exit=` field is a placeholder, not a success signal. Judge success from the device response.",
+                "Raw serial port (UART / RS-232), not a POSIX or Windows shell. Use the connected device's command syntax. \
+                 Do not assume pipes, redirects, command substitution, globbing, or filesystem commands are supported.",
+            ),
+            Self::Telnet => (
+                "`show version` on Cisco IOS or `display version` on Huawei VRP; identify the device's CLI dialect first",
+                "No exit code. The `exit=` field is a placeholder, not a success signal. Judge success from output and device error messages.",
+                "Telnet may connect to a network-device CLI or an embedded/BusyBox box. Do not assume a Unix shell. \
+                 Use shell/filesystem features only after the output proves a Unix shell is present.",
+            ),
+        };
+        let composition = if self.is_raw_device() {
+            "Send exactly one device command per `cmd` argument. Do not chain commands with `;`, `&&`, `||`, `|`, \
+             or another separator. Completion is user-driven."
+                .to_string()
+        } else {
+            format!(
+                "When you need multiple commands in one `cmd` argument, separate them with `{}` \
+                 (rssh does not split — you compose the line).",
+                self.separator()
+            )
+        };
+        format!(
+            "The connected session is using **{}**.\n\n\
+             - Use target-appropriate command syntax. Typical commands here: {examples}.\n\
+             - {composition}\n\
+             - {exit_info}\n\
+             - {tips}\n",
+            self.name()
+        )
+    }
+
+    /// Render raw-device execution rules for the run_command tool description.
+    /// Shell identity is already supplied in the system environment information.
     pub fn prompt_section(self) -> String {
-        // Raw devices have no shell — their own guidance, not the
-        // (examples/exit_var/tips) shape the shell families share. Steers the
-        // LLM away from shell syntax, chaining, and any reliance on the
-        // (meaningless) exit code. Serial and telnet share the mechanics but
+        // Raw-device guidance steers the LLM away from shell syntax, chaining,
+        // and any reliance on the (meaningless) exit code.
+        // Serial and telnet share the mechanics but
         // NOT the steering: a serial peer is a bootloader/MCU, a telnet peer is
         // a network OS — wrong examples send the LLM down the wrong CLI.
         if let Self::Serial = self {
@@ -191,54 +250,13 @@ impl ShellKind {
                  messages, prompts, `% Invalid input`, etc.).\n\
                  - **Completion is user-driven.** Your command is pasted to the connection, then the \
                  user watches the device and submits the output once it has finished responding. Long \
-                 output may be truncated by the device's pager — asking the user to disable it (e.g. \
-                 `terminal length 0` / `screen-length 0 temporary`) is a reasonable first step on \
-                 network gear.\n\
+                 output may be truncated by the device's pager.\n\
                  - **Match the device's CLI dialect.** Read the prompt and early output to identify \
                  the OS before proposing commands; prefer read-only `show`/`display` commands, and use \
                  shell/filesystem features only after the output proves a Unix shell is present.\n"
                 .to_string();
         }
-        let (examples, exit_var, tips) = match self {
-            Self::Posix => (
-                "`ps aux`, `df -h`, `which python3`, `cat /etc/os-release`",
-                "`$?`",
-                "Standard POSIX shell. `;` separates statements; `&&` short-circuits on failure. \
-                 Pipes (`|`), redirects (`>`, `2>&1`), and command substitution (`$(...)`) all work as usual.",
-            ),
-            Self::Cmd => (
-                "`ipconfig`, `tasklist`, `dir`, `where python`, `systeminfo`",
-                "`%errorlevel%`",
-                "Windows cmd.exe. **Do NOT use POSIX syntax** — `;` is literal, `$?` is undefined, `$VAR` is not expanded. \
-                 Use `%VAR%` for environment variables (e.g. `%USERPROFILE%`). \
-                 Use `&` to separate statements (run both regardless); `&&` for short-circuit on success. \
-                 No pipes-of-pipes tricks; redirect to `nul` not `/dev/null`.",
-            ),
-            Self::Powershell => (
-                "`Get-Process`, `Get-NetIPAddress`, `Get-Command python`, `Get-ChildItem`, `$PSVersionTable`",
-                "`$LASTEXITCODE`",
-                "Windows PowerShell. `;` separates statements. \
-                 **Critical**: `$?` is a BOOLEAN (True/False), NOT the exit code — use `$LASTEXITCODE` for the numeric exit code of native commands. \
-                 Variables are `$Name`. Use cmdlets (`Get-X` / `Set-X`) over external binaries when both exist. \
-                 Redirect to `$null` (PS) not `/dev/null`.",
-            ),
-            Self::Serial | Self::Telnet => {
-                unreachable!("raw devices handled by the early returns above")
-            }
-        };
-        format!(
-            "\n---\n\n# Target shell\n\n\
-             The remote session is running **{name}**.\n\n\
-             - Use shell-appropriate command syntax. Typical commands here: {examples}.\n\
-             - When you need multiple commands in one `cmd` argument, separate them with `{sep}` (rssh does not split — you compose the line).\n\
-             - Exit code variable for this shell: {exit_var}.\n\
-             - {tips}\n",
-            name = self.name(),
-            sep = self.separator(),
-            examples = examples,
-            exit_var = exit_var,
-            tips = tips,
-        )
+        String::new()
     }
 
     /// Map a local shell binary path (as remembered by `PtyHandle`) to a
@@ -436,26 +454,51 @@ mod tests {
     }
 
     #[test]
-    fn prompt_section_mentions_right_keywords() {
-        // The LLM picks shell-appropriate syntax based on this section, so it
-        // MUST contain the distinguishing tokens. If a future refactor strips
-        // any of these, the LLM may revert to POSIX guesses on Windows targets
-        // — which is the exact bug this whole module exists to fix.
-        let posix = ShellKind::Posix.prompt_section();
-        assert!(posix.contains("POSIX"));
-        assert!(posix.contains("$?"));
+    fn system_prompt_block_uses_shell_specific_commands_and_separator() {
+        for (shell, example, exit_status) in [
+            (ShellKind::Posix, "`ps aux`", "`$?`"),
+            (ShellKind::Cmd, "`tasklist`", "`%errorlevel%`"),
+            (ShellKind::Powershell, "`Get-Process`", "`$LASTEXITCODE`"),
+        ] {
+            let block = shell.system_prompt_block();
+            assert!(block.contains(shell.name()));
+            assert!(block.contains(example));
+            assert!(block.contains(exit_status));
+            assert!(block.contains(&format!("separate them with `{}`", shell.separator())));
+            assert!(!block.contains("# Target shell"));
+        }
 
-        let cmd = ShellKind::Cmd.prompt_section();
-        assert!(cmd.contains("cmd.exe"));
-        assert!(cmd.contains("%errorlevel%"));
-        assert!(cmd.contains("&"));
-        assert!(cmd.contains("ipconfig") || cmd.contains("tasklist"));
+        let posix = ShellKind::Posix.system_prompt_block();
+        for syntax in ["`&&`", "`|`", "`>`", "`2>&1`", "`$(...)`"] {
+            assert!(posix.contains(syntax), "missing POSIX syntax: {syntax}");
+        }
+    }
 
-        let ps = ShellKind::Powershell.prompt_section();
-        assert!(ps.contains("PowerShell"));
-        assert!(ps.contains("$LASTEXITCODE"));
-        // PowerShell's `$?` is the booby trap — the section MUST warn the LLM.
-        assert!(ps.contains("$?"));
+    #[test]
+    fn powershell_system_prompt_distinguishes_native_and_cmdlet_status() {
+        let block = ShellKind::Powershell.system_prompt_block();
+        assert!(block.contains("For native commands, `$LASTEXITCODE` is the numeric exit code"));
+        assert!(block.contains("For cmdlets, `$?` is a success boolean"));
+        assert!(block.contains("cmdlets do not update `$LASTEXITCODE`"));
+    }
+
+    #[test]
+    fn raw_device_system_prompt_does_not_assume_a_shell() {
+        for (shell, example) in [
+            (ShellKind::Serial, "AT-command modem"),
+            (ShellKind::Telnet, "`show version`"),
+        ] {
+            let block = shell.system_prompt_block();
+            assert!(block.contains(shell.name()));
+            assert!(block.contains(example));
+            assert!(block.contains("exactly one device command"));
+            assert!(block.contains("Do not chain commands"));
+            assert!(block.contains("No exit code"));
+            assert!(block.contains("not a success signal"));
+            assert!(!block.contains("`ps aux`"));
+            assert!(!block.contains("`$?`"));
+            assert!(!block.contains("# Target shell"));
+        }
     }
 
     #[test]

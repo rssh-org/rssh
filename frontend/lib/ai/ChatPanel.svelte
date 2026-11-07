@@ -170,7 +170,7 @@
     }
 
     /** 没 session 就先启动；启动失败抛错。
-     *  skill 固定 general —— 用户自定义 skill 已自动拼进 master prompt，让 LLM 自己路由。
+     *  系统提示词由设置提供；skill 参数仅保留旧 wire 兼容。
      *  远端 shell 探测不在这里 —— 它在 SSH 连接时已跑过并写进 profile 缓存，
      *  startSession 从缓存读初始 shell（缓存 miss 则 POSIX 兜底）。 */
     async function ensureSession(owner: PanelOwner): Promise<void> {
@@ -191,7 +191,7 @@
                 tabId: owner.tabId,
                 targetKind: owner.targetKind,
                 targetId: startedTargetId,
-                skill: "general",
+                skill: "",
                 provider: settings.provider, model: settings.model,
                 lease: owner.lease,
             });
@@ -228,7 +228,7 @@
                 tabId: owner.tabId,
                 targetKind: owner.targetKind,
                 targetId: startedTargetId,
-                skill: "general",
+                skill: "",
                 provider: conversation.source === "mcp" ? "" : settings.provider,
                 model: conversation.source === "mcp" ? "" : settings.model,
                 lease: owner.lease,

@@ -259,6 +259,34 @@
         setByokNote(t("ai.settings.note.saved"), 2000);
     }
 
+    // ─── 系统提示词 ────────────────────────────────────────────
+    let systemPrompt = $state("");
+    let savedSystemPrompt = $state("");
+    let systemPromptLoaded = $state(false);
+    let savingSystemPrompt = $state(false);
+    let systemPromptNote = $state<string | null>(null);
+    let systemPromptChanged = $derived(systemPrompt !== savedSystemPrompt);
+
+    async function saveSystemPrompt() {
+        if (!systemPromptLoaded || savingSystemPrompt || !systemPromptChanged) return;
+        savingSystemPrompt = true;
+        systemPromptNote = null;
+        try {
+            await ai.saveSettings({ systemPrompt });
+            savedSystemPrompt = ai.settings()?.system_prompt ?? systemPrompt;
+            systemPrompt = savedSystemPrompt;
+        } catch (e) {
+            systemPromptNote = t("ai.settings.system_prompt.save_failed", { error: errMsg(e) });
+        } finally {
+            savingSystemPrompt = false;
+        }
+    }
+
+    function cancelSystemPrompt() {
+        systemPrompt = savedSystemPrompt;
+        systemPromptNote = null;
+    }
+
     // ─── Skill 管理 ────────────────────────────────────────────
     let skills = $state<SkillRecord[]>([]);
     let editing = $state<SkillRecord | null>(null);
@@ -298,6 +326,9 @@
 
     onMount(async () => {
         const s = await ai.loadSettings();
+        systemPrompt = s.system_prompt ?? "";
+        savedSystemPrompt = systemPrompt;
+        systemPromptLoaded = true;
         activeId = s.provider;
         autoRunCommand = s.auto_run_command;
         autoMatchFile = s.auto_match_file;
@@ -360,10 +391,6 @@
 
     async function saveSkill() {
         if (!editing) return;
-        if (editing.builtin) {
-            skillNote = t("ai.settings.skills.error.builtin_readonly");
-            return;
-        }
         if (!editing.name.trim() || !editing.content.trim() || !editing.id.trim()) {
             skillNote = t("ai.settings.skills.error.empty_fields");
             return;
@@ -388,7 +415,6 @@
     }
 
     async function removeSkill(s: SkillRecord) {
-        if (s.builtin) return;
         // 二次点击确认：第一次切到 "click again to confirm" 状态，3s 内不再点就回退
         if (!confirmingDelete) {
             confirmingDelete = true;
@@ -912,6 +938,26 @@
         </div>
     </div>
 
+    <section class="system-prompt-settings form" aria-labelledby="system-prompt-title">
+        <div class="row">
+            <label id="system-prompt-title" class="section-label" for="ai-system-prompt">{t("ai.settings.section.system_prompt")}</label>
+            <div id="system-prompt-hint" class="hint">{t("ai.settings.system_prompt.hint")}</div>
+            <textarea id="ai-system-prompt" rows="16" bind:value={systemPrompt}
+                      aria-describedby="system-prompt-hint" disabled={!systemPromptLoaded || savingSystemPrompt}></textarea>
+        </div>
+        {#if systemPromptNote}
+            <div class="banner" role="alert">{systemPromptNote}</div>
+        {/if}
+        <div class="actions">
+            <button class="btn btn-accent btn-sm" onclick={saveSystemPrompt}
+                    disabled={!systemPromptLoaded || savingSystemPrompt || !systemPromptChanged}>
+                {savingSystemPrompt ? t("ai.settings.btn.saving") : t("common.save")}
+            </button>
+            <button class="btn btn-sm" onclick={cancelSystemPrompt}
+                    disabled={savingSystemPrompt || !systemPromptChanged}>{t("common.cancel")}</button>
+        </div>
+    </section>
+
     <div class="section-label skill-header">
         {t("ai.settings.section.skills")}
         {#if !editing}
@@ -929,9 +975,6 @@
                 <button class="skill-item neu-sm" onclick={() => viewSkill(s)}>
                     <div class="skill-row">
                         <span class="skill-name">{s.name}</span>
-                        <span class="skill-tag" class:builtin={s.builtin} class:user={!s.builtin}>
-                            {s.builtin ? t("ai.settings.skills.tag.builtin") : t("ai.settings.skills.tag.user")}
-                        </span>
                         <span class="skill-id">{s.id}</span>
                     </div>
                     {#if s.description}<div class="skill-desc">{s.description}</div>{/if}
@@ -946,37 +989,35 @@
             <div class="row">
                 <label for="sk-id">{t("ai.settings.skills.label.id")}</label>
                 <input id="sk-id" type="text" bind:value={editing.id}
-                       disabled={!isNew || editing.builtin}/>
+                       disabled={!isNew}/>
             </div>
             <div class="row">
                 <label for="sk-name">{t("ai.settings.skills.label.name")}</label>
-                <input id="sk-name" type="text" bind:value={editing.name} disabled={editing.builtin}
+                <input id="sk-name" type="text" bind:value={editing.name}
                        placeholder={t("ai.settings.skills.placeholder.name")}/>
             </div>
             <div class="row">
                 <label for="sk-desc">{t("ai.settings.skills.label.description")}</label>
-                <input id="sk-desc" type="text" bind:value={editing.description} disabled={editing.builtin}
+                <input id="sk-desc" type="text" bind:value={editing.description}
                        placeholder={t("ai.settings.skills.placeholder.desc")}/>
             </div>
             <div class="row">
-                <label for="sk-content">{t("ai.settings.skills.label.system_prompt")}</label>
-                <textarea id="sk-content" bind:value={editing.content} disabled={editing.builtin}
+                <label for="sk-content">{t("ai.settings.skills.label.content")}</label>
+                <textarea id="sk-content" bind:value={editing.content}
                           rows="20"
                           placeholder={t("ai.settings.skills.placeholder.content")}></textarea>
             </div>
             <div class="actions">
-                {#if !editing.builtin}
-                    <button class="btn btn-accent btn-sm" onclick={saveSkill} disabled={savingSkill}>
-                        {savingSkill ? t("ai.settings.btn.saving") : t("common.save")}
-                    </button>
-                {/if}
-                {#if !editing.builtin && !isNew}
+                <button class="btn btn-accent btn-sm" onclick={saveSkill} disabled={savingSkill}>
+                    {savingSkill ? t("ai.settings.btn.saving") : t("common.save")}
+                </button>
+                {#if !isNew}
                     <button class="btn btn-sm btn-danger" class:confirming={confirmingDelete}
                             onclick={() => editing && removeSkill(editing)}>
                         {confirmingDelete ? t("ai.settings.skills.btn.delete_confirm") : t("ai.settings.skills.btn.delete")}
                     </button>
                 {/if}
-                <button class="btn btn-sm" onclick={cancelEdit}>{editing.builtin ? t("ai.settings.skills.btn.back") : t("ai.settings.skills.btn.cancel")}</button>
+                <button class="btn btn-sm" onclick={cancelEdit}>{t("ai.settings.skills.btn.cancel")}</button>
             </div>
         </div>
     {/if}
@@ -1312,20 +1353,6 @@
     .skill-name {
         font-weight: 600;
         font-size: 13px;
-    }
-    .skill-tag {
-        font-size: 10px;
-        padding: 1px 6px;
-        border-radius: 3px;
-        font-weight: 500;
-    }
-    .skill-tag.builtin {
-        background: var(--surface);
-        color: var(--text-dim);
-    }
-    .skill-tag.user {
-        background: var(--accent-soft);
-        color: var(--accent);
     }
     .skill-id {
         font-family: var(--term-font);

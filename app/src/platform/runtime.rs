@@ -111,12 +111,6 @@ pub async fn capabilities(window: &tauri::Window) -> AppResult<RuntimeCapabiliti
         .await
 }
 
-/// Android/iOS retain their existing diagnosis policy for private artifacts.
-#[cfg(feature = "tauri")]
-pub fn allows_diagnosis_downloads() -> bool {
-    !cfg!(any(android, ios))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

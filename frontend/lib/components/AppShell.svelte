@@ -395,7 +395,7 @@
                 tabId,
                 targetKind: "local",
                 targetId: sid,
-                skill: "general",
+                skill: "",
                 provider: settings.provider,
                 model: settings.model,
                 lease,

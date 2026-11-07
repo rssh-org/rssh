@@ -32,10 +32,6 @@ struct NativeWindows {
 
 #[async_trait::async_trait]
 impl WindowHost for NativeWindows {
-    fn allows_diagnosis_downloads(&self) -> bool {
-        crate::platform::runtime::allows_diagnosis_downloads()
-    }
-
     async fn ensure_local_analysis_available(&self) -> Result<(), String> {
         #[cfg(any(windows, macos, linux, ohos))]
         {

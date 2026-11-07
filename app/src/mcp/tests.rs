@@ -203,21 +203,30 @@ async fn streamable_http_initializes_and_exposes_only_terminal_tools() {
     assert!(result["result"]["tools"][2]["inputSchema"]["properties"]
         .get("request_id")
         .is_none());
-    let download_schema = &result["result"]["tools"][3]["inputSchema"];
-    let mut expected_schema = rssh_core::ai::tools::all_tools()
-        .into_iter()
-        .find(|tool| tool.name == "download_file")
-        .unwrap()
-        .input_schema;
-    expected_schema["properties"]["session_id"] = json!({
-        "type":"string", "description":"Exact session_id returned by list_sessions."
-    });
-    expected_schema["required"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!("session_id"));
-    expected_schema["additionalProperties"] = json!(false);
-    assert_eq!(download_schema, &expected_schema);
+    for (index, name) in [(2, "run_command"), (3, "download_file")] {
+        let canonical = rssh_core::ai::tools::all_tools()
+            .into_iter()
+            .find(|tool| tool.name == name)
+            .unwrap();
+        let exposed = &result["result"]["tools"][index];
+        assert_eq!(
+            exposed["description"],
+            format!(
+                "{} Use a session_id accepted through open_session.",
+                canonical.description
+            )
+        );
+        let mut expected_schema = canonical.input_schema;
+        expected_schema["properties"]["session_id"] = json!({
+            "type":"string", "description":"Exact session_id returned by list_sessions."
+        });
+        expected_schema["required"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("session_id"));
+        expected_schema["additionalProperties"] = json!(false);
+        assert_eq!(exposed["inputSchema"], expected_schema);
+    }
     let response = fixture
         .request(
             json!({"jsonrpc":"2.0", "id":3, "method":"tools/call",
@@ -412,15 +421,17 @@ async fn command_call_uses_the_ai_conversation_after_session_acceptance() {
 }
 
 #[tokio::test]
-async fn download_requires_an_accepted_conversation_and_an_ssh_target() {
+async fn download_requires_acceptance_and_copies_a_local_target_file() {
     let fixture = Fixture::new().await;
     let (id, host, mut events) = terminal(&fixture, "tab-download");
     let session = fixture.initialize().await;
+    let source = fixture._dir.path().join("profile.pprof");
+    std::fs::write(&source, b"local artifact").unwrap();
     let call = |request_id, max_mb| {
         fixture.request(
             json!({"jsonrpc":"2.0", "id":request_id, "method":"tools/call",
             "params":{"name":"download_file", "arguments":{
-                "session_id":id, "remote_path":"/tmp/profile.pprof", "max_mb":max_mb
+                "session_id":id, "remote_path":source, "max_mb":max_mb
             }}}),
             Some(&session),
         )
@@ -432,17 +443,37 @@ async fn download_requires_an_accepted_conversation_and_an_ssh_target() {
         "agent_session_unavailable"
     );
 
-    open_terminal(&fixture, &session, &id, host, &mut events).await;
-    let local = read_result(call(4, 1).send().await.unwrap()).await;
-    assert_eq!(local["result"]["isError"], true);
+    let info = open_terminal(&fixture, &session, &id, host, &mut events).await;
+    let request = call(4, 1);
+    let pending = tokio::spawn(async move { read_result(request.send().await.unwrap()).await });
+    let proposal = next_event(&mut events, "ai:download_proposed:").await;
+    let destination =
+        std::path::Path::new(proposal["dest_dir"].as_str().unwrap()).join("profile.pprof");
+    assert!(!destination.exists());
+    rssh_core::ai::commands::ai_command_result_impl(
+        &fixture.state,
+        "tab-download",
+        &fixture.owner,
+        proposal["id"].as_str().unwrap().into(),
+        0,
+        String::new(),
+        false,
+        false,
+        Some(&info.instance_id),
+    )
+    .await
+    .unwrap();
+    let local = pending.await.unwrap();
+    assert_eq!(local["result"]["isError"], false);
     assert_eq!(local["result"]["structuredContent"]["session_id"], id);
-    assert_eq!(local["result"]["structuredContent"]["ok"], false);
-    assert!(local["result"]["structuredContent"]["local_path"].is_null());
-    assert!(local["result"]["structuredContent"]["bytes"].is_null());
-    assert!(local["result"]["structuredContent"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("SFTP"));
+    assert_eq!(local["result"]["structuredContent"]["ok"], true);
+    assert_eq!(
+        local["result"]["structuredContent"]["local_path"],
+        destination.to_str().unwrap()
+    );
+    assert_eq!(local["result"]["structuredContent"]["bytes"], 14);
+    assert_eq!(std::fs::read(&destination).unwrap(), b"local artifact");
+    assert_eq!(std::fs::read(&source).unwrap(), b"local artifact");
 
     // Validation takes precedence over opening an SSH subsystem or displaying
     // an approval card, and must reject both sides of the advertised limit.

@@ -13,6 +13,7 @@ use crate::state::AppState;
 use super::codex_auth;
 use super::command_blacklist::{self, CategoryGroup};
 use super::llm;
+use super::prompts;
 use super::redact_rules::{self, RedactRuleRecord};
 use super::sanitize;
 use super::session::{self, DiagnoseSession, UserAction};
@@ -120,7 +121,7 @@ fn key_auto_detect_remote_shell() -> String {
 // `danger_mode` and the `auto_*` family are deliberately NOT synced — they are
 // per-device safety preferences, not portable config.
 
-/// Build the `ai` payload section: `{ active_provider, providers: [...] }`.
+/// Build the `ai` payload section: `{ system_prompt, active_provider, providers: [...] }`.
 /// Rows come from the `ai_providers` table — every row the user created rides
 /// along (a row IS intent; there is no "never-configured" partial state to
 /// filter). `include_keys` gates the plaintext `api_key` field (the AI-key
@@ -152,12 +153,17 @@ pub fn export_ai_settings(
         providers.push(obj);
     }
     let active = crate::db::settings::get(db, &key_provider())?;
-    Ok(json!({ "active_provider": active, "providers": providers }))
+    Ok(json!({
+        "system_prompt": prompts::get(db)?,
+        "active_provider": active,
+        "providers": providers,
+    }))
 }
 
 /// Apply an `ai` payload section — full replace (mirror): the local table
 /// becomes exactly what the payload carries. Rows absent from the payload are
-/// deleted (row + api_key).
+/// deleted (row + api_key). The system prompt is replaced only when present;
+/// older payloads without it leave the local prompt untouched.
 ///
 /// **Validate-then-mutate**: every row is parsed and checked (id/name/protocol/
 /// endpoint non-empty, protocol one of the three) BEFORE the mirror's first
@@ -173,6 +179,14 @@ pub fn import_ai_settings(
     data_dir: &std::path::Path,
     ai: &serde_json::Value,
 ) -> AppResult<()> {
+    let system_prompt = ai
+        .get("system_prompt")
+        .map(|value| {
+            value.as_str().ok_or_else(|| {
+                AppError::config("ai_payload_invalid", json!({ "field": "system_prompt" }))
+            })
+        })
+        .transpose()?;
     let arr = ai
         .get("providers")
         .and_then(|v| v.as_array())
@@ -249,6 +263,13 @@ pub fn import_ai_settings(
             crate::db::ai_provider::clear_all_tx(tx)?;
             for (row, _) in &rows {
                 crate::db::ai_provider::upsert_tx(tx, row)?;
+            }
+            if let Some(prompt) = system_prompt {
+                tx.execute(
+                    "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [prompts::SYSTEM_PROMPT_KEY, prompt],
+                )?;
             }
             Ok(())
         })
@@ -351,6 +372,58 @@ impl AiTarget {
             | AiTarget::Serial(id)
             | AiTarget::Telnet(id) => id,
         }
+    }
+}
+
+/// Resolve the owned transport and shell together for both start and rebind.
+fn target_environment(
+    state: &AppState,
+    owner: &crate::state::SessionOwner,
+    target: &AiTarget,
+) -> AppResult<(
+    Option<crate::ssh::client::SshHandle>,
+    super::shell::ShellKind,
+)> {
+    use super::shell::ShellKind;
+    use crate::commands::lifecycle::{owned_ready_ai_target, OwnedAiTarget};
+    use crate::state::SessionKind;
+
+    let kind = match target {
+        AiTarget::Ssh(_) => SessionKind::Ssh,
+        #[cfg(any(windows, macos, linux, ohos))]
+        AiTarget::Local(_) => SessionKind::Pty,
+        #[cfg(any(android, ios))]
+        AiTarget::Local(_) => return Err(AppError::not_found("local_pty_not_found", json!({}))),
+        #[cfg(any(windows, macos, linux, ohos))]
+        AiTarget::Serial(_) => SessionKind::Serial,
+        #[cfg(any(android, ios))]
+        AiTarget::Serial(_) => {
+            return Err(AppError::not_found("serial_session_not_found", json!({})))
+        }
+        AiTarget::Telnet(_) => SessionKind::Telnet,
+    };
+    match owned_ready_ai_target(state, target.id(), kind, owner)? {
+        OwnedAiTarget::Ssh { handle, profile_id } => {
+            let auto_detect = crate::db::settings::get(&state.db, &key_auto_detect_remote_shell())?
+                .as_deref()
+                == Some("1");
+            // Connect-time probes populate this cache. A disabled or unfinished
+            // probe keeps the existing POSIX fallback without blocking callers.
+            let shell = if auto_detect {
+                locked(&state.ai_remote_shell_cache)?
+                    .get(&profile_id)
+                    .copied()
+                    .unwrap_or_default()
+            } else {
+                ShellKind::default()
+            };
+            Ok((Some(handle), shell))
+        }
+        #[cfg(any(windows, macos, linux, ohos))]
+        OwnedAiTarget::PtyShellPath(path) => Ok((None, ShellKind::from_local_path(&path))),
+        #[cfg(any(windows, macos, linux, ohos))]
+        OwnedAiTarget::Serial => Ok((None, ShellKind::Serial)),
+        OwnedAiTarget::Telnet => Ok((None, ShellKind::Telnet)),
     }
 }
 
@@ -566,110 +639,13 @@ async fn start_session_impl(
         }
     };
 
-    // 2. 校验 target 存在 + 抓 SSH handle（给 download_file 工具复用）+ 推断初始 shell。
-    //
-    // Shell 决策 3 路径：
-    //   - local PTY: PtyHandle 记得用户选的 shell path → 映射 ShellKind，零探测。
-    //   - remote SSH + auto_detect off: POSIX 兜底（保护 99% Linux/macOS 现状）。
-    //   - remote SSH + auto_detect on:
-    //       cache 命中（连接时探测已写入）→ 用缓存值。
-    //       cache 未命中（探测未完成 / 失败 / 未开 auto_detect）→ POSIX 兜底。
-    //   探测本身在 SSH 连接成功后跑（见前端 TerminalPane + ai_remote_shell_probe_needed /
-    //   ai_cache_remote_shell），结果只落 profile 缓存，与 AI 会话生命周期解耦。
-    let auto_detect = crate::db::settings::get(&state.db, &key_auto_detect_remote_shell())?
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let mut initial_shell = super::shell::ShellKind::default();
-    let ssh_handle = match &target {
-        AiTarget::Ssh(target_id) => {
-            let (handle, profile_id) = match crate::commands::lifecycle::owned_ready_ai_target(
-                state,
-                target_id,
-                crate::state::SessionKind::Ssh,
-                &owner,
-            )? {
-                crate::commands::lifecycle::OwnedAiTarget::Ssh { handle, profile_id } => {
-                    (handle, profile_id)
-                }
-                _ => unreachable!("SSH lifecycle kind returned a non-SSH target"),
-            };
-            if auto_detect {
-                if let Some(k) = locked(&state.ai_remote_shell_cache)?
-                    .get(&profile_id)
-                    .copied()
-                {
-                    initial_shell = k; // cache 命中：用连接时探测的结果
-                }
-                // cache 未命中：保持 POSIX 兜底（探测还没跑完或失败，不阻塞启动）。
-            }
-            Some(handle)
-        }
-        #[cfg(any(windows, macos, linux, ohos))]
-        AiTarget::Local(target_id) => {
-            let shell_path = match crate::commands::lifecycle::owned_ready_ai_target(
-                state,
-                target_id,
-                crate::state::SessionKind::Pty,
-                &owner,
-            )? {
-                crate::commands::lifecycle::OwnedAiTarget::PtyShellPath(path) => path,
-                _ => unreachable!("PTY lifecycle kind returned a non-PTY target"),
-            };
-            initial_shell = super::shell::ShellKind::from_local_path(&shell_path);
-            None
-        }
-        #[cfg(any(android, ios))]
-        AiTarget::Local(_) => return Err(AppError::not_found("local_pty_not_found", json!({}))),
-        #[cfg(any(windows, macos, linux, ohos))]
-        AiTarget::Serial(target_id) => {
-            // No shell to probe — a serial port is raw bytes. Validate it exists,
-            // then run with ShellKind::Serial (no sentinel, no exit code) and no
-            // ssh_handle (like Local; the front-end does the serial_write/read).
-            let _ = crate::commands::lifecycle::owned_ready_ai_target(
-                state,
-                target_id,
-                crate::state::SessionKind::Serial,
-                &owner,
-            )?;
-            initial_shell = super::shell::ShellKind::Serial;
-            None
-        }
-        #[cfg(any(android, ios))]
-        AiTarget::Serial(_) => {
-            return Err(AppError::not_found("serial_session_not_found", json!({})))
-        }
-        AiTarget::Telnet(target_id) => {
-            // Same raw-device path as Serial: validate it exists, run with
-            // ShellKind::Telnet, no ssh_handle (front-end does telnet_write/read).
-            let _ = crate::commands::lifecycle::owned_ready_ai_target(
-                state,
-                target_id,
-                crate::state::SessionKind::Telnet,
-                &owner,
-            )?;
-            initial_shell = super::shell::ShellKind::Telnet;
-            None
-        }
-    };
+    let (ssh_handle, initial_shell) = target_environment(state, &owner, &target)?;
 
-    // system prompt = 内置 general 规则集 + lazy Skill 目录（id + description）。
-    // 其它内置 Skill 和用户 Skill 走 load_skill 工具按需加载，
-    // 用户写多个 skill 也不会让启动 prompt 爆炸。
+    // Snapshot the editable template, response language and lazy skill catalog.
+    // The actor renders placeholders using its current target shell per request.
     let _ = skill; // 前端不再选；保留参数兼容
     let (system_prompt, user_skills_cache) = match &driver {
-        session::SessionDriver::Ai(_) => {
-            let locale_lbl = locale_label(locale.as_deref().unwrap_or("en"));
-            let local_analysis_unavailable = host.ensure_local_analysis_available().await.err();
-            (
-                skills::build_catalog_prompt(
-                    &state.db,
-                    locale_lbl,
-                    local_analysis_unavailable.as_deref(),
-                    host.allows_diagnosis_downloads(),
-                )?,
-                skills::list_user(&state.db)?,
-            )
-        }
+        session::SessionDriver::Ai(_) => (prompts::get(&state.db)?, skills::list_user(&state.db)?),
         session::SessionDriver::Mcp { .. } => (String::new(), Vec::new()),
     };
 
@@ -713,8 +689,9 @@ async fn start_session_impl(
     let cfg = session::SessionConfig {
         tab_id: tab_id.clone(),
         target_id: target.id().to_string(),
-        skill: "general".to_string(),
+        skill: String::new(), // Retained for older session/history wire formats.
         system_prompt,
+        response_language: locale_label(locale.as_deref().unwrap_or("en")).to_owned(),
         user_skills_cache,
         model,
         provider,
@@ -1233,8 +1210,8 @@ pub async fn ai_cache_remote_shell(
     Ok(())
 }
 
-/// SSH 重连后重新绑定 target。actor 内部更新 target_id + ssh_handle，让
-/// 后续 file_ops / SFTP 走新连接。history / audit / pending 全保留。
+/// SSH 重连后重新绑定 target。actor 更新连接和 shell 类型，让后续命令、
+/// file_ops / SFTP 使用新目标的环境。history / audit / pending 全保留。
 ///
 /// 错误模型：target_id 必须在 state.sessions / pty_sessions 里存在，否则
 /// rebind 后立即触发的 file_ops 会拿到孤儿 handle 失败。前端通常在 SSH 重连
@@ -1270,53 +1247,7 @@ pub fn ai_session_rebind_target_impl(
     // concurrent stop cannot create a validate-then-mutate gap.
     with_owned_ready_ai_session(state, &tab_id, expected_owner, instance_id, |_| Ok(()))?;
 
-    // 重新抓 ssh_handle（local 是 None）—— 复用 ai_session_start 的同款校验。
-    let ssh_handle = match &target {
-        AiTarget::Ssh(target_id) => match crate::commands::lifecycle::owned_ready_ai_target(
-            state,
-            target_id,
-            crate::state::SessionKind::Ssh,
-            expected_owner,
-        )? {
-            crate::commands::lifecycle::OwnedAiTarget::Ssh { handle, .. } => Some(handle),
-            _ => unreachable!("SSH lifecycle kind returned a non-SSH target"),
-        },
-        #[cfg(any(windows, macos, linux, ohos))]
-        AiTarget::Local(target_id) => {
-            let _ = crate::commands::lifecycle::owned_ready_ai_target(
-                state,
-                target_id,
-                crate::state::SessionKind::Pty,
-                expected_owner,
-            )?;
-            None
-        }
-        #[cfg(any(android, ios))]
-        AiTarget::Local(_) => return Err(AppError::not_found("local_pty_not_found", json!({}))),
-        #[cfg(any(windows, macos, linux, ohos))]
-        AiTarget::Serial(target_id) => {
-            let _ = crate::commands::lifecycle::owned_ready_ai_target(
-                state,
-                target_id,
-                crate::state::SessionKind::Serial,
-                expected_owner,
-            )?;
-            None
-        }
-        #[cfg(any(android, ios))]
-        AiTarget::Serial(_) => {
-            return Err(AppError::not_found("serial_session_not_found", json!({})))
-        }
-        AiTarget::Telnet(target_id) => {
-            let _ = crate::commands::lifecycle::owned_ready_ai_target(
-                state,
-                target_id,
-                crate::state::SessionKind::Telnet,
-                expected_owner,
-            )?;
-            None
-        }
-    };
+    let (ssh_handle, shell_kind) = target_environment(state, expected_owner, &target)?;
     let target_id = target.id().to_string();
     // Conversation scope guard: the persisted conversation row is keyed by
     // target_key, fixed at session start. A rebind within the same scope
@@ -1349,6 +1280,7 @@ pub fn ai_session_rebind_target_impl(
                 .send(UserAction::RebindTarget {
                     target_id: target_id.clone(),
                     ssh_handle,
+                    shell_kind,
                 })
                 .map_err(|_| AppError::other("ai_session_stopped", json!({})))?;
             s.target_id = target_id.clone();
@@ -1575,6 +1507,7 @@ pub fn ai_conversation_delete_impl(state: &AppState, id: &str) -> AppResult<()> 
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct AiSettings {
+    pub system_prompt: String,
     /// Active (or requested) provider row id. Empty = nothing configured.
     pub provider: String,
     /// Display name / protocol of that row (empty alongside `provider`).
@@ -1663,6 +1596,7 @@ pub async fn ai_settings_get_impl(
             .map(|v| v == "1")
             .unwrap_or(false);
     Ok(AiSettings {
+        system_prompt: prompts::get(&state.db)?,
         provider: row.as_ref().map(|r| r.id.clone()).unwrap_or_default(),
         provider_name: row.as_ref().map(|r| r.name.clone()).unwrap_or_default(),
         protocol: row.as_ref().map(|r| r.protocol.clone()).unwrap_or_default(),
@@ -1947,6 +1881,7 @@ pub async fn ai_provider_delete_impl(state: &AppState, id: String) -> AppResult<
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiSettingsPatch {
+    pub system_prompt: Option<String>,
     /// Set the active provider (row id). Must name an existing row.
     pub provider: Option<String>,
     pub danger_mode: Option<bool>,
@@ -1970,6 +1905,7 @@ pub async fn ai_settings_set(state: &AppState, patch: AiSettingsPatch) -> AppRes
 /// Transport-agnostic body shared by the Tauri command and the headless server.
 pub async fn ai_settings_set_impl(state: &AppState, patch: AiSettingsPatch) -> AppResult<()> {
     let AiSettingsPatch {
+        system_prompt,
         provider,
         danger_mode,
         auto_run_command,
@@ -1994,6 +1930,9 @@ pub async fn ai_settings_set_impl(state: &AppState, patch: AiSettingsPatch) -> A
             ));
         }
         crate::db::settings::set(&state.db, &key_provider(), p)?;
+    }
+    if let Some(prompt) = system_prompt {
+        crate::db::settings::set(&state.db, prompts::SYSTEM_PROMPT_KEY, &prompt)?;
     }
     if let Some(on) = danger_mode {
         // 用 "1"/"0" 而不是 delete on false——显式记录用户的"我关了"，
@@ -2032,13 +1971,59 @@ pub async fn ai_settings_set_impl(state: &AppState, patch: AiSettingsPatch) -> A
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn system_prompt_settings_preserve_content_and_partial_updates() {
+        let (host, _events) = crate::ssh::test_support::headless_host();
+        let state = host.state();
+        assert_eq!(
+            ai_settings_get_impl(state, None)
+                .await
+                .unwrap()
+                .system_prompt,
+            prompts::SYSTEM,
+        );
+        for content in ["  自定义系统提示词\n\nKeep trailing whitespace.  \n", ""] {
+            ai_settings_set_impl(
+                state,
+                AiSettingsPatch {
+                    system_prompt: Some(content.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            ai_settings_set_impl(
+                state,
+                AiSettingsPatch {
+                    danger_mode: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                ai_settings_get_impl(state, None)
+                    .await
+                    .unwrap()
+                    .system_prompt,
+                content,
+            );
+            assert_eq!(
+                crate::db::settings::get(&state.db, prompts::SYSTEM_PROMPT_KEY)
+                    .unwrap()
+                    .as_deref(),
+                Some(content),
+            );
+        }
+    }
+
     #[cfg(any(windows, macos, linux))]
     #[tokio::test]
     async fn connector_conversations_keep_their_target_scope() {
         use crate::commands::lifecycle::{self, ReadySession};
         use crate::models::ConnectorSpec;
         use crate::state::{SessionKind, SessionOwner};
-        let (host, _events) = crate::ssh::test_support::headless_host();
+        let (host, mut events) = crate::ssh::test_support::headless_host();
         let state = host.state();
         let owner = SessionOwner::Window("connector-scope-test".into());
         let register = |connector| {
@@ -2128,6 +2113,56 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.code(), "conversation_target_mismatch");
         }
+        ai_session_rebind_target_impl(
+            state,
+            &owner,
+            info.tab_id.clone(),
+            renamed.clone(),
+            Some(info.conversation_id.clone()),
+            Some(&info.instance_id),
+        )
+        .unwrap();
+        let (reply, result) = tokio::sync::oneshot::channel();
+        let action_tx = with_owned_ready_ai_session(
+            state,
+            &info.tab_id,
+            &owner,
+            Some(&info.instance_id),
+            |session| {
+                assert_eq!(session.target_id, renamed.id());
+                Ok(session.action_tx.clone())
+            },
+        )
+        .unwrap();
+        action_tx
+            .send(UserAction::ExternalTool {
+                tool_id: "after-rebind".into(),
+                input: session::ExternalToolInput::RunCommand(
+                    super::super::tools::RunCommandInput {
+                        cmd: "echo rebind".into(),
+                        explain: "Check the rebound shell".into(),
+                        side_effect: "read-only".into(),
+                        timeout_s: Some(10),
+                    },
+                ),
+                reply,
+            })
+            .unwrap();
+        let proposal = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let (event, payload) = events.recv().await.unwrap();
+                if event == "ai:command_proposed:connector-tab" {
+                    break payload;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(proposal["execution"]["full_cmd"]
+            .as_str()
+            .unwrap()
+            .ends_with(":%errorlevel%"));
+        drop(result);
         lifecycle::close_ai_session(state, &info.tab_id, &owner, Some(&info.instance_id))
             .await
             .unwrap();
@@ -2280,12 +2315,14 @@ mod tests {
             "dangerMode": true,
             "autoRunCommand": false,
             "autoDetectRemoteShell": true,
+            "systemPrompt": "  Complete prompt\n\n",
         }))
         .unwrap();
         assert_eq!(p.provider.as_deref(), Some("provider-ab12c"));
         assert_eq!(p.danger_mode, Some(true));
         assert_eq!(p.auto_run_command, Some(false));
         assert_eq!(p.auto_detect_remote_shell, Some(true));
+        assert_eq!(p.system_prompt.as_deref(), Some("  Complete prompt\n\n"));
     }
 
     #[test]
@@ -2296,6 +2333,7 @@ mod tests {
         assert_eq!(p.danger_mode, Some(true));
         assert!(p.provider.is_none());
         assert!(p.auto_patch_mv.is_none());
+        assert!(p.system_prompt.is_none());
     }
 
     #[test]

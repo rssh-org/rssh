@@ -8,10 +8,10 @@
     import { toast } from "../stores/toast.svelte.ts";
     import type { DownloadProposal, DownloadResult } from "./types.ts";
 
-    // Dedicated approval card for download_file (SFTP pull). Independent data
+    // Dedicated approval card for download_file. Independent data
     // model (DownloadProposal / DownloadResult). Ack-only: approve just acks
     // via ai_command_result (shared approve channel, by id); the backend does
-    // the SFTP transfer itself, no PTY execution.
+    // the file transfer itself, no PTY execution.
     let { tabId, instanceId, proposal, result, rejected, active } = $props<{
         tabId: string;
         instanceId: string;

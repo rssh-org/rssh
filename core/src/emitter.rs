@@ -13,7 +13,6 @@ pub type Sink = Arc<dyn Fn(&str, serde_json::Value) -> bool + Send + Sync>;
 
 #[async_trait::async_trait]
 pub trait WindowHost: Send + Sync {
-    fn allows_diagnosis_downloads(&self) -> bool;
     async fn ensure_local_analysis_available(&self) -> Result<(), String>;
     async fn open_app_window(
         &self,
@@ -66,12 +65,6 @@ impl Host {
         &self.state
     }
 
-    pub fn allows_diagnosis_downloads(&self) -> bool {
-        self.windows
-            .as_ref()
-            .is_none_or(|windows| windows.allows_diagnosis_downloads())
-    }
-
     pub async fn ensure_local_analysis_available(&self) -> Result<(), String> {
         match &self.windows {
             Some(windows) => windows.ensure_local_analysis_available().await,
@@ -113,9 +106,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn headless_supports_downloads_without_claiming_native_windows() {
+    async fn headless_does_not_claim_native_windows() {
         let (host, _events) = crate::ssh::test_support::headless_host();
-        assert!(host.allows_diagnosis_downloads());
         assert!(host.ensure_local_analysis_available().await.is_err());
         assert!(host.open_app_window("label", "title", "").await.is_err());
     }

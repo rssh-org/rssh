@@ -7,6 +7,7 @@ export interface SkillRecord {
   name: string;
   description: string;
   content: string;
+  /** Legacy wire field; all skills are user-owned and return false. */
   builtin: boolean;
 }
 
@@ -49,6 +50,8 @@ export interface AiProviderRecord {
 }
 
 export interface AiSettings {
+  /** Editable base instructions used when a new AI session starts. */
+  system_prompt: string;
   /** active provider 行 id；空 = 未配置任何 provider。 */
   provider: string;
   provider_name: string;
@@ -97,9 +100,9 @@ export interface WebToolResult {
   duration_ms: number;
 }
 
-/** download_file — SFTP pull of a remote artifact to local. Independent
+/** download_file — copy an artifact into the host diagnosis directory. Independent
  *  proposal/result stream; ack-only (approve just acks, the backend does the
- *  SFTP transfer itself — no PTY execution). */
+ *  transfer itself — no PTY execution). */
 export interface DownloadProposal {
   id: string;
   remote_path: string;

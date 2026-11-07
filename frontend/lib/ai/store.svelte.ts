@@ -672,7 +672,7 @@ export async function startMcpSession(
   requestId: string,
 ): Promise<AiSessionInfo> {
   return launchSession(
-    { ...args, skill: "general", provider: "", model: "" },
+    { ...args, skill: "", provider: "", model: "" },
     null,
     () => invoke<AiSessionInfo>("mcp_accept_session", { requestId }),
   );
@@ -1761,6 +1761,7 @@ export async function saveAuditWithDialog(session: SessionInstanceRef): Promise<
 export function settings() { return _settings; }
 
 type AiSettingsPatch = Partial<{
+  systemPrompt: string;
   /** Active provider row id. */
   provider: string;
   dangerMode: boolean;
