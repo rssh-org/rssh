@@ -14,12 +14,12 @@ const generatedFiles = new Set([
   'tauri.settings.gradle', 'app/tauri.build.gradle.kts', 'app/proguard-tauri.pro',
   'app/tauri.properties', 'app/src/main/assets/tauri.conf.json',
 ]);
-// Keep the existing launcher resource set: the optional adaptive-icon XML was
-// never part of this Android app and would change its launcher appearance.
+// Android 8+ uses the adaptive layers; older launchers retain the PNG fallback.
 const launcherResources = new Set([
   ...['hdpi', 'mdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi'].flatMap((density) =>
     ['ic_launcher.png', 'ic_launcher_foreground.png', 'ic_launcher_round.png']
       .map((name) => `mipmap-${density}/${name}`)),
+  'mipmap-anydpi-v26/ic_launcher.xml',
   'values/ic_launcher_background.xml',
 ]);
 

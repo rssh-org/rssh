@@ -37,7 +37,6 @@ test('Android prepares native inputs without copying caches, credentials or gene
     for (const file of excluded) write(`android/${file}`, 'excluded');
     write('android/local.properties', 'sdk.dir=local-sdk');
     write('android/app/src/main/res/values/colors.xml', 'app colors');
-    write('icons/android/mipmap-anydpi-v26/ic_launcher.xml', 'unused adaptive icon');
     write('app/gen/android/app/build/outputs/current.apk', 'keep current output');
     write('app/gen/android/app/src/main/assets/bin/rssh-cli', 'old desktop CLI');
     prepareAndroid(root);
@@ -49,7 +48,6 @@ test('Android prepares native inputs without copying caches, credentials or gene
     assert.equal(existsSync(path.join(generated, 'app/src/main/assets/bin')), false);
     assert.equal(readFileSync(path.join(generated, 'app/src/main/res/mipmap-hdpi/ic_launcher.png'), 'utf8'), 'launcher');
     assert.equal(readFileSync(path.join(generated, 'app/src/main/res/values/colors.xml'), 'utf8'), 'app colors');
-    assert.equal(existsSync(path.join(generated, 'app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml')), false);
     for (const file of excluded) assert.equal(existsSync(path.join(generated, file)), false, file);
 
     rmSync(path.join(root, 'android/app/src/main/java/Main.kt'));
@@ -57,6 +55,26 @@ test('Android prepares native inputs without copying caches, credentials or gene
     prepareAndroid(root);
     assert.equal(existsSync(path.join(generated, 'app/src/main/java/Main.kt')), false);
     assert.equal(readFileSync(path.join(generated, 'app/src/main/res/mipmap-hdpi/ic_launcher.png'), 'utf8'), 'updated launcher');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Android stages adaptive launcher resources alongside legacy density fallbacks', () => {
+  const { root, write } = fixture();
+  try {
+    const resources = [
+      'mipmap-anydpi-v26/ic_launcher.xml',
+      'values/ic_launcher_background.xml',
+      ...['mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi'].flatMap((density) =>
+        ['ic_launcher.png', 'ic_launcher_round.png', 'ic_launcher_foreground.png']
+          .map((name) => `mipmap-${density}/${name}`)),
+    ];
+    for (const resource of resources) write(`icons/android/${resource}`, resource);
+    const generated = prepareAndroid(root);
+    for (const resource of resources) {
+      assert.equal(readFileSync(path.join(generated, 'app/src/main/res', resource), 'utf8'), resource);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

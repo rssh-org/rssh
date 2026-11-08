@@ -474,27 +474,31 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn program(directory: &Path, script: &str) -> ResolvedDiscoveryProgram {
-        use std::os::unix::fs::PermissionsExt;
-        let executable = directory.join("fake-cli");
-        std::fs::write(&executable, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        ResolvedDiscoveryProgram {
-            executable,
+    fn program(script: &str, args: &[String]) -> (ResolvedDiscoveryProgram, Vec<String>) {
+        // A concurrent fork can inherit a temporary executable's write handle,
+        // causing ETXTBSY on Linux even after this thread closes it. Use the
+        // installed interpreter, with connector arguments kept separate from
+        // the fixed fixture script so their contents are never evaluated.
+        let program = ResolvedDiscoveryProgram {
+            executable: "/bin/sh".into(),
             search_path: std::env::var_os("PATH").unwrap_or_default(),
-        }
+        };
+        let mut script_args = vec!["-c".into(), script.into(), "fake-cli".into()];
+        script_args.extend_from_slice(args);
+        (program, script_args)
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn connector_download_executes_argv_without_a_shell_and_commits_exact_bytes() {
+    async fn connector_download_preserves_literal_argv_and_commits_exact_bytes() {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("中文.log");
         let path = "/tmp/$(printf injected); file.log";
         let (_, args) = connector_command(&docker(), path).unwrap();
         let expected = format!("{}\n", args.join("\n"));
+        let (program, args) = program("printf '%s\\n' \"$@\"", &args);
         let result = copy_connector_with_program(
-            program(directory.path(), "printf '%s\\n' \"$@\""),
+            program,
             &args,
             path,
             &destination,
@@ -533,9 +537,10 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let destination = directory.path().join("existing.log");
             std::fs::write(&destination, b"original").unwrap();
+            let (program, args) = program(script, &[]);
             let error = copy_connector_with_program(
-                program(directory.path(), script),
-                &[],
+                program,
+                &args,
                 "/container.log",
                 &destination,
                 max_bytes,
@@ -545,7 +550,7 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.code(), code);
             assert_eq!(std::fs::read(destination).unwrap(), b"original");
-            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
         }
     }
 
@@ -555,12 +560,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("existing.log");
         std::fs::write(&destination, b"original").unwrap();
-        let program = program(directory.path(), "printf partial; exec sleep 30");
+        let (program, args) = program("printf partial; exec sleep 30", &[]);
         let target = destination.clone();
         let task = tokio::spawn(async move {
             copy_connector_with_program(
                 program,
-                &[],
+                &args,
                 "/container.log",
                 &target,
                 4096,
@@ -569,7 +574,7 @@ mod tests {
             .await
         });
         tokio::time::timeout(Duration::from_secs(2), async {
-            while std::fs::read_dir(directory.path()).unwrap().count() < 3 {
+            while std::fs::read_dir(directory.path()).unwrap().count() < 2 {
                 tokio::task::yield_now().await;
             }
         })
@@ -578,7 +583,7 @@ mod tests {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         tokio::time::timeout(Duration::from_secs(2), async {
-            while std::fs::read_dir(directory.path()).unwrap().count() > 2 {
+            while std::fs::read_dir(directory.path()).unwrap().count() > 1 {
                 tokio::task::yield_now().await;
             }
         })
