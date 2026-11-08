@@ -10,6 +10,7 @@
   import * as ai from "./lib/ai/store.svelte.ts";
   import * as runtime from "./lib/stores/runtime.svelte.ts";
   import * as layout from "./lib/stores/layout.svelte.ts";
+  import * as theme from "./lib/themes/store.svelte.ts";
   import { errMsg, t } from "./lib/i18n/index.svelte.ts";
 
   // First-launch auto-show: when there are no profiles and no forwards,
@@ -22,9 +23,13 @@
   // Capture before the capability await: AppShell consumes these handoffs
   // when it mounts, before startup's remaining asynchronous work settles.
   const auxiliaryWindow = !!window.__rssh_clone || !!window.__rssh_ai_handoff;
+  // Keep startup/error UI available while settings load. Retries reuse this
+  // read so an older response cannot overwrite a later theme initialization.
+  const themeReady = theme.init();
 
   let showWelcome = $state(false);
   let startupError = $state("");
+  let startupReady = $state(false);
 
   $effect.pre(() => {
     if (!runtime.loaded()) return;
@@ -51,11 +56,12 @@
   async function initialize() {
     startupError = "";
     try {
-      await runtime.load();
+      await Promise.all([themeReady, runtime.load()]);
     } catch (error) {
       startupError = errMsg(error);
       return;
     }
+    startupReady = true;
     // 预热 AI 设置：色条"发送到 AI"等入口靠 ai.settings()?.has_api_key 同步判断是否
     // 可用，过去只有打开 AI 面板才加载它。在 app 启动时拉一次，保证任何菜单打开前
     // _settings 已就位（fire-and-forget；失败不阻塞 UI，开面板时还会重试）。
@@ -109,7 +115,7 @@
   }
 </script>
 
-{#if runtime.loaded()}
+{#if startupReady}
   <AppShell />
 {:else}
   <main class="startup" aria-busy={!startupError}>

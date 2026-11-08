@@ -10,8 +10,8 @@
  *   • Persistence uses Tauri get_setting/set_setting (cross-device,
  *     consistent with command_block_bar / shell settings).
  *
- * Init order: main.ts calls `init()` once before mount so the user's
- * saved palette is applied before first paint (or close to it).
+ * Init order: App calls `init()` once and waits before mounting AppShell,
+ * so application content starts with the user's saved palette.
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -449,9 +449,8 @@ function isShapeId(v: string | null | undefined): v is ShapeId {
 }
 
 /**
- * Initialise from persisted settings and apply. Call once at startup,
- * before mounting the Svelte tree, so first paint reflects the user's
- * choice (the :root literal defaults will be overwritten in-place).
+ * Initialise from persisted settings and apply. App waits for this before
+ * mounting its shell; the startup screen remains available during the read.
  *
  * Loads palette + shape + density in parallel — all are independent.
  */
@@ -499,12 +498,9 @@ export async function init(): Promise<void> {
   applyShape(_shapeId);
   applyDensity(_densityId);
   writeTermFontVar();
-  // init() is not awaited before mount (see main.ts), so a terminal may
-  // register its font listener before this resolves — with the default stack.
-  // Notify now so any already-mounted terminal picks up the persisted font.
+  // Notify existing subscribers too if settings are initialized again.
   // Mirrors apply()'s notifyXterms() for the palette.
   notifyXtermFonts();
-  // Same late-mount race for the GPU toggle: a pane that mounted with the
-  // host default may need to (un)load its WebGL addon.
+  // An existing pane may need to (un)load its WebGL addon.
   notifyXtermGpu();
 }

@@ -42,7 +42,9 @@ it("applies the host's top-inset policy before mounting the shell, independently
   target.id = "app";
   document.body.append(target);
   let finish!: (response: runtime.RuntimeResponse) => void;
-  invokeMock.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+  invokeMock.mockImplementation((command) => command === "get_runtime_capabilities"
+    ? new Promise((resolve) => { finish = resolve; })
+    : Promise.resolve(null));
   component = mount(App, { target });
   flushSync();
   expect(shellMounted).not.toHaveBeenCalled();

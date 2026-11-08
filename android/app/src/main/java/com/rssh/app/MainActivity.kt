@@ -1,6 +1,7 @@
 package com.rssh.app
 
 import android.os.Bundle
+import android.webkit.WebView
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
@@ -40,6 +41,12 @@ class MainActivity : TauriActivity() {
             WindowInsetsCompat.CONSUMED
         }
         hideStatusBar()
+    }
+
+    override fun onWebViewCreate(webView: WebView) {
+        super.onWebViewCreate(webView)
+        // Match the starting window until the document paints its saved theme.
+        webView.setBackgroundColor(getColor(R.color.startup_background))
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
