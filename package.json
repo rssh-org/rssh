@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "icons": "node scripts/generate-icons.mjs",
     "preview": "vite preview",
     "tauri": "node scripts/tauri.mjs",
     "test": "vitest run",
@@ -35,6 +36,7 @@
     "@tauri-apps/cli": "^2",
     "happy-dom": "21.0.4",
     "json5": "2.2.3",
+    "sharp": "0.35.5",
     "svelte": "^5",
     "typescript": "^5.6",
     "vite": "^6",

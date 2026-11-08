@@ -18,7 +18,7 @@ devices.
 
 All platforms need:
 
-- **Node.js** >= 20
+- **Node.js** >= 20.9.0
 - **Rust** stable (install via [rustup](https://rustup.rs))
 - **npm** (comes with Node)
 
@@ -336,20 +336,37 @@ Disk. Details in `idea-plugin/README.md`.
 
 ## App icons
 
-Maintain source artwork and platform icon sets in `icons/`. To regenerate the
-standard desktop, Android and iOS sets from the canonical source image:
+The canonical artwork is `icons/icon-source-hmos.png`: a full-bleed 1024×1024 RGB
+image with no alpha channel or pre-cut corners. `icons/icon-source.png` is a
+generated compatibility copy, not a second master. Regenerate all platform sets:
 
 ```bash
-npm run tauri -- icon icons/icon-source.png --output icons
+npm run icons
+npm run test:build
 ```
 
-Desktop builds reference this directory directly. Android preparation copies the
-existing launcher resource set from `icons/android/`; iOS packaging copies
-`icons/ios/` into the generated Xcode asset catalog. Do not maintain duplicate icon
-files in `android/app/src/main/res/` or edit icons under `app/gen/`.
-The optional Android adaptive-icon XML is not staged, preserving the app's current
-launcher appearance. HarmonyOS keeps its platform-specific app icon under
-`ohos/app/AppScope/resources/base/media/`.
+The generator uses Sharp for resizing and masks, and Tauri for platform filenames
+and ICNS/ICO encoding. Desktop PNG/ICO/ICNS assets have a centered 824px body in a
+1024px transparent canvas, matching the traditional macOS icon scale. iOS images
+retain the full square background and are encoded without alpha. Android 8+
+uses the staged adaptive-icon XML and unmasked 108dp foreground; the current
+flattened artwork has an opaque foreground over an opaque background, with its
+mark inside the 66dp safe zone. Earlier Android versions retain PNG fallbacks.
+HarmonyOS retains its supported single-image icon, copied from the same master.
+This does not introduce separate foreground/background artwork for HarmonyOS.
+
+`icons/macos-mask.png` contains the grayscale alpha mask exported from Apple's
+empty macOS Icon Composer template, using `ictool --export-image --platform macOS
+--rendition Default --width 1024 --height 1024 --scale 1 --design-generation 26`.
+The template is under Xcode's `Platforms/MacOSX.platform/Developer/Library/Xcode/
+Templates/File Templates/macOS/Resource/Icon Composer Icon.xctemplate/`.
+Only its silhouette is used; the template's colors and effects are not applied.
+The mask is checked in so ordinary generation works without Icon Composer.
+
+Desktop builds reference `icons/` directly. Android preparation copies launcher
+resources from `icons/android/`; iOS packaging copies `icons/ios/` into the generated
+Xcode asset catalog. Do not maintain duplicate icon files in
+`android/app/src/main/res/` or edit icons under `app/gen/`.
 
 ## Project Structure
 
