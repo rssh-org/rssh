@@ -350,8 +350,10 @@ and ICNS/ICO encoding. Desktop PNG/ICO/ICNS assets have a centered 824px body in
 1024px transparent canvas, matching the traditional macOS icon scale. iOS images
 retain the full square background and are encoded without alpha. Android 8+
 uses the staged adaptive-icon XML and unmasked 108dp foreground; the current
-flattened artwork has an opaque foreground over an opaque background, with its
-mark inside the 66dp safe zone. Earlier Android versions retain PNG fallbacks.
+flattened artwork is fitted to the central 72dp viewport, with its background
+edge pixels extended through the surrounding 18dp overscan. This keeps the
+layer opaque and prevents Android's layer expansion from enlarging the mark.
+Earlier Android versions retain PNG fallbacks.
 HarmonyOS retains its supported single-image icon, copied from the same master.
 This does not introduce separate foreground/background artwork for HarmonyOS.
 

@@ -9,6 +9,26 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const icons = path.join(root, 'icons');
 const source = path.join(icons, 'icon-source-hmos.png');
 
+async function blueMark(file) {
+  const { data, info } = await sharp(file).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  let left = info.width, top = info.height, right = 0, bottom = 0, radius = 0;
+  for (let y = 0; y < info.height; y++) {
+    for (let x = 0; x < info.width; x++) {
+      const offset = (y * info.width + x) * info.channels;
+      const [r, g, b] = data.subarray(offset, offset + 3);
+      // Isolate the blue terminal mark from its dark textured background.
+      if (b < 144 || b - r < 64 || b - g < 32) continue;
+      left = Math.min(left, x);
+      top = Math.min(top, y);
+      right = Math.max(right, x + 1);
+      bottom = Math.max(bottom, y + 1);
+      radius = Math.max(radius, Math.hypot(x + 0.5 - info.width / 2, y + 0.5 - info.height / 2));
+    }
+  }
+  assert.ok(right > left && bottom > top, `missing blue mark: ${file}`);
+  return { left, top, right, bottom, radius, width: info.width, height: info.height };
+}
+
 test('all source aliases and HarmonyOS use the canonical full-bleed artwork', async () => {
   const metadata = await sharp(source).metadata();
   assert.equal(metadata.width, 1024);
@@ -32,7 +52,7 @@ test('iOS icons have no alpha channel or baked-in inset tile', async () => {
   }
 });
 
-test('Android preserves full-bleed artwork and correct sizes at every density', async () => {
+test('Android icons have correct sizes and opaque adaptive layers at every density', async () => {
   for (const [density, scale] of [['mdpi', 1], ['hdpi', 1.5], ['xhdpi', 2], ['xxhdpi', 3], ['xxxhdpi', 4]]) {
     const directory = path.join(icons, 'android', `mipmap-${density}`);
     for (const name of ['ic_launcher.png', 'ic_launcher_round.png']) {
@@ -45,8 +65,27 @@ test('Android preserves full-bleed artwork and correct sizes at every density', 
     assert.equal(metadata.width, 108 * scale);
     assert.equal(metadata.height, 108 * scale);
     assert.equal(metadata.hasAlpha, false, density);
-    const expected = await sharp(source).resize(108 * scale).removeAlpha().raw().toBuffer();
-    assert.ok((await sharp(foreground).raw().toBuffer()).equals(expected), density);
+  }
+});
+
+test('Android keeps the master mark scale and position inside the launcher viewport', async () => {
+  const master = await blueMark(source);
+  for (const density of ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi']) {
+    const mark = await blueMark(path.join(icons, 'android', `mipmap-${density}`, 'ic_launcher_foreground.png'));
+    // AdaptiveIconDrawable expands each layer by 25% on every side:
+    // a 108dp layer therefore has a centered 72dp launcher viewport.
+    const viewport = mark.width * 72 / 108;
+    const inset = (mark.width - viewport) / 2;
+    for (const [start, end, size] of [['left', 'right', 'width'], ['top', 'bottom', 'height']]) {
+      const actualSize = (mark[end] - mark[start]) / viewport;
+      const expectedSize = (master[end] - master[start]) / master[size];
+      assert.ok(Math.abs(actualSize - expectedSize) < 0.02,
+        `${density} ${size}: mark occupies ${(actualSize * 100).toFixed(1)}% of the viewport, expected ${(expectedSize * 100).toFixed(1)}%`);
+      const actualCenter = ((mark[start] + mark[end]) / 2 - inset) / viewport;
+      const expectedCenter = (master[start] + master[end]) / 2 / master[size];
+      assert.ok(Math.abs(actualCenter - expectedCenter) < 0.02, `${density} ${size}: mark is off-center`);
+    }
+    assert.ok(mark.radius <= mark.width * 33 / 108, `${density}: mark leaves the 66dp safe circle`);
   }
 });
 
