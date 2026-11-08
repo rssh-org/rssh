@@ -23,6 +23,7 @@ vi.mock("./lib/stores/sync.svelte.ts", () => ({
   startBackgroundChecks: vi.fn(),
 }));
 vi.mock("./lib/stores/cli.svelte.ts", () => ({ startBackgroundChecks: vi.fn() }));
+vi.mock("./lib/themes/store.svelte.ts", () => ({ init: async () => {} }));
 
 beforeEach(() => {
   vi.resetModules();
@@ -72,7 +73,7 @@ describe("release updates follow the RSSH host capability", () => {
     render(App).body;
     expect(mounted).toHaveLength(1);
     mounted[0]();
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
     expect(vi.getTimerCount()).toBe(supported ? 1 : 0);
     expect(invokeMock).toHaveBeenCalledExactlyOnceWith("get_runtime_capabilities");
   });

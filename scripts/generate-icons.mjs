@@ -80,10 +80,14 @@ async function generateIcons() {
       mkdirSync(directory, { recursive: true });
       await sharp(desktop).resize(48 * scale).png().toFile(path.join(directory, 'ic_launcher.png'));
       await sharp(round).resize(48 * scale).png().toFile(path.join(directory, 'ic_launcher_round.png'));
-      // This master is flattened artwork. Keep it full-bleed in the 108dp
-      // adaptive foreground; its centered mark fits inside the 66dp safe zone.
-      // Android applies the mask. Never reuse the pre-masked legacy PNG here.
-      await sharp(source).resize(108 * scale).removeAlpha().png()
+      // AdaptiveIconDrawable shows the center 72dp of each 108dp layer.
+      // Fit the master to that viewport, then bleed its background edges into
+      // the 18dp overscan so the mark keeps its intended scale without a tile.
+      // Copy edge pixels: mirroring could repeat the mark during motion.
+      await sharp(source).resize(72 * scale).extend({
+        top: 18 * scale, bottom: 18 * scale, left: 18 * scale, right: 18 * scale,
+        extendWith: 'copy',
+      }).removeAlpha().png()
         .toFile(path.join(directory, 'ic_launcher_foreground.png'));
     }
     copyFileSync(source, path.join(icons, 'icon-source.png'));
