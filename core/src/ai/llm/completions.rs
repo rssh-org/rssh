@@ -1,4 +1,4 @@
-//! OpenAI Completions 协议客户端。
+//! OpenAI Chat Completions 协议客户端。
 //!
 //! 覆盖所有走 Chat Completions wire 格式的服务端（OpenAI / 智谱 GLM /
 //! vLLM / Together / Groq …）。DeepSeek Thinking 是**独立协议文件**
@@ -417,5 +417,42 @@ mod tests {
             normalize_chat_endpoint("https://api.openai.com/v1/chat/completions/".into()),
             "https://api.openai.com/v1/chat/completions"
         );
+    }
+
+    fn text_request(model: &str) -> ChatRequest {
+        ChatRequest {
+            system_prompt: "sys".into(),
+            messages: vec![ChatMessage::User {
+                content: "hello".into(),
+            }],
+            tools: vec![],
+            model: model.into(),
+            max_tokens: 1024,
+        }
+    }
+
+    #[tokio::test]
+    async fn compatible_endpoints_keep_chat_completions_for_any_model() {
+        let mut server = mockito::Server::new_async().await;
+        for model in ["gpt-4o", "gpt-6.1-sol", "glm-4"] {
+            let expected = server.mock("POST", "/v1/chat/completions")
+                .match_header("authorization", "Bearer test-key")
+                .match_body(mockito::Matcher::Json(json!({
+                    "model": model, "max_completion_tokens": 1024,
+                    "messages": [{"role": "system", "content": "sys"}, {"role": "user", "content": "hello"}],
+                    "tools": [], "stream": true, "stream_options": {"include_usage": true}
+                })))
+                .with_header("content-type", "text/event-stream")
+                .with_body("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+                .create_async().await;
+            let client =
+                OpenAiCompletionsClient::new("test-key".into(), format!("{}/v1", server.url()));
+            let response = client
+                .chat(text_request(model), std::sync::Arc::new(|_| {}))
+                .await
+                .unwrap();
+            assert_eq!(response.text, "ok");
+            expected.assert_async().await;
+        }
     }
 }

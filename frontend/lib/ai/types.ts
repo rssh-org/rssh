@@ -35,7 +35,7 @@ export interface CategoryGroup {
 }
 
 /** Wire values match the backend protocol registry. */
-export type LlmProtocol = "deepseek-thinking" | "openai-completions" | "anthropic-messages" | "codex-subscription";
+export type LlmProtocol = "deepseek-thinking" | "openai-completions" | "openai-responses" | "anthropic-messages" | "codex-subscription";
 
 /** 一条用户自定义 provider（ai_providers 表一行）。 */
 export interface AiProviderRecord {

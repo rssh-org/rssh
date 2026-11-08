@@ -753,6 +753,8 @@ const zh: Messages = {
   "ai.settings.protocol.codex": "Codex 订阅",
   "ai.settings.protocol.sub.deepseek": "reasoning_content 回传",
   "ai.settings.protocol.sub.openai": "OpenAI / GLM / vLLM …",
+  "ai.settings.protocol.sub.responses": "Responses API · API Key",
+  "ai.settings.completions.hint": "通过 OpenAI 官方接口使用 GPT-6 及后续模型时，请选择 Responses 协议。",
   "ai.settings.protocol.sub.anthropic": "Claude 官方协议",
   "ai.settings.codex.waiting": "等待授权完成…",
   "ai.settings.codex.open_page": "打开登录页面",
@@ -1033,6 +1035,9 @@ const zh: Messages = {
   "error.llm_request_failed": "LLM 请求失败：{err}",
   "error.llm_error_status": "LLM 错误 {status}：{text}",
   "error.llm_stream_read_failed": "LLM stream 读失败：{err}",
+  "error.llm_invalid_response": "模型返回的响应无效，请重试。",
+  "error.llm_response_failed": "模型未能完成此次响应，请重试。",
+  "error.llm_stream_incomplete": "模型响应意外中断，请重试。",
 
   // ── 后端错误（raw-string 迁移批次） ──
   "error.crypto_rng_failed": "随机数生成失败：{err}",

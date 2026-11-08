@@ -1,11 +1,11 @@
-//! DeepSeek Thinking 协议（独立实现，与 `protocol.rs` 的 OpenAI Completions
+//! DeepSeek Thinking 协议（独立实现，与 `completions.rs` 的 OpenAI Completions
 //! 完全拆分）。
 //!
 //! wire 层接近 Chat Completions，但有一条 DeepSeek 特有硬约束：带 `tools`
 //! 的请求在后续所有轮次必须把 assistant 消息的 `reasoning_content`（思考链）
 //! 原样回传，否则 400（官方 Thinking Mode 文档：
 //! https://api-docs.deepseek.com/guides/thinking_mode/ ）。该语义只存在于
-//! 本文件 —— 其他协议遇到思考链一律丢弃（见 protocol.rs / anthropic.rs）。
+//! 本文件 —— 其他协议遇到思考链一律丢弃（见 completions.rs / anthropic.rs）。
 //!
 //! 模型：deepseek-chat / deepseek-reasoner / deepseek-v3.x（以 /models 拉取为准）。
 //! 文档：https://api-docs.deepseek.com/

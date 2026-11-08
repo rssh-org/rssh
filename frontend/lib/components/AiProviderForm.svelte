@@ -218,7 +218,7 @@
         class="protocol-card"
         class:active={formProtocol === card.protocol}
         class:p-ds={card.protocol === "deepseek-thinking"}
-        class:p-oai={card.protocol === "openai-completions"}
+        class:p-oai={card.protocol === "openai-completions" || card.protocol === "openai-responses"}
         class:p-ant={card.protocol === "anthropic-messages"}
         aria-pressed={formProtocol === card.protocol}
         onclick={() => selectProtocol(card.protocol)}
@@ -279,8 +279,12 @@
       bind:value={formEndpoint}
       placeholder="https://…"
       aria-labelledby={`endpoint-label-${formId || "new"}`}
+      aria-describedby={formProtocol === "openai-completions" ? `endpoint-hint-${formId || "new"}` : undefined}
       onkeydown={handleKeydown}
     />
+    {#if formProtocol === "openai-completions"}
+      <p class="endpoint-hint" id={`endpoint-hint-${formId || "new"}`}>{t("ai.settings.completions.hint")}</p>
+    {/if}
   </div>
 
   <label class="field">
@@ -439,7 +443,7 @@
     flex-wrap: wrap;
     gap: 8px;
   }
-  .auth-hint, .auth-url {
+  .auth-hint, .auth-url, .endpoint-hint {
     margin: 0;
     font-size: 12px;
     color: var(--text-sub);

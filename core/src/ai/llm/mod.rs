@@ -2,11 +2,12 @@
 //!
 //! 决议 #5：手写 reqwest + 自解析 SSE，零额外 SDK 依赖。
 //!
-//! 一协议一文件，互不共享请求/解析逻辑：
+//! 按 wire 协议隔离请求/解析逻辑：
 //! - `deepseek.rs`     —— DeepSeek Thinking（含 reasoning_content 回传）
-//! - `protocol.rs`     —— OpenAI Completions（OpenAI / GLM / vLLM / Groq …）
+//! - `completions.rs`  —— OpenAI Chat Completions 兼容端点
 //! - `anthropic.rs`    —— Anthropic Messages
-//! - `codex.rs`        —— Codex subscription Responses
+//! - `codex.rs`        —— Codex subscription transport
+//! - `responses.rs`    —— OpenAI Responses API key transport / 共用 wire 协议
 //!
 //! DeepSeek 与 OpenAI 协议曾共用一套实现，导致 DeepSeek 特有的思考链
 //! 回传逻辑长在共享层：换协议 resume 对话时会把 reasoning_content 发给
@@ -18,8 +19,9 @@
 
 pub mod anthropic;
 pub mod codex;
+mod completions;
 pub mod deepseek;
-mod protocol;
+mod responses;
 
 use std::sync::Arc;
 
@@ -28,7 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppResult;
 
-pub use protocol::OpenAiCompletionsClient;
+pub use completions::OpenAiCompletionsClient;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
@@ -44,12 +46,12 @@ pub enum ChatMessage {
         /// 其他厂商：传 None，序列化时不会出现该字段，零影响。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
-        /// Opaque Codex reasoning items required for stateless tool continuations.
-        /// Only the Codex encoder sends these back; free-form text is stored
-        /// separately and redacted before replay.
+        /// Opaque Responses reasoning items required for stateless tool continuations.
+        /// Only the Responses encoder sends these back; the persisted field name
+        /// stays compatible with Codex history. Free-form text is redacted separately.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         codex_reasoning: Option<Vec<serde_json::Value>>,
-        /// Original message boundaries and phases for Codex history replay.
+        /// Original message boundaries and phases for Responses history replay.
         /// Older history has only the concatenated display content above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         codex_messages: Option<Vec<CodexAssistantMessage>>,
@@ -152,6 +154,7 @@ pub trait LlmClient: Send + Sync {
 pub enum Protocol {
     DeepSeekThinking,
     OpenAiCompletions,
+    OpenAiResponses,
     AnthropicMessages,
     CodexSubscription,
 }
@@ -161,6 +164,7 @@ impl Protocol {
         match s {
             "deepseek-thinking" => Some(Protocol::DeepSeekThinking),
             "openai-completions" => Some(Protocol::OpenAiCompletions),
+            "openai-responses" => Some(Protocol::OpenAiResponses),
             "anthropic-messages" => Some(Protocol::AnthropicMessages),
             "codex-subscription" => Some(Protocol::CodexSubscription),
             _ => None,
@@ -187,6 +191,9 @@ pub fn build_client(
         Some(Protocol::OpenAiCompletions) => {
             Ok(Box::new(OpenAiCompletionsClient::new(api_key, endpoint)))
         }
+        Some(Protocol::OpenAiResponses) => Ok(Box::new(responses::OpenAiResponsesClient::new(
+            api_key, endpoint,
+        ))),
         Some(Protocol::AnthropicMessages) => {
             Ok(Box::new(anthropic::AnthropicClient::new(api_key, endpoint)))
         }
@@ -294,6 +301,23 @@ impl SseParser {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    #[test]
+    fn responses_is_an_explicit_api_key_protocol() {
+        assert!(protocol_valid("openai-responses"));
+        assert!(build_client(
+            "openai-responses",
+            "test-key".into(),
+            "https://api.openai.com/v1".into(),
+        )
+        .is_ok());
+        assert!(protocol_valid("openai-completions"));
     }
 }
 
