@@ -68,12 +68,12 @@ function harness() {
 }
 
 describe("HarmonyOS framework host", () => {
-  it("keeps phones and tablets in the mobile HAP with native cutout avoidance", () => {
+  it("lets ArkWeb handle cutout insets without reserving a native top strip on phones and tablets", () => {
     const { module } = JSON.parse(readFileSync(new URL(
       "../app/products/phone/src/main/module.json5", import.meta.url,
     ), "utf8"));
     expect(module.deviceTypes).toEqual(["phone", "tablet"]);
-    expect(module.metadata).toContainEqual({ name: "avoid_cutout", value: "true" });
+    expect(module.metadata ?? []).not.toContainEqual({ name: "avoid_cutout", value: "true" });
   });
 
   it("does not restore a raw database without its device-bound master key", () => {

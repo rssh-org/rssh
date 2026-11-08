@@ -442,7 +442,8 @@
   .home { padding: 24px; flex: 1; overflow-y: auto; min-height: 0; }
   .home-header { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 16px; margin-bottom: 20px; }
   .logo { display: inline-flex; align-items: center; gap: 6px; font-size: 22px; color: var(--accent); font-weight: 700; white-space: nowrap; }
-  .search-input { flex: 1 1 200px; min-width: 160px; }
+  /* Keep focus from zooming the iOS viewport and clipping the navigation. */
+  .search-input { flex: 1 1 200px; min-width: 160px; font-size: 16px; }
   .home-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
   .segmented {
     display: inline-flex;

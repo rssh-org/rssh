@@ -192,6 +192,7 @@ export function installTauriShim(): void {
                 directoryTransfer: capabilities.directoryTransfer && hasPicker,
                 nativeClipboard: false,
                 systemBack: false,
+                statusBarHidden: false,
                 terminalKeybar: browserTerminalKeybar(navigator),
             };
         },

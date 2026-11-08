@@ -159,6 +159,7 @@ describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
             directoryTransfer: expected,
             nativeClipboard: false,
             systemBack: false,
+            statusBarHidden: false,
             terminalKeybar: false,
             releaseUpdateCheck: true,
             terminalPolicy,
@@ -177,8 +178,9 @@ describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
         const request = ws.sentFrames()[0];
         ws.deliver({ type: "response", id: request.id, ok: true, result: {
             terminalKeybar: !expected,
+            statusBarHidden: true,
         } });
-        await expect(result).resolves.toMatchObject({ terminalKeybar: expected });
+        await expect(result).resolves.toMatchObject({ terminalKeybar: expected, statusBarHidden: false });
     });
 
     it("provides metadata so getCurrentWindow()/getCurrentWebview() don't throw", () => {

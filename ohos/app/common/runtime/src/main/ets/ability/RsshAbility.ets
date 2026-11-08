@@ -8,7 +8,8 @@ export class RsshAbility extends NativeAbility {
 
   protected override async loadWindowStageContent(windowStage: window.WindowStage): Promise<void> {
     // This mobile HAP serves both phones and tablets; desktop has its own Ability.
-    // Leave cutout, keyboard and navigation-bar avoidance to ArkUI.
+    // ArkWeb exposes cutout insets to CSS without reserving a native top strip.
+    // Keep keyboard and navigation-bar avoidance in ArkUI.
     try {
       const mainWindow = await windowStage.getMainWindow();
       await mainWindow.setSpecificSystemBarEnabled('status', false);
