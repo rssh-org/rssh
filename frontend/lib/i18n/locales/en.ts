@@ -750,6 +750,8 @@ const en = {
   "ai.settings.protocol.codex": "Codex Subscription",
   "ai.settings.protocol.sub.deepseek": "reasoning_content echo",
   "ai.settings.protocol.sub.openai": "OpenAI / GLM / vLLM …",
+  "ai.settings.protocol.sub.responses": "Responses API · API key",
+  "ai.settings.completions.hint": "When using GPT-6 or later models through the official OpenAI API, select the Responses protocol.",
   "ai.settings.protocol.sub.anthropic": "Claude native protocol",
   "ai.settings.codex.waiting": "Waiting for authorization…",
   "ai.settings.codex.open_page": "Open sign-in page",
@@ -1030,6 +1032,9 @@ const en = {
   "error.llm_request_failed": "LLM request failed: {err}",
   "error.llm_error_status": "LLM error {status}: {text}",
   "error.llm_stream_read_failed": "LLM stream read failed: {err}",
+  "error.llm_invalid_response": "The model returned an invalid response. Please try again.",
+  "error.llm_response_failed": "The model could not complete this response. Please try again.",
+  "error.llm_stream_incomplete": "The model response ended unexpectedly. Please try again.",
 
   // ── Backend errors (raw-string migration batch) ──
   "error.crypto_rng_failed": "RNG failed: {err}",

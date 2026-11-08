@@ -1972,6 +1972,52 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn openai_provider_protocols_survive_save_list_and_settings_reload() {
+        let (host, _events) = crate::ssh::test_support::headless_host();
+        let state = host.state();
+        let endpoint = "https://api.openai.com/v1";
+        let mut saved = Vec::new();
+        for protocol in ["openai-completions", "openai-responses"] {
+            let id = ai_provider_save_impl(
+                state,
+                AiProviderPatch {
+                    name: Some(protocol.into()),
+                    protocol: Some(protocol.into()),
+                    model: Some("gpt-6.1-sol".into()),
+                    endpoint: Some(endpoint.into()),
+                    api_key: Some("test-api-key".into()),
+                    activate: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let settings = ai_settings_get_impl(state, None).await.unwrap();
+            assert_eq!(settings.provider, id);
+            assert_eq!(settings.protocol, protocol);
+            assert_eq!(settings.endpoint.as_deref(), Some(endpoint));
+            assert!(settings.has_api_key && settings.has_credentials);
+            saved.push((id, protocol));
+        }
+
+        let providers = ai_provider_list_impl(state).await.unwrap();
+        assert_eq!(providers.len(), 2);
+        for (id, protocol) in saved {
+            let provider = providers.iter().find(|provider| provider.id == id).unwrap();
+            assert_eq!(provider.protocol, protocol);
+            assert_eq!(provider.endpoint, endpoint);
+            assert!(provider.has_api_key && provider.has_credentials);
+            let settings = ai_settings_get_impl(state, Some(id.clone())).await.unwrap();
+            assert_eq!(settings.protocol, protocol);
+            let row = crate::db::ai_provider::get(&state.db, &id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.protocol, protocol);
+            assert!(provider_client(state, &row).is_ok());
+        }
+    }
+
+    #[tokio::test]
     async fn system_prompt_settings_preserve_content_and_partial_updates() {
         let (host, _events) = crate::ssh::test_support::headless_host();
         let state = host.state();

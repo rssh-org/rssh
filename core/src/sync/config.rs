@@ -1977,6 +1977,48 @@ mod tests {
     }
 
     #[test]
+    fn openai_protocols_roundtrip_backup_and_sync_without_conversion() {
+        let (db, ss, dir) = fixture();
+        let expected = json!({
+            "system_prompt": "Use approved tools",
+            "active_provider": "provider-responses",
+            "providers": [
+                {
+                    "provider": "provider-completions", "name": "Existing OpenAI",
+                    "protocol": "openai-completions", "model": "gpt-6.1-sol",
+                    "endpoint": "https://api.openai.com/v1", "api_key": "completions-key"
+                },
+                {
+                    "provider": "provider-responses", "name": "OpenAI Responses",
+                    "protocol": "openai-responses", "model": "gpt-6.1-sol",
+                    "endpoint": "https://api.openai.com/v1", "api_key": "responses-key"
+                }
+            ]
+        });
+        merge_import(
+            &db,
+            &ss,
+            dir.path(),
+            &json!({ "version": 1, "ai": expected }),
+        )
+        .unwrap();
+
+        for mode in [
+            ExportMode::LocalBackup,
+            ExportMode::RemotePush(read_sync_prefs(&db).unwrap()),
+        ] {
+            let exported = build_payload(&db, &ss, dir.path(), &mode).unwrap();
+            assert_eq!(exported["ai"], expected);
+            let (restored, restored_ss, restored_dir) = fixture();
+            merge_import(&restored, &restored_ss, restored_dir.path(), &exported).unwrap();
+            assert_eq!(
+                crate::ai::commands::export_ai_settings(&restored, &restored_ss, true).unwrap(),
+                expected,
+            );
+        }
+    }
+
+    #[test]
     fn export_ai_settings_omits_local_only_prefs() {
         let (db, ss, _dir) = fixture();
         crate::db::ai_provider::upsert(
