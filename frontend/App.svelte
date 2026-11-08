@@ -26,6 +26,14 @@
   let showWelcome = $state(false);
   let startupError = $state("");
 
+  $effect.pre(() => {
+    if (!runtime.loaded()) return;
+    const root = document.getElementById("app");
+    // Apply the host policy before AppShell mounts, so its first layout is final.
+    root?.classList.toggle("status-bar-hidden", runtime.capabilities().statusBarHidden);
+    return () => root?.classList.remove("status-bar-hidden");
+  });
+
   $effect(() => {
     const revision = sync.configurationRevision();
     if (revision === 0) return;

@@ -98,6 +98,7 @@ pub async fn capabilities(
     capabilities.directory_transfer = pc && device.folder_selection;
     capabilities.native_clipboard = true;
     capabilities.terminal_keybar = device.class() == DeviceClass::Mobile;
+    capabilities.status_bar_hidden = device.class() == DeviceClass::Mobile;
     capabilities.terminal_policy = if pc {
         TerminalRuntimePolicy::desktop()
     } else {

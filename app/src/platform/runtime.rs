@@ -20,6 +20,7 @@ pub struct RuntimeCapabilities {
     pub native_clipboard: bool,
     pub release_update_check: bool,
     pub system_back: bool,
+    pub status_bar_hidden: bool,
     pub mcp_server: bool,
     pub terminal_keybar: bool,
     pub terminal_policy: TerminalRuntimePolicy,
@@ -47,6 +48,7 @@ impl RuntimeCapabilities {
             // follow their RSSH server's policy, not the browser's operating system.
             release_update_check: !cfg!(ios),
             system_back: cfg!(android),
+            status_bar_hidden: cfg!(any(android, ios)),
             mcp_server: cfg!(any(windows, macos, linux)),
             terminal_keybar: cfg!(any(android, ios)),
             terminal_policy: if cfg!(any(android, ios)) {
@@ -66,6 +68,7 @@ impl RuntimeCapabilities {
             plugins: false,
             native_clipboard: false,
             system_back: false,
+            status_bar_hidden: false,
             // The browser adapter supplies its client's keyboard affordance.
             terminal_keybar: false,
             ..Self::native()
@@ -134,15 +137,17 @@ mod tests {
             "nativeClipboard",
             "releaseUpdateCheck",
             "systemBack",
+            "statusBarHidden",
             "mcpServer",
             "terminalKeybar",
         ] {
             assert!(value[key].is_boolean(), "missing boolean capability {key}");
         }
-        assert_eq!(value.as_object().unwrap().len(), 18);
+        assert_eq!(value.as_object().unwrap().len(), 19);
         assert_eq!(value["fileMultiSelect"], true);
         assert_eq!(value["releaseUpdateCheck"], !cfg!(ios));
         assert_eq!(value["systemBack"], cfg!(android));
+        assert_eq!(value["statusBarHidden"], cfg!(any(android, ios)));
         assert_eq!(value["terminalKeybar"], cfg!(any(android, ios)));
         let expected = if cfg!(any(android, ios)) {
             TerminalRuntimePolicy::constrained()
@@ -165,6 +170,7 @@ mod tests {
         assert!(!capabilities.cli_install);
         assert!(!capabilities.plugins);
         assert!(!capabilities.system_back);
+        assert!(!capabilities.status_bar_hidden);
         assert!(!capabilities.terminal_keybar);
         assert!(capabilities.local_pty);
         assert!(capabilities.release_update_check);

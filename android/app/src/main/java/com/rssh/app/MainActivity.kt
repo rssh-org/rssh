@@ -25,14 +25,17 @@ class MainActivity : TauriActivity() {
 
         val content = findViewById<android.view.View>(android.R.id.content)
         ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
-            // Hiding the status bar does not remove the camera cutout's safe area.
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
             )
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
             imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
             updateBackCallback()
-            view.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, ime.bottom))
+            val bottom = maxOf(bars.bottom, ime.bottom)
+            // The app's top navigation replaces the hidden status bar. Do not
+            // reserve that row for the cutout, natively or via CSS safe-area.
+            // Keep side cutouts, the bottom navigation bar and the IME clear.
+            view.setPadding(bars.left, 0, bars.right, bottom)
             WindowInsetsCompat.CONSUMED
         }
         hideStatusBar()

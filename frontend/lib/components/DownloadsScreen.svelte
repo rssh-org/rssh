@@ -180,7 +180,7 @@
         bottom: calc(12px + env(safe-area-inset-bottom, 0px));
     }
     .downloads.sb-top {
-        top:   calc(var(--sb-top, 0px) + 8px + env(safe-area-inset-top, 0px));
+        top:   calc(var(--sb-top, 0px) + 8px + var(--app-inset-top, env(safe-area-inset-top, 0px)));
         right: calc(12px + env(safe-area-inset-right, 0px));
     }
     .downloads.sb-bottom {
