@@ -178,6 +178,7 @@ describe("panel visibility", () => {
 
 describe("provider settings", () => {
   const initialSettings: AiSettings = {
+    system_prompt: "RSSH system instructions",
     provider: "provider-active",
     provider_name: "Active provider",
     protocol: "openai-completions",

@@ -70,14 +70,13 @@ mod http {
         endpoint_token: Arc<str>,
     }
 
-    fn session_tool_schema(name: &str) -> serde_json::Map<String, Value> {
-        // Keep arguments aligned with the built-in AI tool; MCP only adds
-        // the accepted terminal's identity.
-        let mut schema = rssh_core::ai::tools::all_tools()
+    fn session_tool(name: &str) -> Tool {
+        // Share the complete tool contract; MCP only adds session selection.
+        let canonical = rssh_core::ai::tools::all_tools()
             .into_iter()
             .find(|tool| tool.name == name)
-            .expect("built-in AI tool schema")
-            .input_schema;
+            .expect("built-in AI tool");
+        let mut schema = canonical.input_schema;
         schema["properties"]["session_id"] = json!({
             "type":"string", "description":"Exact session_id returned by list_sessions."
         });
@@ -86,13 +85,20 @@ mod http {
             .unwrap()
             .push(json!("session_id"));
         schema["additionalProperties"] = json!(false);
-        schema.as_object().unwrap().clone()
+        Tool::new(
+            canonical.name,
+            format!(
+                "{} Use a session_id accepted through open_session.",
+                canonical.description
+            ),
+            schema.as_object().unwrap().clone(),
+        )
     }
 
     fn tool_definitions() -> Vec<Tool> {
         let list = Tool::new(
             "list_sessions",
-            "List every connected terminal in this RSSH window. Call open_session to request control before run_command or download_file. An empty tab_id means the terminal frontend is still registering; retry discovery before opening it. Shell metadata reflects RSSH's existing detection/configuration and can be stale after a nested shell. Use the reported shell syntax and inspect any further environment details with run_command.",
+            "List connected terminals in this RSSH window. Select the returned session_id and call open_session to request access. An empty tab_id means the terminal frontend is still registering; retry discovery before opening it. Shell metadata reflects RSSH's existing detection/configuration and can be stale after a nested shell.",
             json!({"type":"object", "properties":{}, "additionalProperties":false})
                 .as_object().unwrap().clone(),
         ).annotate(ToolAnnotations::new().read_only(true));
@@ -104,24 +110,19 @@ mod http {
                 "title":{"type":"string", "minLength":1, "maxLength":512, "description":"Short title describing the debugging task."}
             }, "required":["session_id","title"], "additionalProperties":false}).as_object().unwrap().clone(),
         );
-        let run = Tool::new(
-            "run_command",
-            "Run one command in a terminal accepted through open_session. Uses the RSSH AI conversation's command validation, approval cards, danger-mode settings, audit and output redaction. Returns output from the existing interactive shell. Match list_sessions shell syntax; RSSH adds its own completion marker. Do not add markers or change shells. A timeout ends output collection and does not guarantee the command stopped. The terminal frontend must remain open. Do not automatically repeat a command after a timeout or lost response.",
-            session_tool_schema("run_command"),
-        );
-        let download = Tool::new(
-            "download_file",
-            "Download a remote file using the existing SSH connection's SFTP subsystem after open_session is accepted. Reuses RSSH AI download approval, danger-mode auto_download_file settings, audit and history. max_mb must be 1..100; inspect the remote file size first and transfer larger files manually. Local shell, serial and Telnet targets cannot provide SFTP. Returns status, bytes and a local_path on the RSSH host under its data directory; it does not return file contents. In Headless/JetBrains the RSSH host may differ from the agent's machine. The terminal frontend must remain open.",
-            session_tool_schema("download_file"),
-        );
-        vec![list, open, run, download]
+        vec![
+            list,
+            open,
+            session_tool("run_command"),
+            session_tool("download_file"),
+        ]
     }
 
     impl ServerHandler for TerminalTools {
         fn get_info(&self) -> ServerConfig {
             ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
                 .with_server_info(Implementation::new("rssh", env!("CARGO_PKG_VERSION")))
-                .with_instructions("Use list_sessions to select a connected terminal, open_session(session_id,title) to request a conversation, then run_command to diagnose it or download_file to fetch an SSH file onto the RSSH host. Local repository access remains the coding agent's responsibility. Tools follow the conversation's AI approval settings; download_file returns a host-local path, not file contents.")
+                .with_instructions("RSSH exposes the user's connected terminal sessions.")
         }
 
         async fn list_tools(

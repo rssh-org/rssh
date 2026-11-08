@@ -1180,7 +1180,7 @@ async fn dispatch_async(
                 arg(&args, "target")?,
                 args.get("skill")
                     .and_then(Value::as_str)
-                    .unwrap_or("general")
+                    .unwrap_or("")
                     .to_string(),
                 arg(&args, "provider")?,
                 arg(&args, "model")?,
@@ -1900,6 +1900,71 @@ mod tests {
             data_dir: dir.path().into(),
         };
         (Arc::new(state), dir)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_system_prompt_edits_round_trip_as_settings() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let initial = dispatch_async(&state, &owner, "ai_settings_get", json!({}), &tx)
+            .await
+            .unwrap();
+        assert_eq!(initial["system_prompt"], crate::ai::prompts::SYSTEM);
+        let listed = dispatch_async(&state, &owner, "ai_list_skills", json!({}), &tx)
+            .await
+            .unwrap();
+        assert!(listed.as_array().unwrap().is_empty());
+
+        let content = "  先检查证据。\nExplain uncertainty clearly.  \n\n";
+        assert_eq!(
+            dispatch_async(
+                &state,
+                &owner,
+                "ai_settings_set",
+                json!({ "patch": { "systemPrompt": content } }),
+                &tx,
+            )
+            .await
+            .unwrap(),
+            Value::Null,
+        );
+        let saved = dispatch_async(&state, &owner, "ai_settings_get", json!({}), &tx)
+            .await
+            .unwrap();
+        assert_eq!(saved["system_prompt"], content);
+        assert_eq!(
+            crate::db::settings::get(&state.db, crate::ai::prompts::SYSTEM_PROMPT_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(content),
+        );
+
+        dispatch_async(
+            &state,
+            &owner,
+            "ai_settings_set",
+            json!({ "patch": { "autoRunCommand": false } }),
+            &tx,
+        )
+        .await
+        .unwrap();
+        let saved = dispatch_async(&state, &owner, "ai_settings_get", json!({}), &tx)
+            .await
+            .unwrap();
+        assert_eq!(saved["system_prompt"], content);
+        assert_eq!(
+            dispatch_async(
+                &state,
+                &owner,
+                "ai_get_skill",
+                json!({ "id": "general" }),
+                &tx
+            )
+            .await
+            .unwrap(),
+            Value::Null,
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

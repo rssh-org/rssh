@@ -1,6 +1,6 @@
-//! AI 自定义 skill 的 DB 访问。内置 skill 不入表，从 ai::prompts 常量读。
+//! Persisted user-owned AI skills.
 
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::error::AppResult;
 
@@ -46,7 +46,7 @@ pub fn get(db: &Db, id: &str) -> AppResult<Option<UserSkill>> {
                 })
             },
         )
-        .ok();
+        .optional()?;
     Ok(res)
 }
 

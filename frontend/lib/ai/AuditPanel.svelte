@@ -59,7 +59,7 @@
     function summary(e: AuditEntry): string {
         const k = e.kind;
         switch (k.type) {
-            case "session_started": return t("ai.audit.summary.session_started", { skill: k.skill, target: k.target });
+            case "session_started": return t(k.skill ? "ai.audit.summary.session_started" : "ai.audit.summary.session_started_default", { skill: k.skill, target: k.target });
             case "session_ended": return t("ai.audit.summary.session_ended");
             case "user_message": return t("ai.audit.summary.user_message", { content: k.content });
             case "llm_request": return t("ai.audit.summary.llm_request", { model: k.model });
