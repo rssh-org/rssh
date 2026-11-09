@@ -2,11 +2,14 @@ import { createHash, createPrivateKey, constants, sign } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 const UPLOAD_URL = 'https://connect-api.cloud.huawei.com/api/publish/v2/upload-url/for-obs';
 const PACKAGE_INFO_URL = 'https://connect-api.cloud.huawei.com/api/publish/v3/app-package-info';
 const VERSION_LIST_URL = 'https://connect-api.cloud.huawei.com/api/publish/v3/version/brief-info/list';
+const COMPILE_STATUS_URL = 'https://connect-api.cloud.huawei.com/api/publish/v3/package/compile/status';
+const SUBMIT_URL = 'https://connect-api.cloud.huawei.com/api/publish/v3/app-submit';
 const TOKEN_AUDIENCE = 'https://oauth-login.cloud.huawei.com/oauth2/v3/token';
 const MAX_APP_BYTES = 4 * 1024 ** 3;
 
@@ -65,7 +68,11 @@ async function requestJson(fetchImpl, url, options, stage) {
     throw new UploadError(`${stage} response was not valid JSON.`);
   }
   const code = result?.ret?.code;
-  requireValue(code === 0, `${stage} request failed (code ${Number.isSafeInteger(code) ? code : 'missing or invalid'}).`);
+  // Use documented guidance, not ret.msg, which can contain private response data.
+  const hint = code === 204144743
+    ? ' AGC has no editable release version. For a published app, open its published version in AppGallery Connect and choose Upgrade to create a draft. If a version is pending review or release, resolve its status before retrying. See CONTRIBUTING.md.'
+    : '';
+  requireValue(code === 0, `${stage} request failed (code ${Number.isSafeInteger(code) ? code : 'missing or invalid'}).${hint}`);
   return result;
 }
 
@@ -114,17 +121,41 @@ function uploadInfo(value, size) {
   return { url, headers, objectId: value.objectId };
 }
 
+// Huawei requires waiting two minutes after upload before submitting review.
+// Only the registered package's successful parsing state permits submission.
+// https://developer.huawei.com/consumer/cn/doc/app/agc-help-publish-api-query-compile-status-0000002236041434
+// https://developer.huawei.com/consumer/cn/doc/app/agc-help-publish-api-app-submit-0000002271160585
+async function waitForPackage(appId, packageId, headers, fetchImpl, sleep) {
+  requireValue(typeof packageId === 'string' && packageId.length > 0 && packageId.length <= 32, 'AGC returned no valid package ID; no review submitted.');
+  const endpoint = new URL(COMPILE_STATUS_URL);
+  endpoint.search = new URLSearchParams({ appId, pkgIds: packageId }).toString();
+  await sleep(120_000);
+  for (let attempt = 0; attempt < 17; attempt++) {
+    const result = await requestJson(fetchImpl, endpoint, { headers }, 'AGC package status');
+    requireValue(Array.isArray(result.pkgStateList), 'AGC returned no valid package status list; no review submitted.');
+    const matches = result.pkgStateList.filter((pkg) => pkg?.pkgId === packageId);
+    requireValue(matches.length === 1, 'AGC returned no unique package status for the uploaded package; no review submitted.');
+    const { successStatus } = matches[0];
+    requireValue([0, 1, 2].includes(successStatus), 'AGC returned an invalid package status; no review submitted.');
+    requireValue(successStatus !== 2, 'AGC package parsing failed; no review submitted. Check its diagnostics in AppGallery Connect.');
+    if (successStatus === 0) return;
+    if (attempt < 16) await sleep(30_000);
+  }
+  throw new UploadError('AGC package is still parsing after polling; no review submitted. Check its status in AppGallery Connect.');
+}
+
 // HarmonyOS uses a Service Account PS256 JWT, an OBS-signed binary PUT, then
 // app-package-info to register the uploaded object in the developer console.
-// Registration is separate from review submission; never call app-submit here.
+// Review submission is optional for direct callers and enabled by release CI.
 // These are the HarmonyOS APIs, not Android's multipart upload/update-file API:
 // https://developer.huawei.com/consumer/en/doc/app/agc-help-connect-api-obtain-server-auth-0000002271134661
 // https://developer.huawei.com/consumer/en/doc/app/agc-help-upload-api-upload-url-0000002236201294
 // https://developer.huawei.com/consumer/en/doc/app/agc-help-upload-api-upload-file-0000002271160621
 // https://developer.huawei.com/consumer/cn/doc/app/agc-help-publish-api-app-package-info-update-0000002236201250
 // https://developer.huawei.com/consumer/cn/doc/app/agc-help-publish-api-guide-0000002271134665
-export async function uploadApp({ file, appId, serviceAccountJson, chineseMainlandFlag }, { fetchImpl = fetch, now = Date.now } = {}) {
+export async function uploadApp({ file, appId, serviceAccountJson, chineseMainlandFlag, submitReview = false }, { fetchImpl = fetch, now = Date.now, sleep = delay } = {}) {
   requireValue(typeof appId === 'string' && /^[0-9]{1,32}$/.test(appId), 'AGC_APP_ID must be the numeric APP ID from AppGallery Connect.');
+  requireValue(typeof submitReview === 'boolean', 'submitReview must be a boolean.');
   requireValue(typeof file === 'string' && path.extname(file) === '.app', 'Provide the signed HarmonyOS .app package.');
   requireValue(chineseMainlandFlag === undefined || /^[01]$/.test(String(chineseMainlandFlag)), 'AGC_CHINESE_MAINLAND_FLAG must be 0 or 1 when configured.');
   let metadata;
@@ -164,21 +195,33 @@ export async function uploadApp({ file, appId, serviceAccountJson, chineseMainla
   // OBS only stores the bytes. Register the package before reporting success.
   const registrationUrl = new URL(PACKAGE_INFO_URL);
   registrationUrl.searchParams.set('appId', appId);
-  await requestJson(fetchImpl, registrationUrl, {
+  const registration = await requestJson(fetchImpl, registrationUrl, {
     method: 'PUT', headers, body: JSON.stringify({ fileName, objectId: info.objectId }),
   }, 'AGC package registration');
+  if (submitReview) {
+    await waitForPackage(appId, registration.packageId, headers, fetchImpl, sleep);
+    const submitUrl = new URL(SUBMIT_URL);
+    submitUrl.searchParams.set('appId', appId);
+    // Do not retry a submission: a timeout may occur after AGC accepts it.
+    await requestJson(fetchImpl, submitUrl, {
+      method: 'POST', headers, body: JSON.stringify({ releaseType: 1, releasePhase: 0 }),
+    }, 'AGC review submission');
+  }
   return { fileName, size: metadata.size, sha256, objectId: info.objectId };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    requireValue(process.argv.length === 3, 'Usage: node ohos/scripts/upload-agc.mjs path/to/RSSH.app');
+    const submitReview = process.argv[3] === '--submit-review';
+    requireValue(process.argv.length === 3 || (process.argv.length === 4 && submitReview), 'Usage: node ohos/scripts/upload-agc.mjs path/to/RSSH.app [--submit-review]');
     const result = await uploadApp({
       file: process.argv[2], appId: process.env.AGC_APP_ID,
       serviceAccountJson: process.env.AGC_SERVICE_ACCOUNT_JSON,
       chineseMainlandFlag: process.env.AGC_CHINESE_MAINLAND_FLAG || undefined,
+      submitReview,
     });
-    console.log(`Uploaded and registered ${result.fileName} in AppGallery Connect (${result.size} bytes, SHA-256 ${result.sha256}). No review submitted.`);
+    const reviewStatus = submitReview ? 'Review submitted; awaiting Huawei approval.' : 'No review submitted.';
+    console.log(`Uploaded and registered ${result.fileName} in AppGallery Connect (${result.size} bytes, SHA-256 ${result.sha256}). ${reviewStatus}`);
   } catch (error) {
     console.error(error instanceof UploadError ? error.message : 'AGC upload failed.');
     process.exitCode = 1;

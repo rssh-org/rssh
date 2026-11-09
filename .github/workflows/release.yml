@@ -74,7 +74,7 @@ jobs:
             fi
           done
 
-  # Stable releases upload the signed App Pack to AGC, without submitting review.
+  # Stable releases upload the signed App Pack to AGC and submit it for review.
   build-ohos:
     needs: test
     if: ${{ !contains(github.ref_name, '-') }}

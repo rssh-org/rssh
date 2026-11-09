@@ -15,15 +15,18 @@ const account = {
 };
 const serviceAccountJson = JSON.stringify(account);
 const appId = '123456789';
+const packageId = '157300000005952';
 const now = () => 1_800_000_000_000;
 
-async function fixture(t, { urlReply, uploadStatus = 200, apiStatus = 200, registrationReply, registrationStatus = 200, registrationBody, versionReply, versionStatus = 200, versionBody } = {}) {
+async function fixture(t, { urlReply, uploadStatus = 200, apiStatus = 200, registrationReply, registrationStatus = 200, registrationBody, versionReply, versionStatus = 200, versionBody, compileReplies = [{ ret: { code: 0 }, pkgStateList: [{ pkgId: packageId, successStatus: 0 }] }], compileStatus = 200, compileBody, submitReply, submitStatus = 200, submitBody } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'rssh agc upload '));
   const file = path.join(dir, 'RSSH release.app');
   // Binary fixture exercises byte preservation (NUL and non-UTF8 included).
   const bytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 255, 128, 13, 10, 0x22]);
   writeFileSync(file, bytes);
   const requests = [];
+  const waits = [];
+  let compileCalls = 0;
   const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -57,7 +60,17 @@ async function fixture(t, { urlReply, uploadStatus = 200, apiStatus = 200, regis
     }
     if (req.url.startsWith('/api/publish/v3/app-package-info?')) {
       res.writeHead(registrationStatus, { 'content-type': 'application/json' });
-      res.end(registrationBody ?? JSON.stringify(registrationReply ?? { ret: { code: 0 }, packageId: '157300000005952' }));
+      res.end(registrationBody ?? JSON.stringify(registrationReply ?? { ret: { code: 0 }, packageId }));
+      return;
+    }
+    if (req.url.startsWith('/api/publish/v3/package/compile/status?')) {
+      res.writeHead(compileStatus, { 'content-type': 'application/json' });
+      res.end(compileBody ?? JSON.stringify(compileReplies[Math.min(compileCalls++, compileReplies.length - 1)]));
+      return;
+    }
+    if (req.url.startsWith('/api/publish/v3/app-submit?')) {
+      res.writeHead(submitStatus, { 'content-type': 'application/json' });
+      res.end(submitBody ?? JSON.stringify(submitReply ?? { ret: { code: 0 } }));
       return;
     }
     res.writeHead(500);
@@ -82,7 +95,8 @@ async function fixture(t, { urlReply, uploadStatus = 200, apiStatus = 200, regis
     return fetch(url, options);
   };
   const options = { file, appId, serviceAccountJson };
-  return { file, bytes, requests, options, fetchImpl };
+  const sleep = async (ms) => waits.push({ ms, requestCount: requests.length });
+  return { file, bytes, requests, options, fetchImpl, sleep, waits };
 }
 
 test('next version code authenticates and queries every release type and state before incrementing the largest package code', async (t) => {
@@ -238,6 +252,109 @@ test('the mainland flag can be omitted for a mainland-registered developer', asy
   assert.equal(new URL(f.requests[0].url, 'https://example.test').searchParams.has('chineseMainlandFlag'), false);
 });
 
+test('automatic review waits for this package to finish parsing and submits the full release once', async (t) => {
+  const f = await fixture(t, { compileReplies: [
+    { ret: { code: 0 }, pkgStateList: [{ pkgId: packageId, successStatus: 1 }] },
+    { ret: { code: 0 }, pkgStateList: [{ pkgId: packageId, successStatus: 0 }] },
+  ] });
+  await uploadApp({ ...f.options, submitReview: true }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep });
+  assert.equal(f.requests.length, 6);
+  assert.deepEqual(f.waits, [{ ms: 120_000, requestCount: 3 }, { ms: 30_000, requestCount: 4 }]);
+  for (const status of f.requests.slice(3, 5)) {
+    assert.equal(status.method, 'GET');
+    assert.equal(status.url, `/api/publish/v3/package/compile/status?appId=${appId}&pkgIds=${packageId}`);
+    assert.equal(status.headers.authorization, f.requests[0].headers.authorization);
+  }
+  const submit = f.requests[5];
+  assert.equal(submit.method, 'POST');
+  assert.equal(submit.url, `/api/publish/v3/app-submit?appId=${appId}`);
+  assert.equal(submit.headers.authorization, f.requests[0].headers.authorization);
+  assert.equal(submit.headers.client_id, undefined);
+  assert.equal(submit.headers['content-type'], 'application/json');
+  assert.deepEqual(JSON.parse(submit.body), { releaseType: 1, releasePhase: 0 });
+});
+
+for (const code of [204144743, 204144666]) {
+  test(`automatic review stops immediately if registration fails with ${code}`, async (t) => {
+    const f = await fixture(t, { registrationReply: { ret: { code } } });
+    await assert.rejects(uploadApp({ ...f.options, submitReview: true }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep }), /package registration request failed/);
+    assert.equal(f.requests.length, 3);
+    assert.deepEqual(f.waits, []);
+  });
+}
+
+test('automatic review requires the package ID returned by registration', async (t) => {
+  const f = await fixture(t, { registrationReply: { ret: { code: 0 } } });
+  await assert.rejects(uploadApp({ ...f.options, submitReview: true }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep }), /package ID/);
+  assert.equal(f.requests.length, 3);
+  assert.deepEqual(f.waits, []);
+});
+
+for (const [name, reply, expected] of [
+  ['failed parsing', { pkgStateList: [{ pkgId: packageId, successStatus: 2, errorMsg: 'SECRET' }] }, /package parsing failed/],
+  ['unknown status', { pkgStateList: [{ pkgId: packageId, successStatus: 99 }] }, /invalid package status/],
+  ['string status', { pkgStateList: [{ pkgId: packageId, successStatus: '0' }] }, /invalid package status/],
+  ['missing status list', {}, /package status/],
+  ['empty status list', { pkgStateList: [] }, /package status/],
+  ['another package', { pkgStateList: [{ pkgId: '999', successStatus: 0 }] }, /package status/],
+  ['duplicate package', { pkgStateList: [{ pkgId: packageId, successStatus: 0 }, { pkgId: packageId, successStatus: 1 }] }, /package status/],
+]) {
+  test(`automatic review refuses ${name}`, async (t) => {
+    const f = await fixture(t, { compileReplies: [{ ret: { code: 0 }, ...reply }] });
+    await assert.rejects(uploadApp({ ...f.options, submitReview: true }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep }), (error) => {
+      assert.match(error.message, expected);
+      assert.doesNotMatch(error.message, /SECRET/);
+      return true;
+    });
+    assert.equal(f.requests.length, 4);
+  });
+}
+
+test('automatic review stops polling a package that never finishes parsing', async (t) => {
+  const f = await fixture(t, { compileReplies: [{ ret: { code: 0 }, pkgStateList: [{ pkgId: packageId, successStatus: 1 }] }] });
+  await assert.rejects(uploadApp({ ...f.options, submitReview: true }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep }), /still parsing.*no review submitted/i);
+  assert.equal(f.requests.length, 20, 'Three upload requests followed by at most 17 status checks.');
+  assert.equal(f.waits.reduce((sum, wait) => sum + wait.ms, 0), 600_000);
+  assert.ok(f.requests.slice(3).every((request) => request.method === 'GET'));
+});
+
+for (const [name, config, expected, requestCount] of [
+  ['status HTTP error', { compileStatus: 403 }, /HTTP 403/, 4],
+  ['status invalid JSON', { compileBody: 'SECRET' }, /not valid JSON/, 4],
+  ['status business error', { compileReplies: [{ ret: { code: 204144718, msg: 'SECRET' } }] }, /code 204144718/, 4],
+  ['submission HTTP error', { submitStatus: 403 }, /HTTP 403/, 5],
+  ['submission invalid JSON', { submitBody: 'SECRET' }, /not valid JSON/, 5],
+  ['submission business error', { submitReply: { ret: { code: 204144664, msg: 'SECRET' } } }, /code 204144664/, 5],
+  ['submission missing status', { submitReply: {} }, /missing or invalid/, 5],
+]) {
+  test(`automatic review fails on ${name} without retrying or exposing the response`, async (t) => {
+    const f = await fixture(t, config);
+    await assert.rejects(uploadApp({ ...f.options, submitReview: true }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep }), (error) => {
+      assert.match(error.message, expected);
+      assert.doesNotMatch(error.message, /SECRET/);
+      return true;
+    });
+    assert.equal(f.requests.length, requestCount);
+  });
+}
+
+test('automatic review never retries an ambiguous submission transport failure or exposes credentials', async (t) => {
+  const f = await fixture(t);
+  let submissions = 0;
+  const fetchImpl = (url, options) => {
+    if (new URL(url).pathname === '/api/publish/v3/app-submit') {
+      submissions++;
+      throw new Error(`${options.headers.Authorization} SECRET`);
+    }
+    return f.fetchImpl(url, options);
+  };
+  await assert.rejects(uploadApp({ ...f.options, submitReview: true }, { fetchImpl, now, sleep: f.sleep }), {
+    message: 'AGC review submission request failed (network, redirect, or timeout).',
+  });
+  assert.equal(submissions, 1);
+  assert.equal(f.requests.length, 4);
+});
+
 for (const [name, config, expected] of [
   ['HTTP failure', { apiStatus: 403 }, /HTTP 403/],
   ['business failure', { urlReply: { ret: { code: 204144666, msg: 'SECRET do-not-log' } } }, /code 204144666/],
@@ -259,6 +376,21 @@ test('a failed binary PUT is not reported as a successful upload', async (t) => 
   const f = await fixture(t, { uploadStatus: 403 });
   await assert.rejects(uploadApp(f.options, { fetchImpl: f.fetchImpl, now }), /package upload returned HTTP 403/);
   assert.equal(f.requests.length, 2);
+});
+
+test('registration without an editable version explains how to create a draft and remains a failure', async (t) => {
+  const f = await fixture(t, { registrationReply: { ret: { code: 204144743, msg: 'SECRET do-not-log' } } });
+  await assert.rejects(uploadApp(f.options, { fetchImpl: f.fetchImpl, now }), (error) => {
+    assert.match(error.message, /package registration request failed \(code 204144743\)/);
+    assert.match(error.message, /no editable release version/i);
+    assert.match(error.message, /published version.*Upgrade.*draft/);
+    assert.match(error.message, /pending review or release/);
+    assert.match(error.message, /CONTRIBUTING\.md/);
+    assert.doesNotMatch(error.message, /SECRET|do-not-log/);
+    return true;
+  });
+  assert.equal(f.requests.length, 3, 'Do not retry registration or change the review/release state.');
+  assert.deepEqual(f.requests[1].body, f.bytes);
 });
 
 for (const [name, config, expected] of [
@@ -324,6 +456,7 @@ test('invalid credentials and packages fail before any network access', async (t
   const fetchImpl = async () => assert.fail('Invalid input must not use the network');
   for (const change of [
     { appId: '' }, { file: f.file.replace(/app$/, 'hap') }, { chineseMainlandFlag: '2' },
+    { submitReview: 'false' },
     { serviceAccountJson: '{}' }, { serviceAccountJson: 'SECRET invalid JSON' },
     { serviceAccountJson: JSON.stringify({ ...account, project_id: 'project-scope' }) },
     { serviceAccountJson: JSON.stringify({ ...account, private_key: 'SECRET invalid private key' }) },
@@ -344,4 +477,36 @@ test('the CLI fails clearly when required configuration is absent, without print
   assert.equal(run.status, 1);
   assert.match(run.stderr, /AGC_APP_ID/);
   assert.doesNotMatch(run.stderr, /SECRET/);
+});
+
+test('the CLI keeps upload-only behavior unless --submit-review is passed', async (t) => {
+  const f = await fixture(t);
+  const preload = path.join(path.dirname(f.file), 'fetch-fixture.mjs');
+  writeFileSync(preload, `
+    const replies = [
+      { ret: { code: 0 }, urlInfo: { method: 'PUT', url: 'https://upload.example.test/package', objectId: 'test-object' } },
+      null,
+      { ret: { code: 0 } },
+    ];
+    globalThis.fetch = async (url, options) => {
+      if (options.body && options.duplex) for await (const chunk of options.body) {}
+      if (!replies.length) throw new Error('Unexpected request');
+      return new Response(JSON.stringify(replies.shift()), { status: 200 });
+    };
+  `);
+  const options = {
+    encoding: 'utf8', timeout: 5000,
+    env: { ...process.env, AGC_APP_ID: appId, AGC_SERVICE_ACCOUNT_JSON: serviceAccountJson, AGC_CHINESE_MAINLAND_FLAG: '' },
+  };
+  const args = ['--import', preload, 'ohos/scripts/upload-agc.mjs', f.file];
+  const uploadOnly = spawnSync(process.execPath, args, options);
+  assert.equal(uploadOnly.status, 0, uploadOnly.stderr);
+  assert.match(uploadOnly.stdout, /No review submitted/);
+  const submit = spawnSync(process.execPath, [...args, '--submit-review'], options);
+  assert.equal(submit.status, 1, submit.stderr);
+  assert.match(submit.stderr, /package ID/, 'The review flag must reach the registration result check.');
+  assert.doesNotMatch(submit.stdout, /Review submitted/);
+  const invalid = spawnSync(process.execPath, [...args, '--submit-reveiw'], options);
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /Usage:/);
 });
