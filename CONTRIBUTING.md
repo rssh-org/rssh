@@ -228,9 +228,13 @@ project during preparation. `--unsigned` does not require signing configuration.
 
 Stable `vMAJOR.MINOR.PATCH` tags run **HarmonyOS Upload** after the release tests.
 It builds on GitHub's Ubuntu runner, signs both HAPs, archives `RSSH.app`, and
-uploads it and registers the package in AppGallery Connect. It **never submits
-review or publishes**.
+uploads and registers the package in AppGallery Connect. It then waits for package
+processing and **automatically submits the full release for review**. Huawei's
+[submission API](https://developer.huawei.com/consumer/cn/doc/app/agc-help-publish-api-app-submit-0000002271160585/)
+defaults to immediate publication after approval; CI does not set a release date.
 You can also run the workflow manually with a stable version and selected ref.
+Both tag-triggered and manual runs submit review. Before running either, create
+an editable release draft in AGC and complete its required release information.
 
 Configure repository secrets and variables under
 **Settings > Secrets and variables > Actions**:
@@ -276,8 +280,38 @@ invalid package data, CI stops before building. Run **HarmonyOS Upload** manuall
 and fill in `version_code` with a positive integer up to `2147483647`, higher than
 all previously uploaded codes. This input is required when automatic lookup
 cannot determine the next code; an explicit value bypasses the lookup.
-Success confirms upload and package registration; check asynchronous package
-processing in AGC before submitting review yourself.
+After registration, CI waits two minutes, then checks the returned package ID's
+parsing status up to 17 times at 30-second intervals. Only a successful status
+allows review submission. Parsing failure, invalid responses, or polling
+exhaustion fail the job without submitting review. Success confirms that AGC
+accepted the review submission, not that Huawei approved the release.
+Submission is never automatically retried. If the submission request times out
+or its response cannot be read, check AGC's review status before rerunning CI.
+
+Package registration requires an editable full-release version in AGC. If it fails
+with `204144743` (no version can be modified), the bytes reached OBS but were not
+registered. For an already published app, follow Huawei's
+[version upgrade procedure](https://developer.huawei.com/consumer/cn/doc/app/agc-help-maintain-upgrade-0000002236494386/):
+open the app in HarmonyOS Developer Console, go to **Distribution > App release >
+Version information**, open the published version, and choose **Upgrade** to create
+a **New version - Ready to submit** draft. If the latest version is still pending
+review or release, resolve that workflow first; the Upgrade button may be unavailable.
+CI does not create release drafts or cancel reviews. The current HarmonyOS
+Publishing API documentation does not establish a supported formal-draft creation
+call; the test-version creation API cannot replace the console's Upgrade action.
+
+After the draft is ready, rerun the failed HarmonyOS job. Alternatively, download
+the `rssh-<version>-harmonyos` artifact retained by the failed run for seven days
+and upload its signed `RSSH.app` through the console or this script. Changing
+`version_code` alone does not create the missing release draft.
+
+Direct script use preserves the upload-only default. Add `--submit-review` to
+wait for package processing and submit review, using the same AGC environment
+variables as CI:
+
+```bash
+node ohos/scripts/upload-agc.mjs path/to/RSSH.app --submit-review
+```
 
 ## Running outside Tauri (headless server + IDEA plugin)
 
