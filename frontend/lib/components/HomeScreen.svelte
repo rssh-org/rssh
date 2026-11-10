@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import * as app from "../stores/app.svelte.ts";
   import * as syncStatus from "../stores/sync.svelte.ts";
+  import * as discovery from "../stores/discovery.svelte.ts";
   import type {
     Profile,
     Credential,
@@ -40,7 +41,7 @@
   let groups = $state<Group[]>([]);
   let serialProfiles = $state<SerialProfile[]>([]);
   let telnetProfiles = $state<TelnetProfile[]>([]);
-  let dynamicTargets = $state<DynamicDiscoveredTarget[]>([]);
+  let dynamicTargets = $derived(discovery.targets());
   let query = $state("");
   let viewPreferences = $state<HomeViewPreferences>(loadHomeViewPreferences());
 
@@ -79,9 +80,6 @@
         loadedTelnet,
       };
     },
-    loadDynamic: () => app.capabilities().localDiscovery
-      ? app.discoverDynamicTargets()
-      : Promise.resolve({ targets: [], errors: [] }),
     applyStatic: (loaded) => {
       profiles = loaded.loadedProfiles;
       credentials = loaded.loadedCredentials;
@@ -89,9 +87,6 @@
       groups = loaded.loadedGroups;
       serialProfiles = loaded.loadedSerial;
       telnetProfiles = loaded.loadedTelnet;
-    },
-    applyDynamic: (snapshot) => {
-      dynamicTargets = snapshot.targets;
     },
     onError: (error) => toast.error(errMsg(error)),
   });
@@ -120,6 +115,8 @@
         return { icon: dynamicPlatformIconName("docker"), iconClass: "docker" };
       case "kubectl_exec":
         return { icon: dynamicPlatformIconName("k8s"), iconClass: "k8s" };
+      case "aws_ssm":
+        return { icon: dynamicPlatformIconName("aws_ssm"), iconClass: "" };
     }
 
     const _exhaustive: never = target.connector_spec;
@@ -190,6 +187,7 @@
       case "telnet": return t("settings.section.telnet");
       case "docker_exec": return t("home.type.docker");
       case "kubectl_exec": return t("home.type.kubernetes");
+      case "aws_ssm": return t("home.type.aws_ssm");
     }
   }
 

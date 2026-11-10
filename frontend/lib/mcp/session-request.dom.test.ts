@@ -42,7 +42,7 @@ afterEach(async () => {
   document.body.innerHTML = "";
 });
 
-it.each(["local", "docker_exec", "kubectl_exec"] as const)("authorizes the requested %s split pane and runs commands in that PTY", async (type) => {
+it.each(["local", "docker_exec", "kubectl_exec", "aws_ssm"] as const)("authorizes the requested %s split pane and runs commands in that PTY", async (type) => {
   app.addTab({ id: "local:workspace", type: "local", label: "Workspace" });
   app.addPane("local:workspace", "right", { id: terminal.tab_id, type, label: "Target" });
   app.registerSession({ tabId: terminal.tab_id, sessionId: terminal.session_id, type });

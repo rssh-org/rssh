@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import AppShell from "./lib/components/AppShell.svelte";
   import ToastStack from "./lib/components/ToastStack.svelte";
   import WelcomeScreen from "./lib/components/WelcomeScreen.svelte";
@@ -7,6 +7,7 @@
   import * as updates from "./lib/stores/updates.svelte.ts";
   import * as sync from "./lib/stores/sync.svelte.ts";
   import * as cli from "./lib/stores/cli.svelte.ts";
+  import * as discovery from "./lib/stores/discovery.svelte.ts";
   import * as ai from "./lib/ai/store.svelte.ts";
   import * as runtime from "./lib/stores/runtime.svelte.ts";
   import * as layout from "./lib/stores/layout.svelte.ts";
@@ -50,7 +51,19 @@
   onMount(() => {
     const stopObservingViewport = layout.observeViewport();
     void initialize();
-    return stopObservingViewport;
+    return () => {
+      stopObservingViewport();
+      discovery.stopBackgroundRefresh();
+    };
+  });
+
+  $effect(() => {
+    // Each frontend window owns its discovery snapshot and refresh schedule.
+    if (!startupReady || !runtime.capabilities().localDiscovery) return;
+    void untrack(() => discovery.startBackgroundRefresh()).catch((error) => {
+      console.warn("[dynamic-discovery] refresh settings failed:", error);
+    });
+    return () => discovery.stopBackgroundRefresh();
   });
 
   async function initialize() {

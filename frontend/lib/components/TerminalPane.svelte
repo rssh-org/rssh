@@ -645,7 +645,7 @@
     let touchScrollCleanup: (() => void) | undefined;
 
     const isLocal = $derived(tabType === "local");
-    const isPtyConnector = $derived(tabType === "docker_exec" || tabType === "kubectl_exec");
+    const isPtyConnector = $derived(tabType === "docker_exec" || tabType === "kubectl_exec" || tabType === "aws_ssm");
     const isSsh = $derived(tabType === "ssh");
     // Transport table — the per-tab byte-stream IPC contract lives in DATA, not in
     // branches. Adding a transport is one more row, zero code change.
@@ -657,6 +657,7 @@
         local:  { write: "pty_write",    resize: "pty_resize",    data: "pty:data",    close: "pty:close",    closeCmd: "pty_close" },
         docker_exec:  { write: "pty_write", resize: "pty_resize", data: "pty:data", close: "pty:close", closeCmd: "pty_close" },
         kubectl_exec: { write: "pty_write", resize: "pty_resize", data: "pty:data", close: "pty:close", closeCmd: "pty_close" },
+        aws_ssm:     { write: "pty_write", resize: "pty_resize", data: "pty:data", close: "pty:close", closeCmd: "pty_close" },
         serial: { write: "serial_write", resize: null,            data: "serial:data", close: "serial:close", closeCmd: "serial_close" },
         telnet: { write: "telnet_write", resize: "telnet_resize", data: "telnet:data", close: "telnet:close", closeCmd: "telnet_close" },
     };

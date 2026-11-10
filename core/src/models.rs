@@ -386,6 +386,7 @@ pub enum DynamicDiscoveryPlatform {
     Docker,
     #[serde(rename = "k8s")]
     K8s,
+    AwsSsm,
 }
 
 fn default_container_shell() -> String {
@@ -408,6 +409,16 @@ pub enum DynamicDiscoveryConfig {
         #[serde(default = "default_container_shell")]
         shell: String,
     },
+    AwsSsm {
+        #[serde(default)]
+        profile: String,
+        region: String,
+        #[serde(default)]
+        only_ssm_available: bool,
+        /// Actual Session Manager shell family; None infers the EC2 OS default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<String>,
+    },
 }
 
 impl DynamicDiscoveryConfig {
@@ -415,6 +426,7 @@ impl DynamicDiscoveryConfig {
         match self {
             Self::Docker { .. } => DynamicDiscoveryPlatform::Docker,
             Self::K8s { .. } => DynamicDiscoveryPlatform::K8s,
+            Self::AwsSsm { .. } => DynamicDiscoveryPlatform::AwsSsm,
         }
     }
 }
@@ -463,6 +475,14 @@ pub enum ConnectorSpec {
         namespace: String,
         pod: String,
         container: Option<String>,
+        shell: String,
+    },
+    AwsSsm {
+        profile: String,
+        region: String,
+        instance_id: String,
+        account_id: String,
+        /// Remote SSM shell family, used for command syntax, not session configuration.
         shell: String,
     },
 }

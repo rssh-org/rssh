@@ -3,6 +3,7 @@ import type { ConnectionKind, DynamicPlatform, TabType } from "../stores/app.sve
 export const APP_ICON_NAMES = [
   "add",
   "ai",
+  "aws",
   "check",
   "cloud-download",
   "cloud-upload",
@@ -46,7 +47,11 @@ export function connectionIconName(kind: ConnectionKind): AppIconName {
 }
 
 export function dynamicPlatformIconName(platform: DynamicPlatform): AppIconName {
-  return platform === "docker" ? "docker" : "kubernetes";
+  switch (platform) {
+    case "docker": return "docker";
+    case "k8s": return "kubernetes";
+    case "aws_ssm": return "aws";
+  }
 }
 
 export function tabIconName(type: TabType): AppIconName {
@@ -58,6 +63,7 @@ export function tabIconName(type: TabType): AppIconName {
     case "telnet": return "telnet";
     case "docker_exec": return "docker";
     case "kubectl_exec": return "kubernetes";
+    case "aws_ssm": return "aws";
     case "forward": return "forward";
     case "edit": return "edit";
   }

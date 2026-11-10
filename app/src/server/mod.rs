@@ -230,6 +230,17 @@ fn dispatch(
         // List the local shells the host offers (pure engine, no UI).
         "refresh_shells" => ok(crate::commands::pty::refresh_shells()),
 
+        // ---- dynamic discovery sources (CLI probes live in dispatch_async) ----
+        "list_dynamic_discovery_sources" => ok(
+            crate::commands::discovery::list_dynamic_discovery_sources(state),
+        ),
+        "save_dynamic_discovery_sources" => {
+            ok(crate::commands::discovery::save_dynamic_discovery_sources(
+                state,
+                arg(&args, "sources")?,
+            ))
+        }
+
         // ---- credentials (secret via SecretStore, metadata via DB) ----
         "list_credentials" => ok(crate::db::credential::list(&state.db)),
         "get_credential" => {
@@ -674,6 +685,26 @@ async fn dispatch_async(
     tx: &mpsc::UnboundedSender<Message>,
 ) -> Result<Value, Value> {
     match cmd {
+        "dynamic_discovery_tool_status" => ok(
+            crate::commands::discovery::dynamic_discovery_tool_status(arg(&args, "platform")?)
+                .await,
+        ),
+        "list_dynamic_discovery_contexts" => ok(
+            crate::commands::discovery::list_dynamic_discovery_contexts(arg(&args, "platform")?)
+                .await,
+        ),
+        "discover_dynamic_targets" => {
+            ok(crate::commands::discovery::discover_dynamic_targets(state).await)
+        }
+        "pty_spawn_connector" => ok(crate::commands::pty::pty_spawn_connector(
+            headless_host(state, tx),
+            owner.clone(),
+            state,
+            checked_u16_arg(&args, "cols", 80)?,
+            checked_u16_arg(&args, "rows", 24)?,
+            arg(&args, "spec")?,
+            optional_string_arg(&args, "sessionId")?,
+        )),
         "mcp_start" => ok(crate::mcp::start(state.clone(), owner.clone()).await),
         "mcp_status" => ok(crate::mcp::status(state, owner)),
         "mcp_stop" => ok(crate::mcp::stop(state, owner)),
@@ -1900,6 +1931,145 @@ mod tests {
             data_dir: dir.path().into(),
         };
         (Arc::new(state), dir)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_dynamic_discovery_round_trips_sources_and_skips_disabled_sources() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sources = json!([{
+            "id": "docker-dev", "name": "Docker Dev", "enabled": false,
+            "platform": "docker", "context": "local", "shell": "sh"
+        }, {
+            "id": "aws-prod", "name": "AWS Production", "enabled": false,
+            "platform": "aws_ssm", "profile": "", "region": "ap-southeast-1",
+            "only_ssm_available": true
+        }]);
+        let capabilities =
+            dispatch_async(&state, &owner, "get_runtime_capabilities", json!({}), &tx)
+                .await
+                .unwrap();
+        assert_eq!(capabilities["localDiscovery"], true);
+        assert_eq!(
+            dispatch_async(
+                &state,
+                &owner,
+                "save_dynamic_discovery_sources",
+                json!({ "sources": sources }),
+                &tx,
+            )
+            .await
+            .unwrap(),
+            Value::Null,
+        );
+        assert_eq!(
+            dispatch_async(
+                &state,
+                &owner,
+                "list_dynamic_discovery_sources",
+                json!({}),
+                &tx
+            )
+            .await
+            .unwrap(),
+            sources,
+        );
+        assert_eq!(
+            dispatch_async(&state, &owner, "discover_dynamic_targets", json!({}), &tx)
+                .await
+                .unwrap(),
+            json!({ "targets": [], "errors": [] }),
+        );
+
+        let error = dispatch_async(
+            &state,
+            &owner,
+            "save_dynamic_discovery_sources",
+            json!({ "sources": [sources[0], sources[0]] }),
+            &tx,
+        )
+        .await
+        .unwrap_err();
+        let payload = error
+            .as_str()
+            .unwrap()
+            .strip_prefix("__rssh_err__|")
+            .unwrap();
+        let error: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(error["code"], "dynamic_discovery_duplicate_id");
+        assert_eq!(
+            dispatch_async(
+                &state,
+                &owner,
+                "list_dynamic_discovery_sources",
+                json!({}),
+                &tx
+            )
+            .await
+            .unwrap(),
+            sources,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_dynamic_discovery_tool_commands_validate_the_platform() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        for command in [
+            "dynamic_discovery_tool_status",
+            "list_dynamic_discovery_contexts",
+        ] {
+            let error = dispatch_async(
+                &state,
+                &owner,
+                command,
+                json!({ "platform": "unsupported" }),
+                &tx,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.as_str().unwrap().starts_with("bad arg 'platform':"));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_dynamic_connector_preserves_engine_validation_errors() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let spec = json!({
+            "type": "aws_ssm", "profile": "", "region": "",
+            "instance_id": "i-0123456789abcdef0", "account_id": "123456789012",
+            "shell": "sh"
+        });
+        for (session_id, expected_code) in [
+            ("invalid".to_owned(), "session_id_invalid"),
+            (
+                uuid::Uuid::new_v4().to_string(),
+                "dynamic_discovery_connector_invalid",
+            ),
+        ] {
+            let error = dispatch_async(
+                &state,
+                &owner,
+                "pty_spawn_connector",
+                json!({ "spec": spec, "sessionId": session_id, "cols": 80, "rows": 24 }),
+                &tx,
+            )
+            .await
+            .unwrap_err();
+            let payload = error
+                .as_str()
+                .unwrap()
+                .strip_prefix("__rssh_err__|")
+                .unwrap();
+            let error: Value = serde_json::from_str(payload).unwrap();
+            assert_eq!(error["code"], expected_code);
+            assert!(state.lifecycle_sessions.lock().unwrap().is_empty());
+            assert!(state.pty_sessions.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

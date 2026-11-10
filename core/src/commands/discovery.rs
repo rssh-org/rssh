@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -25,6 +26,7 @@ fn platform_program(platform: DynamicDiscoveryPlatform) -> &'static str {
     match platform {
         DynamicDiscoveryPlatform::Docker => "docker",
         DynamicDiscoveryPlatform::K8s => "kubectl",
+        DynamicDiscoveryPlatform::AwsSsm => "aws",
     }
 }
 
@@ -111,6 +113,7 @@ fn discovery_cli_fallback_dirs() -> Vec<PathBuf> {
         }
         fallback_dirs.push(PathBuf::from("/opt/homebrew/bin"));
         fallback_dirs.push(PathBuf::from("/usr/local/bin"));
+        fallback_dirs.push(PathBuf::from("/usr/local/sessionmanagerplugin/bin"));
         fallback_dirs.push(PathBuf::from("/usr/bin"));
         fallback_dirs.push(PathBuf::from("/bin"));
         #[cfg(linux)]
@@ -124,8 +127,16 @@ fn discovery_cli_fallback_dirs() -> Vec<PathBuf> {
     #[cfg(windows)]
     {
         if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            let program_files = PathBuf::from(program_files);
+            fallback_dirs.push(program_files.join("Amazon").join("AWSCLIV2"));
             fallback_dirs.push(
-                PathBuf::from(program_files)
+                program_files
+                    .join("Amazon")
+                    .join("SessionManagerPlugin")
+                    .join("bin"),
+            );
+            fallback_dirs.push(
+                program_files
                     .join("Docker")
                     .join("Docker")
                     .join("resources")
@@ -146,7 +157,14 @@ fn discovery_cli_fallback_dirs() -> Vec<PathBuf> {
 pub(crate) fn resolve_dynamic_discovery_program(
     platform: DynamicDiscoveryPlatform,
 ) -> AppResult<ResolvedDiscoveryProgram> {
-    let program = platform_program(platform);
+    resolve_discovery_program(platform_program(platform))
+}
+
+pub(crate) fn resolve_session_manager_plugin() -> AppResult<ResolvedDiscoveryProgram> {
+    resolve_discovery_program("session-manager-plugin")
+}
+
+fn resolve_discovery_program(program: &'static str) -> AppResult<ResolvedDiscoveryProgram> {
     let inherited_path = std::env::var_os("PATH");
     resolve_executable_in(
         program,
@@ -170,8 +188,15 @@ async fn run_success(
     args: Vec<String>,
     timeout_secs: u64,
 ) -> AppResult<CapturedOutput> {
-    let program = platform_program(platform);
-    let resolved = resolve_dynamic_discovery_program(platform)?;
+    run_program_success(platform_program(platform), args, timeout_secs).await
+}
+
+async fn run_program_success(
+    program: &'static str,
+    args: Vec<String>,
+    timeout_secs: u64,
+) -> AppResult<CapturedOutput> {
+    let resolved = resolve_discovery_program(program)?;
     let mut cmd = tokio::process::Command::new(resolved.executable);
     // kubectl exec-auth plugins and Docker SSH/credential helpers inherit this
     // environment, so resolving only the top-level binary is insufficient.
@@ -270,6 +295,13 @@ fn normalize_sources(sources: &mut [DynamicDiscoverySource]) {
         if let DynamicDiscoveryConfig::K8s { namespace, .. } = &mut source.config {
             *namespace = normalize_optional_namespace(namespace.take());
         }
+        if let DynamicDiscoveryConfig::AwsSsm {
+            profile, region, ..
+        } = &mut source.config
+        {
+            *profile = profile.trim().to_string();
+            *region = region.trim().to_string();
+        }
     }
 }
 
@@ -288,6 +320,26 @@ fn validate_sources(sources: &[DynamicDiscoverySource]) -> AppResult<()> {
             DynamicDiscoveryConfig::Docker { context, shell } => {
                 validate_arg("context", context)?;
                 validate_arg("shell", shell)?;
+            }
+            DynamicDiscoveryConfig::AwsSsm {
+                profile,
+                region,
+                shell,
+                ..
+            } => {
+                if !profile.is_empty() {
+                    validate_arg("profile", profile)?;
+                }
+                validate_arg("region", region)?;
+                if shell
+                    .as_deref()
+                    .is_some_and(|shell| !matches!(shell, "sh" | "powershell" | "cmd"))
+                {
+                    return Err(AppError::config(
+                        "dynamic_discovery_aws_shell_invalid",
+                        json!({ "shell": shell }),
+                    ));
+                }
             }
             DynamicDiscoveryConfig::K8s {
                 context,
@@ -340,8 +392,28 @@ pub async fn dynamic_discovery_tool_status(
         DynamicDiscoveryPlatform::K8s => {
             vec!["version".to_string(), "--client=true".to_string()]
         }
+        DynamicDiscoveryPlatform::AwsSsm => vec!["--version".into()],
     };
-    match run_success(platform, args, 3).await {
+    let result = async {
+        let out = run_success(platform, args, 3).await?;
+        if platform == DynamicDiscoveryPlatform::AwsSsm {
+            let version = if out.stdout.is_empty() {
+                &out.stderr
+            } else {
+                &out.stdout
+            };
+            if !version.starts_with("aws-cli/2.") {
+                return Err(AppError::other(
+                    "dynamic_discovery_aws_cli_v2_required",
+                    json!({ "version": version }),
+                ));
+            }
+            run_program_success("session-manager-plugin", vec!["--version".into()], 3).await?;
+        }
+        Ok::<_, AppError>(out)
+    }
+    .await;
+    match result {
         Ok(out) => Ok(DynamicDiscoveryToolStatus {
             platform,
             available: true,
@@ -367,6 +439,7 @@ pub async fn list_dynamic_discovery_contexts(
     match platform {
         DynamicDiscoveryPlatform::Docker => list_docker_contexts().await,
         DynamicDiscoveryPlatform::K8s => list_k8s_contexts().await,
+        DynamicDiscoveryPlatform::AwsSsm => list_aws_profiles().await,
     }
 }
 
@@ -406,6 +479,32 @@ async fn list_k8s_contexts() -> AppResult<Vec<DynamicDiscoveryContext>> {
     .ok()
     .map(|o| o.stdout);
     Ok(parse_k8s_contexts(&out.stdout, current.as_deref()))
+}
+
+async fn list_aws_profiles() -> AppResult<Vec<DynamicDiscoveryContext>> {
+    let out = run_success(
+        DynamicDiscoveryPlatform::AwsSsm,
+        vec![
+            "configure".into(),
+            "list-profiles".into(),
+            "--no-cli-pager".into(),
+            "--no-cli-auto-prompt".into(),
+        ],
+        5,
+    )
+    .await?;
+    let current = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".into());
+    Ok(out
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| DynamicDiscoveryContext {
+            platform: DynamicDiscoveryPlatform::AwsSsm,
+            name: name.into(),
+            current: name == current,
+        })
+        .collect())
 }
 
 pub async fn discover_dynamic_targets(state: &AppState) -> AppResult<DynamicDiscoverySnapshot> {
@@ -483,6 +582,17 @@ async fn discover_source(
             namespace,
             shell,
         } => discover_k8s(source, context, namespace.as_deref(), shell).await,
+        DynamicDiscoveryConfig::AwsSsm {
+            profile,
+            region,
+            only_ssm_available,
+            ..
+        } => {
+            discover_aws_ssm_with(source, profile, region, *only_ssm_available, |args| {
+                run_success(DynamicDiscoveryPlatform::AwsSsm, args, 30)
+            })
+            .await
+        }
     }
 }
 
@@ -755,10 +865,378 @@ fn parse_k8s_pods(
     Ok(targets)
 }
 
+pub(crate) fn aws_cli_args(profile: &str, region: &str) -> Vec<String> {
+    let mut args = vec![
+        format!("--region={region}"),
+        "--output=json".into(),
+        "--no-cli-pager".into(),
+        "--no-cli-auto-prompt".into(),
+    ];
+    if !profile.is_empty() {
+        // Attached option values preserve profiles beginning with '-' as data.
+        args.push(format!("--profile={profile}"));
+    }
+    args
+}
+
+async fn discover_aws_ssm_with<F, Fut>(
+    source: &DynamicDiscoverySource,
+    profile: &str,
+    region: &str,
+    only_ssm_available: bool,
+    run: F,
+) -> AppResult<Vec<DynamicDiscoveredTarget>>
+where
+    F: Fn(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = AppResult<CapturedOutput>>,
+{
+    let mut args = aws_cli_args(profile, region);
+    args.extend([
+        "ec2".into(),
+        "describe-instances".into(),
+        "--page-size=100".into(),
+    ]);
+    // The CLI follows all pages and combines Reservations in its JSON output.
+    let ec2 = run(args).await?;
+    let online = if only_ssm_available {
+        let mut args = aws_cli_args(profile, region);
+        args.extend([
+            "ssm".into(),
+            "describe-instance-information".into(),
+            // DescribeInstanceInformation caps MaxResults at 50.
+            "--page-size=50".into(),
+            "--filters".into(),
+            "Key=PingStatus,Values=Online".into(),
+        ]);
+        Some(parse_ssm_online_instances(&run(args).await?.stdout)?)
+    } else {
+        None
+    };
+    parse_ec2_instances(source, profile, region, &ec2.stdout, online.as_ref())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Ec2Instances {
+    reservations: Vec<Ec2Reservation>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Ec2Reservation {
+    owner_id: String,
+    instances: Vec<Ec2Instance>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Ec2Instance {
+    instance_id: String,
+    state: Ec2InstanceState,
+    platform: Option<String>,
+    private_ip_address: Option<String>,
+    public_ip_address: Option<String>,
+    #[serde(default)]
+    tags: Vec<Ec2Tag>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Ec2InstanceState {
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Ec2Tag {
+    key: String,
+    value: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct SsmInstanceInformation {
+    instance_information_list: Vec<SsmInstance>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct SsmInstance {
+    instance_id: String,
+    ping_status: String,
+}
+
+fn parse_aws_json<T: serde::de::DeserializeOwned>(stdout: &str, command: &str) -> AppResult<T> {
+    serde_json::from_str(stdout).map_err(|e| {
+        AppError::other(
+            "dynamic_discovery_parse_failed",
+            json!({
+                "platform": "aws_ssm", "command": command, "line": e.line(), "err": e.to_string(),
+            }),
+        )
+    })
+}
+
+fn parse_ssm_online_instances(stdout: &str) -> AppResult<HashSet<String>> {
+    let list: SsmInstanceInformation = parse_aws_json(stdout, "describe-instance-information")?;
+    Ok(list
+        .instance_information_list
+        .into_iter()
+        .filter(|instance| instance.ping_status == "Online")
+        .map(|instance| instance.instance_id)
+        .collect())
+}
+
+fn parse_ec2_instances(
+    source: &DynamicDiscoverySource,
+    profile: &str,
+    region: &str,
+    stdout: &str,
+    online: Option<&HashSet<String>>,
+) -> AppResult<Vec<DynamicDiscoveredTarget>> {
+    let list: Ec2Instances = parse_aws_json(stdout, "describe-instances")?;
+    let shell_override = match &source.config {
+        DynamicDiscoveryConfig::AwsSsm { shell, .. } => shell.as_deref(),
+        _ => None,
+    };
+    let mut targets = Vec::new();
+    for reservation in list.reservations {
+        for instance in reservation.instances {
+            let state = instance.state.name.as_str();
+            if matches!(state, "terminated" | "shutting-down")
+                || online
+                    .is_some_and(|ids| state != "running" || !ids.contains(&instance.instance_id))
+            {
+                continue;
+            }
+            let name = instance
+                .tags
+                .iter()
+                .find(|tag| tag.key == "Name")
+                .and_then(|tag| tag.value.as_deref())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(&instance.instance_id)
+                .to_string();
+            let mut details = vec![instance.instance_id.as_str(), state, region];
+            details.extend(instance.private_ip_address.as_deref());
+            details.extend(instance.public_ip_address.as_deref());
+            let sub = details.join(" · ");
+            // Match existing Session Manager shell preferences when explicitly configured.
+            let shell =
+                shell_override.unwrap_or(if instance.platform.as_deref() == Some("windows") {
+                    "powershell"
+                } else {
+                    "sh"
+                });
+            targets.push(DynamicDiscoveredTarget {
+                id: format!(
+                    "aws_ssm:{}:{region}:{}",
+                    reservation.owner_id, instance.instance_id
+                ),
+                source_id: source.id.clone(),
+                source_name: source.name.clone(),
+                platform: DynamicDiscoveryPlatform::AwsSsm,
+                name,
+                sub,
+                connector_spec: ConnectorSpec::AwsSsm {
+                    profile: profile.to_string(),
+                    region: region.to_string(),
+                    instance_id: instance.instance_id,
+                    account_id: reservation.owner_id.clone(),
+                    shell: shell.into(),
+                },
+            });
+        }
+    }
+    Ok(targets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::DynamicDiscoveryConfig;
+
+    #[test]
+    fn aws_ssm_source_accepts_default_credentials_and_defaults_online_filter_off() {
+        let source: DynamicDiscoverySource = serde_json::from_value(json!({
+            "id": "aws", "name": "AWS", "enabled": true,
+            "platform": "aws_ssm", "profile": "", "region": "ap-southeast-1"
+        }))
+        .unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        save_dynamic_discovery_sources_to_db(&db, vec![source]).unwrap();
+        let saved = read_dynamic_discovery_sources_from_db(&db).unwrap();
+        let value = serde_json::to_value(&saved[0]).unwrap();
+        assert_eq!(value["profile"], "");
+        assert_eq!(value["region"], "ap-southeast-1");
+        assert_eq!(value["only_ssm_available"], false);
+        assert!(value.get("shell").is_none());
+    }
+
+    fn aws_source() -> DynamicDiscoverySource {
+        serde_json::from_value(json!({
+            "id": "aws", "name": "AWS", "enabled": true,
+            "platform": "aws_ssm", "profile": "production", "region": "ap-southeast-1"
+        }))
+        .unwrap()
+    }
+
+    fn ec2_instances() -> String {
+        json!({ "Reservations": [{ "OwnerId": "123456789012", "Instances": [
+            { "InstanceId": "i-linux", "State": { "Name": "running" },
+              "PrivateIpAddress": "10.0.0.1", "PublicIpAddress": "203.0.113.1",
+              "Tags": [{ "Key": "Name", "Value": "Web" }] },
+            { "InstanceId": "i-windows", "State": { "Name": "running" },
+              "Platform": "windows" },
+            { "InstanceId": "i-stopped", "State": { "Name": "stopped" } },
+            { "InstanceId": "i-terminated", "State": { "Name": "terminated" } },
+            { "InstanceId": "i-shutting-down", "State": { "Name": "shutting-down" } }
+        ]}] })
+        .to_string()
+    }
+
+    #[test]
+    fn ec2_instances_use_account_region_identity_and_remote_shell() {
+        let targets = parse_ec2_instances(
+            &aws_source(),
+            "production",
+            "ap-southeast-1",
+            &ec2_instances(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(targets.len(), 3);
+        assert_eq!(targets[0].id, "aws_ssm:123456789012:ap-southeast-1:i-linux");
+        assert_eq!(targets[0].name, "Web");
+        assert!(targets[0].sub.contains("10.0.0.1"));
+        assert!(targets[0].sub.contains("203.0.113.1"));
+        assert!(targets[0].sub.contains("running"));
+        let linux = serde_json::to_value(&targets[0].connector_spec).unwrap();
+        assert_eq!(linux["shell"], "sh");
+        let windows = serde_json::to_value(&targets[1].connector_spec).unwrap();
+        assert_eq!(windows["shell"], "powershell");
+        assert_eq!(targets[1].name, "i-windows");
+    }
+
+    #[test]
+    fn aws_ssm_shell_override_is_persisted_and_used_for_every_instance() {
+        for shell in ["sh", "powershell", "cmd"] {
+            let mut value = serde_json::to_value(aws_source()).unwrap();
+            value["shell"] = shell.into();
+            let source = serde_json::from_value(value).unwrap();
+            let db = crate::db::Db::open_in_memory().unwrap();
+            save_dynamic_discovery_sources_to_db(&db, vec![source]).unwrap();
+            let saved = read_dynamic_discovery_sources_from_db(&db).unwrap();
+            assert_eq!(serde_json::to_value(&saved[0]).unwrap()["shell"], shell);
+            let targets =
+                parse_ec2_instances(&saved[0], "production", "us-east-1", &ec2_instances(), None)
+                    .unwrap();
+            assert!(targets
+                .iter()
+                .all(
+                    |target| serde_json::to_value(&target.connector_spec).unwrap()["shell"]
+                        == shell
+                ));
+        }
+    }
+
+    #[test]
+    fn aws_ssm_rejects_unknown_shell_family() {
+        let mut value = serde_json::to_value(aws_source()).unwrap();
+        value["shell"] = "arbitrary-command".into();
+        let source = serde_json::from_value(value).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        assert_eq!(
+            save_dynamic_discovery_sources_to_db(&db, vec![source])
+                .unwrap_err()
+                .code(),
+            "dynamic_discovery_aws_shell_invalid"
+        );
+    }
+
+    #[test]
+    fn ssm_filter_requires_ec2_running_and_ssm_online() {
+        let online = parse_ssm_online_instances(
+            &json!({ "InstanceInformationList": [
+            { "InstanceId": "i-linux", "PingStatus": "Online" },
+            { "InstanceId": "i-windows", "PingStatus": "ConnectionLost" },
+            { "InstanceId": "i-stopped", "PingStatus": "Online" },
+            { "InstanceId": "mi-hybrid-node", "PingStatus": "Online" }
+        ] })
+            .to_string(),
+        )
+        .unwrap();
+        let targets = parse_ec2_instances(
+            &aws_source(),
+            "production",
+            "ap-southeast-1",
+            &ec2_instances(),
+            Some(&online),
+        )
+        .unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "Web");
+    }
+
+    #[tokio::test]
+    async fn ssm_status_is_queried_once_only_when_requested() {
+        for only_online in [false, true] {
+            let calls = std::sync::Mutex::new(Vec::new());
+            let targets = discover_aws_ssm_with(
+                &aws_source(), "profile with spaces", "ap-southeast-1", only_online,
+                |args| {
+                    let is_ssm = args.iter().any(|arg| arg == "describe-instance-information");
+                    calls.lock().unwrap().push(args);
+                    async move { Ok(CapturedOutput {
+                        stdout: if is_ssm {
+                            json!({"InstanceInformationList": [{"InstanceId": "i-linux", "PingStatus": "Online"}]}).to_string()
+                        } else { ec2_instances() },
+                        stderr: String::new(),
+                    }) }
+                },
+            ).await.unwrap();
+            let calls = calls.into_inner().unwrap();
+            assert_eq!(calls.len(), if only_online { 2 } else { 1 });
+            assert_eq!(targets.len(), if only_online { 1 } else { 3 });
+            for call in calls {
+                assert!(call.contains(&"--profile=profile with spaces".to_string()));
+                assert!(call.contains(&"--region=ap-southeast-1".to_string()));
+                let page_size = if call.contains(&"ssm".to_string()) {
+                    50
+                } else {
+                    100
+                };
+                assert!(call.contains(&format!("--page-size={page_size}")));
+                assert!(call.contains(&"--no-cli-pager".to_string()));
+                assert!(call.contains(&"--no-cli-auto-prompt".to_string()));
+                assert!(!call.contains(&"--no-paginate".to_string()));
+                assert!(!call.contains(&"start-session".to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn aws_default_credentials_omit_profile_argument() {
+        let args = aws_cli_args("", "us-east-1");
+        assert!(args.iter().all(|arg| !arg.starts_with("--profile")));
+    }
+
+    #[test]
+    fn malformed_aws_results_report_command_and_platform() {
+        let error = parse_ec2_instances(
+            &aws_source(),
+            "production",
+            "ap-southeast-1",
+            "{broken}",
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "dynamic_discovery_parse_failed");
+        assert!(error.to_string().contains("describe-instances"));
+        assert!(error.to_string().contains("aws_ssm"));
+        let error = parse_ssm_online_instances("{}").unwrap_err();
+        assert_eq!(error.code(), "dynamic_discovery_parse_failed");
+    }
 
     #[cfg(unix)]
     fn make_executable(path: &std::path::Path, script: &str) {

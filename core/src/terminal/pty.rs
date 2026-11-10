@@ -80,7 +80,9 @@ impl PtyHandle {
     pub fn shell_path(&self) -> &str {
         match self.connector() {
             Some(
-                ConnectorSpec::DockerExec { shell, .. } | ConnectorSpec::KubectlExec { shell, .. },
+                ConnectorSpec::DockerExec { shell, .. }
+                | ConnectorSpec::KubectlExec { shell, .. }
+                | ConnectorSpec::AwsSsm { shell, .. },
             ) => shell,
             None => &self.shell_path,
         }
@@ -505,6 +507,23 @@ mod tests {
                 shell: shell.into(),
             });
             assert_eq!(connector.shell_path(), shell);
+            assert_eq!(
+                crate::ai::shell::ShellKind::from_local_path(connector.shell_path()),
+                expected
+            );
+        }
+        for (shell, expected) in [
+            ("sh", crate::ai::shell::ShellKind::Posix),
+            ("powershell", crate::ai::shell::ShellKind::Powershell),
+            ("cmd", crate::ai::shell::ShellKind::Cmd),
+        ] {
+            let connector = handle.clone().with_connector(ConnectorSpec::AwsSsm {
+                profile: String::new(),
+                region: "us-east-1".into(),
+                instance_id: "i-0123456789abcdef0".into(),
+                account_id: "123456789012".into(),
+                shell: shell.into(),
+            });
             assert_eq!(
                 crate::ai::shell::ShellKind::from_local_path(connector.shell_path()),
                 expected

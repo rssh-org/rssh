@@ -30,21 +30,21 @@ export { capabilities };
 /* ═══════════════════════════════════════════════════════
    Types
    ═══════════════════════════════════════════════════════ */
-export type TabType = "home" | "ssh" | "local" | "serial" | "telnet" | "docker_exec" | "kubectl_exec" | "forward" | "edit";
+export type TabType = "home" | "ssh" | "local" | "serial" | "telnet" | "docker_exec" | "kubectl_exec" | "aws_ssm" | "forward" | "edit";
 /** Tab types that render a TerminalPane (byte-stream terminals). */
 export type TerminalTabType = Exclude<TabType, "home" | "forward" | "edit">;
 export type TerminalConnectionStatus = "connecting" | "connected" | "disconnected";
 export function isTerminalTabType(type: TabType): type is TerminalTabType {
   return type === "ssh" || type === "local" || type === "serial" || type === "telnet"
-    || type === "docker_exec" || type === "kubectl_exec";
+    || type === "docker_exec" || type === "kubectl_exec" || type === "aws_ssm";
 }
 export type AiCapableTabType = TerminalTabType;
 export function isAiCapableTabType(type: TabType): type is AiCapableTabType {
   return isTerminalTabType(type);
 }
-/** Connector tabs use their existing PTY, including the container's shell. */
+/** Connector tabs use their existing PTY, including the remote shell. */
 export function aiTargetKind(type: AiCapableTabType): AiTargetKind {
-  return type === "docker_exec" || type === "kubectl_exec" ? "local" : type;
+  return type === "docker_exec" || type === "kubectl_exec" || type === "aws_ssm" ? "local" : type;
 }
 export interface Tab {
   id: string;
@@ -140,13 +140,15 @@ export interface TelnetProfile {
   save_script_to_remote?: boolean;
   group_id: string | null;
 }
-export type DynamicPlatform = "docker" | "k8s";
+export type DynamicPlatform = "docker" | "k8s" | "aws_ssm";
 export type ConnectorSpec =
   | { type: "docker_exec"; context: string; container_id: string; container_name: string; shell: string }
-  | { type: "kubectl_exec"; context: string; namespace: string; pod: string; container: string | null; shell: string };
+  | { type: "kubectl_exec"; context: string; namespace: string; pod: string; container: string | null; shell: string }
+  | { type: "aws_ssm"; profile: string; region: string; instance_id: string; account_id: string; shell: string };
 export type DynamicDiscoverySource =
   | { id: string; name: string; enabled: boolean; platform: "docker"; context: string; shell: string }
-  | { id: string; name: string; enabled: boolean; platform: "k8s"; context: string; namespace: string | null; shell: string };
+  | { id: string; name: string; enabled: boolean; platform: "k8s"; context: string; namespace: string | null; shell: string }
+  | { id: string; name: string; enabled: boolean; platform: "aws_ssm"; profile: string; region: string; only_ssm_available: boolean; shell?: string | null };
 export interface DynamicDiscoveryContext {
   platform: DynamicPlatform;
   name: string;
@@ -553,6 +555,7 @@ function homeItemIdForTab(tab: Tab): string | null {
       return meta?.profileId ? `telnet:${meta.profileId}` : null;
     case "docker_exec":
     case "kubectl_exec":
+    case "aws_ssm":
       return meta?.sourceId && meta.dynamicTargetId
         ? `dynamic:${meta.sourceId}:${meta.dynamicTargetId}`
         : null;
@@ -963,6 +966,8 @@ function connectorTabType(spec: ConnectorSpec): Extract<TerminalTabType, Connect
       return "docker_exec";
     case "kubectl_exec":
       return "kubectl_exec";
+    case "aws_ssm":
+      return "aws_ssm";
   }
 
   const _exhaustive: never = spec;
@@ -1385,10 +1390,7 @@ export async function loadDynamicDiscoveryContexts(platform: DynamicPlatform): P
   return invoke<DynamicDiscoveryContext[]>("list_dynamic_discovery_contexts", { platform });
 }
 export async function discoverDynamicTargets(): Promise<DynamicDiscoverySnapshot> {
-  return invoke<DynamicDiscoverySnapshot>("discover_dynamic_targets").catch((e) => {
-    console.warn("[dynamic-discovery] discover failed:", e);
-    return { targets: [], errors: [{ source_id: "", source_name: "dynamic discovery", platform: "docker", message: String(e) }] };
-  });
+  return invoke<DynamicDiscoverySnapshot>("discover_dynamic_targets");
 }
 export async function loadSnippets(): Promise<Snippet[]> {
   return invoke<Snippet[]>("load_snippets");

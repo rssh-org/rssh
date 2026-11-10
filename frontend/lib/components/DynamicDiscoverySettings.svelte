@@ -7,6 +7,7 @@
     DynamicPlatform,
   } from "../stores/app.svelte.ts";
   import * as app from "../stores/app.svelte.ts";
+  import * as discovery from "../stores/discovery.svelte.ts";
   import { toast } from "../stores/toast.svelte.ts";
   import { t, errMsg } from "../i18n/index.svelte.ts";
   import DynamicDiscoverySourceForm from "./DynamicDiscoverySourceForm.svelte";
@@ -19,10 +20,16 @@
   let adding = $state<DynamicDiscoverySource | null>(null);
   let addKey = $state(0);
   let editId = $state<string | null>(null);
+  let savingSources = $state(false);
+  let savingRefresh = $state(false);
+  let refreshSettingsError = $state("");
 
   onMount(() => {
     void refresh();
     void refreshPlatformInfo();
+    void discovery.loadPreferences().catch((error) => {
+      refreshSettingsError = errMsg(error);
+    });
   });
 
   async function refresh() {
@@ -49,14 +56,7 @@
   }
 
   async function refreshPlatformInfo() {
-    const [dockerStatus, k8sStatus, dockerContexts, k8sContexts] = await Promise.all([
-      loadToolStatus("docker"),
-      loadToolStatus("k8s"),
-      app.loadDynamicDiscoveryContexts("docker").catch(() => []),
-      app.loadDynamicDiscoveryContexts("k8s").catch(() => []),
-    ]);
-    statuses = { docker: dockerStatus, k8s: k8sStatus };
-    contexts = [...dockerContexts, ...k8sContexts];
+    await Promise.all((["docker", "k8s", "aws_ssm"] as const).map(refreshContextInfo));
   }
 
   async function refreshContextInfo(platform: DynamicPlatform) {
@@ -80,10 +80,15 @@
   function defaultPlatform(): DynamicPlatform {
     if (statuses.docker?.available) return "docker";
     if (statuses.k8s?.available) return "k8s";
+    if (statuses.aws_ssm?.available) return "aws_ssm";
     return "docker";
   }
 
   function blankSource(platform: DynamicPlatform): DynamicDiscoverySource {
+    if (platform === "aws_ssm") return {
+      id: crypto.randomUUID(), name: "AWS SSM", enabled: true,
+      platform: "aws_ssm", profile: "", region: "", only_ssm_available: false,
+    };
     return platform === "docker"
       ? {
           id: crypto.randomUUID(),
@@ -121,14 +126,20 @@
   }
 
   async function saveAll(next: DynamicDiscoverySource[]): Promise<boolean> {
+    if (savingSources) return false;
+    savingSources = true;
+    const previous = items;
     try {
       await app.saveDynamicDiscoverySources(next);
+      discovery.sourcesChanged(previous, next);
       items = next;
       await refresh();
       return true;
     } catch (e: any) {
       toast.error(`${t("toast.error.save")}: ${errMsg(e)}`);
       return false;
+    } finally {
+      savingSources = false;
     }
   }
 
@@ -140,11 +151,11 @@
     if (await saveAll(items.map((it) => it.id === source.id ? source : it))) editId = null;
   }
 
-  async function toggleEnabled(source: DynamicDiscoverySource) {
-    const previous = items;
-    const next = items.map((it) => it.id === source.id ? { ...it, enabled: !it.enabled } : it);
-    items = next;
-    if (!(await saveAll(next))) items = previous;
+  async function toggleEnabled(source: DynamicDiscoverySource, event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const next = items.map((it) => it.id === source.id ? { ...it, enabled: input.checked } : it);
+    await saveAll(next);
+    input.checked = items.find((it) => it.id === source.id)?.enabled ?? false;
   }
 
   async function remove(id: string) {
@@ -152,9 +163,9 @@
     if (editId === id) editId = null;
   }
 
-  async function testDiscovery() {
+  async function manualRefresh() {
     try {
-      const snapshot = await app.discoverDynamicTargets();
+      const snapshot = await discovery.refresh();
       if (snapshot.errors.length) {
         toast.error(t("dynamic_discovery.probe_partial", { targets: snapshot.targets.length, errors: snapshot.errors.length }));
       } else {
@@ -165,41 +176,102 @@
     }
   }
 
+  async function saveRefreshPreferences(next: discovery.DiscoveryRefreshPreferences) {
+    if (savingRefresh) return;
+    savingRefresh = true;
+    try {
+      await discovery.savePreferences(next);
+      refreshSettingsError = "";
+    } catch (error) {
+      toast.error(errMsg(error));
+    } finally {
+      savingRefresh = false;
+    }
+  }
+
+  async function changeInterval(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    await saveRefreshPreferences({ ...discovery.preferences(), interval_seconds: Number(input.value) });
+    input.value = String(discovery.preferences().interval_seconds);
+  }
+
+  async function changeAutoRefresh(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    await saveRefreshPreferences({ ...discovery.preferences(), auto_refresh: input.checked });
+    input.checked = discovery.preferences().auto_refresh;
+  }
+
   function sourceMeta(source: DynamicDiscoverySource): string {
     if (source.platform === "docker") return `Docker · ${source.context}`;
+    if (source.platform === "aws_ssm") return `AWS SSM · ${source.profile || t("dynamic_discovery.aws_default_profile")} · ${source.region}`;
     return `K8S · ${source.context}${source.namespace ? ` · ${source.namespace}` : ` · ${t("dynamic_discovery.all_namespaces")}`}`;
   }
 </script>
 
 <div class="page">
   <div class="toolbar">
-    <button class="btn btn-sm" onclick={testDiscovery}>{t("dynamic_discovery.test")}</button>
-    <button class="btn btn-accent btn-sm" onclick={startAdd}>{t("dynamic_discovery.new")}</button>
+    <button class="btn btn-accent btn-sm" onclick={startAdd} disabled={savingSources}>{t("dynamic_discovery.new")}</button>
   </div>
+
+  <section class="card refresh-settings" aria-labelledby="discovery-refresh-title">
+    <div class="refresh-heading">
+      <h2 id="discovery-refresh-title">{t("dynamic_discovery.refresh_title")}</h2>
+      <button class="btn btn-sm" onclick={manualRefresh} disabled={discovery.refreshing()}>
+        {t(discovery.refreshing() ? "dynamic_discovery.refreshing" : "dynamic_discovery.manual_refresh")}
+      </button>
+    </div>
+    <p class="refresh-hint">{t("dynamic_discovery.refresh_hint")}</p>
+    <div class="refresh-controls">
+      <label class="refresh-toggle">
+        <span>{t("dynamic_discovery.auto_refresh")}</span>
+        <span class="switch">
+          <input type="checkbox" checked={discovery.preferences().auto_refresh}
+            disabled={!discovery.loaded() || savingRefresh}
+            onchange={changeAutoRefresh} />
+          <span class="slider"></span>
+        </span>
+      </label>
+      <label class="refresh-interval">
+        <span>{t("dynamic_discovery.refresh_interval")}</span>
+        <input type="number" min="1" max="86400" step="1" value={discovery.preferences().interval_seconds}
+          disabled={!discovery.loaded() || savingRefresh} onchange={changeInterval} />
+      </label>
+    </div>
+    {#if refreshSettingsError || discovery.failure()}
+      <p class="refresh-error" role="alert">{refreshSettingsError || errMsg(discovery.failure())}</p>
+    {/if}
+    {#each discovery.errors() as error}
+      <p class="refresh-error" role="alert">{error.source_name}: {errMsg(error.message)}</p>
+    {/each}
+  </section>
 
   {#if adding}
     {#key addKey}
-      <DynamicDiscoverySourceForm
-        source={adding}
-        {contexts}
-        {statuses}
-        onRefreshContexts={refreshContextInfo}
-        onSave={saveNew}
-        onCancel={cancelForm}
-      />
+      <fieldset class="source-form" disabled={savingSources}>
+        <DynamicDiscoverySourceForm
+          source={adding}
+          {contexts}
+          {statuses}
+          onRefreshContexts={refreshContextInfo}
+          onSave={saveNew}
+          onCancel={cancelForm}
+        />
+      </fieldset>
     {/key}
   {/if}
 
   {#each items as source (source.id)}
     {#if editId === source.id}
-      <DynamicDiscoverySourceForm
-        {source}
-        {contexts}
-        {statuses}
-        onRefreshContexts={refreshContextInfo}
-        onSave={saveEdit}
-        onCancel={cancelForm}
-      />
+      <fieldset class="source-form" disabled={savingSources}>
+        <DynamicDiscoverySourceForm
+          {source}
+          {contexts}
+          {statuses}
+          onRefreshContexts={refreshContextInfo}
+          onSave={saveEdit}
+          onCancel={cancelForm}
+        />
+      </fieldset>
     {:else}
       <div class="card item-row">
         <div class="item-info" class:dimmed={!source.enabled}>
@@ -213,7 +285,7 @@
         </div>
         <div class="item-actions">
           <label class="switch" title={t("dynamic_discovery.enabled")}>
-            <input type="checkbox" checked={source.enabled} onchange={() => toggleEnabled(source)} />
+            <input type="checkbox" checked={source.enabled} disabled={savingSources} onchange={(event) => toggleEnabled(source, event)} />
             <span class="slider"></span>
           </label>
           <button
@@ -221,6 +293,7 @@
             title={t("common.edit")}
             aria-label={`${t("common.edit")} ${source.name}`}
             onclick={() => startEdit(source)}
+            disabled={savingSources}
           >
             <AppIcon name="edit" size={16} />
           </button>
@@ -229,6 +302,7 @@
             title={t("common.delete")}
             aria-label={`${t("common.delete")} ${source.name}`}
             onclick={() => remove(source.id)}
+            disabled={savingSources}
           >
             <AppIcon name="trash" size={16} />
           </button>
@@ -243,7 +317,17 @@
 </div>
 
 <style>
-  .page { padding: 24px; }
+  .page { padding: 24px; min-height: 0; }
+  .source-form { border: 0; margin: 0; padding: 0; min-inline-size: 0; }
+  .refresh-settings { margin-bottom: 16px; }
+  .refresh-heading, .refresh-controls, .refresh-toggle, .refresh-interval { display: flex; align-items: center; gap: 12px; }
+  .refresh-heading { justify-content: space-between; }
+  .refresh-heading h2 { font-size: 14px; font-weight: 600; margin: 0; }
+  .refresh-hint { font-size: 12px; color: var(--text-sub); margin: 10px 0 16px; }
+  .refresh-controls { flex-wrap: wrap; gap: 16px 24px; }
+  .refresh-toggle, .refresh-interval { font-size: 13px; }
+  .refresh-interval input { width: 100px; }
+  .refresh-error { color: var(--error); font-size: 12px; overflow-wrap: anywhere; margin: 10px 0 0; }
   .toolbar {
     display: flex;
     justify-content: flex-end;

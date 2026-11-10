@@ -1399,6 +1399,14 @@ pub(crate) fn conversation_target_key(state: &AppState, target: &AiTarget) -> Ap
                         json!([context, namespace, pod, container])
                     )
                 }
+                Some(crate::models::ConnectorSpec::AwsSsm {
+                    account_id,
+                    region,
+                    instance_id,
+                    ..
+                }) => {
+                    format!("aws_ssm:{}", json!([account_id, region, instance_id]))
+                }
                 None => "local".to_string(),
             }
         }
@@ -2108,8 +2116,18 @@ mod tests {
                 shell: "sh".into(),
             }
         };
+        let aws_ssm = |account_id: &str, region: &str, instance_id: &str, profile: &str| {
+            ConnectorSpec::AwsSsm {
+                account_id: account_id.into(),
+                region: region.into(),
+                instance_id: instance_id.into(),
+                profile: profile.into(),
+                shell: "sh".into(),
+            }
+        };
         let target = register(Some(docker("dev", "container", "old name", "pwsh")));
         let renamed = register(Some(docker("dev", "container", "new name", "cmd.exe")));
+        let aws_target = register(Some(aws_ssm("123456789012", "us-east-1", "i-one", "dev")));
         let others = [
             register(None),
             register(Some(docker("prod", "container", "old name", "pwsh"))),
@@ -2121,7 +2139,21 @@ mod tests {
             register(Some(kubectl("dev", "other-ns", "pod", None))),
             register(Some(kubectl("dev", "ns", "other-pod", None))),
             register(Some(kubectl("dev", "ns", "pod", Some("sidecar")))),
+            aws_target.clone(),
+            register(Some(aws_ssm("123456789013", "us-east-1", "i-one", "dev"))),
+            register(Some(aws_ssm("123456789012", "us-east-2", "i-one", "dev"))),
+            register(Some(aws_ssm("123456789012", "us-east-1", "i-two", "dev"))),
         ];
+        let same_aws_target = register(Some(aws_ssm(
+            "123456789012",
+            "us-east-1",
+            "i-one",
+            "other-profile",
+        )));
+        assert_eq!(
+            conversation_target_key(state, &aws_target).unwrap(),
+            conversation_target_key(state, &same_aws_target).unwrap(),
+        );
         let key = conversation_target_key(state, &target).unwrap();
         assert_eq!(key, conversation_target_key(state, &renamed).unwrap());
         let mut keys = std::collections::HashSet::from([key]);
@@ -2248,7 +2280,7 @@ mod tests {
         lifecycle::close_ai_session(state, &resumed.tab_id, &owner, Some(&resumed.instance_id))
             .await
             .unwrap();
-        for target in others.iter().chain([&target, &renamed]) {
+        for target in others.iter().chain([&target, &renamed, &same_aws_target]) {
             lifecycle::close_resource_and_wait(state, target.id(), SessionKind::Pty, &owner)
                 .await
                 .unwrap();

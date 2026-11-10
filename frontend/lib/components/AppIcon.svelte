@@ -31,6 +31,9 @@
   {:else if name === "ai"}
     <path d="M12 3.5c.8 4.4 3.1 6.7 7.5 7.5-4.4.8-6.7 3.1-7.5 7.5-.8-4.4-3.1-6.7-7.5-7.5 4.4-.8 6.7-3.1 7.5-7.5Z" />
     <path d="M19 3v3M20.5 4.5h-3" />
+  {:else if name === "aws"}
+    <path d="M6 19a5 5 0 0 1-.5-10A6.5 6.5 0 0 1 18 8.2a5.5 5.5 0 0 1 .5 10.8H6Z" />
+    <path d="m8 11 3 2.5L8 16m5 0h3" />
   {:else if name === "check"}
     <path d="m5 12 4 4 10-10" />
   {:else if name === "cloud-download" || name === "cloud-upload"}
