@@ -1449,6 +1449,8 @@
             // The wrapper paints the base color. Keep xterm transparent so tint
             // toggles never reset colors set by terminal applications via OSC.
             theme: terminalWaveTheme(baseTermTheme, true),
+            // xterm requires this before open(); it may reduce rendering performance
+            // even when no waves or block tints are visible.
             allowTransparency: true,
             // xterm 6 draws its own scrollbar at overviewRuler.width||14 (=14px),
             // out of reach of the global ::-webkit-scrollbar; pin it to the app's 6px.
