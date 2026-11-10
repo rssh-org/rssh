@@ -110,7 +110,7 @@
     let baseTermTheme = $state(theme.currentTermTheme());
 
     $effect(() => {
-        const colors = terminalWaveTheme(baseTermTheme, !!waveColor);
+        const colors = terminalWaveTheme(baseTermTheme, true);
         if (terminal) terminal.options.theme = colors;
     });
 
@@ -1421,8 +1421,7 @@
 
     onMount(async () => {
         const focusBeforeInit = document.activeElement;
-        // Transparency is fixed when xterm opens. Capture the accent first;
-        // configuration edits only affect newly opened terminals.
+        // Capture the accent once; configuration edits only affect new terminals.
         let color: string | null = null;
         try {
             color = await loadTerminalWaveColor(tabType, meta);
@@ -1448,8 +1447,12 @@
             // users cannot select at all in mouse mode. Match iTerm2's Option-drag.
             macOptionClickForcesSelection: true,
             */
-            theme: terminalWaveTheme(baseTermTheme, !!waveColor),
-            allowTransparency: !!waveColor,
+            // The wrapper paints the base color. Keep xterm transparent so tint
+            // toggles never reset colors set by terminal applications via OSC.
+            theme: terminalWaveTheme(baseTermTheme, true),
+            // xterm requires this before open(); it may reduce rendering performance
+            // even when no waves or block tints are visible.
+            allowTransparency: true,
             // xterm 6 draws its own scrollbar at overviewRuler.width||14 (=14px),
             // out of reach of the global ::-webkit-scrollbar; pin it to the app's 6px.
             overviewRuler: { width: 6 },
@@ -2000,7 +2003,7 @@
            overlays unpredictably — the backlog badge was only visible while
            devtools was open. */
         position: relative;
-        z-index: 0;
+        z-index: 1;
     }
 
     /* Widen left padding 4px → 12px to make room for the block bar.
@@ -2029,6 +2032,7 @@
        pointer events so text selection still works; only the per-block
        hit-box rects opt back in for click-to-select. */
     .block-bar {
+        z-index: 2;
         position: absolute;
         left: 0;
         top: 4px;
@@ -2088,9 +2092,9 @@
         pointer-events: none;
     }
 
-    /* 染色层：整行宽的半透明色带。0.15 不透明度——文字依旧清晰可读，只是底色透出
-       块的色条颜色。pointer-events:none 让选中/点击全部穿透到下面的 xterm。 */
+    /* Paint tints below transparent xterm; glyphs keep their original colors. */
     .block-tint {
+        z-index: 0;
         position: absolute;
         left: 0;
         right: 0;
