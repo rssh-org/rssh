@@ -222,24 +222,3 @@ export function createCommandBlockTracker(
     },
   };
 }
-
-/** Display ranges never overlap, including same-row Enter events and stale end markers. */
-export function commandBlockRanges<T extends {
-  start: { line: number; isDisposed: boolean };
-  end: { line: number; isDisposed: boolean } | null;
-}>(blocks: readonly T[], cursorLine: number): { block: T; startLine: number; endLine: number }[] {
-  const ranges: { block: T; startLine: number; endLine: number }[] = [];
-  let nextStart = Infinity;
-  for (let index = blocks.length - 1; index >= 0; index--) {
-    const block = blocks[index];
-    if (block.start.isDisposed) continue;
-    const startLine = block.start.line;
-    const endLine = Math.min(
-      block.end ? (block.end.isDisposed ? startLine - 1 : block.end.line) : cursorLine,
-      nextStart - 1,
-    );
-    nextStart = Math.min(nextStart, startLine);
-    if (endLine >= startLine) ranges.push({ block, startLine, endLine });
-  }
-  return ranges.reverse();
-}

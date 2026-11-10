@@ -23,7 +23,7 @@
     import TerminalKeybar from "./TerminalKeybar.svelte";
     import {registerRsshOscHandlers} from "../osc/handler.ts";
     import {registerClipboardOscHandler} from "../osc/clipboard.ts";
-    import {commandBlockRanges, createCommandBlockTracker, type CommandBlock, type CommandBlockTracker} from "../terminal/command-blocks.ts";
+    import {createCommandBlockTracker, type CommandBlock, type CommandBlockTracker} from "../terminal/command-blocks.ts";
     import {readViewportSnapshot, readViewportText} from "../terminal/viewport-snapshot.ts";
     import {createFoldStore, type FoldStore} from "../terminal/folds.ts";
     import {
@@ -110,7 +110,7 @@
     let baseTermTheme = $state(theme.currentTermTheme());
 
     $effect(() => {
-        const colors = terminalWaveTheme(baseTermTheme, transparentBackground);
+        const colors = terminalWaveTheme(baseTermTheme, true);
         if (terminal) terminal.options.theme = colors;
     });
 
@@ -368,14 +368,16 @@
         // bottom of the viewport.
         const cursorAbs = buf.baseY + buf.cursorY;
         const out: BlockRect[] = [];
-        for (const { block: b, startLine, endLine: rangeEnd } of commandBlockRanges(blockTracker.blocks, cursorAbs)) {
+        for (const b of blockTracker.blocks) {
+            if (b.start.isDisposed) continue;
             const fold = foldStore?.getFold(b.id);
             const folded = fold !== undefined;
             // Full fold leaves only the command row. An automatic prefix fold
             // keeps the newest output rows visible, so its bar still spans them.
+            const startLine = b.start.line;
             const endLine = fold?.kind === "full"
                 ? b.start.line
-                : rangeEnd;
+                : b.end && !b.end.isDisposed ? b.end.line : cursorAbs;
             const top = Math.max(startLine, viewportY);
             const bot = Math.min(endLine, viewportY + rows - 1);
             if (top > bot) continue;
@@ -407,7 +409,6 @@
     // 不变式：块 GC 时必须从这里剪枝，否则新块复用旧 id 会"鬼染色"。
     // 剪枝逻辑挂在 blockTracker.onChange，跟 selectedBlockIds 同一处。
     const coloredBlockIds = new SvelteSet<number>();
-    const transparentBackground = $derived(!!waveColor || (app.commandBlockBar() && coloredBlockIds.size > 0));
     let selectionAnchorId: number | null = null;
 
     // 自动染色：开关开着时，每个新块一出现就自动染（等价于自动右键"染色"）。
@@ -1419,8 +1420,7 @@
 
     onMount(async () => {
         const focusBeforeInit = document.activeElement;
-        // Transparency is fixed when xterm opens. Capture the accent first;
-        // configuration edits only affect newly opened terminals.
+        // Capture the accent once; configuration edits only affect new terminals.
         let color: string | null = null;
         try {
             color = await loadTerminalWaveColor(tabType, meta);
@@ -1446,8 +1446,9 @@
             // users cannot select at all in mouse mode. Match iTerm2's Option-drag.
             macOptionClickForcesSelection: true,
             */
-            theme: terminalWaveTheme(baseTermTheme, transparentBackground),
-            // Transparency is a constructor-only option; tinting can be enabled later.
+            // The wrapper paints the base color. Keep xterm transparent so tint
+            // toggles never reset colors set by terminal applications via OSC.
+            theme: terminalWaveTheme(baseTermTheme, true),
             allowTransparency: true,
             // xterm 6 draws its own scrollbar at overviewRuler.width||14 (=14px),
             // out of reach of the global ::-webkit-scrollbar; pin it to the app's 6px.
@@ -1893,16 +1894,6 @@
     {/if}
     <div class="term-wrap" class:soft-keyboard={softKeyboardRequested} class:no-block-bar={!app.commandBlockBar()}>
         {#if waveColor}<EnvironmentWave color={waveColor} />{/if}
-        {#if app.commandBlockBar()}
-            <!-- Paint background tints below xterm's transparent canvas, never over glyphs. -->
-            <div class="block-tints" aria-hidden="true">
-                {#each blockRects as r (r.id)}
-                    {#if coloredBlockIds.has(r.id)}
-                        <div class="block-tint" style="top: {r.y}px; height: {r.h}px; background: {r.color};"></div>
-                    {/if}
-                {/each}
-            </div>
-        {/if}
         <div class="xterm-host" bind:this={containerEl}></div>
         {#if backlogBytes > BACKLOG_INDICATOR_BYTES}
             <div class="backlog-badge">
@@ -1911,6 +1902,16 @@
             </div>
         {/if}
         {#if app.commandBlockBar()}
+            <!-- 染色层：整行宽的半透明色块，用块自身的色条颜色。pointer-events:none
+                 让点击/选中穿透到 xterm 与 .block-hit。坐标同 fold-label：block-bar
+                 SVG 有 top:4px 偏移，这个 div 是 .term-wrap 子节点，要把那 4px 加回来。
+                 排在 SVG 之前 → 色条画在染色之上，主条保持清晰。 -->
+            {#each blockRects as r (r.id)}
+                {#if coloredBlockIds.has(r.id)}
+                    <div class="block-tint"
+                         style="top: calc({r.y}px + 4px); height: {r.h}px; background: {r.color};"></div>
+                {/if}
+            {/each}
             <svg class="block-bar" aria-hidden="true">
                 {#if isAltBuffer}
                     <rect x="5" y="0" width="3" height="100%" rx="1.5" style="fill: var(--text-dim)" opacity="0.5" />
@@ -2088,16 +2089,9 @@
         pointer-events: none;
     }
 
-    .block-tints {
-        position: absolute;
-        inset: 4px 0 0;
-        overflow: hidden;
-        pointer-events: none;
-        z-index: 0;
-    }
-
-    /* Only background pixels are tinted; glyphs retain their original colors. */
+    /* Paint tints below transparent xterm; glyphs keep their original colors. */
     .block-tint {
+        z-index: 0;
         position: absolute;
         left: 0;
         right: 0;

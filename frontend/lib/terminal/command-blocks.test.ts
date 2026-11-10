@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { Terminal } from "@xterm/xterm";
-import { commandBlockRanges, createCommandBlockTracker } from "./command-blocks.ts";
+import { createCommandBlockTracker } from "./command-blocks.ts";
 
 /* ─────────────────────────────────────────────────────────────
  * Fake xterm.js Terminal — 实现 createCommandBlockTracker 用到的
@@ -536,28 +536,5 @@ describe("createCommandBlockTracker — prompt mode", () => {
     expect(tracker.blocks[1].end).toBeNull();
     tracker.dispose();
     term.dispose();
-  });
-});
-
-describe("command block display ranges", () => {
-  const marker = (line: number, isDisposed = false) => ({ line, isDisposed });
-  it("gives a shared row only to the newest block after multiple Enter events", () => {
-    const blocks = [
-      { start: marker(5), end: marker(4) },
-      { start: marker(5), end: marker(4, true) },
-      { start: marker(5), end: null },
-    ];
-    expect(commandBlockRanges(blocks, 10)).toEqual([{ block: blocks[2], startLine: 5, endLine: 10 }]);
-  });
-  it("clips stale block tails at the next block and never expands a disposed end", () => {
-    const blocks = [
-      { start: marker(0), end: marker(20) },
-      { start: marker(5), end: marker(10, true) },
-      { start: marker(10), end: null },
-    ];
-    expect(commandBlockRanges(blocks, 15)).toEqual([
-      { block: blocks[0], startLine: 0, endLine: 4 },
-      { block: blocks[2], startLine: 10, endLine: 15 },
-    ]);
   });
 });
