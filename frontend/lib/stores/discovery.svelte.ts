@@ -9,6 +9,7 @@ export interface DiscoveryRefreshPreferences {
 
 const SETTING_KEY = "dynamic_discovery_refresh";
 const PREFERENCES_CHANGED_KEY = `${SETTING_KEY}.changed`;
+const SOURCES_CHANGED_KEY = "dynamic_discovery_sources.changed";
 let _preferences = $state<DiscoveryRefreshPreferences>({ auto_refresh: true, interval_seconds: 60 });
 let _loaded = $state(false);
 let _snapshot = $state<DynamicDiscoverySnapshot>({ targets: [], errors: [] });
@@ -59,8 +60,23 @@ export function loadPreferences(): Promise<void> {
   return loading;
 }
 
-function onPreferencesChanged(event: StorageEvent): void {
-  if (event.key !== PREFERENCES_CHANGED_KEY || !running) return;
+function onStorageChanged(event: StorageEvent): void {
+  if (!running) return;
+  if (event.key === SOURCES_CHANGED_KEY) {
+    if (event.newValue === null) return;
+    try {
+      const change: unknown = JSON.parse(event.newValue);
+      if (!change || typeof change !== "object"
+        || !("ids" in change) || !Array.isArray(change.ids)
+        || !change.ids.every((id): id is string => typeof id === "string")
+        || !("nonce" in change) || typeof change.nonce !== "string") return;
+      invalidateSources(new Set(change.ids));
+    } catch (error) {
+      console.warn("[dynamic-discovery] source change notification invalid:", error);
+    }
+    return;
+  }
+  if (event.key !== PREFERENCES_CHANGED_KEY) return;
   preferencesRevision += 1;
   _loaded = false;
   clearTimer();
@@ -127,7 +143,16 @@ export function refresh(): Promise<DynamicDiscoverySnapshot> {
   return promise;
 }
 
-/** Source edits invalidate cached results without triggering discovery. */
+function invalidateSources(changed: Set<string>): void {
+  generation += 1;
+  _snapshot = {
+    targets: _snapshot.targets.filter((target) => !changed.has(target.source_id)),
+    errors: _snapshot.errors.filter((error) => !changed.has(error.source_id)),
+  };
+}
+
+/** Called after saving sources. Invalidate every window's cached results without
+ * triggering discovery; notifications carry source IDs, never discovered data. */
 export function sourcesChanged(previous: DynamicDiscoverySource[], next: DynamicDiscoverySource[]): void {
   const updated = new Map(next.map((source) => [source.id, source]));
   const changed = new Set(previous.filter((source) => {
@@ -137,11 +162,13 @@ export function sourcesChanged(previous: DynamicDiscoverySource[], next: Dynamic
       || Object.entries(source).some(([key, value]) => Reflect.get(replacement, key) !== value);
   }).map((source) => source.id));
   if (changed.size === 0 && previous.length === next.length) return;
-  generation += 1;
-  _snapshot = {
-    targets: _snapshot.targets.filter((target) => !changed.has(target.source_id)),
-    errors: _snapshot.errors.filter((error) => !changed.has(error.source_id)),
-  };
+  // Additions also invalidate in-flight discovery, even without cached IDs to remove.
+  invalidateSources(changed);
+  try {
+    localStorage.setItem(SOURCES_CHANGED_KEY, JSON.stringify({ ids: [...changed], nonce: crypto.randomUUID() }));
+  } catch (error) {
+    console.warn("[dynamic-discovery] source change notification failed:", error);
+  }
 }
 
 export async function savePreferences(next: DiscoveryRefreshPreferences): Promise<void> {
@@ -167,7 +194,7 @@ export async function startBackgroundRefresh(): Promise<void> {
   // Keep the window's lifecycle active if reading settings fails. A later
   // settings load or save can then resume scheduling without an app reload.
   running = true;
-  if (typeof window !== "undefined") window.addEventListener("storage", onPreferencesChanged);
+  if (typeof window !== "undefined") window.addEventListener("storage", onStorageChanged);
   const current = runGeneration;
   await loadPreferences();
   if (running && current === runGeneration && _loaded && _preferences.auto_refresh) await refreshAutomatically();
@@ -175,7 +202,7 @@ export async function startBackgroundRefresh(): Promise<void> {
 
 export function stopBackgroundRefresh(): void {
   running = false;
-  if (typeof window !== "undefined") window.removeEventListener("storage", onPreferencesChanged);
+  if (typeof window !== "undefined") window.removeEventListener("storage", onStorageChanged);
   runGeneration += 1;
   generation += 1;
   clearTimer();

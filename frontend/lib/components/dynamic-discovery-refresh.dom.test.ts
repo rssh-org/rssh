@@ -50,6 +50,7 @@ afterEach(async () => {
   discovery.stopBackgroundRefresh();
   app.closeSettings();
   document.body.innerHTML = "";
+  vi.restoreAllMocks();
 });
 
 describe("shared discovery refresh controls", () => {
@@ -103,6 +104,7 @@ describe("shared discovery refresh controls", () => {
   });
 
   it.each([false, true])("invalidates Home targets only after a source disable is saved (save fails=%s)", async (fails) => {
+    const notify = vi.spyOn(localStorage, "setItem");
     let sources = [{ id: "docker", name: "Development", enabled: true, platform: "docker", context: "default", shell: "sh" }];
     invokeMock.mockImplementation(async (command, args) => {
       if (command === "list_dynamic_discovery_sources") return sources;
@@ -126,6 +128,9 @@ describe("shared discovery refresh controls", () => {
     expect(toggle.checked).toBe(fails);
     expect(home.textContent!.includes(target.name)).toBe(fails);
     expect(invokeMock.mock.calls.some(([command]) => command === "discover_dynamic_targets")).toBe(false);
+    const sourceChanges = notify.mock.calls.filter(([key]) => key === "dynamic_discovery_sources.changed");
+    expect(sourceChanges).toHaveLength(fails ? 0 : 1);
+    if (!fails) expect(JSON.parse(sourceChanges[0][1])).toEqual({ ids: ["docker"], nonce: expect.any(String) });
   });
 
   it("blocks all source edits during a pending save and preserves both sequential disables", async () => {
