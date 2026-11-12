@@ -1615,7 +1615,7 @@ async fn ssh_connect(
     let emitter = headless_host(state, tx);
     let connection_owner = owner.clone();
 
-    let result = client::run_blocking_ssh(move || async move {
+    let mut result = client::run_blocking_ssh(move || async move {
         client::connect(client::ConnectParams {
             session_id,
             profile,
@@ -1635,6 +1635,21 @@ async fn ssh_connect(
     })
     .await
     .map_err(err_value)?;
+
+    if let Some(command) = crate::ai::commands::remote_shell_probe_command(
+        state,
+        &crate::commands::lifecycle::OwnedAiTarget::Ssh {
+            handle: result.handle.ssh_handle().clone(),
+            profile_id: result.handle.profile_id().to_owned(),
+            shell_probe_enqueued: result.handle.shell_probe_enqueued(),
+        },
+        &result.session_id,
+    )
+    .map_err(err_value)?
+    {
+        result.handle.write(command.as_bytes()).map_err(err_value)?;
+        result.handle.mark_shell_probe_enqueued();
+    }
 
     if let Some(ref cmd) = init_command {
         if !cmd.is_empty() {
@@ -1944,8 +1959,9 @@ mod tests {
         let id = uuid::Uuid::new_v4().to_string();
         let reservation =
             lifecycle::reserve_resource(&state, &id, SessionKind::Pty, owner.clone()).unwrap();
-        let (_, handle) =
+        let (_, mut handle) =
             crate::terminal::pty::spawn(id.clone(), 80, 24, Arc::new(|_, _| {}), None).unwrap();
+        handle.mark_shell_probe_enqueued();
         reservation
             .activate(ReadySession::Pty(handle.with_connector(
                 crate::models::ConnectorSpec::AwsSsm {

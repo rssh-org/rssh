@@ -161,10 +161,16 @@ pub fn pty_spawn_connector(
         program.search_path,
         args,
     )?;
-    reservation.activate_returned(
+    let mut handle = handle.with_connector(spec);
+    if let Some(command) = crate::ai::commands::remote_shell_probe_command(
+        state,
+        &crate::commands::lifecycle::OwnedAiTarget::Pty(handle.clone()),
         &id,
-        crate::commands::lifecycle::ReadySession::Pty(handle.with_connector(spec)),
-    )?;
+    )? {
+        handle.write(command.as_bytes())?;
+        handle.mark_shell_probe_enqueued();
+    }
+    reservation.activate_returned(&id, crate::commands::lifecycle::ReadySession::Pty(handle))?;
     Ok(id)
 }
 

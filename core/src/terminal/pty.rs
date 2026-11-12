@@ -51,6 +51,7 @@ pub struct PtyHandle {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     shell_path: Arc<str>,
     connector: Option<Arc<ConnectorSpec>>,
+    shell_probe_enqueued: bool,
     _reaper: Arc<ChildReaper>,
 }
 
@@ -92,6 +93,14 @@ impl PtyHandle {
 
     pub fn connector(&self) -> Option<&ConnectorSpec> {
         self.connector.as_deref()
+    }
+
+    pub fn shell_probe_enqueued(&self) -> bool {
+        self.shell_probe_enqueued
+    }
+
+    pub fn mark_shell_probe_enqueued(&mut self) {
+        self.shell_probe_enqueued = true;
     }
 }
 
@@ -421,6 +430,7 @@ fn spawn_builder(
         master: Arc::new(Mutex::new(pair.master)),
         shell_path: Arc::from(shell_path.as_str()),
         connector: None,
+        shell_probe_enqueued: false,
         _reaper: Arc::new(ChildReaper {
             child: Mutex::new(Some(child)),
         }),
@@ -448,6 +458,110 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn connector_buffers_shell_probe_until_remote_stdin_is_ready() {
+        use crate::ai::commands::{
+            ai_cache_remote_shell_impl, ai_remote_shell_probe_needed_impl,
+            remote_shell_probe_command,
+        };
+        use crate::commands::lifecycle::{self, OwnedAiTarget, ReadySession};
+        use crate::state::{SessionKind, SessionOwner};
+
+        let (host, _events) = crate::ssh::test_support::headless_host();
+        let state = host.state();
+        let owner = SessionOwner::Window("buffered-probe-test".into());
+        let id = uuid::Uuid::new_v4().to_string();
+        let reservation =
+            lifecycle::reserve_resource(state, &id, SessionKind::Pty, owner.clone()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let gate = dir.path().join("ready");
+        let (sender, receiver) = mpsc::channel();
+        let sink: PtySink = Arc::new(move |_, output| {
+            let _ = sender.send(output);
+        });
+        let (_, handle) = spawn_command(
+            id.clone(),
+            80,
+            24,
+            sink,
+            PathBuf::from("/bin/sh"),
+            OsString::from("/usr/bin:/bin"),
+            vec![
+                "-c".into(),
+                "stty -echo; printf 'CONNECTING\\n'; while [ ! -f \"$1\" ]; do sleep 0.01; done; IFS= read -r line; printf 'REMOTE_INPUT:%s\\n' \"$line\"".into(),
+                "probe-test".into(),
+                gate.to_string_lossy().into_owned(),
+            ],
+        )
+        .unwrap();
+        let mut handle = handle.with_connector(ConnectorSpec::AwsSsm {
+            profile: "prod".into(),
+            region: "us-east-1".into(),
+            instance_id: "i-0123456789abcdef0".into(),
+            account_id: "123456789012".into(),
+        });
+        assert!(!handle.shell_probe_enqueued());
+        assert!(
+            remote_shell_probe_command(state, &OwnedAiTarget::Pty(handle.clone()), &id)
+                .unwrap()
+                .is_none()
+        );
+        crate::db::settings::set(&state.db, "ai_auto_detect_remote_shell", "1").unwrap();
+        let command = remote_shell_probe_command(state, &OwnedAiTarget::Pty(handle.clone()), &id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            command,
+            format!(
+                "echo RSSH_SHELL_{}=$PSEdition=$$=END\r",
+                id.replace('-', "")
+            )
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        while !String::from_utf8_lossy(&output).contains("CONNECTING") {
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(PtyOut::Data(data)) => output.extend(data),
+                _ => panic!("connector did not reach its startup gate"),
+            }
+        }
+        handle.write(command.as_bytes()).unwrap();
+        handle.mark_shell_probe_enqueued();
+        reservation
+            .activate(ReadySession::Pty(handle.clone()))
+            .unwrap();
+        assert!(ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
+        // The child cannot read until this gate opens, after the probe was written.
+        std::fs::write(&gate, []).unwrap();
+        let expected_input = format!("REMOTE_INPUT:{}", command.trim_end());
+        while !String::from_utf8_lossy(&output).contains(&expected_input) {
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(PtyOut::Data(data)) => output.extend(data),
+                _ => panic!("connector did not receive buffered input"),
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&output).contains(&expected_input),
+            "{}",
+            String::from_utf8_lossy(&output)
+        );
+        ai_cache_remote_shell_impl(
+            state,
+            &owner,
+            id.clone(),
+            crate::ai::shell::ShellKind::Posix,
+        )
+        .unwrap();
+        assert!(!ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
+        assert!(
+            remote_shell_probe_command(state, &OwnedAiTarget::Pty(handle), &id)
+                .unwrap()
+                .is_none()
+        );
+        lifecycle::close_resource(state, &id, SessionKind::Pty, &owner).unwrap();
+    }
 
     #[test]
     fn local_pty_streams_input_reports_resize_and_closes() {

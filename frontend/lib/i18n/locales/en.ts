@@ -635,6 +635,7 @@ const en = {
   "ai.message.rollback_confirm": "This message and every later user and AI message will be removed from context. The audit log is preserved and will record this rollback.",
   "ai.message.rollback_confirm_action": "Roll back",
   "ai.error.no_api_key": "Configure your API key in Settings → AI Diagnose first",
+  "ai.error.shell_unrecognized": "The remote shell could not be identified. AI features are unavailable for this session; you can still use the terminal.",
   "ai.error.no_provider": "Create and activate a provider in Settings → AI Diagnose first",
   "ai.placeholder.welcome": "Just tell me what's wrong",
   "ai.placeholder.example_hint": "For example: \"this box's CPU shot to 100%\", \"the Java process is leaking memory\".",

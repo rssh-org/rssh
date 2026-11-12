@@ -638,6 +638,7 @@ const zh: Messages = {
   "ai.message.rollback_confirm": "将从上下文中删除这条消息及其后的所有用户和 AI 消息。审计日志不会删除，并会记录本次回退。",
   "ai.message.rollback_confirm_action": "回退",
   "ai.error.no_api_key": "请先到 设置 → AI 排障 配置 API key",
+  "ai.error.shell_unrecognized": "无法识别远端 shell，此会话暂不能使用 AI 功能；仍可手动使用终端。",
   "ai.error.no_provider": "请先到 设置 → AI 排障 新建并启用一个 Provider",
   "ai.placeholder.welcome": "直接说说怎么了",
   "ai.placeholder.example_hint": "例如：\"这台机器 CPU 飙到 100% 了\"、\"Java 进程内存涨得很猛\"。",

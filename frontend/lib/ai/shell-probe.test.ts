@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyShell, classifyProbeBuffer, PROBE_COMMAND } from "./shell-probe.ts";
+import { classifyShell, createShellProbe } from "./shell-probe.ts";
 
 describe("classifyShell", () => {
   it("maps PowerShell editions", () => {
@@ -15,71 +15,80 @@ describe("classifyShell", () => {
     expect(classifyShell("", "12345")).toBe("posix");
   });
 
-  it("returns null for ambiguous signatures (e.g. PS 4.x)", () => {
-    expect(classifyShell("", "$$")).toBeNull(); // $$ not numeric
+  it("returns null for unsupported or ambiguous signatures", () => {
+    expect(classifyShell("", "$$")).toBeNull();
     expect(classifyShell("Foo", "bar")).toBeNull();
   });
 });
 
-describe("classifyProbeBuffer", () => {
-  // The pasted command, echoed back verbatim by an ECHO=on PTY. Its `P=...=E`
-  // is byte-identical to a real cmd.exe output line — it MUST NOT be classified.
-  const echo = (prompt: string) => `${prompt}${PROBE_COMMAND}\r\n`;
+describe("createShellProbe", () => {
+  function evaluated(command: string, edition: string, dollar: string): string {
+    return command.slice("echo ".length).replace("$PSEdition", () => edition).replace("$$", () => dollar);
+  }
 
-  it("classifies a POSIX evaluated line", () => {
-    expect(classifyProbeBuffer("P==12345=E\r\n")).toEqual({ kind: "posix", cmd: false });
+  it("uses the reserved session UUID as the shared shell-safe marker", () => {
+    const id = crypto.randomUUID();
+    const first = createShellProbe(id);
+    const second = createShellProbe(crypto.randomUUID());
+    expect(createShellProbe(id).command).toBe(first.command);
+    expect(first.command).toContain(`RSSH_SHELL_${id.replaceAll("-", "")}`);
+    expect(first.command).toMatch(/^echo RSSH_SHELL_[0-9a-f]{32}=\$PSEdition=\$\$=END$/);
+    expect(second.command).not.toBe(first.command);
   });
 
-  it("classifies a PowerShell evaluated line", () => {
-    expect(classifyProbeBuffer("P=Desktop=token=E\r\n")).toEqual({ kind: "powershell", cmd: false });
+  it.each([
+    ["", "12345", "posix"],
+    ["Desktop", "token", "powershell"],
+    ["Core", "argument=value", "powershell"],
+    ["$PSEdition", "$$", "cmd"],
+  ] as const)("classifies a complete %s / %s response as %s", (edition, dollar, shell) => {
+    const probe = createShellProbe(crypto.randomUUID());
+    expect(probe.classify(`${evaluated(probe.command, edition, dollar)}\r\n`)).toEqual({ shell });
   });
 
-  it("ECHO=on POSIX: echo line excluded, evaluated line wins", () => {
-    const buf = echo("user@host:~$ ") + "P==12345=E\r\n";
-    expect(classifyProbeBuffer(buf)).toEqual({ kind: "posix", cmd: false });
+  it.each(["", "user@host:~$ ", "PS C:\\> ", "C:\\> "])("ignores input echo after prompt %s", (prompt) => {
+    const probe = createShellProbe(crypto.randomUUID());
+    const echoed = `${prompt}${probe.command}\r\n`;
+    expect(probe.classify(echoed)).toBeNull();
+    expect(probe.classify(`${echoed}${evaluated(probe.command, "", "12345")}\r\n`)).toEqual({ shell: "posix" });
   });
 
-  it("ECHO=on PowerShell: echo line excluded, evaluated line wins", () => {
-    const buf = echo("PS C:\\> ") + "P=Core=val=E\r\n";
-    expect(classifyProbeBuffer(buf)).toEqual({ kind: "powershell", cmd: false });
+  it("accepts real cmd output immediately without accepting its echoed command", () => {
+    const probe = createShellProbe(crypto.randomUUID());
+    const echo = `C:\\> ${probe.command}\r\n`;
+    expect(probe.classify(echo)).toBeNull();
+    expect(probe.classify(`${echo}${probe.command.slice(5)}\r\n`)).toEqual({ shell: "cmd" });
   });
 
-  it("ECHO=on cmd.exe: echo excluded, real output flags cmd candidate", () => {
-    // cmd prints the literal (no $-expansion); only the non-echo output line counts.
-    const buf = echo("C:\\> ") + "P=$PSEdition=$$=E\r\n";
-    expect(classifyProbeBuffer(buf)).toEqual({ kind: null, cmd: true });
+  it("ignores old markers and unrelated output", () => {
+    const old = createShellProbe(crypto.randomUUID());
+    const current = createShellProbe(crypto.randomUUID());
+    const noise = `Last login: yesterday\r\n${evaluated(old.command, "", "12345")}\r\nP=Core=token=E\r\n`;
+    expect(current.classify(noise)).toBeNull();
+    expect(current.classify(`${noise}${evaluated(current.command, "Core", "token")}\r\n`)).toEqual({ shell: "powershell" });
   });
 
-  it("REGRESSION (Copilot): echo-only buffer must NOT look like cmd", () => {
-    // Slow link / POSIX or PowerShell host whose evaluated line hasn't arrived
-    // yet. Trusting the echoed line here would poison the per-profile cache as
-    // cmd and 60s-timeout every later AI command. Must stay {null,false}.
-    expect(classifyProbeBuffer(echo("user@host:~$ "))).toEqual({ kind: null, cmd: false });
-    expect(classifyProbeBuffer(echo("PS /home> "))).toEqual({ kind: null, cmd: false });
+  it.each(["\n", "\r\n"])("waits for the complete response ending in %j across split chunks", (ending) => {
+    const probe = createShellProbe(crypto.randomUUID());
+    const line = evaluated(probe.command, "", "12345") + ending;
+    for (let length = 0; length < line.length; length++) {
+      expect(probe.classify(line.slice(0, length))).toBeNull();
+    }
+    expect(probe.classify(line)).toEqual({ shell: "posix" });
   });
 
-  it("empty / unrelated buffer → nothing", () => {
-    expect(classifyProbeBuffer("")).toEqual({ kind: null, cmd: false });
-    expect(classifyProbeBuffer("Last login: ...\r\nmotd\r\n")).toEqual({ kind: null, cmd: false });
+  it("requires the response to occupy a complete line", () => {
+    const probe = createShellProbe(crypto.randomUUID());
+    const line = evaluated(probe.command, "", "12345");
+    expect(probe.classify(`noise ${line}\n`)).toBeNull();
+    expect(probe.classify(`${line} trailing noise\n`)).toBeNull();
+    expect(probe.classify(`banner\r\n${line}\r\nprompt> `)).toEqual({ shell: "posix" });
   });
 
-  it("posix evaluated line wins even if a cmd-signature output also appears", () => {
-    // Defensive: an unambiguous posix line decides regardless of ordering.
-    const buf = "P=$PSEdition=$$=E\r\nP==999=E\r\n";
-    expect(classifyProbeBuffer(buf)).toEqual({ kind: "posix", cmd: false });
-  });
-
-  it("ignores a P=...=E that is not at line start (mid-line noise)", () => {
-    // Only column-0 evaluated lines are ours; mid-line coincidences must not match.
-    // This is why PROBE_RE uses a `^` anchor rather than a `(?<!echo )` lookbehind.
-    expect(classifyProbeBuffer("here is P==5=E inline\r\n")).toEqual({ kind: null, cmd: false });
-    expect(classifyProbeBuffer("noise P=$PSEdition=$$=E noise\r\n")).toEqual({ kind: null, cmd: false });
-  });
-
-  it("matches both LF-only and CRLF line endings", () => {
-    // Guards against re-introducing a `$` end-anchor, which would not match the
-    // `\r` in CRLF output and would silently break POSIX/PowerShell detection.
-    expect(classifyProbeBuffer("P==7=E\n")).toEqual({ kind: "posix", cmd: false });
-    expect(classifyProbeBuffer("P==7=E\r\n")).toEqual({ kind: "posix", cmd: false });
+  it("distinguishes a completed unsupported response from a pending probe", () => {
+    const probe = createShellProbe(crypto.randomUUID());
+    expect(probe.classify("")).toBeNull();
+    expect(probe.classify(`${evaluated(probe.command, "", "")}\r\n`)).toEqual({ shell: null });
+    expect(probe.classify(`${evaluated(probe.command, "Unknown", "value")}\n`)).toEqual({ shell: null });
   });
 });

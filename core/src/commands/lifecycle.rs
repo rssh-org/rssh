@@ -890,6 +890,7 @@ pub enum OwnedAiTarget {
     Ssh {
         handle: crate::ssh::client::SshHandle,
         profile_id: String,
+        shell_probe_enqueued: bool,
     },
     #[cfg(any(windows, macos, linux, ohos))]
     Pty(crate::terminal::pty::PtyHandle),
@@ -942,6 +943,7 @@ pub fn with_owned_ready_ai_target<T>(
             .map(|session| OwnedAiTarget::Ssh {
                 handle: session.ssh_handle().clone(),
                 profile_id: session.profile_id().to_owned(),
+                shell_probe_enqueued: session.shell_probe_enqueued(),
             })
             .ok_or_else(|| {
                 AppError::other(

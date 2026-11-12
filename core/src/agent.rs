@@ -370,6 +370,7 @@ fn session_info(
                 OwnedAiTarget::Ssh {
                     handle: session.ssh_handle().clone(),
                     profile_id: session.profile_id().to_owned(),
+                    shell_probe_enqueued: session.shell_probe_enqueued(),
                 },
             )
         }

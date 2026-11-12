@@ -753,6 +753,197 @@ mod tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD, Engine};
 
+    struct InitCommandServer {
+        channels: Vec<russh::Channel<russh::server::Msg>>,
+        received: mpsc::UnboundedSender<Vec<u8>>,
+    }
+
+    impl russh::server::Handler for InitCommandServer {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _: &str) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            channel: russh::Channel<russh::server::Msg>,
+            reply: russh::server::ChannelOpenHandle,
+            _: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            self.channels.push(channel);
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn data(
+            &mut self,
+            _: russh::ChannelId,
+            data: &[u8],
+            _: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            self.received.send(data.to_vec()).unwrap();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_probe_precedes_init_command_and_respects_cache() {
+        use crate::ai::commands::{ai_remote_shell_probe_needed_impl, remote_shell_probe_command};
+        use crate::commands::lifecycle::{self, OwnedAiTarget, ReadySession};
+        use crate::state::{SessionKind, SessionOwner};
+
+        for (enabled, cached) in [(true, false), (false, false), (true, true)] {
+            let (app, _events) = crate::ssh::test_support::headless_host();
+            let state = app.state();
+            crate::db::settings::set(
+                &state.db,
+                "ai_auto_detect_remote_shell",
+                if enabled { "1" } else { "0" },
+            )
+            .unwrap();
+            if cached {
+                state.ai_remote_shell_cache.lock().unwrap().insert(
+                    "ssh:init-profile".into(),
+                    crate::ai::shell::ShellKind::Posix,
+                );
+            }
+            let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+            let id = uuid::Uuid::new_v4().to_string();
+            let reservation =
+                lifecycle::reserve_resource(state, &id, SessionKind::Ssh, owner.clone()).unwrap();
+            let init_command = Some("echo 中文".to_owned());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let key: russh::keys::PrivateKey =
+                russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[29; 32]).into();
+            let dir = tempfile::tempdir().unwrap();
+            let known_hosts_path = dir.path().join("known_hosts");
+            russh::keys::known_hosts::learn_known_hosts_path(
+                "127.0.0.1",
+                port,
+                key.public_key(),
+                &known_hosts_path,
+            )
+            .unwrap();
+            let (received, mut writes) = mpsc::unbounded_channel();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let running = russh::server::run_stream(
+                    Arc::new(russh::server::Config {
+                        keys: vec![key],
+                        ..Default::default()
+                    }),
+                    stream,
+                    InitCommandServer {
+                        channels: Vec::new(),
+                        received,
+                    },
+                )
+                .await
+                .unwrap();
+                let _ = running.await;
+            });
+            let mut result = connect(ConnectParams {
+                session_id: id.clone(),
+                profile: Profile {
+                    id: "init-profile".into(),
+                    name: "Init test".into(),
+                    host: "127.0.0.1".into(),
+                    port,
+                    credential_id: "credential".into(),
+                    bastion_profile_id: None,
+                    init_command: init_command.clone(),
+                    terminal_encoding: TerminalEncoding::Gbk,
+                    group_id: None,
+                    algorithms: Default::default(),
+                },
+                credential: Credential {
+                    id: "credential".into(),
+                    name: "test".into(),
+                    username: "test".into(),
+                    credential_type: crate::models::CredentialType::None,
+                    secret: None,
+                    save_to_remote: false,
+                },
+                bastion_chain: Vec::new(),
+                cols: 80,
+                rows: 24,
+                app: app.clone(),
+                owner: owner.clone(),
+                recording_path: None,
+                log_session_id: None,
+                prompt_session_id: None,
+                known_hosts_path,
+                timeout_secs: 5,
+            })
+            .await
+            .unwrap();
+
+            if let Some(command) = remote_shell_probe_command(
+                state,
+                &OwnedAiTarget::Ssh {
+                    handle: result.handle.ssh_handle().clone(),
+                    profile_id: result.handle.profile_id().to_owned(),
+                    shell_probe_enqueued: result.handle.shell_probe_enqueued(),
+                },
+                &id,
+            )
+            .unwrap()
+            {
+                result.handle.write(command.as_bytes()).unwrap();
+                result.handle.mark_shell_probe_enqueued();
+            }
+            // Preserve the adapter's original init write and newline semantics.
+            if let Some(ref cmd) = init_command {
+                if !cmd.is_empty() {
+                    result
+                        .handle
+                        .write(format!("{}\n", cmd).as_bytes())
+                        .unwrap();
+                }
+            }
+            result.handle.write(b"after\n").unwrap();
+            assert_eq!(result.handle.shell_probe_enqueued(), enabled && !cached);
+            reservation
+                .activate(ReadySession::Ssh(result.handle))
+                .unwrap();
+            assert_eq!(
+                ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap(),
+                enabled && !cached,
+            );
+            if !enabled {
+                // Enabling detection later must not wait for a probe never queued.
+                crate::db::settings::set(&state.db, "ai_auto_detect_remote_shell", "1").unwrap();
+                assert!(!ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
+            }
+
+            let mut expected = Vec::new();
+            if enabled && !cached {
+                expected.push(
+                    format!(
+                        "echo RSSH_SHELL_{}=$PSEdition=$$=END\r",
+                        id.replace('-', "")
+                    )
+                    .into_bytes(),
+                );
+            }
+            expected.push(b"echo \xd6\xd0\xce\xc4\n".to_vec());
+            expected.push(b"after\n".to_vec());
+            for bytes in expected {
+                assert_eq!(
+                    timeout(Duration::from_secs(5), writes.recv())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    bytes,
+                );
+            }
+            lifecycle::close_resource(state, &id, SessionKind::Ssh, &owner).unwrap();
+            server.abort();
+        }
+    }
+
     #[tokio::test]
     async fn connection_log_uses_base64_stream_payload() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -938,6 +1129,7 @@ pub struct SessionHandle {
     /// 本次连接对应的 Profile.id。AI 模块用它作 remote_shell_cache 的 key ——
     /// 同一 profile 多次重连共享一份探测结果，不重发 probe。
     profile_id: String,
+    shell_probe_enqueued: bool,
 }
 
 impl SessionHandle {
@@ -957,6 +1149,14 @@ impl SessionHandle {
     }
     pub fn profile_id(&self) -> &str {
         &self.profile_id
+    }
+
+    pub fn shell_probe_enqueued(&self) -> bool {
+        self.shell_probe_enqueued
+    }
+
+    pub fn mark_shell_probe_enqueued(&mut self) {
+        self.shell_probe_enqueued = true;
     }
 
     /// 强制断开整条 SSH 连接 —— 不只是 shell channel，连 TCP 一起切。
@@ -1194,6 +1394,7 @@ pub async fn connect(params: ConnectParams) -> AppResult<ConnectResult> {
             ssh_handle,
             terminal_encoding,
             profile_id: profile.id.clone(),
+            shell_probe_enqueued: false,
         },
     })
 }

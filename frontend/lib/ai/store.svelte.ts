@@ -14,7 +14,7 @@ import { t, errMsg, locale as currentLocale } from "../i18n/index.svelte.ts";
 import { extractOutput, findSentinel } from "./pty-output.ts";
 import { decodeStreamChunk } from "../terminal/stream-decode.ts";
 import { truncateCommand } from "./format.ts";
-import { PROBE_COMMAND, classifyProbeBuffer } from "./shell-probe.ts";
+import { createShellProbe } from "./shell-probe.ts";
 import {
   applyTerminalMutations,
   restoreTimeline,
@@ -1178,7 +1178,15 @@ export async function cancelStream(tab_id: string, lease: SessionLease): Promise
 }
 
 type ShellProbeTransport = "ssh" | "pty";
-const remoteShellProbes = new Map<string, { promise: Promise<boolean>; controller: AbortController }>();
+type ShellProbeResponse = { shell: ShellKind | null } | { error: unknown } | null;
+interface RemoteShellProbe {
+  controller: AbortController;
+  response: Promise<ShellProbeResponse>;
+  finish(response: ShellProbeResponse): void;
+  observe(raw: Uint8Array): void;
+  promise?: Promise<boolean>;
+}
+const remoteShellProbes = new Map<string, RemoteShellProbe>();
 const sessionProbeWaits = new Map<string, AbortController>();
 
 /** Release callers on cancellation even if an IPC response never arrives. Late
@@ -1225,96 +1233,102 @@ export async function remoteShellProbeNeeded(target_id: string): Promise<boolean
   return invoke<boolean>("ai_remote_shell_probe_needed", { targetId: target_id });
 }
 
-/** Register before publishing the terminal; AI and MCP starts await this same probe. */
-export function ensureRemoteShellProbe(targetId: string, transport: ShellProbeTransport = "ssh"): Promise<boolean> {
+/** Prepare before connect/spawn: the backend may emit its probe response before
+ * the connect IPC returns. This collector has no IPC or rejecting promise. */
+export function prepareRemoteShellProbe(targetId: string, transport: ShellProbeTransport = "ssh"): void {
   const key = `${transport}:${targetId}`;
-  const existing = remoteShellProbes.get(key);
-  if (existing) return existing.promise;
-  const controller = new AbortController();
+  if (remoteShellProbes.has(key)) return;
+  const probe = createShellProbe(targetId);
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  const TAIL_CAP = 16 * 1024;
+  let buffer = "";
+  let discardingLine = false;
+  let complete = false;
+  let resolve!: (response: ShellProbeResponse) => void;
+  const response = new Promise<ShellProbeResponse>((done) => { resolve = done; });
+  const finish = (result: ShellProbeResponse) => {
+    if (complete) return;
+    complete = true;
+    buffer = "";
+    resolve(result);
+  };
+  remoteShellProbes.set(key, {
+    controller: new AbortController(),
+    response,
+    finish,
+    observe(raw) {
+      if (complete) return;
+      try {
+        let text = decoder.decode(raw, { stream: true });
+        if (discardingLine) {
+          const newline = text.indexOf("\n");
+          if (newline < 0) return;
+          text = text.slice(newline + 1);
+          discardingLine = false;
+        }
+        buffer += text;
+        // Inspect complete lines before trimming a large following output burst.
+        const result = probe.classify(buffer);
+        buffer = buffer.slice(buffer.lastIndexOf("\n") + 1);
+        if (buffer.length > TAIL_CAP) {
+          buffer = "";
+          // A continuation of an oversized echoed line is not a new line start.
+          discardingLine = true;
+        }
+        if (result) finish(result);
+      } catch (error) {
+        finish({ error });
+      }
+    },
+  });
+}
+
+/** Observe the existing terminal data subscription without changing its bytes. */
+export function observeRemoteShellOutput(targetId: string, transport: ShellProbeTransport, raw: Uint8Array): void {
+  remoteShellProbes.get(`${transport}:${targetId}`)?.observe(raw);
+}
+
+/** Called after connect, before effects publish the session. The backend already
+ * enqueued the probe before SSH's unchanged init-command path. AI/MCP await the
+ * response and cache acknowledgement; elapsed time never determines readiness. */
+export function ensureRemoteShellProbe(targetId: string, transport: ShellProbeTransport = "ssh"): Promise<boolean> {
+  prepareRemoteShellProbe(targetId, transport);
+  const collector = remoteShellProbes.get(`${transport}:${targetId}`)!;
+  if (collector.promise) return collector.promise;
+  const assertConnected = () => {
+    if (collector.controller.signal.aborted) throw new SessionClosedError(targetId);
+  };
   const operation = (async () => {
-    try {
-      const needed = await remoteShellProbeNeeded(targetId);
-      if (!needed || controller.signal.aborted) return false;
-      return await probeRemoteShell(targetId, transport, controller.signal);
-    } catch (error) {
-      if (!controller.signal.aborted) console.warn("[ai] connect-time shell probe skipped:", error);
+    const needed = await remoteShellProbeNeeded(targetId);
+    assertConnected();
+    if (!needed) {
+      collector.finish(null);
       return false;
     }
+    const response = await collector.response;
+    assertConnected();
+    if (response && "error" in response) throw response.error;
+    if (!response?.shell) throw new Error(t("ai.error.shell_unrecognized"));
+    await invoke("ai_cache_remote_shell", { targetId, shell: response.shell });
+    assertConnected();
+    return true;
   })();
-  const promise = settleProbeOnAbort(operation, controller.signal).finally(() => {
-    if (remoteShellProbes.get(key)?.controller === controller) remoteShellProbes.delete(key);
+  // Keep failed promises until teardown so later AI starts cannot bypass a
+  // failed detection and silently fall back to the wrong shell family.
+  collector.promise = settleProbeOnAbort(operation, collector.controller.signal).then((detected) => {
+    assertConnected();
+    return detected;
   });
-  remoteShellProbes.set(key, { promise, controller });
-  return promise;
+  return collector.promise;
 }
 
 export function cancelRemoteShellProbe(targetId: string, transport: ShellProbeTransport = "ssh"): void {
-  remoteShellProbes.get(`${transport}:${targetId}`)?.controller.abort();
-}
-
-/** Same evaluated-output probe for SSH and PTY. Timeout/ambiguous output stays uncached. */
-export async function probeRemoteShell(
-  target_id: string,
-  transport: ShellProbeTransport = "ssh",
-  signal?: AbortSignal,
-): Promise<boolean> {
-  if (signal?.aborted) return false;
-  const cache = async (shell: ShellKind) => {
-    if (signal?.aborted) return false;
-    await invoke("ai_cache_remote_shell", { targetId: target_id, shell });
-    return !signal?.aborted;
-  };
-
-  // Tail-bounded buffer: the probe echo + its evaluated output land at the END
-  // of the stream (after any MOTD / init_command noise), so only the recent tail
-  // matters. Cap it so a chatty connect can't grow an unbounded string that
-  // classifyProbeBuffer re-scans every 80ms. Trim on a newline boundary so a cut
-  // can never open a line mid-token and let `^P=` false-match a sliced echo line.
-  const TAIL_CAP = 16 * 1024;
-  let buffer = "";
-  let unlisten: UnlistenFn | undefined;
-  const dispose = () => { unlisten?.(); unlisten = undefined; };
-  signal?.addEventListener("abort", dispose, { once: true });
-  try {
-    unlisten = await listen<string>(`${transport}:data:${target_id}`, (e) => {
-      if (signal?.aborted) return;
-      buffer += new TextDecoder("utf-8", { fatal: false }).decode(decodeStreamChunk(e.payload));
-      if (buffer.length > TAIL_CAP) {
-        const tail = buffer.slice(-TAIL_CAP);
-        const nl = tail.indexOf("\n");
-        buffer = nl >= 0 ? tail.slice(nl + 1) : tail;
-      }
-    });
-    if (signal?.aborted) return false;
-    await invoke(`${transport}_write`, {
-      sessionId: target_id,
-      data: Array.from(new TextEncoder().encode(PROBE_COMMAND + "\r")),
-    });
-    // 1.5s deadline：远端通常 100-300ms 内回响，给 5x 头量容忍慢链路。
-    const deadline = Date.now() + 1500;
-    while (Date.now() < deadline) {
-      if (signal?.aborted) return false;
-      const { kind } = classifyProbeBuffer(buffer);
-      if (kind) {
-        return await cache(kind); // posix/powershell 的求值行无歧义，立即定夺
-      }
-      await new Promise((r) => setTimeout(r, 80));
-    }
-    // 超时：没等到 posix/powershell 求值行。若 buffer 里有（非回显的）cmd 求值签名 → 真 cmd.exe；
-    // 慢链路下求值行整个没到（只有被排除的回显）→ cmd=false → 不写缓存，POSIX 兜底。
-    if (signal?.aborted) return false;
-    if (classifyProbeBuffer(buffer).cmd) {
-      return await cache("cmd");
-    }
-    console.warn("[ai] shell probe timed out — keeping POSIX fallback");
-    return false;
-  } catch (e) {
-    if (!signal?.aborted) console.error("[ai] shell probe failed:", e);
-    return false;
-  } finally {
-    signal?.removeEventListener("abort", dispose);
-    dispose();
-  }
+  const key = `${transport}:${targetId}`;
+  const collector = remoteShellProbes.get(key);
+  if (!collector) return;
+  collector.controller.abort();
+  collector.finish(null);
+  remoteShellProbes.delete(key);
 }
 
 /** 当前会话的助手消息是否正在流式输出 —— UI 用它把"发送"按钮切成"停止"。 */

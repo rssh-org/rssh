@@ -1243,14 +1243,47 @@ pub fn ai_remote_shell_probe_needed_impl(
         None,
         owner,
         |target| {
-            let TargetShell::Remote(key) = target_shell(&target) else {
-                return Ok(false);
+            let enqueued = match &target {
+                crate::commands::lifecycle::OwnedAiTarget::Ssh {
+                    shell_probe_enqueued,
+                    ..
+                } => *shell_probe_enqueued,
+                #[cfg(any(windows, macos, linux, ohos))]
+                crate::commands::lifecycle::OwnedAiTarget::Pty(handle) => {
+                    handle.shell_probe_enqueued()
+                }
+                _ => false,
             };
-            Ok(remote_shell_detection_enabled(state)?
-                && !locked(&state.ai_remote_shell_cache)?.contains_key(&key))
+            Ok(enqueued && remote_shell_probe_needed_for_target(state, &target)?)
         },
     )?
     .unwrap_or(false))
+}
+
+fn remote_shell_probe_needed_for_target(
+    state: &AppState,
+    target: &crate::commands::lifecycle::OwnedAiTarget,
+) -> AppResult<bool> {
+    let TargetShell::Remote(key) = target_shell(target) else {
+        return Ok(false);
+    };
+    Ok(remote_shell_detection_enabled(state)?
+        && !locked(&state.ai_remote_shell_cache)?.contains_key(&key))
+}
+
+/// Queue the same shell probe during connection setup, before any init command.
+/// The frontend collects its response from the existing terminal data stream.
+pub fn remote_shell_probe_command(
+    state: &AppState,
+    target: &crate::commands::lifecycle::OwnedAiTarget,
+    session_id: &str,
+) -> AppResult<Option<String>> {
+    Ok(
+        remote_shell_probe_needed_for_target(state, target)?.then(|| {
+            let marker = format!("RSSH_SHELL_{}", session_id.replace('-', ""));
+            format!("echo {marker}=$PSEdition=$$=END\r")
+        }),
+    )
 }
 
 /// Cache the existing frontend probe's result. A result arriving after close
@@ -2162,10 +2195,12 @@ mod tests {
         let (_, handle) =
             crate::terminal::pty::spawn(id.clone(), 80, 24, std::sync::Arc::new(|_, _| {}), None)
                 .unwrap();
-        let handle = match connector {
+        let mut handle = match connector {
             Some(connector) => handle.with_connector(connector),
             None => handle,
         };
+        // This ready-session fixture represents a probe queued during connect.
+        handle.mark_shell_probe_enqueued();
         reservation.activate(ReadySession::Pty(handle)).unwrap();
         id
     }

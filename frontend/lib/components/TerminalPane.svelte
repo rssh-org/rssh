@@ -1007,10 +1007,13 @@
      * exist before a fast child process or peer can produce its first byte. */
     async function createSessionEventSubscription(sid: string): Promise<UnlistenFn> {
         const listeners: UnlistenFn[] = [];
+        const probeTransport = isSsh ? "ssh" : isLocal || isPtyConnector ? "pty" : null;
+        if (probeTransport) ai.prepareRemoteShellProbe(sid, probeTransport);
         try {
             listeners.push(await listen<string>(`${dataEvent}:${sid}`, (ev) => {
                 if (!acceptsSessionEvent(sid)) return;
                 const raw = decodeStreamChunk(ev.payload);
+                if (probeTransport) ai.observeRemoteShellOutput(sid, probeTransport, raw);
                 if (streamOpts) {
                     stageLoginScript(raw);
                     if (streamOpts.outputMode === "hex") {
@@ -1066,6 +1069,7 @@
                 announceDisconnected();
             }));
         } catch (error) {
+            if (probeTransport) ai.cancelRemoteShellProbe(sid, probeTransport);
             listeners.forEach((unlisten) => unlisten());
             throw error;
         }
@@ -1336,11 +1340,14 @@
             }
         });
 
-        // The backend gates known shells and the shared auto-detection setting.
-        // Register now, before effects publish the session; AI/MCP starts await
-        // this probe without blocking terminal input or rendering.
+        // The existing data listener already collected early backend probe
+        // output. Register its completion before effects publish this session;
+        // manual terminal input remains available while AI/MCP await detection.
         if (isSsh || isLocal || isPtyConnector) {
-            void ai.ensureRemoteShellProbe(readySessionId, isSsh ? "ssh" : "pty");
+            void ai.ensureRemoteShellProbe(readySessionId, isSsh ? "ssh" : "pty").catch((error) => {
+                if (!isCurrent() || disconnected || sessionId !== readySessionId) return;
+                toast.error(errMsg(error));
+            });
         }
 
         return true;
