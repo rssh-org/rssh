@@ -262,7 +262,8 @@
     const registerBack = createScopedBackHandler();
     $effect(() => {
         if (!showSearch) return;
-        return registerBack({ enabled: () => showSearch, handle: closeSearch });
+        // Search is local to its focused pane; sibling Home panes keep keyboard navigation.
+        return registerBack({ enabled: () => showSearch && app.activePaneId() === tabId, handle: closeSearch });
     });
 
     // Command block overlay state. `paintTick` is a dumb counter we bump
