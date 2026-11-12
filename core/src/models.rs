@@ -415,9 +415,6 @@ pub enum DynamicDiscoveryConfig {
         region: String,
         #[serde(default)]
         only_ssm_available: bool,
-        /// Actual Session Manager shell family; None infers the EC2 OS default.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        shell: Option<String>,
     },
 }
 
@@ -482,7 +479,7 @@ pub enum ConnectorSpec {
         region: String,
         instance_id: String,
         account_id: String,
-        /// Remote SSM shell family, used for command syntax, not session configuration.
+        /// Shell family inferred from the EC2 OS for command syntax, not session configuration.
         shell: String,
     },
 }

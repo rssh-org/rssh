@@ -7,7 +7,6 @@
   } from "../stores/app.svelte.ts";
   import { t } from "../i18n/index.svelte.ts";
   import SearchSelect from "./SearchSelect.svelte";
-  import Select from "./Select.svelte";
   import AppIcon from "./AppIcon.svelte";
   import { dynamicPlatformIconName } from "./app-icon";
 
@@ -35,7 +34,6 @@
   let formNamespace = $state("");
   let formShell = $state("sh");
   let formRegion = $state("");
-  let formAwsShell = $state<string | null>(null);
   let formOnlySsmAvailable = $state(false);
   let refreshingContexts = $state(false);
   let loadedSourceId = $state("");
@@ -49,7 +47,6 @@
     formShell = s.platform === "aws_ssm" ? "sh" : (s.shell || "sh");
     formNamespace = s.platform === "k8s" ? (s.namespace ?? "") : "";
     formRegion = s.platform === "aws_ssm" ? s.region : "";
-    formAwsShell = s.platform === "aws_ssm" ? (s.shell ?? null) : null;
     formOnlySsmAvailable = s.platform === "aws_ssm" && s.only_ssm_available;
   }
 
@@ -101,7 +98,6 @@
           profile: formContext.trim(),
           region: formRegion.trim(),
           only_ssm_available: formOnlySsmAvailable,
-          shell: formAwsShell,
         }
       : formPlatform === "docker"
       ? {
@@ -259,22 +255,6 @@
       <span class="label-text">{t("dynamic_discovery.aws_region")}</span>
       <input type="text" bind:value={formRegion} placeholder="us-east-1" onkeydown={handleKeydown} />
     </label>
-    <div class="field">
-      <label class="label-text" for={`dynamic-aws-shell-${formId}`}>{t("dynamic_discovery.aws_shell")}</label>
-      <Select
-        id={`dynamic-aws-shell-${formId}`}
-        ariaLabel={t("dynamic_discovery.aws_shell")}
-        value={formAwsShell}
-        onchange={(value) => { formAwsShell = typeof value === "string" ? value : null; }}
-        options={[
-          { value: null, label: t("dynamic_discovery.aws_shell_auto") },
-          { value: "sh", label: "POSIX (sh / bash / zsh)" },
-          { value: "powershell", label: "PowerShell" },
-          { value: "cmd", label: "cmd.exe" },
-        ]}
-      />
-      <div class="field-hint">{t("dynamic_discovery.aws_shell_hint")}</div>
-    </div>
     <label class="filter-row">
       <span>{t("dynamic_discovery.only_ssm_available")}</span>
       <span class="switch">

@@ -322,24 +322,12 @@ fn validate_sources(sources: &[DynamicDiscoverySource]) -> AppResult<()> {
                 validate_arg("shell", shell)?;
             }
             DynamicDiscoveryConfig::AwsSsm {
-                profile,
-                region,
-                shell,
-                ..
+                profile, region, ..
             } => {
                 if !profile.is_empty() {
                     validate_arg("profile", profile)?;
                 }
                 validate_arg("region", region)?;
-                if shell
-                    .as_deref()
-                    .is_some_and(|shell| !matches!(shell, "sh" | "powershell" | "cmd"))
-                {
-                    return Err(AppError::config(
-                        "dynamic_discovery_aws_shell_invalid",
-                        json!({ "shell": shell }),
-                    ));
-                }
             }
             DynamicDiscoveryConfig::K8s {
                 context,
@@ -995,10 +983,6 @@ fn parse_ec2_instances(
     online: Option<&HashSet<String>>,
 ) -> AppResult<Vec<DynamicDiscoveredTarget>> {
     let list: Ec2Instances = parse_aws_json(stdout, "describe-instances")?;
-    let shell_override = match &source.config {
-        DynamicDiscoveryConfig::AwsSsm { shell, .. } => shell.as_deref(),
-        _ => None,
-    };
     let mut targets = Vec::new();
     for reservation in list.reservations {
         for instance in reservation.instances {
@@ -1021,13 +1005,11 @@ fn parse_ec2_instances(
             details.extend(instance.private_ip_address.as_deref());
             details.extend(instance.public_ip_address.as_deref());
             let sub = details.join(" · ");
-            // Match existing Session Manager shell preferences when explicitly configured.
-            let shell =
-                shell_override.unwrap_or(if instance.platform.as_deref() == Some("windows") {
-                    "powershell"
-                } else {
-                    "sh"
-                });
+            let shell = if instance.platform.as_deref() == Some("windows") {
+                "powershell"
+            } else {
+                "sh"
+            };
             targets.push(DynamicDiscoveredTarget {
                 id: format!(
                     "aws_ssm:{}:{region}:{}",
@@ -1119,38 +1101,27 @@ mod tests {
     }
 
     #[test]
-    fn aws_ssm_shell_override_is_persisted_and_used_for_every_instance() {
-        for shell in ["sh", "powershell", "cmd"] {
-            let mut value = serde_json::to_value(aws_source()).unwrap();
-            value["shell"] = shell.into();
-            let source = serde_json::from_value(value).unwrap();
-            let db = crate::db::Db::open_in_memory().unwrap();
-            save_dynamic_discovery_sources_to_db(&db, vec![source]).unwrap();
-            let saved = read_dynamic_discovery_sources_from_db(&db).unwrap();
-            assert_eq!(serde_json::to_value(&saved[0]).unwrap()["shell"], shell);
-            let targets =
-                parse_ec2_instances(&saved[0], "production", "us-east-1", &ec2_instances(), None)
-                    .unwrap();
-            assert!(targets
-                .iter()
-                .all(
-                    |target| serde_json::to_value(&target.connector_spec).unwrap()["shell"]
-                        == shell
-                ));
-        }
-    }
-
-    #[test]
-    fn aws_ssm_rejects_unknown_shell_family() {
+    fn aws_ssm_legacy_shell_does_not_override_instance_operating_system() {
         let mut value = serde_json::to_value(aws_source()).unwrap();
-        value["shell"] = "arbitrary-command".into();
+        value["shell"] = "cmd".into();
         let source = serde_json::from_value(value).unwrap();
         let db = crate::db::Db::open_in_memory().unwrap();
+        save_dynamic_discovery_sources_to_db(&db, vec![source]).unwrap();
+        let saved = read_dynamic_discovery_sources_from_db(&db).unwrap();
+        assert!(serde_json::to_value(&saved[0])
+            .unwrap()
+            .get("shell")
+            .is_none());
+        let targets =
+            parse_ec2_instances(&saved[0], "production", "us-east-1", &ec2_instances(), None)
+                .unwrap();
         assert_eq!(
-            save_dynamic_discovery_sources_to_db(&db, vec![source])
-                .unwrap_err()
-                .code(),
-            "dynamic_discovery_aws_shell_invalid"
+            serde_json::to_value(&targets[0].connector_spec).unwrap()["shell"],
+            "sh"
+        );
+        assert_eq!(
+            serde_json::to_value(&targets[1].connector_spec).unwrap()["shell"],
+            "powershell"
         );
     }
 

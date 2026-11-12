@@ -148,7 +148,7 @@ export type ConnectorSpec =
 export type DynamicDiscoverySource =
   | { id: string; name: string; enabled: boolean; platform: "docker"; context: string; shell: string }
   | { id: string; name: string; enabled: boolean; platform: "k8s"; context: string; namespace: string | null; shell: string }
-  | { id: string; name: string; enabled: boolean; platform: "aws_ssm"; profile: string; region: string; only_ssm_available: boolean; shell?: string | null };
+  | { id: string; name: string; enabled: boolean; platform: "aws_ssm"; profile: string; region: string; only_ssm_available: boolean };
 export interface DynamicDiscoveryContext {
   platform: DynamicPlatform;
   name: string;
