@@ -157,7 +157,7 @@
         for (const tab of tabs) app.closeTab(tab.id);
     }
     function requestCloseTabs(ids: string[]) {
-        const tabs = app.tabs().filter(tab => ids.includes(tab.id) && tab.type !== "home");
+        const tabs = app.tabs().filter(tab => ids.includes(tab.id) && tab.id !== "home");
         if (!tabs.length) return;
         if (app.confirmCloseTab()) { closingTabs = tabs; return; }
         closeRequestedTabs(tabs);
@@ -1024,20 +1024,27 @@
     }
 
     function canSplitTab(tab: Tab): boolean {
-        return !layout.compact() && app.isTerminalTabType(tab.type) && tab.type !== "serial";
+        return !layout.compact() && ((app.isTerminalTabType(tab.type) && tab.type !== "serial")
+            || (tab.type === "home" && !!tab.paneOf));
     }
     type SplitSide = "left" | "right" | "top" | "bottom";
 
-    function splitCurrentPane(tab: Tab, side: SplitSide) {
+    async function splitCurrentPane(tab: Tab, side: SplitSide) {
         if (!canSplitTab(tab)) return;
+        const opensHome = await app.loadSplitOpensHome();
+        if (!canSplitTab(tab) || !app.tabs().some((candidate) => candidate.id === tab.id)) return;
         const workspaceId = tab.workspaceId ?? tab.id;
         if (!app.isTerminalWorkspace(workspaceId)) return;
+        app.setActiveWorkspace(workspaceId);
         if (tab.paneOf) app.setActivePane(tab.id);
-        else app.setActiveWorkspace(workspaceId);
         const sourcePaneId = app.activePaneId();
 
-        const newId = `${tab.type}:${crypto.randomUUID()}`;
-        const newTab: Tab = {
+        const newId = `${opensHome ? "home" : tab.type}:${crypto.randomUUID()}`;
+        const newTab: Tab = opensHome ? {
+            id: newId,
+            type: "home",
+            label: "",
+        } : {
             id: newId,
             type: tab.type,
             label: tab.label,
@@ -1046,7 +1053,7 @@
         try {
             const paneId = app.addPane(workspaceId, side, newTab);
             if (!paneId) throw new Error(t("toast.error.add"));
-            pendingPaneSources[paneId] = sourcePaneId;
+            if (app.isTerminalTabType(newTab.type)) pendingPaneSources[paneId] = sourcePaneId;
         } catch (error) {
             delete pendingPaneSources[newId];
             // addPane is synchronous, but keep rollback here so a future store
@@ -1667,7 +1674,7 @@
         <Modal onClose={() => (closingTabs = [])} class="stack"
                aria-labelledby="close-tab-title" aria-describedby="close-tab-body">
             <h3 id="close-tab-title" class="dialog-title">{t("tab.close_confirm_title")}</h3>
-            <div id="close-tab-body" class="dialog-body">{closingTabs.length === 1 ? t("tab.close_confirm_body", { label: closingTabs[0].label }) : t("tab.close_many_confirm_body", { count: closingTabs.length })}</div>
+            <div id="close-tab-body" class="dialog-body">{closingTabs.length === 1 ? t("tab.close_confirm_body", { label: app.tabLabel(closingTabs[0]) }) : t("tab.close_many_confirm_body", { count: closingTabs.length })}</div>
             <div class="modal-actions">
                 <button class="btn btn-sm" onclick={() => (closingTabs = [])}>{t("common.cancel")}</button>
                 <button class="btn btn-sm btn-primary" onclick={confirmCloseTab}>{t("tab.context.close")}</button>

@@ -1297,6 +1297,8 @@ const en = {
   "settings.shell.interaction": "Terminal interaction",
   "settings.shell.confirm_close_tab": "Confirm before closing tab",
   "settings.shell.confirm_close_tab_desc": "Show a confirmation dialog when closing a tab, to avoid losing a session by accident.",
+  "settings.shell.split_opens_home": "Open Home in split panes",
+  "settings.shell.split_opens_home_desc": "Show Home in new split panes to choose a connection. Turn off to open another connection to the current session.",
   "settings.shell.copy_on_select": "Copy on select",
   "settings.shell.copy_on_select_desc": "Automatically copy selected text to the clipboard.",
   "settings.shell.right_click": "Right-click action",

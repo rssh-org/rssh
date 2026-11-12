@@ -18,7 +18,7 @@ import type { ViewportSnapshot } from "../terminal/viewport-snapshot.ts";
 import { toast } from "./toast.svelte.ts";
 
 export type { CommandBlockSplitMode } from "../terminal/command-blocks.ts";
-import { addSplit, collectLeafIds, leaf, normalizeRatio, removeLeaf } from "../terminal/layout.ts";
+import { addSplit, collectLeafIds, leaf, normalizeRatio, removeLeaf, replaceLeaf } from "../terminal/layout.ts";
 import type { SplitDirection, TerminalLayout } from "../terminal/layout.ts";
 import { createSidePanelState } from "./panel-state.svelte.ts";
 
@@ -339,7 +339,7 @@ export function workspaceTabs(): Tab[] {
 }
 
 export function tabLabel(tab: Tab): string {
-  return tab.id === "home" ? t("tab.home") : tab.label;
+  return tab.type === "home" ? t("tab.home") : tab.label;
 }
 export function layoutForWorkspace(workspaceId: string): TerminalLayout | null {
   return _layoutByWorkspace[workspaceId] ?? null;
@@ -431,7 +431,8 @@ export function resizeLayoutPath(workspaceId: string, path: readonly number[], r
 
 export function addPane(workspaceId: string, side: PaneSide, tab: Tab): string | null {
   const root = _tabs.find((candidate) => candidate.id === workspaceId && !candidate.paneOf);
-  if (!root || !isTerminalTabType(root.type) || root.type === "serial" || !isTerminalTabType(tab.type) || tab.type === "serial") return null;
+  if (!root || !isTerminalTabType(root.type) || root.type === "serial") return null;
+  if (tab.type !== "home" && (!isTerminalTabType(tab.type) || tab.type === "serial")) return null;
   if (_tabs.some((candidate) => candidate.id === tab.id)) return null;
   const layout = ensureWorkspaceLayout(workspaceId);
   if (!layout) return null;
@@ -528,6 +529,29 @@ export function addTab(tab: Tab) {
   recordRecentHomeItem(rootTab);
 }
 
+/** Home selections replace only the explicitly targeted split pane. */
+export function openTab(tab: Tab, targetPaneId = "home") {
+  if (targetPaneId === "home" || !isTerminalTabType(tab.type)) {
+    addTab(tab);
+    return;
+  }
+  const target = _tabs.find((candidate) => candidate.id === targetPaneId);
+  if (target?.type !== "home" || !target.paneOf || !target.workspaceId) return;
+  const layout = layoutForWorkspace(target.workspaceId);
+  if (!layout || !collectLeafIds(layout).includes(targetPaneId)) return;
+  if (_tabs.some((candidate) => candidate.id === tab.id)) return;
+
+  const pane: Tab = { ...tab, workspaceId: target.workspaceId, paneOf: target.paneOf };
+  _layoutByWorkspace[target.workspaceId] = replaceLeaf(layout, targetPaneId, pane.id);
+  _tabs = _tabs.map((candidate) => candidate.id === targetPaneId ? pane : candidate);
+  disposeTabResources(targetPaneId);
+  ai.activateTab(pane.id);
+  if (pane.type === "ssh") sftpPanel.seedWidth(pane.id);
+  setActiveWorkspace(target.workspaceId);
+  setActivePane(pane.id);
+  recordRecentHomeItem(pane);
+}
+
 
 function recordRecentHomeItem(tab: Tab): void {
   const itemId = homeItemIdForTab(tab);
@@ -590,7 +614,7 @@ export function tabCloseTargets(id: string, scope: TabCloseScope): string[] {
 
 export function closeTab(id: string) {
   const tab = _tabs.find((candidate) => candidate.id === id);
-  if (!tab || tab.type === "home") return;
+  if (!tab || id === "home") return;
   if (tab.paneOf) {
     closePane(id);
     return;
@@ -892,8 +916,8 @@ export function closeSnippetPicker() { _snippetPickerOpen = false; }
 /** Open a terminal tab from a saved serial profile (Home cards + the manager
  *  use this). meta carries the config in snake_case — TerminalPane feeds it to
  *  serial_open verbatim, no remapping. id is ignored (ad-hoc connects pass ""). */
-export function connectSerialProfile(sp: SerialProfile) {
-  addTab({
+export function connectSerialProfile(sp: SerialProfile, targetPaneId?: string) {
+  openTab({
     id: `serial:${crypto.randomUUID()}`,
     type: "serial",
     label: sp.name,
@@ -916,14 +940,14 @@ export function connectSerialProfile(sp: SerialProfile) {
       output_mode: sp.output_mode,
       login_script: sp.login_script,
     },
-  });
+  }, targetPaneId);
 }
 
 /** Open a terminal tab from a saved telnet profile. Non-secret connection
  *  settings live in tab meta; the login script is fetched by profileId only
  *  after TerminalPane mounts, so window-clone persistence never sees it. */
-export function connectTelnetProfile(tp: TelnetProfile) {
-  addTab({
+export function connectTelnetProfile(tp: TelnetProfile, targetPaneId?: string) {
+  openTab({
     id: `telnet:${crypto.randomUUID()}`,
     type: "telnet",
     label: tp.name,
@@ -938,13 +962,13 @@ export function connectTelnetProfile(tp: TelnetProfile) {
       echo_mode: tp.echo_mode ?? (tp.local_echo ? "on" : "off"),
       backspace: tp.backspace,
     },
-  });
+  }, targetPaneId);
 }
 
-export function connectDynamicTarget(target: DynamicDiscoveredTarget) {
+export function connectDynamicTarget(target: DynamicDiscoveredTarget, targetPaneId?: string) {
   const spec = target.connector_spec;
   const tabType = connectorTabType(spec);
-  addTab({
+  openTab({
     id: `${tabType}:${crypto.randomUUID()}`,
     type: tabType,
     label: target.name,
@@ -954,7 +978,7 @@ export function connectDynamicTarget(target: DynamicDiscoveredTarget) {
       sourceId: target.source_id,
       sourceName: target.source_name,
     },
-  });
+  }, targetPaneId);
 }
 
 function connectorTabType(spec: ConnectorSpec): Extract<TerminalTabType, ConnectorSpec["type"]> {
@@ -1224,6 +1248,40 @@ export async function setConfirmCloseTab(v: boolean) {
   _confirmCloseTab = v;
   _cctLoaded = true;
   await invoke("set_setting", { key: "confirm_close_tab", value: String(v) });
+}
+
+/* ─── Open Home in new split panes ─── */
+// Existing installations have no value: only an explicit "false" restores
+// the previous behavior of connecting another instance of the current session.
+let _splitOpensHome = $state(true);
+let _splitOpensHomeLoaded = false;
+let _splitOpensHomeLoad: Promise<boolean> | null = null;
+export function splitOpensHome() { return _splitOpensHome; }
+export async function loadSplitOpensHome(): Promise<boolean> {
+  if (_splitOpensHomeLoaded) return _splitOpensHome;
+  if (!_splitOpensHomeLoad) {
+    _splitOpensHomeLoad = (async () => {
+      try {
+        const value = await invoke<string | null>("get_setting", { key: "split_opens_home" });
+        // A setting saved while this read was pending takes precedence.
+        if (!_splitOpensHomeLoaded) {
+          _splitOpensHome = value !== "false";
+          _splitOpensHomeLoaded = true;
+        }
+      } catch (error) {
+        console.warn("[settings] split Home preference load failed:", error);
+      } finally {
+        _splitOpensHomeLoad = null;
+      }
+      return _splitOpensHome;
+    })();
+  }
+  return _splitOpensHomeLoad;
+}
+export async function setSplitOpensHome(value: boolean) {
+  await invoke("set_setting", { key: "split_opens_home", value: String(value) });
+  _splitOpensHome = value;
+  _splitOpensHomeLoaded = true;
 }
 
 /* ─── MRU tab reorder ─── */

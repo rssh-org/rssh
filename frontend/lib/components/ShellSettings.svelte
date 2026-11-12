@@ -24,6 +24,7 @@
   let connectTimeout = $state(10);
   let copyOnSelect = $state(false);
   let confirmCloseTab = $state(false);
+  let splitOpensHomeBusy = $state(true);
   let rightClickAction = $state<app.RightClickAction>("menu");
   let ctrlRightClickMenu = $state(false);
   /** Modifier key label for the ctrl+right-click hint — Cmd on macOS, Ctrl elsewhere. */
@@ -46,6 +47,11 @@
   /** 用户当前选中的是 Custom 还是某个内置 shell。
    *  pendingCustom（点了 Custom 没填）或 selectedShell 不在 shells 里都算 custom。 */
   let customMode = $derived(pendingCustom || (selectedShell !== "" && !shells.includes(selectedShell)));
+
+  onMount(async () => {
+    await app.loadSplitOpensHome();
+    splitOpensHomeBusy = false;
+  });
 
   onMount(async () => {
     await loadStartup();
@@ -143,6 +149,19 @@
 
   async function saveConfirmCloseTab() {
     await app.setConfirmCloseTab(confirmCloseTab);
+  }
+
+  async function saveSplitOpensHome(event: Event) {
+    splitOpensHomeBusy = true;
+    const input = event.currentTarget as HTMLInputElement;
+    try {
+      await app.setSplitOpensHome(input.checked);
+    } catch (error) {
+      toast.error(errMsg(error));
+    } finally {
+      input.checked = app.splitOpensHome();
+      splitOpensHomeBusy = false;
+    }
   }
 
   /** Right-click change awaiting confirmation — non-null opens the dialog.
@@ -286,7 +305,7 @@
   </div>
 
   <div class="section-label">{t("settings.shell.interaction")}</div>
-  <!-- 终端交互：选中即复制（开关）+ 关闭标签页确认（开关）+ 右键动作（下拉）合在一张卡片，
+  <!-- 终端交互：选中即复制、关闭标签确认、分屏首页与右键动作合在一张卡片，
        "行 + 分隔线 + 行"结构，跟命令块卡片同款，避免控件割裂。 -->
   <div class="card surface-raised mouse-card">
     <div class="cmd-block-head">
@@ -309,6 +328,20 @@
       </div>
       <label class="switch">
         <input type="checkbox" bind:checked={confirmCloseTab} onchange={saveConfirmCloseTab} />
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="card-divider"></div>
+
+    <div class="cmd-block-head">
+      <div class="cmd-block-head-body">
+        <label for="split-opens-home" class="cmd-block-title" class:on={app.splitOpensHome()} class:off={!app.splitOpensHome()}>{t("settings.shell.split_opens_home")}</label>
+        <div id="split-opens-home-hint" class="cmd-block-desc">{t("settings.shell.split_opens_home_desc")}</div>
+      </div>
+      <label class="switch">
+        <input id="split-opens-home" type="checkbox" checked={app.splitOpensHome()}
+          disabled={splitOpensHomeBusy} aria-describedby="split-opens-home-hint" onchange={saveSplitOpensHome} />
         <span class="slider"></span>
       </label>
     </div>

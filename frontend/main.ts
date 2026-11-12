@@ -31,6 +31,7 @@ void transfers.loadMaxConcurrent();
 void app.loadCopyOnSelect();
 void app.loadRightClickAction();
 void app.loadConfirmCloseTab();
+void app.loadSplitOpensHome();
 void app.loadTabMru();
 void app.loadCtrlRightClickMenu();
 

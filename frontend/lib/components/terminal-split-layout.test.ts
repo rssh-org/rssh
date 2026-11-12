@@ -18,7 +18,7 @@ const appShellSource = readFileSync(
 describe("TerminalSplitLayout", () => {
   it("localizes pane controls", () => {
     expect(source).toContain('import {t} from "../i18n/index.svelte.ts"');
-    expect(source).toContain('aria-label={t("terminal.pane.activate", {label: tab.label})}');
+    expect(source).toContain('aria-label={t("terminal.pane.activate", {label: app.tabLabel(tab)})}');
     expect(source).toContain('title={t("terminal.pane.close")}');
     expect(source).toContain('aria-label={t("terminal.pane.resize")}');
   });

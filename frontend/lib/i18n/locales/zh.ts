@@ -1300,6 +1300,8 @@ const zh: Messages = {
   "settings.shell.interaction": "终端交互",
   "settings.shell.confirm_close_tab": "关闭标签页前确认",
   "settings.shell.confirm_close_tab_desc": "关闭标签页时弹出二次确认，避免误关丢失会话。",
+  "settings.shell.split_opens_home": "分屏打开首页",
+  "settings.shell.split_opens_home_desc": "新分屏显示首页，可自行选择连接；关闭后使用当前会话配置再打开一个连接。",
   "settings.shell.copy_on_select": "选中即复制",
   "settings.shell.copy_on_select_desc": "选中文本时自动复制到剪贴板。",
   "settings.shell.right_click": "右键动作",

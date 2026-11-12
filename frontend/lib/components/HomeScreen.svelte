@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import * as app from "../stores/app.svelte.ts";
+  import { canHandleBack } from "../stores/back.svelte.ts";
   import * as syncStatus from "../stores/sync.svelte.ts";
   import type {
     Profile,
@@ -34,6 +35,10 @@
     type HomeSorting,
     type HomeViewPreferences,
   } from "./home-layout.ts";
+
+  let { paneId = "home" }: { paneId?: string } = $props();
+  let workspaceId = $derived(app.tabs().find((tab) => tab.id === paneId)?.workspaceId ?? paneId);
+  let homeElement: HTMLDivElement;
 
   let profiles = $state<Profile[]>([]);
   let credentials = $state<Credential[]>([]);
@@ -148,13 +153,13 @@
       kind: "serial", id: `serial:${s.id}`, name: s.name,
       sub: `${s.port} · ${s.baud_rate}`,
       icon: connectionIconName("serial"), iconClass: "serial", groupId: s.group_id ?? null,
-      pinProfileId: null, open: () => app.connectSerialProfile(s),
+      pinProfileId: null, open: () => app.connectSerialProfile(s, paneId),
     })),
     ...telnetProfiles.map((tp): HomeItem => ({
       kind: "telnet", id: `telnet:${tp.id}`, name: tp.name,
       sub: `${tp.host}:${tp.port}`,
       icon: connectionIconName("telnet"), iconClass: "telnet", groupId: tp.group_id ?? null,
-      pinProfileId: null, open: () => app.connectTelnetProfile(tp),
+      pinProfileId: null, open: () => app.connectTelnetProfile(tp, paneId),
     })),
     ...dynamicTargets.map((target): HomeItem => {
       const presentation = dynamicTargetPresentation(target);
@@ -167,7 +172,7 @@
         iconClass: presentation.iconClass,
         groupId: null,
         pinProfileId: null,
-        open: () => app.connectDynamicTarget(target),
+        open: () => app.connectDynamicTarget(target, paneId),
       };
     }),
   ]);
@@ -231,8 +236,13 @@
   }
 
   function handleHomeKey(e: KeyboardEvent) {
-    if (app.activeTabId() !== "home" || app.settingsActive()) return;
-    if (e.target instanceof Element && e.target.closest(".home-controls, .search-input")) return;
+    if (e.defaultPrevented || app.activeTabId() !== paneId || app.settingsActive() || canHandleBack()) return;
+    if (!(e.target instanceof Element) || !homeElement) return;
+    const target = e.target;
+    const fromGrid = homeElement.contains(target)
+      && (target.matches(".grid") || !!target.closest(".card-btn"));
+    // Menus, dialog buttons and other panes retain their own keyboard behavior.
+    if (!fromGrid && target !== document.body && target !== homeElement && target !== homeElement.closest(".pane")) return;
     const total = navItems.length;
     if (!total) return;
 
@@ -281,7 +291,7 @@
 
   $effect(() => {
     syncStatus.configurationRevision();
-    if (app.activeTabId() !== "home" || app.settingsActive()) {
+    if (app.activeWorkspaceId() !== workspaceId || app.settingsActive()) {
       homeRefresh.cancel();
       return;
     }
@@ -322,7 +332,7 @@
   function connectProfile(p: Profile) {
     const tabId = `ssh:${crypto.randomUUID()}`;
     const cred = credentials.find((c) => c.id === p.credential_id);
-    app.addTab({
+    app.openTab({
       id: tabId, type: "ssh", label: p.name,
       meta: {
         profileId: p.id,
@@ -331,26 +341,40 @@
         authType: cred?.type ?? "password",
         secret: cred?.secret ?? "",
       },
-    });
+    }, paneId);
   }
 
   function openForward(f: Forward) {
     const fp = profiles.find((p) => p.id === f.profile_id);
     const id = `fwd:${f.id}:${Date.now()}`;
-    app.addTab({
+    app.openTab({
       id, type: "forward", label: f.name,
       meta: {
         forwardId: f.id, name: f.name,
         ruleCount: String(f.rules.length),
         profileName: fp?.name ?? "?",
       },
-    });
+    }, paneId);
+  }
+
+  function openLocal() {
+    app.openTab({
+      id: `local:${crypto.randomUUID()}`,
+      type: "local",
+      label: t("tab.local"),
+    }, paneId);
   }
 </script>
 
 <svelte:window onkeydown={handleHomeKey} />
 
-<div class="home">
+<div
+  class="home"
+  bind:this={homeElement}
+  role="presentation"
+  onpointerdown={() => app.setActivePane(paneId)}
+  onfocusin={() => app.setActivePane(paneId)}
+>
   <div class="home-header">
     <h1 class="logo">RSSH <AppIcon name="terminal" size={24} /></h1>
     <input
@@ -361,6 +385,11 @@
       placeholder={`${t("common.search")}...`}
     />
     <div class="home-controls">
+      {#if paneId !== "home" && app.capabilities().localPty}
+        <button type="button" class="btn" onclick={openLocal}>
+          <AppIcon name="terminal" size={16} />{t("tab.new_terminal")}
+        </button>
+      {/if}
       <div class="segmented" role="group" aria-label={t("home.display.aria")}>
         <button
           type="button"
@@ -394,7 +423,7 @@
 
   {#if sections.length > 0}
     {#each sections as section, sIdx (section.key)}
-      {@const headingId = `home-section-${sIdx}`}
+      {@const headingId = `home-section-${paneId}-${sIdx}`}
       <section aria-labelledby={headingId}>
         <h2 id={headingId} class="section-label" style={section.color ? `border-left: 3px solid ${section.color}; padding-left: 8px` : ""}>
           {section.label}
@@ -440,11 +469,11 @@
 </div>
 
 <style>
-  .home { padding: 24px; flex: 1; overflow-y: auto; min-height: 0; }
+  .home { padding: 24px; flex: 1; overflow-y: auto; min-height: 0; min-width: 0; }
   .home-header { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 16px; margin-bottom: 20px; }
   .logo { display: inline-flex; align-items: center; gap: 6px; font-size: 22px; color: var(--accent); font-weight: 700; white-space: nowrap; }
   /* Keep focus from zooming the iOS viewport and clipping the navigation. */
-  .search-input { flex: 1 1 200px; min-width: 160px; font-size: 16px; }
+  .search-input { flex: 1 1 200px; min-width: min(160px, 100%); font-size: 16px; }
   .home-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
   .segmented {
     display: inline-flex;
@@ -486,7 +515,7 @@
 
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
     gap: 14px;
     margin-bottom: 8px;
   }

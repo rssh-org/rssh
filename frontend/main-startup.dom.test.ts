@@ -15,6 +15,7 @@ vi.mock("./lib/stores/app.svelte.ts", () => ({
   loadCopyOnSelect: vi.fn(),
   loadRightClickAction: vi.fn(),
   loadConfirmCloseTab: vi.fn(),
+  loadSplitOpensHome: vi.fn(),
   loadTabMru: vi.fn(),
   loadCtrlRightClickMenu: vi.fn(),
 }));

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Settings persist through the Tauri backend (invoke). Unit tests have no
-// backend, so stub it to a no-op — we only assert in-memory tab ordering.
-const invokeMock = vi.hoisted(() => vi.fn(async () => null as unknown));
+// backend, so stub it to assert store behavior and command arguments.
+const invokeMock = vi.hoisted(() => vi.fn(async (_command: string, _args?: Record<string, unknown>) => null as unknown));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 // The store transitively imports the AI store, which reads localStorage at
@@ -1091,5 +1091,66 @@ describe("tab bar bulk close targets", () => {
     for (const id of app.tabCloseTargets("b", "all")) app.closeTab(id);
     expect(app.tabs().map(tab => tab.id)).toEqual(["home"]);
     expect(app.activeTabId()).toBe("home");
+  });
+});
+
+describe("split Home preference", () => {
+  it("defaults to Home for existing installations and retains an explicit opt-out after reload", async () => {
+    let stored: string | null = null;
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "set_setting") stored = String(args?.value);
+      return command === "get_setting" ? stored : null;
+    });
+    let app = await loadAppModule();
+
+    expect(app.splitOpensHome()).toBe(true);
+    await expect(app.loadSplitOpensHome()).resolves.toBe(true);
+    await app.setSplitOpensHome(false);
+    expect(app.splitOpensHome()).toBe(false);
+    expect(invokeMock).toHaveBeenCalledWith("set_setting", {
+      key: "split_opens_home", value: "false",
+    });
+
+    app = await loadAppModule();
+    await expect(app.loadSplitOpensHome()).resolves.toBe(false);
+    await app.setSplitOpensHome(true);
+    app = await loadAppModule();
+    await expect(app.loadSplitOpensHome()).resolves.toBe(true);
+  });
+
+  it("waits for an in-flight startup read before deciding where to split", async () => {
+    let resolveSetting!: (value: string) => void;
+    invokeMock.mockReturnValueOnce(new Promise<string>((resolve) => { resolveSetting = resolve; }));
+    const app = await loadAppModule();
+
+    const startupRead = app.loadSplitOpensHome();
+    const splitRead = app.loadSplitOpensHome();
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    resolveSetting("false");
+
+    await expect(Promise.all([startupRead, splitRead])).resolves.toEqual([false, false]);
+  });
+
+  it("does not replace a newly saved preference with a stale pending read", async () => {
+    let resolveSetting!: (value: string) => void;
+    invokeMock.mockReturnValueOnce(new Promise<string>((resolve) => { resolveSetting = resolve; }));
+    const app = await loadAppModule();
+
+    const pendingRead = app.loadSplitOpensHome();
+    await app.setSplitOpensHome(false);
+    resolveSetting("true");
+
+    await expect(pendingRead).resolves.toBe(false);
+    expect(app.splitOpensHome()).toBe(false);
+  });
+
+  it("keeps the current behavior when saving fails", async () => {
+    const app = await loadAppModule();
+    await app.loadSplitOpensHome();
+    invokeMock.mockRejectedValueOnce(new Error("settings unavailable"));
+
+    await expect(app.setSplitOpensHome(false)).rejects.toThrow("settings unavailable");
+    expect(app.splitOpensHome()).toBe(true);
+    await expect(app.loadSplitOpensHome()).resolves.toBe(true);
   });
 });
