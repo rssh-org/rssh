@@ -479,8 +479,6 @@ pub enum ConnectorSpec {
         region: String,
         instance_id: String,
         account_id: String,
-        /// Shell family inferred from the EC2 OS for command syntax, not session configuration.
-        shell: String,
     },
 }
 

@@ -819,7 +819,7 @@ const en = {
   "ai.settings.danger.auto.web_search": "web_search (redacted query egress)",
   "ai.settings.danger.auto.web_fetch": "web_fetch (auto-fetch any URL — no host restriction)",
   "ai.settings.shell_detect.label": "Auto-detect remote shell (Windows cmd / PowerShell support)",
-  "ai.settings.shell_detect.desc": "When OFF (default), the remote is assumed POSIX (bash / zsh) — commands use `; echo \"...:$?\"`. Covers ~99% Linux / macOS remotes with zero overhead. When ON, a one-line echo probe runs in the terminal on each SSH (re)connect to classify the remote as cmd.exe / PowerShell / POSIX, then picks the right sentinel template. Enabling it on an already-connected session takes effect on the next reconnect. Probe result is cached per profile for the rest of the process lifetime.",
+  "ai.settings.shell_detect.desc": "When OFF (default), SSH and AWS SSM remotes are treated as POSIX. When ON, connecting or reconnecting runs a one-line echo command in the terminal to detect POSIX, PowerShell, or cmd.exe; failed detection falls back to POSIX. Reconnect existing sessions to detect their shell. Results are cached until the app exits, so the same target is not probed again.",
   "ai.settings.shell_detect.save_failed": "Failed to save shell detect toggle: {error}",
   "ai.settings.section.skills": "SKILLS",
   "ai.settings.section.system_prompt": "SYSTEM PROMPT",

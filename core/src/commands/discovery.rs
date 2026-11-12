@@ -574,7 +574,6 @@ async fn discover_source(
             profile,
             region,
             only_ssm_available,
-            ..
         } => {
             discover_aws_ssm_with(source, profile, region, *only_ssm_available, |args| {
                 run_success(DynamicDiscoveryPlatform::AwsSsm, args, 30)
@@ -921,7 +920,6 @@ struct Ec2Reservation {
 struct Ec2Instance {
     instance_id: String,
     state: Ec2InstanceState,
-    platform: Option<String>,
     private_ip_address: Option<String>,
     public_ip_address: Option<String>,
     #[serde(default)]
@@ -1005,11 +1003,6 @@ fn parse_ec2_instances(
             details.extend(instance.private_ip_address.as_deref());
             details.extend(instance.public_ip_address.as_deref());
             let sub = details.join(" · ");
-            let shell = if instance.platform.as_deref() == Some("windows") {
-                "powershell"
-            } else {
-                "sh"
-            };
             targets.push(DynamicDiscoveredTarget {
                 id: format!(
                     "aws_ssm:{}:{region}:{}",
@@ -1025,7 +1018,6 @@ fn parse_ec2_instances(
                     region: region.to_string(),
                     instance_id: instance.instance_id,
                     account_id: reservation.owner_id.clone(),
-                    shell: shell.into(),
                 },
             });
         }
@@ -1078,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn ec2_instances_use_account_region_identity_and_remote_shell() {
+    fn ec2_instances_keep_target_identity_without_assuming_a_shell() {
         let targets = parse_ec2_instances(
             &aws_source(),
             "production",
@@ -1094,14 +1086,14 @@ mod tests {
         assert!(targets[0].sub.contains("203.0.113.1"));
         assert!(targets[0].sub.contains("running"));
         let linux = serde_json::to_value(&targets[0].connector_spec).unwrap();
-        assert_eq!(linux["shell"], "sh");
+        assert!(linux.get("shell").is_none());
         let windows = serde_json::to_value(&targets[1].connector_spec).unwrap();
-        assert_eq!(windows["shell"], "powershell");
+        assert!(windows.get("shell").is_none());
         assert_eq!(targets[1].name, "i-windows");
     }
 
     #[test]
-    fn aws_ssm_legacy_shell_does_not_override_instance_operating_system() {
+    fn aws_ssm_legacy_shell_is_ignored() {
         let mut value = serde_json::to_value(aws_source()).unwrap();
         value["shell"] = "cmd".into();
         let source = serde_json::from_value(value).unwrap();
@@ -1115,14 +1107,12 @@ mod tests {
         let targets =
             parse_ec2_instances(&saved[0], "production", "us-east-1", &ec2_instances(), None)
                 .unwrap();
-        assert_eq!(
-            serde_json::to_value(&targets[0].connector_spec).unwrap()["shell"],
-            "sh"
-        );
-        assert_eq!(
-            serde_json::to_value(&targets[1].connector_spec).unwrap()["shell"],
-            "powershell"
-        );
+        assert!(targets
+            .iter()
+            .all(|target| serde_json::to_value(&target.connector_spec)
+                .unwrap()
+                .get("shell")
+                .is_none()));
     }
 
     #[test]

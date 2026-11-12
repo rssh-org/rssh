@@ -1069,7 +1069,10 @@
             listeners.forEach((unlisten) => unlisten());
             throw error;
         }
-        return () => listeners.splice(0).forEach((unlisten) => unlisten());
+        return () => {
+            if (isSsh || isLocal || isPtyConnector) ai.cancelRemoteShellProbe(sid, isSsh ? "ssh" : "pty");
+            listeners.splice(0).forEach((unlisten) => unlisten());
+        };
     }
 
     const reservedSessionAttempt = createReservedSessionAttempt({
@@ -1333,16 +1336,11 @@
             }
         });
 
-        // 远端 shell 探测（仅 SSH）。连接成功时跑——此刻 init_command 已由后端在
-        // ssh_connect 返回前写入 PTY，探针排在其后。门控：auto_detect 开 + 该 profile
-        // 进程缓存未命中（remoteShellProbeNeeded）。命中即写 profile 缓存，供 AI 会话
-        // 启动时读初始 shell。fire-and-forget，不阻塞终端就绪；重连时缓存已命中 →
-        // needed=false，不重复刷探针。
-        if (isSsh) {
-            const sid = sessionId!;
-            void ai.remoteShellProbeNeeded(sid)
-                .then((needed) => { if (needed) return ai.probeRemoteShell(sid); })
-                .catch((e) => console.warn("[ai] connect-time shell probe skipped:", e));
+        // The backend gates known shells and the shared auto-detection setting.
+        // Register now, before effects publish the session; AI/MCP starts await
+        // this probe without blocking terminal input or rendering.
+        if (isSsh || isLocal || isPtyConnector) {
+            void ai.ensureRemoteShellProbe(readySessionId, isSsh ? "ssh" : "pty");
         }
 
         return true;

@@ -652,17 +652,13 @@ fn dispatch(
             Ok(Value::Null)
         }
         "ai_cache_remote_shell" => {
-            let target_id: String = arg(&args, "targetId")?;
-            let shell: crate::ai::shell::ShellKind = arg(&args, "shell")?;
-            if let Some(profile_id) = locked(&state.sessions)
-                .map_err(err_value)?
-                .get(&target_id)
-                .map(|h| h.profile_id().to_string())
-            {
-                locked(&state.ai_remote_shell_cache)
-                    .map_err(err_value)?
-                    .insert(profile_id, shell);
-            }
+            crate::ai::commands::ai_cache_remote_shell_impl(
+                state,
+                owner,
+                arg(&args, "targetId")?,
+                arg(&args, "shell")?,
+            )
+            .map_err(err_value)?;
             Ok(Value::Null)
         }
 
@@ -1367,9 +1363,13 @@ async fn dispatch_async(
             let g = audit.lock().map_err(|_| err_value(AppError::Lock))?;
             Ok(json!(g.to_log_string()))
         }
-        "ai_remote_shell_probe_needed" => ok(
-            crate::ai::commands::ai_remote_shell_probe_needed_impl(state, arg(&args, "targetId")?),
-        ),
+        "ai_remote_shell_probe_needed" => {
+            ok(crate::ai::commands::ai_remote_shell_probe_needed_impl(
+                state,
+                owner,
+                arg(&args, "targetId")?,
+            ))
+        }
         "ai_conversations_list" => ok(crate::ai::commands::ai_conversations_list_impl(
             state,
             &arg(&args, "target")?,
@@ -1931,6 +1931,93 @@ mod tests {
             data_dir: dir.path().into(),
         };
         (Arc::new(state), dir)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_remote_shell_probe_uses_owned_ssm_cache() {
+        use crate::commands::lifecycle::{self, ReadySession};
+        use crate::state::SessionKind;
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let other = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let id = uuid::Uuid::new_v4().to_string();
+        let reservation =
+            lifecycle::reserve_resource(&state, &id, SessionKind::Pty, owner.clone()).unwrap();
+        let (_, handle) =
+            crate::terminal::pty::spawn(id.clone(), 80, 24, Arc::new(|_, _| {}), None).unwrap();
+        reservation
+            .activate(ReadySession::Pty(handle.with_connector(
+                crate::models::ConnectorSpec::AwsSsm {
+                    profile: "prod".into(),
+                    account_id: "account".into(),
+                    region: "region".into(),
+                    instance_id: "instance".into(),
+                },
+            )))
+            .unwrap();
+        crate::db::settings::set(&state.db, "ai_auto_detect_remote_shell", "1").unwrap();
+        let args = json!({ "targetId": id, "shell": "powershell" });
+        assert_eq!(
+            dispatch_async(
+                &state,
+                &owner,
+                "ai_remote_shell_probe_needed",
+                args.clone(),
+                &tx
+            )
+            .await
+            .unwrap(),
+            json!(true)
+        );
+        for command in ["ai_remote_shell_probe_needed", "ai_cache_remote_shell"] {
+            let error = dispatch_async(&state, &other, command, args.clone(), &tx)
+                .await
+                .unwrap_err();
+            assert!(error.as_str().unwrap().contains("session_owner_mismatch"));
+        }
+        dispatch_async(&state, &owner, "ai_cache_remote_shell", args.clone(), &tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            dispatch_async(
+                &state,
+                &owner,
+                "ai_remote_shell_probe_needed",
+                args.clone(),
+                &tx
+            )
+            .await
+            .unwrap(),
+            json!(false)
+        );
+        assert_eq!(
+            rssh_core::agent::list_sessions(&state, &owner).unwrap()[0]
+                .shell
+                .kind,
+            crate::ai::shell::ShellKind::Powershell
+        );
+        crate::db::settings::set(&state.db, "ai_auto_detect_remote_shell", "0").unwrap();
+        assert_eq!(
+            rssh_core::agent::list_sessions(&state, &owner).unwrap()[0]
+                .shell
+                .kind,
+            crate::ai::shell::ShellKind::Posix
+        );
+        lifecycle::close_resource_and_wait(&state, &id, SessionKind::Pty, &owner)
+            .await
+            .unwrap();
+        let before = state.ai_remote_shell_cache.lock().unwrap().clone();
+        dispatch_async(
+            &state,
+            &owner,
+            "ai_cache_remote_shell",
+            json!({"targetId": id, "shell": "cmd"}),
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(*state.ai_remote_shell_cache.lock().unwrap(), before);
     }
 
     #[tokio::test(flavor = "current_thread")]

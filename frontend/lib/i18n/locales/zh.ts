@@ -822,7 +822,7 @@ const zh: Messages = {
   "ai.settings.danger.auto.web_search": "web_search（查询出网前已脱敏）",
   "ai.settings.danger.auto.web_fetch": "web_fetch（自动抓取任意 URL — 无主机限制）",
   "ai.settings.shell_detect.label": "自动探测远端 shell（含 Windows cmd / PowerShell）",
-  "ai.settings.shell_detect.desc": "关闭（默认）时远端假设 POSIX（bash / zsh），命令模板用 `; echo \"...:$?\"`——覆盖 Linux / macOS 远端。开启后，每次 SSH（重）连接时在终端跑一行 echo 探针，自动识别远端是 cmd.exe / PowerShell 还是 POSIX，并按对应 shell 拼接命令。对已连接的会话开启需重连后生效。探针对同一 profile 缓存到进程结束。",
+  "ai.settings.shell_detect.desc": "关闭（默认）时，SSH 和 AWS SSM 远端按 POSIX 处理。开启后，连接或重连时在终端执行一行 echo 命令，识别 POSIX、PowerShell 或 cmd.exe；识别失败仍按 POSIX 处理。已连接的会话需重连后探测，结果缓存到应用退出，同一目标不重复探测。",
   "ai.settings.shell_detect.save_failed": "保存 shell 探测开关失败: {error}",
   "ai.settings.section.skills": "SKILLS",
   "ai.settings.section.system_prompt": "系统提示词",

@@ -78,7 +78,7 @@ describe("sidebar layout preferences", () => {
 describe("recent Home connections", () => {
   it("opens AWS SSM targets as ephemeral PTY terminals with recent-history and AI support", async () => {
     const app = await loadAppModule();
-    const spec = { type: "aws_ssm" as const, profile: "production", region: "us-east-1", instance_id: "i-0123456789abcdef0", account_id: "123456789012", shell: "sh" };
+    const spec = { type: "aws_ssm" as const, profile: "production", region: "us-east-1", instance_id: "i-0123456789abcdef0", account_id: "123456789012" };
     app.connectDynamicTarget({
       id: "aws_ssm:123456789012:us-east-1:i-0123456789abcdef0", source_id: "aws-source",
       source_name: "AWS SSM", platform: "aws_ssm", name: "Production EC2", sub: "us-east-1", connector_spec: spec,

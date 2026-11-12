@@ -357,7 +357,6 @@ mod tests {
             region: "us-east-1".into(),
             instance_id: "i-0123456789abcdef0".into(),
             account_id: "123456789012".into(),
-            shell: "sh".into(),
         };
         let error = copy_connector(&spec, source.to_str().unwrap(), &destination, 1024)
             .await

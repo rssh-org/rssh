@@ -358,73 +358,45 @@ fn session_info(
     id: &str,
     record: &SessionRecord,
 ) -> AppResult<Option<AgentSession>> {
-    let (kind, shell) = match record.kind {
+    use crate::commands::lifecycle::OwnedAiTarget;
+    let (kind, target) = match record.kind {
         SessionKind::Ssh => {
             let sessions = locked(&state.sessions)?;
             let session = sessions
                 .get(id)
                 .ok_or_else(|| error("agent_session_unavailable"))?;
-            let auto = crate::db::settings::get(&state.db, "ai_auto_detect_remote_shell")?
-                .as_deref()
-                == Some("1");
-            let cached = if auto {
-                locked(&state.ai_remote_shell_cache)?
-                    .get(session.profile_id())
-                    .copied()
-            } else {
-                None
-            };
             (
                 "ssh",
-                ShellInfo {
-                    kind: cached.unwrap_or_default(),
-                    source: if cached.is_some() {
-                        "profile_cache"
-                    } else {
-                        "fallback"
-                    }
-                    .into(),
+                OwnedAiTarget::Ssh {
+                    handle: session.ssh_handle().clone(),
+                    profile_id: session.profile_id().to_owned(),
                 },
             )
         }
         #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Pty => {
-            let sessions = locked(&state.pty_sessions)?;
-            let session = sessions
+            let session = locked(&state.pty_sessions)?
                 .get(id)
+                .cloned()
                 .ok_or_else(|| error("agent_session_unavailable"))?;
-            (
-                "local",
-                ShellInfo {
-                    kind: ShellKind::from_local_path(session.shell_path()),
-                    source: "launch_config".into(),
-                },
-            )
+            ("local", OwnedAiTarget::Pty(session))
         }
         #[cfg(any(windows, macos, linux, ohos))]
-        SessionKind::Serial => (
-            "serial",
-            ShellInfo {
-                kind: ShellKind::Serial,
-                source: "transport".into(),
-            },
-        ),
-        SessionKind::Telnet => (
-            "telnet",
-            ShellInfo {
-                kind: ShellKind::Telnet,
-                source: "transport".into(),
-            },
-        ),
+        SessionKind::Serial => ("serial", OwnedAiTarget::Serial),
+        SessionKind::Telnet => ("telnet", OwnedAiTarget::Telnet),
         _ => return Ok(None),
     };
+    let (shell, source) = crate::ai::commands::resolved_target_shell(state, &target)?;
     Ok(Some(AgentSession {
         session_id: id.into(),
         tab_id: String::new(),
         nonce: record.nonce.to_string(),
         name: format!("{kind} {id}"),
         kind: kind.into(),
-        shell,
+        shell: ShellInfo {
+            kind: shell,
+            source: source.into(),
+        },
     }))
 }
 

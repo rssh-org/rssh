@@ -892,7 +892,7 @@ pub enum OwnedAiTarget {
         profile_id: String,
     },
     #[cfg(any(windows, macos, linux, ohos))]
-    PtyShellPath(String),
+    Pty(crate::terminal::pty::PtyHandle),
     #[cfg(any(windows, macos, linux, ohos))]
     Serial,
     Telnet,
@@ -904,27 +904,39 @@ pub fn owned_ready_ai_target(
     kind: SessionKind,
     expected_owner: &SessionOwner,
 ) -> AppResult<OwnedAiTarget> {
+    with_owned_ready_ai_target(state, id, Some(kind), expected_owner, Ok)?
+        .ok_or_else(|| AppError::not_found("session_not_found", serde_json::json!({ "id": id })))
+}
+
+/// Resolve a terminal by its registry kind and keep ownership/liveness stable
+/// through the operation. Callers must not re-enter the lifecycle registry.
+/// Missing, pending and closed sessions have no ready target; a known session
+/// owned by another caller is rejected even if it is already closed.
+pub fn with_owned_ready_ai_target<T>(
+    state: &AppState,
+    id: &str,
+    kind: Option<SessionKind>,
+    expected_owner: &SessionOwner,
+    operation: impl FnOnce(OwnedAiTarget) -> AppResult<T>,
+) -> AppResult<Option<T>> {
     let registry = locked(&state.lifecycle_sessions)?;
-    let record = registry
-        .get(id)
-        .ok_or_else(|| AppError::not_found("session_not_found", serde_json::json!({ "id": id })))?;
-    if record.kind != kind || record.phase() != SessionPhase::Ready {
-        return Err(AppError::not_found(
-            "session_not_found",
-            serde_json::json!({ "id": id }),
-        ));
-    }
+    let Some(record) = registry.get(id) else {
+        return Ok(None);
+    };
     if &record.owner != expected_owner {
         return Err(AppError::config(
             "session_owner_mismatch",
             serde_json::json!({ "id": id }),
         ));
     }
+    if kind.is_some_and(|kind| record.kind != kind) || record.phase() != SessionPhase::Ready {
+        return Ok(None);
+    }
 
     // Keep `lifecycle_sessions -> concrete handle` ordering. Resource close
     // uses the same ordering, so an owned lookup cannot race a close into a
     // borrowed handle from a different lifecycle epoch.
-    match kind {
+    let target = match record.kind {
         SessionKind::Ssh => locked(&state.sessions)?
             .get(id)
             .map(|session| OwnedAiTarget::Ssh {
@@ -940,7 +952,7 @@ pub fn owned_ready_ai_target(
         #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Pty => locked(&state.pty_sessions)?
             .get(id)
-            .map(|session| OwnedAiTarget::PtyShellPath(session.shell_path().to_owned()))
+            .map(|session| OwnedAiTarget::Pty(session.clone()))
             .ok_or_else(|| {
                 AppError::other(
                     "session_registry_inconsistent",
@@ -970,7 +982,8 @@ pub fn owned_ready_ai_target(
             "session_kind_mismatch",
             serde_json::json!({ "id": id }),
         )),
-    }
+    }?;
+    operation(target).map(Some)
 }
 
 fn take_ready_handle(

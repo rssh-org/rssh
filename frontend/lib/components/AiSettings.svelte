@@ -796,8 +796,8 @@
     </div>
 
     <!-- 远端 shell 自动探测 —— 独立卡片，跟 danger_mode 解耦。
-         off（默认）：远端假设 POSIX，保持 99% 用户零开销。
-         on：SSH 连接成功后跑一行 echo 探针，定位 cmd.exe / PowerShell。 -->
+         off（默认）：远端假设 POSIX。
+         on：SSH / SSM 共用连接时的 echo 探针，识别实际远端 shell。 -->
     <div class="card surface-raised">
         <div class="danger-head">
             <div class="danger-head-body">

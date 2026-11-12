@@ -375,9 +375,9 @@ pub struct SessionConfig {
     /// `handle_run_command` and `ensure_remote_caps` / `run_file_op`.
     /// Resolved at construction and refreshed when the target is rebound.
     /// Default Posix is the safe fallback (Linux/macOS remotes, ~99% case).
-    /// Local PTY: derived from PtyHandle.shell_path.
-    /// Remote SSH: the profile-level cache value if a connect-time probe hit
-    /// (auto-detect on), else Posix.
+    /// Known local/container shells: derived from PtyHandle.shell_path.
+    /// Unknown remote shells (SSH/SSM): the connection-scoped cache value if
+    /// auto-detect is on and a connect-time probe hit, otherwise Posix.
     pub shell_kind: super::shell::ShellKind,
     /// Conversation persistence. The actor autosaves `history` into
     /// ai_conversations at every consistent commit point (paired

@@ -384,7 +384,6 @@ fn target_environment(
     Option<crate::ssh::client::SshHandle>,
     super::shell::ShellKind,
 )> {
-    use super::shell::ShellKind;
     use crate::commands::lifecycle::{owned_ready_ai_target, OwnedAiTarget};
     use crate::state::SessionKind;
 
@@ -402,29 +401,87 @@ fn target_environment(
         }
         AiTarget::Telnet(_) => SessionKind::Telnet,
     };
-    match owned_ready_ai_target(state, target.id(), kind, owner)? {
-        OwnedAiTarget::Ssh { handle, profile_id } => {
-            let auto_detect = crate::db::settings::get(&state.db, &key_auto_detect_remote_shell())?
-                .as_deref()
-                == Some("1");
-            // Connect-time probes populate this cache. A disabled or unfinished
-            // probe keeps the existing POSIX fallback without blocking callers.
-            let shell = if auto_detect {
-                locked(&state.ai_remote_shell_cache)?
-                    .get(&profile_id)
-                    .copied()
-                    .unwrap_or_default()
-            } else {
-                ShellKind::default()
-            };
-            Ok((Some(handle), shell))
-        }
+    let target = owned_ready_ai_target(state, target.id(), kind, owner)?;
+    let (shell, _) = resolved_target_shell(state, &target)?;
+    let handle = match target {
+        OwnedAiTarget::Ssh { handle, .. } => Some(handle),
+        _ => None,
+    };
+    Ok((handle, shell))
+}
+
+enum TargetShell {
+    Known(super::shell::ShellKind),
+    Remote(String),
+}
+
+/// Known shell executables never need probing. Unknown remote defaults share
+/// the same setting and cache, scoped by the connection's remote identity.
+fn target_shell(target: &crate::commands::lifecycle::OwnedAiTarget) -> TargetShell {
+    use super::shell::ShellKind;
+    use crate::commands::lifecycle::OwnedAiTarget;
+    match target {
+        OwnedAiTarget::Ssh { profile_id, .. } => TargetShell::Remote(format!("ssh:{profile_id}")),
         #[cfg(any(windows, macos, linux, ohos))]
-        OwnedAiTarget::PtyShellPath(path) => Ok((None, ShellKind::from_local_path(&path))),
+        OwnedAiTarget::Pty(handle) => match handle.connector() {
+            Some(crate::models::ConnectorSpec::AwsSsm {
+                profile,
+                account_id,
+                region,
+                instance_id,
+            }) => TargetShell::Remote(format!(
+                "aws_ssm:{}",
+                json!([profile, account_id, region, instance_id])
+            )),
+            _ => TargetShell::Known(
+                handle
+                    .shell_path()
+                    .map(ShellKind::from_local_path)
+                    .unwrap_or_default(),
+            ),
+        },
         #[cfg(any(windows, macos, linux, ohos))]
-        OwnedAiTarget::Serial => Ok((None, ShellKind::Serial)),
-        OwnedAiTarget::Telnet => Ok((None, ShellKind::Telnet)),
+        OwnedAiTarget::Serial => TargetShell::Known(ShellKind::Serial),
+        OwnedAiTarget::Telnet => TargetShell::Known(ShellKind::Telnet),
     }
+}
+
+/// Shared by AI sessions and MCP terminal descriptions; the source label keeps
+/// known launch configuration distinct from a probe result or POSIX fallback.
+pub(crate) fn resolved_target_shell(
+    state: &AppState,
+    target: &crate::commands::lifecycle::OwnedAiTarget,
+) -> AppResult<(super::shell::ShellKind, &'static str)> {
+    use super::shell::ShellKind;
+    match target_shell(target) {
+        TargetShell::Known(shell) => Ok((
+            shell,
+            match shell {
+                ShellKind::Serial | ShellKind::Telnet => "transport",
+                _ => "launch_config",
+            },
+        )),
+        TargetShell::Remote(key) => {
+            let cached = if remote_shell_detection_enabled(state)? {
+                locked(&state.ai_remote_shell_cache)?.get(&key).copied()
+            } else {
+                None
+            };
+            let source = if cached.is_some() {
+                "profile_cache"
+            } else {
+                "fallback"
+            };
+            Ok((cached.unwrap_or_default(), source))
+        }
+    }
+}
+
+fn remote_shell_detection_enabled(state: &AppState) -> AppResult<bool> {
+    Ok(
+        crate::db::settings::get(&state.db, &key_auto_detect_remote_shell())?.as_deref()
+            == Some("1"),
+    )
 }
 
 pub async fn ai_list_skills(state: &AppState) -> AppResult<Vec<SkillRecord>> {
@@ -1164,49 +1221,69 @@ pub async fn ai_session_rollback_context(
     .await
 }
 
-/// 连接时探测前的门控查询：这个 target 现在需要跑 shell 探测吗？
-///
-/// true 仅当三条同时成立：auto_detect 开 + target 是已知 SSH 会话 + 该 profile 进程
-/// 缓存未命中。缓存命中（同 profile 之前探过）或 auto_detect 关 → false，于是连接 /
-/// 重连都不会重复刷探针。本地 PTY 的 session_id 不在 `state.sessions` 里 → 自然返回
-/// false（本地 shell 已知，无需探测）。
-pub async fn ai_remote_shell_probe_needed(state: &AppState, target_id: String) -> AppResult<bool> {
-    ai_remote_shell_probe_needed_impl(&state, target_id)
+/// Probe only live, owned targets with an unknown remote shell, when detection
+/// is enabled and their process-local cache has no result yet.
+pub async fn ai_remote_shell_probe_needed(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    target_id: String,
+) -> AppResult<bool> {
+    ai_remote_shell_probe_needed_impl(state, &owner, target_id)
 }
 
 /// Transport-agnostic body shared by the Tauri command and the headless server.
-pub fn ai_remote_shell_probe_needed_impl(state: &AppState, target_id: String) -> AppResult<bool> {
-    let auto_detect = crate::db::settings::get(&state.db, &key_auto_detect_remote_shell())?
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    if !auto_detect {
-        return Ok(false);
-    }
-    let profile_id = match locked(&state.sessions)?.get(&target_id) {
-        Some(h) => h.profile_id().to_string(),
-        None => return Ok(false), // 本地 PTY 或会话已断：不探
-    };
-    Ok(!locked(&state.ai_remote_shell_cache)?.contains_key(&profile_id))
+pub fn ai_remote_shell_probe_needed_impl(
+    state: &AppState,
+    owner: &crate::state::SessionOwner,
+    target_id: String,
+) -> AppResult<bool> {
+    Ok(crate::commands::lifecycle::with_owned_ready_ai_target(
+        state,
+        &target_id,
+        None,
+        owner,
+        |target| {
+            let TargetShell::Remote(key) = target_shell(&target) else {
+                return Ok(false);
+            };
+            Ok(remote_shell_detection_enabled(state)?
+                && !locked(&state.ai_remote_shell_cache)?.contains_key(&key))
+        },
+    )?
+    .unwrap_or(false))
 }
 
-/// 前端在 SSH 连接成功后探测远端 shell，把结果写进程级 cache（key=profile_id）。
-///
-/// 不需要 AI 会话 —— shell 种类是 profile 级事实，AI session 启动时（ai_session_start）
-/// 从这个缓存读初始 shell。同 profile 的下一次连接 / AI 会话直接命中，不再重探。
-///
-/// `target_id` 是发起探测时的 SSH session_id；探针刚回来 SSH 就断（极少）→ 查不到
-/// profile_id，静默跳过写入（下次连接会重探），不当错误抛。
+/// Cache the existing frontend probe's result. A result arriving after close
+/// or after detection was disabled is ignored; ownership is always checked.
 pub async fn ai_cache_remote_shell(
+    owner: crate::state::SessionOwner,
     state: &AppState,
     target_id: String,
     shell: super::shell::ShellKind,
 ) -> AppResult<()> {
-    if let Some(profile_id) = locked(&state.sessions)?
-        .get(&target_id)
-        .map(|h| h.profile_id().to_string())
-    {
-        locked(&state.ai_remote_shell_cache)?.insert(profile_id, shell);
-    }
+    ai_cache_remote_shell_impl(state, &owner, target_id, shell)
+}
+
+pub fn ai_cache_remote_shell_impl(
+    state: &AppState,
+    owner: &crate::state::SessionOwner,
+    target_id: String,
+    shell: super::shell::ShellKind,
+) -> AppResult<()> {
+    crate::commands::lifecycle::with_owned_ready_ai_target(
+        state,
+        &target_id,
+        None,
+        owner,
+        |target| {
+            if let TargetShell::Remote(key) = target_shell(&target) {
+                if remote_shell_detection_enabled(state)? {
+                    locked(&state.ai_remote_shell_cache)?.insert(key, shell);
+                }
+            }
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
@@ -2072,6 +2149,224 @@ mod tests {
     }
 
     #[cfg(any(windows, macos, linux))]
+    fn register_shell_probe_pty(
+        state: &AppState,
+        owner: &crate::state::SessionOwner,
+        connector: Option<crate::models::ConnectorSpec>,
+    ) -> String {
+        use crate::commands::lifecycle::{self, ReadySession};
+        use crate::state::SessionKind;
+        let id = uuid::Uuid::new_v4().to_string();
+        let reservation =
+            lifecycle::reserve_resource(state, &id, SessionKind::Pty, owner.clone()).unwrap();
+        let (_, handle) =
+            crate::terminal::pty::spawn(id.clone(), 80, 24, std::sync::Arc::new(|_, _| {}), None)
+                .unwrap();
+        let handle = match connector {
+            Some(connector) => handle.with_connector(connector),
+            None => handle,
+        };
+        reservation.activate(ReadySession::Pty(handle)).unwrap();
+        id
+    }
+
+    #[cfg(any(windows, macos, linux))]
+    fn shell_probe_ssm(
+        profile: &str,
+        account: &str,
+        region: &str,
+        instance: &str,
+    ) -> crate::models::ConnectorSpec {
+        crate::models::ConnectorSpec::AwsSsm {
+            profile: profile.into(),
+            account_id: account.into(),
+            region: region.into(),
+            instance_id: instance.into(),
+        }
+    }
+
+    #[cfg(any(windows, macos, linux))]
+    #[tokio::test]
+    async fn ssm_target_uses_remote_shell_probe_setting_and_cache() {
+        use super::super::shell::ShellKind;
+        use crate::commands::lifecycle;
+        use crate::state::{SessionKind, SessionOwner};
+        let (host, _events) = crate::ssh::test_support::headless_host();
+        let state = host.state();
+        let owner = SessionOwner::Window("remote-shell-probe-test".into());
+        // Legacy serialized OS-derived shell hints must not bypass the setting.
+        let spec = serde_json::from_value(json!({
+            "type": "aws_ssm", "profile": "production", "account_id": "123456789012",
+            "region": "us-east-1", "instance_id": "i-0123456789abcdef0", "shell": "powershell"
+        }))
+        .unwrap();
+        let id = register_shell_probe_pty(state, &owner, Some(spec));
+        let target = AiTarget::Local(id.clone());
+        assert_eq!(
+            target_environment(state, &owner, &target).unwrap().1,
+            ShellKind::Posix
+        );
+        crate::db::settings::set(&state.db, &key_auto_detect_remote_shell(), "1").unwrap();
+        assert!(ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
+        ai_cache_remote_shell(owner.clone(), state, id.clone(), ShellKind::Cmd)
+            .await
+            .unwrap();
+        assert!(!ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
+        assert_eq!(
+            target_environment(state, &owner, &target).unwrap().1,
+            ShellKind::Cmd
+        );
+        let mcp_shell = &crate::agent::list_sessions(state, &owner).unwrap()[0].shell;
+        assert_eq!(mcp_shell.kind, ShellKind::Cmd);
+        assert_eq!(mcp_shell.source, "profile_cache");
+        crate::db::settings::set(&state.db, &key_auto_detect_remote_shell(), "0").unwrap();
+        assert_eq!(
+            target_environment(state, &owner, &target).unwrap().1,
+            ShellKind::Posix
+        );
+        assert!(!ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
+        let mcp_shell = &crate::agent::list_sessions(state, &owner).unwrap()[0].shell;
+        assert_eq!(mcp_shell.kind, ShellKind::Posix);
+        assert_eq!(mcp_shell.source, "fallback");
+        lifecycle::close_resource_and_wait(state, &id, SessionKind::Pty, &owner)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(any(windows, macos, linux))]
+    #[tokio::test]
+    async fn remote_shell_cache_scopes_ssm_identity_and_skips_known_shells() {
+        use super::super::shell::ShellKind;
+        use crate::commands::lifecycle;
+        use crate::models::ConnectorSpec;
+        use crate::state::{SessionKind, SessionOwner};
+        let (host, _events) = crate::ssh::test_support::headless_host();
+        let state = host.state();
+        let owner = SessionOwner::Window("remote-shell-cache-test".into());
+        crate::db::settings::set(&state.db, &key_auto_detect_remote_shell(), "1").unwrap();
+        let register = |spec| register_shell_probe_pty(state, &owner, spec);
+        let first = register(Some(shell_probe_ssm(
+            "prod", "account", "region", "instance",
+        )));
+        ai_cache_remote_shell_impl(state, &owner, first.clone(), ShellKind::Powershell).unwrap();
+        lifecycle::close_resource_and_wait(state, &first, SessionKind::Pty, &owner)
+            .await
+            .unwrap();
+        let reconnect = register(Some(shell_probe_ssm(
+            "prod", "account", "region", "instance",
+        )));
+        assert!(!ai_remote_shell_probe_needed_impl(state, &owner, reconnect.clone()).unwrap());
+        assert_eq!(
+            target_environment(state, &owner, &AiTarget::Local(reconnect.clone()))
+                .unwrap()
+                .1,
+            ShellKind::Powershell
+        );
+        for spec in [
+            shell_probe_ssm("other", "account", "region", "instance"),
+            shell_probe_ssm("prod", "other", "region", "instance"),
+            shell_probe_ssm("prod", "account", "other", "instance"),
+            shell_probe_ssm("prod", "account", "region", "other"),
+        ] {
+            let id = register(Some(spec));
+            assert!(ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
+            assert_eq!(
+                target_environment(state, &owner, &AiTarget::Local(id.clone()))
+                    .unwrap()
+                    .1,
+                ShellKind::Posix
+            );
+            lifecycle::close_resource_and_wait(state, &id, SessionKind::Pty, &owner)
+                .await
+                .unwrap();
+        }
+        for spec in [
+            None,
+            Some(ConnectorSpec::DockerExec {
+                context: "dev".into(),
+                container_id: "container".into(),
+                container_name: "container".into(),
+                shell: "pwsh".into(),
+            }),
+            Some(ConnectorSpec::KubectlExec {
+                context: "dev".into(),
+                namespace: "ns".into(),
+                pod: "pod".into(),
+                container: None,
+                shell: "cmd.exe".into(),
+            }),
+        ] {
+            let id = register(spec);
+            let before = target_environment(state, &owner, &AiTarget::Local(id.clone()))
+                .unwrap()
+                .1;
+            assert!(!ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
+            ai_cache_remote_shell_impl(state, &owner, id.clone(), ShellKind::Posix).unwrap();
+            assert_eq!(
+                target_environment(state, &owner, &AiTarget::Local(id.clone()))
+                    .unwrap()
+                    .1,
+                before
+            );
+            lifecycle::close_resource_and_wait(state, &id, SessionKind::Pty, &owner)
+                .await
+                .unwrap();
+        }
+        assert_eq!(state.ai_remote_shell_cache.lock().unwrap().len(), 1);
+        lifecycle::close_resource_and_wait(state, &reconnect, SessionKind::Pty, &owner)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(any(windows, macos, linux))]
+    #[tokio::test]
+    async fn remote_shell_probe_checks_owner_and_ignores_late_results() {
+        use super::super::shell::ShellKind;
+        use crate::commands::lifecycle;
+        use crate::state::{SessionKind, SessionOwner};
+        let (host, _events) = crate::ssh::test_support::headless_host();
+        let state = host.state();
+        let owner = SessionOwner::Window("remote-shell-owner".into());
+        let other = SessionOwner::Window("other-owner".into());
+        let id = register_shell_probe_pty(
+            state,
+            &owner,
+            Some(shell_probe_ssm("prod", "account", "region", "instance")),
+        );
+        // Owner validation also applies while detection is disabled.
+        assert_eq!(
+            ai_remote_shell_probe_needed_impl(state, &other, id.clone())
+                .unwrap_err()
+                .code(),
+            "session_owner_mismatch"
+        );
+        assert_eq!(
+            ai_cache_remote_shell_impl(state, &other, id.clone(), ShellKind::Cmd)
+                .unwrap_err()
+                .code(),
+            "session_owner_mismatch"
+        );
+        ai_cache_remote_shell_impl(state, &owner, id.clone(), ShellKind::Cmd).unwrap();
+        assert!(state.ai_remote_shell_cache.lock().unwrap().is_empty());
+        crate::db::settings::set(&state.db, &key_auto_detect_remote_shell(), "1").unwrap();
+        assert!(ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
+        lifecycle::close_resource_and_wait(state, &id, SessionKind::Pty, &owner)
+            .await
+            .unwrap();
+        assert!(!ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
+        ai_cache_remote_shell_impl(state, &owner, id, ShellKind::Cmd).unwrap();
+        let missing = uuid::Uuid::new_v4().to_string();
+        assert!(!ai_remote_shell_probe_needed_impl(state, &owner, missing.clone()).unwrap());
+        ai_cache_remote_shell_impl(state, &owner, missing, ShellKind::Cmd).unwrap();
+        let pending = uuid::Uuid::new_v4().to_string();
+        let _reservation =
+            lifecycle::reserve_resource(state, &pending, SessionKind::Pty, owner.clone()).unwrap();
+        assert!(!ai_remote_shell_probe_needed_impl(state, &owner, pending.clone()).unwrap());
+        ai_cache_remote_shell_impl(state, &owner, pending, ShellKind::Cmd).unwrap();
+        assert!(state.ai_remote_shell_cache.lock().unwrap().is_empty());
+    }
+
+    #[cfg(any(windows, macos, linux))]
     #[tokio::test]
     async fn connector_conversations_keep_their_target_scope() {
         use crate::commands::lifecycle::{self, ReadySession};
@@ -2122,7 +2417,6 @@ mod tests {
                 region: region.into(),
                 instance_id: instance_id.into(),
                 profile: profile.into(),
-                shell: "sh".into(),
             }
         };
         let target = register(Some(docker("dev", "container", "old name", "pwsh")));

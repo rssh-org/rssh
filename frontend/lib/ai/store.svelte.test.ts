@@ -43,6 +43,258 @@ async function registerIdleTerminals(...tabIds: string[]) {
   for (const tabId of tabIds) screen.registerAlternateScreenProvider(tabId, () => false);
 }
 
+describe("remote shell probing", () => {
+  async function setup() {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    invokeMock.mockImplementation(async (command) => command === "ai_remote_shell_probe_needed");
+    return ai;
+  }
+
+  function output(transport: "ssh" | "pty", text: string, id = "target") {
+    listenMock.mock.calls.find(([event]) => event === `${transport}:data:${id}`)![1]({ payload: btoa(text) });
+  }
+
+  it.each(["ssh", "pty"] as const)("routes %s probes through the existing IPC and deduplicates concurrent callers", async (transport) => {
+    const ai = await setup();
+    const first = ai.ensureRemoteShellProbe("target", transport);
+    const second = ai.ensureRemoteShellProbe("target", transport);
+    expect(second).toBe(first);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(invokeMock).toHaveBeenCalledWith("ai_remote_shell_probe_needed", { targetId: "target" });
+    expect(invokeMock).toHaveBeenCalledWith(`${transport}_write`, {
+      sessionId: "target", data: Array.from(new TextEncoder().encode("echo P=$PSEdition=$$=E\r")),
+    });
+    output(transport, "P=Core=token=E\r\n");
+    await vi.advanceTimersByTimeAsync(80);
+    expect(await first).toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith("ai_cache_remote_shell", { targetId: "target", shell: "powershell" });
+    expect(invokeMock.mock.calls.filter(([command]) => command === `${transport}_write`)).toHaveLength(1);
+    expect(unlistenMock).toHaveBeenCalledOnce();
+  });
+
+  it("does not probe known shells or disabled auto-detection", async () => {
+    const ai = await setup();
+    invokeMock.mockResolvedValue(false);
+    expect(await ai.ensureRemoteShellProbe("target", "pty")).toBe(false);
+    expect(invokeMock.mock.calls).toEqual([["ai_remote_shell_probe_needed", { targetId: "target" }]]);
+    expect(listenMock).not.toHaveBeenCalled();
+  });
+
+  it("isolates SSH and PTY probes even when their target identifiers match", async () => {
+    const ai = await setup();
+    const ssh = ai.ensureRemoteShellProbe("target", "ssh");
+    const pty = ai.ensureRemoteShellProbe("target", "pty");
+    expect(ssh).not.toBe(pty);
+    await vi.advanceTimersByTimeAsync(0);
+    output("ssh", "P==1234=E\n");
+    output("pty", "P=Core=token=E\n");
+    await vi.advanceTimersByTimeAsync(80);
+    expect(await Promise.all([ssh, pty])).toEqual([true, true]);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "ai_cache_remote_shell")).toHaveLength(2);
+  });
+
+  it("only accepts cmd evaluated output after the probe deadline", async () => {
+    const ai = await setup();
+    const probing = ai.ensureRemoteShellProbe("target", "pty");
+    await vi.advanceTimersByTimeAsync(0);
+    output("pty", "echo P=$PSEdition=$$=E\r\nP=$PSEdition=$$=E\r\n");
+    await vi.advanceTimersByTimeAsync(1440);
+    expect(invokeMock.mock.calls.some(([command]) => command === "ai_cache_remote_shell")).toBe(false);
+    await vi.advanceTimersByTimeAsync(80);
+    expect(await probing).toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith("ai_cache_remote_shell", { targetId: "target", shell: "cmd" });
+  });
+
+  it("does not write after cancellation while the backend gate is pending", async () => {
+    const ai = await setup();
+    let finish!: (value: boolean) => void;
+    invokeMock.mockReturnValue(new Promise<boolean>((resolve) => { finish = resolve; }));
+    const probing = ai.ensureRemoteShellProbe("target", "pty");
+    ai.cancelRemoteShellProbe("target", "pty");
+    finish(true);
+    expect(await probing).toBe(false);
+    expect(listenMock).not.toHaveBeenCalled();
+  });
+
+  it("settles cancellation even when the backend gate never returns", async () => {
+    const ai = await setup();
+    invokeMock.mockReturnValue(new Promise(() => {}));
+    const probing = ai.ensureRemoteShellProbe("target", "pty");
+    let result: boolean | undefined;
+    void probing.then((value) => { result = value; });
+    ai.cancelRemoteShellProbe("target", "pty");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result).toBe(false);
+    expect(listenMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["pty_write", "ai_cache_remote_shell"])("cancels and removes the listener while %s is pending", async (pendingCommand) => {
+    const ai = await setup();
+    let rejectPending!: (error: Error) => void;
+    const pending = new Promise<never>((_, reject) => { rejectPending = reject; });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "ai_remote_shell_probe_needed") return true;
+      if (command === pendingCommand) return pending;
+      return null;
+    });
+    const probing = ai.ensureRemoteShellProbe("target", "pty");
+    let result: boolean | undefined;
+    void probing.then((value) => { result = value; });
+    await vi.advanceTimersByTimeAsync(0);
+    if (pendingCommand === "ai_cache_remote_shell") {
+      output("pty", "P==1234=E\n");
+      await vi.advanceTimersByTimeAsync(80);
+    }
+    ai.cancelRemoteShellProbe("target", "pty");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result).toBe(false);
+    expect(unlistenMock).toHaveBeenCalledOnce();
+    rejectPending(new Error("late IPC rejection"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(unlistenMock).toHaveBeenCalledOnce();
+  });
+
+  it("releases a late listener without writing after cancellation", async () => {
+    const ai = await setup();
+    let finish!: (stop: () => void) => void;
+    listenMock.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const probing = ai.ensureRemoteShellProbe("target", "pty");
+    await vi.advanceTimersByTimeAsync(0);
+    ai.cancelRemoteShellProbe("target", "pty");
+    finish(unlistenMock);
+    expect(await probing).toBe(false);
+    expect(invokeMock.mock.calls.some(([command]) => command === "pty_write")).toBe(false);
+    expect(unlistenMock).toHaveBeenCalledOnce();
+  });
+
+  it("ignores output after cancellation and releases the listener", async () => {
+    const ai = await setup();
+    const probing = ai.ensureRemoteShellProbe("target", "pty");
+    await vi.advanceTimersByTimeAsync(0);
+    ai.cancelRemoteShellProbe("target", "pty");
+    output("pty", "P=Core=token=E\n");
+    await vi.advanceTimersByTimeAsync(80);
+    expect(await probing).toBe(false);
+    expect(invokeMock.mock.calls.some(([command]) => command === "ai_cache_remote_shell")).toBe(false);
+    expect(unlistenMock).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a timeout uncached and lets the next attempt retry", async () => {
+    const ai = await setup();
+    const probing = ai.ensureRemoteShellProbe("target", "pty");
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(await probing).toBe(false);
+    expect(invokeMock.mock.calls.some(([command]) => command === "ai_cache_remote_shell")).toBe(false);
+    const retry = ai.ensureRemoteShellProbe("target", "pty");
+    await vi.advanceTimersByTimeAsync(0);
+    const callbacks = listenMock.mock.calls.filter(([event]) => event === "pty:data:target");
+    callbacks[callbacks.length - 1][1]({ payload: btoa("P==1234=E\n") });
+    await vi.advanceTimersByTimeAsync(80);
+    expect(await retry).toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith("ai_cache_remote_shell", { targetId: "target", shell: "posix" });
+  });
+
+  const info = { tab_id: "probe-tab", instance_id: "instance", target_id: "target", conversation_id: "conversation", skill: "general", provider: "", model: "" };
+  const args = { tabId: "probe-tab", targetKind: "local" as const, targetId: "target", skill: "general", provider: "", model: "" };
+
+  it.each(["ai", "mcp", "resume"])("waits for the cached shell before %s starts its actor", async (mode) => {
+    const ai = await setup();
+    let finishCache!: () => void;
+    const caching = new Promise<void>((resolve) => { finishCache = resolve; });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "ai_remote_shell_probe_needed") return true;
+      if (command === "ai_cache_remote_shell") return caching;
+      if (command === "ai_session_start" || command === "mcp_accept_session") return info;
+      return null;
+    });
+    ai.activateTab(args.tabId);
+    const probe = ai.ensureRemoteShellProbe("target", "pty");
+    const launchArgs = { ...args, lease: ai.captureSessionLease(args.tabId) };
+    const launch = mode === "mcp" ? ai.startMcpSession(launchArgs, "request")
+      : mode === "resume" ? ai.resumeSession(launchArgs, "conversation") : ai.startSession(launchArgs);
+    await vi.advanceTimersByTimeAsync(0);
+    output("pty", "P=Core=token=E\n");
+    await vi.advanceTimersByTimeAsync(80);
+    expect(invokeMock.mock.calls.some(([command]) => command === "ai_session_start" || command === "mcp_accept_session")).toBe(false);
+    finishCache();
+    await probe;
+    expect(await launch).toEqual(info);
+  });
+
+  it("does not start MCP after its panel closes while the shell probe is pending", async () => {
+    const ai = await setup();
+    ai.activateTab(args.tabId);
+    const probe = ai.ensureRemoteShellProbe("target", "pty");
+    const launch = ai.startMcpSession({ ...args, lease: ai.captureSessionLease(args.tabId) }, "request");
+    const rejected = expect(launch).rejects.toThrow(/closed/i);
+    const closing = ai.closePanel(args.tabId);
+    await vi.advanceTimersByTimeAsync(0);
+    output("pty", "P==1234=E\n");
+    await vi.advanceTimersByTimeAsync(80);
+    await probe;
+    await rejected;
+    await closing;
+    expect(invokeMock.mock.calls.some(([command]) => command === "mcp_accept_session")).toBe(false);
+  });
+
+  it.each(["ai", "mcp"])("releases a closed %s launch without cancelling its terminal's shared probe", async (mode) => {
+    const ai = await setup();
+    let finishGate!: (value: boolean) => void;
+    const gate = new Promise<boolean>((resolve) => { finishGate = resolve; });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "ai_remote_shell_probe_needed") return gate;
+      if (command === "ai_session_start") return { ...info, target_id: "ready-target" };
+      return null;
+    });
+    ai.activateTab(args.tabId);
+    const probe = ai.ensureRemoteShellProbe("target", "pty");
+    const launchArgs = { ...args, lease: ai.captureSessionLease(args.tabId) };
+    const launch = mode === "mcp" ? ai.startMcpSession(launchArgs, "request") : ai.startSession(launchArgs);
+    let rejected = false;
+    const launchResult = launch.catch((error) => { rejected = /closed/i.test(error.message); });
+    let closed = false;
+    const closing = ai.closePanel(args.tabId).then(() => { closed = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rejected).toBe(true);
+    expect(closed).toBe(true);
+    await Promise.all([launchResult, closing]);
+    expect(ai.ensureRemoteShellProbe("target", "pty")).toBe(probe);
+    ai.openPanel(args.tabId);
+    await ai.startSession({ ...args, targetId: "ready-target", lease: ai.captureSessionLease(args.tabId) });
+    finishGate(true);
+    await vi.advanceTimersByTimeAsync(0);
+    output("pty", "P==1234=E\n");
+    await vi.advanceTimersByTimeAsync(80);
+    expect(await probe).toBe(true);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "ai_session_start")).toHaveLength(1);
+    expect(invokeMock.mock.calls.some(([command]) => command === "mcp_accept_session")).toBe(false);
+  });
+
+  it.each([false, true])("waits for probing before rebind and rechecks the lease (close=%s)", async (close) => {
+    const ai = await setup();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "ai_remote_shell_probe_needed") return true;
+      if (command === "ai_session_start") return info;
+      return null;
+    });
+    ai.activateTab(args.tabId);
+    const lease = ai.captureSessionLease(args.tabId);
+    await ai.startSession({ ...args, lease });
+    const probe = ai.ensureRemoteShellProbe("replacement", "pty");
+    const rebind = ai.rebindTarget(args.tabId, "local", "replacement", lease);
+    const result = close ? expect(rebind).rejects.toThrow(/closed/i) : expect(rebind).resolves.toBeUndefined();
+    if (close) await ai.closePanel(args.tabId);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(invokeMock.mock.calls.some(([command]) => command === "ai_session_rebind_target")).toBe(false);
+    output("pty", "P=Core=token=E\n", "replacement");
+    await vi.advanceTimersByTimeAsync(80);
+    await probe;
+    await result;
+    expect(invokeMock.mock.calls.some(([command]) => command === "ai_session_rebind_target")).toBe(!close);
+  });
+});
+
 describe("panel visibility", () => {
   it("recognizes device-local subscription credentials separately from API keys", async () => {
     vi.resetModules();

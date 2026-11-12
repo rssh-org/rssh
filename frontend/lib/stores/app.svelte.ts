@@ -144,7 +144,7 @@ export type DynamicPlatform = "docker" | "k8s" | "aws_ssm";
 export type ConnectorSpec =
   | { type: "docker_exec"; context: string; container_id: string; container_name: string; shell: string }
   | { type: "kubectl_exec"; context: string; namespace: string; pod: string; container: string | null; shell: string }
-  | { type: "aws_ssm"; profile: string; region: string; instance_id: string; account_id: string; shell: string };
+  | { type: "aws_ssm"; profile: string; region: string; instance_id: string; account_id: string };
 export type DynamicDiscoverySource =
   | { id: string; name: string; enabled: boolean; platform: "docker"; context: string; shell: string }
   | { id: string; name: string; enabled: boolean; platform: "k8s"; context: string; namespace: string | null; shell: string }

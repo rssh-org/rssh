@@ -44,8 +44,7 @@ impl Drop for ChildReaper {
 
 /// 本地 PTY 会话句柄，Clone + Send + Sync。
 /// `_reaper` 跟着 PtyHandle 走，最后一份 clone 消失时回收子进程。
-/// `shell_path()` 是 spawn 时实际使用的 shell 二进制路径——AI session 用它
-/// 推断 ShellKind（无需探测，因为本地 shell 是用户在 UI 里显式选的）。
+/// `shell_path()` 只返回实际已知的 shell；远端默认 shell 未知时由既有探测流程确定。
 #[derive(Clone)]
 pub struct PtyHandle {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -75,16 +74,14 @@ impl PtyHandle {
             })
     }
 
-    /// spawn 时实际使用的 shell 路径（用户在 UI 选的，或 default_shell 兜底）。
-    /// AI 模块用这个判定本地 PTY 的 ShellKind，无需探测。
-    pub fn shell_path(&self) -> &str {
+    /// 实际启动的 shell。SSM 启动的是连接客户端，不能把它当作远端 shell。
+    pub fn shell_path(&self) -> Option<&str> {
         match self.connector() {
             Some(
-                ConnectorSpec::DockerExec { shell, .. }
-                | ConnectorSpec::KubectlExec { shell, .. }
-                | ConnectorSpec::AwsSsm { shell, .. },
-            ) => shell,
-            None => &self.shell_path,
+                ConnectorSpec::DockerExec { shell, .. } | ConnectorSpec::KubectlExec { shell, .. },
+            ) => Some(shell),
+            Some(ConnectorSpec::AwsSsm { .. }) => None,
+            None => Some(&self.shell_path),
         }
     }
 
@@ -495,7 +492,7 @@ mod tests {
         let output = String::from_utf8_lossy(&output);
         assert!(output.contains("PTY_INPUT:hello-pty"), "{output}");
         assert!(output.contains("41 103"), "{output}");
-        assert_eq!(handle.shell_path(), "/bin/sh");
+        assert_eq!(handle.shell_path(), Some("/bin/sh"));
         for (shell, expected) in [
             ("pwsh", crate::ai::shell::ShellKind::Powershell),
             ("cmd.exe", crate::ai::shell::ShellKind::Cmd),
@@ -506,28 +503,18 @@ mod tests {
                 container_name: "test".into(),
                 shell: shell.into(),
             });
-            assert_eq!(connector.shell_path(), shell);
+            assert_eq!(connector.shell_path(), Some(shell));
             assert_eq!(
-                crate::ai::shell::ShellKind::from_local_path(connector.shell_path()),
+                crate::ai::shell::ShellKind::from_local_path(connector.shell_path().unwrap()),
                 expected
             );
         }
-        for (shell, expected) in [
-            ("sh", crate::ai::shell::ShellKind::Posix),
-            ("powershell", crate::ai::shell::ShellKind::Powershell),
-            ("cmd", crate::ai::shell::ShellKind::Cmd),
-        ] {
-            let connector = handle.clone().with_connector(ConnectorSpec::AwsSsm {
-                profile: String::new(),
-                region: "us-east-1".into(),
-                instance_id: "i-0123456789abcdef0".into(),
-                account_id: "123456789012".into(),
-                shell: shell.into(),
-            });
-            assert_eq!(
-                crate::ai::shell::ShellKind::from_local_path(connector.shell_path()),
-                expected
-            );
-        }
+        let connector = handle.with_connector(ConnectorSpec::AwsSsm {
+            profile: String::new(),
+            region: "us-east-1".into(),
+            instance_id: "i-0123456789abcdef0".into(),
+            account_id: "123456789012".into(),
+        });
+        assert_eq!(connector.shell_path(), None);
     }
 }

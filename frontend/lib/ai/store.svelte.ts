@@ -245,6 +245,7 @@ export function endConversation(tab_id: string): Promise<void> {
   // 面板关闭即结束这轮 conversation。先换 generation，所有迟到 listener/start
   // continuation 都失效；宽度是 tab 偏好，不属于 conversation，继续保留。
   _tabGeneration[tab_id] = tabGeneration(tab_id) + 1;
+  cancelSessionProbeWait(tab_id);
   if (_sessionByTab[tab_id] || _sessionLaunchesByTab[tab_id]?.size) {
     return stopSession(tab_id);
   }
@@ -284,6 +285,7 @@ export function discardPanelState(tab_id: string) {
  * generation 不同而失效。正常产品路径使用 UUID，不依赖复用。 */
 export function activateTab(tab_id: string) {
   _tabGeneration[tab_id] = tabGeneration(tab_id) + 1;
+  cancelSessionProbeWait(tab_id);
   _disposedTabs.delete(tab_id);
   panel.seedWidth(tab_id);
 }
@@ -291,6 +293,7 @@ export function activateTab(tab_id: string) {
 /** closeTab 的唯一 AI teardown：先同步封死后续异步 continuation，再清 UI/actor。 */
 export async function disposeTab(tab_id: string): Promise<void> {
   _tabGeneration[tab_id] = tabGeneration(tab_id) + 1;
+  cancelSessionProbeWait(tab_id);
   _disposedTabs.add(tab_id);
   discardPanelState(tab_id);
   if (!_sessionByTab[tab_id] && !_sessionLaunchesByTab[tab_id]?.size) {
@@ -720,6 +723,11 @@ async function launchSessionAtGeneration(
   generation: number,
   start?: () => Promise<AiSessionInfo>,
 ): Promise<AiSessionInfo> {
+  const probe = pendingRemoteShellProbe(args.targetKind, args.targetId);
+  if (probe) {
+    await waitForSessionProbe(args.tabId, probe);
+    assertTabLive(args.tabId, generation);
+  }
   let info: AiSessionInfo;
   try {
     info = await (start ? start() : invoke<AiSessionInfo>("ai_session_start", {
@@ -1135,6 +1143,12 @@ export async function rebindTarget(
   const bound = _sessionByTab[tab_id];
   if (!bound) throw new SessionClosedError(tab_id);
   const conversationId = bound.conversation_id;
+  const probe = pendingRemoteShellProbe(target_kind, target_id);
+  if (probe) {
+    await waitForSessionProbe(tab_id, probe);
+    assertTabLive(tab_id, generation);
+    if (_sessionByTab[tab_id]?.instance_id !== bound.instance_id) throw new SessionClosedError(tab_id);
+  }
   await invoke("ai_session_rebind_target", {
     tabId: tab_id,
     instanceId: bound.instance_id,
@@ -1163,34 +1177,93 @@ export async function cancelStream(tab_id: string, lease: SessionLease): Promise
   });
 }
 
-/** 连接时探测的门控：这个 SSH target 现在需要探测吗？
- *  后端判定 auto_detect on + 会话存在 + 该 profile 缓存 miss。命中缓存或开关关 →
- *  false，于是连接 / 重连都不会重复刷探针。本地 PTY 的 target_id 不在后端 sessions 里
- *  → 自然 false。 */
+type ShellProbeTransport = "ssh" | "pty";
+const remoteShellProbes = new Map<string, { promise: Promise<boolean>; controller: AbortController }>();
+const sessionProbeWaits = new Map<string, AbortController>();
+
+/** Release callers on cancellation even if an IPC response never arrives. Late
+ * rejection is still consumed; the operation retains its own cleanup guards. */
+function settleProbeOnAbort(probe: Promise<boolean>, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const cancelled = () => {
+      signal.removeEventListener("abort", cancelled);
+      resolve(false);
+    };
+    signal.addEventListener("abort", cancelled, { once: true });
+    if (signal.aborted) cancelled();
+    probe.then((value) => {
+      signal.removeEventListener("abort", cancelled);
+      resolve(value);
+    }, (error) => {
+      signal.removeEventListener("abort", cancelled);
+      reject(error);
+    });
+  });
+}
+
+function waitForSessionProbe(tabId: string, probe: Promise<boolean>): Promise<boolean> {
+  let controller = sessionProbeWaits.get(tabId);
+  if (!controller) {
+    controller = new AbortController();
+    sessionProbeWaits.set(tabId, controller);
+  }
+  return settleProbeOnAbort(probe, controller.signal);
+}
+
+function cancelSessionProbeWait(tabId: string): void {
+  sessionProbeWaits.get(tabId)?.abort();
+  sessionProbeWaits.delete(tabId);
+}
+
+function pendingRemoteShellProbe(kind: AiTargetKind, targetId: string): Promise<boolean> | undefined {
+  const transport = kind === "ssh" ? "ssh" : kind === "local" ? "pty" : null;
+  return transport ? remoteShellProbes.get(`${transport}:${targetId}`)?.promise : undefined;
+}
+
+/** The backend owns the setting, known-shell decision, and cache lifetime. */
 export async function remoteShellProbeNeeded(target_id: string): Promise<boolean> {
   return invoke<boolean>("ai_remote_shell_probe_needed", { targetId: target_id });
 }
 
-/** SSH 连接成功后探测远端 shell：粘一行 `echo P=$PSEdition=$$=E` 到 PTY，listen 1.5s
- *  解析输出，分类后写进程级缓存（ai_cache_remote_shell，key=profile_id）。AI session
- *  启动时从缓存读初始 shell —— 探测与 AI 会话生命周期解耦，无需 tab_id / actor。
- *
- *  返回 true = 探测成功并已写缓存。false = 超时 / classify 模糊（不写缓存，下次连接重探）。
- *
- *  时机：TerminalPane.connectAndWire 的 SSH 成功分支，且 remoteShellProbeNeeded 为真。
- *  init_command 已由后端在 ssh_connect 返回前写入 PTY，探针排在其后执行。
- *  视觉代价：用户看到一行 echo 滚过终端 —— 每个 profile 每进程仅一次（缓存门控）。
- *
- *  分类规则（见 shell-probe.ts，纯逻辑 + 单测）：回显行被 `(?<!echo )` lookbehind 排除，
- *  只认求值输出。powershell/posix 的求值签名一见即定；cmd 签名（== 被排除的回显签名）
- *  只可能来自真 cmd.exe 的求值输出，且只在 deadline 才采纳——给 posix/ps 求值行先到的机会，
- *  慢链路下求值行整个没到 → 不写缓存，POSIX 兜底重探（不会误缓存 cmd）。
- */
-export async function probeRemoteShell(target_id: string): Promise<boolean> {
-  const dataEvent = `ssh:data:${target_id}`;
-  const cache = (shell: ShellKind) =>
-    // 后端按 target_id 查 profile_id 写缓存；target 已断则静默跳过。
-    invoke("ai_cache_remote_shell", { targetId: target_id, shell });
+/** Register before publishing the terminal; AI and MCP starts await this same probe. */
+export function ensureRemoteShellProbe(targetId: string, transport: ShellProbeTransport = "ssh"): Promise<boolean> {
+  const key = `${transport}:${targetId}`;
+  const existing = remoteShellProbes.get(key);
+  if (existing) return existing.promise;
+  const controller = new AbortController();
+  const operation = (async () => {
+    try {
+      const needed = await remoteShellProbeNeeded(targetId);
+      if (!needed || controller.signal.aborted) return false;
+      return await probeRemoteShell(targetId, transport, controller.signal);
+    } catch (error) {
+      if (!controller.signal.aborted) console.warn("[ai] connect-time shell probe skipped:", error);
+      return false;
+    }
+  })();
+  const promise = settleProbeOnAbort(operation, controller.signal).finally(() => {
+    if (remoteShellProbes.get(key)?.controller === controller) remoteShellProbes.delete(key);
+  });
+  remoteShellProbes.set(key, { promise, controller });
+  return promise;
+}
+
+export function cancelRemoteShellProbe(targetId: string, transport: ShellProbeTransport = "ssh"): void {
+  remoteShellProbes.get(`${transport}:${targetId}`)?.controller.abort();
+}
+
+/** Same evaluated-output probe for SSH and PTY. Timeout/ambiguous output stays uncached. */
+export async function probeRemoteShell(
+  target_id: string,
+  transport: ShellProbeTransport = "ssh",
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (signal?.aborted) return false;
+  const cache = async (shell: ShellKind) => {
+    if (signal?.aborted) return false;
+    await invoke("ai_cache_remote_shell", { targetId: target_id, shell });
+    return !signal?.aborted;
+  };
 
   // Tail-bounded buffer: the probe echo + its evaluated output land at the END
   // of the stream (after any MOTD / init_command noise), so only the recent tail
@@ -1199,42 +1272,48 @@ export async function probeRemoteShell(target_id: string): Promise<boolean> {
   // can never open a line mid-token and let `^P=` false-match a sliced echo line.
   const TAIL_CAP = 16 * 1024;
   let buffer = "";
-  const unlisten = await listen<string>(dataEvent, (e) => {
-    buffer += new TextDecoder("utf-8", { fatal: false }).decode(decodeStreamChunk(e.payload));
-    if (buffer.length > TAIL_CAP) {
-      const tail = buffer.slice(-TAIL_CAP);
-      const nl = tail.indexOf("\n");
-      buffer = nl >= 0 ? tail.slice(nl + 1) : tail;
-    }
-  });
+  let unlisten: UnlistenFn | undefined;
+  const dispose = () => { unlisten?.(); unlisten = undefined; };
+  signal?.addEventListener("abort", dispose, { once: true });
   try {
-    await invoke("ssh_write", {
+    unlisten = await listen<string>(`${transport}:data:${target_id}`, (e) => {
+      if (signal?.aborted) return;
+      buffer += new TextDecoder("utf-8", { fatal: false }).decode(decodeStreamChunk(e.payload));
+      if (buffer.length > TAIL_CAP) {
+        const tail = buffer.slice(-TAIL_CAP);
+        const nl = tail.indexOf("\n");
+        buffer = nl >= 0 ? tail.slice(nl + 1) : tail;
+      }
+    });
+    if (signal?.aborted) return false;
+    await invoke(`${transport}_write`, {
       sessionId: target_id,
       data: Array.from(new TextEncoder().encode(PROBE_COMMAND + "\r")),
     });
     // 1.5s deadline：远端通常 100-300ms 内回响，给 5x 头量容忍慢链路。
     const deadline = Date.now() + 1500;
     while (Date.now() < deadline) {
+      if (signal?.aborted) return false;
       const { kind } = classifyProbeBuffer(buffer);
       if (kind) {
-        await cache(kind); // posix/powershell 的求值行无歧义，立即定夺
-        return true;
+        return await cache(kind); // posix/powershell 的求值行无歧义，立即定夺
       }
       await new Promise((r) => setTimeout(r, 80));
     }
     // 超时：没等到 posix/powershell 求值行。若 buffer 里有（非回显的）cmd 求值签名 → 真 cmd.exe；
-    // 慢链路下求值行整个没到（只有被 lookbehind 排除的回显）→ cmd=false → 不写缓存，POSIX 兜底。
+    // 慢链路下求值行整个没到（只有被排除的回显）→ cmd=false → 不写缓存，POSIX 兜底。
+    if (signal?.aborted) return false;
     if (classifyProbeBuffer(buffer).cmd) {
-      await cache("cmd");
-      return true;
+      return await cache("cmd");
     }
     console.warn("[ai] shell probe timed out — keeping POSIX fallback");
     return false;
   } catch (e) {
-    console.error("[ai] shell probe failed:", e);
+    if (!signal?.aborted) console.error("[ai] shell probe failed:", e);
     return false;
   } finally {
-    unlisten();
+    signal?.removeEventListener("abort", dispose);
+    dispose();
   }
 }
 

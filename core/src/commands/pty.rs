@@ -99,7 +99,6 @@ fn connector_command(spec: ConnectorSpec) -> AppResult<(DynamicDiscoveryPlatform
             region,
             instance_id,
             account_id,
-            shell,
         } => {
             if region.trim().is_empty()
                 || account_id.len() != 12
@@ -107,7 +106,6 @@ fn connector_command(spec: ConnectorSpec) -> AppResult<(DynamicDiscoveryPlatform
                 || !instance_id
                     .strip_prefix("i-")
                     .is_some_and(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_hexdigit()))
-                || !matches!(shell.as_str(), "sh" | "powershell" | "cmd")
                 || [&profile, &region]
                     .iter()
                     .any(|value| value.chars().any(char::is_control))
@@ -218,7 +216,7 @@ mod tests {
         let spec = serde_json::from_value(serde_json::json!({
             "type": "aws_ssm", "profile": "profile with spaces;$(touch /tmp/no)",
             "region": "ap-southeast-1", "instance_id": "i-0123456789abcdef0",
-            "account_id": "123456789012", "shell": "sh"
+            "account_id": "123456789012"
         }))
         .unwrap();
         let (platform, args) = connector_command(spec).unwrap();
@@ -231,14 +229,15 @@ mod tests {
     }
 
     #[test]
-    fn aws_ssm_shell_hint_does_not_change_the_session_command() {
+    fn aws_ssm_legacy_shell_hint_is_ignored() {
         let mut commands = Vec::new();
         for shell in ["sh", "powershell", "cmd"] {
-            let spec = serde_json::from_value(serde_json::json!({
+            let spec: ConnectorSpec = serde_json::from_value(serde_json::json!({
                 "type": "aws_ssm", "profile": "", "region": "us-east-1",
                 "instance_id": "i-0123456789abcdef0", "account_id": "123456789012", "shell": shell
             }))
             .unwrap();
+            assert!(serde_json::to_value(&spec).unwrap().get("shell").is_none());
             commands.push(connector_command(spec).unwrap().1);
         }
         assert!(commands.windows(2).all(|pair| pair[0] == pair[1]));
@@ -253,7 +252,7 @@ mod tests {
         ] {
             let spec = serde_json::from_value(serde_json::json!({
                 "type": "aws_ssm", "profile": "", "region": region,
-                "instance_id": instance_id, "account_id": account_id, "shell": "sh"
+                "instance_id": instance_id, "account_id": account_id
             }))
             .unwrap();
             assert_eq!(

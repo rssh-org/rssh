@@ -289,19 +289,32 @@ pub async fn ai_session_rollback_context(
 
 #[tauri::command]
 pub async fn ai_remote_shell_probe_needed(
+    window: tauri::Window,
     state: State<'_, Arc<AppState>>,
     target_id: String,
 ) -> AppResult<bool> {
-    rssh_core::ai::commands::ai_remote_shell_probe_needed(state.inner().as_ref(), target_id).await
+    rssh_core::ai::commands::ai_remote_shell_probe_needed(
+        rssh_core::state::SessionOwner::Window(window.label().to_owned()),
+        state.inner().as_ref(),
+        target_id,
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn ai_cache_remote_shell(
+    window: tauri::Window,
     state: State<'_, Arc<AppState>>,
     target_id: String,
     shell: rssh_core::ai::shell::ShellKind,
 ) -> AppResult<()> {
-    rssh_core::ai::commands::ai_cache_remote_shell(state.inner().as_ref(), target_id, shell).await
+    rssh_core::ai::commands::ai_cache_remote_shell(
+        rssh_core::state::SessionOwner::Window(window.label().to_owned()),
+        state.inner().as_ref(),
+        target_id,
+        shell,
+    )
+    .await
 }
 
 #[tauri::command]

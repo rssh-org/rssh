@@ -50,3 +50,44 @@ describe("terminal connection errors", () => {
     expect(output).not.toContain("__rssh_err__");
   });
 });
+
+describe("terminal shell probe wiring", () => {
+  it.each(["ssh", "local", "docker_exec", "kubectl_exec", "aws_ssm"])("asks the shared backend gate after connecting %s", async (tabType) => {
+    const ensureRemoteShellProbe = vi.fn().mockResolvedValue(false);
+    const reservedSessionAttempt = createReservedSessionAttempt({
+      makeId: () => "new-session", wireEvents: async () => () => {}, close: async () => {},
+    });
+    const context = {
+      destroyed: false, connectGeneration: 0, dataDisposable: undefined, resizeDisposable: undefined,
+      reservedSessionAttempt, clearSshPromptUi: () => {}, TextDecoder,
+      tabType, isSsh: tabType === "ssh", isLocal: tabType === "local",
+      isPtyConnector: ["docker_exec", "kubectl_exec", "aws_ssm"].includes(tabType),
+      tabId: "new-tab", meta: { profileId: "profile-1", connectorSpec: "{}" },
+      terminal: { cols: 80, rows: 24 }, invoke: vi.fn(async () => "new-session"),
+      outputFeeder: undefined, wireSessionInput: vi.fn(), requestAnimationFrame: vi.fn(),
+      ai: { ensureRemoteShellProbe },
+    };
+    const connect = runInNewContext(connectCode + "\nconnectAndWire", context) as () => Promise<boolean>;
+    expect(await connect()).toBe(true);
+    expect(ensureRemoteShellProbe).toHaveBeenCalledExactlyOnceWith("new-session", tabType === "ssh" ? "ssh" : "pty");
+  });
+
+  it("cancels the shared probe when a PTY subscription is released on close or reconnect", async () => {
+    const subscriptionStart = source.indexOf("async function createSessionEventSubscription(");
+    const subscriptionEnd = source.indexOf("const reservedSessionAttempt =", subscriptionStart);
+    const code = ts.transpileModule(source.slice(subscriptionStart, subscriptionEnd), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const cancelRemoteShellProbe = vi.fn();
+    const stop = vi.fn();
+    const subscribe = runInNewContext(code + "\ncreateSessionEventSubscription", {
+      listen: vi.fn(async () => stop), dataEvent: "pty:data", closeEvent: "pty:close",
+      isSsh: false, isLocal: false, isPtyConnector: true, tabType: "aws_ssm",
+      ai: { cancelRemoteShellProbe },
+    }) as (sid: string) => Promise<() => void>;
+    const release = await subscribe("old-session");
+    release();
+    expect(cancelRemoteShellProbe).toHaveBeenCalledExactlyOnceWith("old-session", "pty");
+    expect(stop).toHaveBeenCalledTimes(2);
+  });
+});

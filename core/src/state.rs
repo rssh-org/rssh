@@ -145,8 +145,9 @@ pub struct AppState {
     /// AI actors intentionally keep `tab_id` reuse semantics, so ownership is
     /// tracked separately from the transport registry's permanent UUID tombstones.
     pub ai_session_owners: Arc<Mutex<HashMap<String, AiSessionRecord>>>,
-    /// 远端 shell 探测结果缓存：profile_id → ShellKind。
-    /// 进程级（不落盘）—— 同一 profile 重连/多次开 AI panel 复用结果。
+    /// 远端 shell 探测结果缓存：带 transport 命名空间的目标 key → ShellKind。
+    /// SSH 按 profile 复用；SSM 按 AWS profile/account/region/instance 复用，
+    /// 避免不同凭证的 RunAs 用户共享结果。进程级缓存，不落盘。
     /// 命中即用，不重发探针；用户切了远端 DefaultShell 注册表后需要重启 app
     /// 才能让 rssh 重新探测（可接受 —— 这是罕见的运维变更）。
     pub ai_remote_shell_cache: Mutex<HashMap<String, crate::ai::shell::ShellKind>>,
