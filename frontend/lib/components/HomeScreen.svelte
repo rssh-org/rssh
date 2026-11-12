@@ -14,6 +14,7 @@
   import { errMsg, locale, t } from "../i18n/index.svelte.ts";
   import { toast } from "../stores/toast.svelte.ts";
   import { createHomeRefresh } from "./home-refresh.ts";
+  import { homeHoverScroll } from "./home-hover-scroll.ts";
   import { forwardDetail } from "./connection-list.ts";
   import AppIcon from "./AppIcon.svelte";
   import {
@@ -400,7 +401,7 @@
         </h2>
         <div class="grid" aria-labelledby={headingId} bind:this={gridEls[sIdx]}>
           {#each section.items as it, i (it.id)}
-            <div class="card-wrap">
+            <div class="card-wrap" use:homeHoverScroll={[it.name, it.sub]}>
               <button
                 class="card-btn surface-raised"
                 class:selected={navIdx === section.offset + i}
@@ -408,8 +409,8 @@
               >
                 <div class="card-icon {it.iconClass}"><AppIcon name={it.icon} size={20} /></div>
                 <div class="card-body">
-                  <div class="card-name">{it.name}</div>
-                  <div class="card-sub">{it.sub}</div>
+                  <div class="card-name"><span class="card-text">{it.name}</span></div>
+                  <div class="card-sub"><span class="card-text">{it.sub}</span></div>
                 </div>
               </button>
               {#if it.pinProfileId}
@@ -490,7 +491,7 @@
     margin-bottom: 8px;
   }
 
-  .card-wrap { position: relative; }
+  .card-wrap { position: relative; min-width: 0; }
   .pin-btn {
     position: absolute; top: 6px; right: 6px;
     display: grid; place-items: center;
@@ -526,8 +527,9 @@
   .card-icon.k8s { background: color-mix(in srgb, var(--purple) 15%, transparent); color: var(--purple); }
 
   .card-body { flex: 1; min-width: 0; }
-  .card-name { font-weight: 600; font-size: 14px; color: var(--text); margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .card-sub { font-size: 12px; color: var(--text-sub); font-family: var(--term-font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-name { font-weight: 600; font-size: 14px; color: var(--text); margin-bottom: 2px; overflow: hidden; white-space: nowrap; }
+  .card-sub { font-size: 12px; color: var(--text-sub); font-family: var(--term-font); overflow: hidden; white-space: nowrap; }
+  .card-text { display: block; overflow: hidden; text-overflow: ellipsis; }
 
   .empty-state { text-align: center; padding: 60px 24px; color: var(--text-dim); }
   .empty-state p { margin-bottom: 12px; }
