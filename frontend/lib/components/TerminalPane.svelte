@@ -946,7 +946,14 @@
      *  after preventDefault. Stopping it first lets preventDefault actually
      *  suppress the menu. */
     function onTerminalContextMenu(e: MouseEvent) {
-        if (isTouchContextMenu(e)) return; // Preserve the native touch/pen long-press menu.
+        if (isTouchContextMenu(e)) {
+            // xterm's rightClickHandler focuses/selects its hidden textarea,
+            // which clears the native DOM selection and its touch handles.
+            // Keep the browser's default long-press action, but stop xterm
+            // from treating it as a mouse right-click.
+            e.stopPropagation();
+            return;
+        }
         // Cmd on macOS, Ctrl elsewhere + right-click falls back to the native menu
         // even in paste/copyPaste modes — an opt-in escape hatch toggled in Shell
         // settings. Returns without preventDefault/stopPropagation so xterm's own
