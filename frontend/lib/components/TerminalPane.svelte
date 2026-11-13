@@ -99,11 +99,10 @@
         highlightDecorator?.setRules(rules);
     });
 
-    let {tabId, tabType, meta = {}, onInitialConnectionFailure}: {
+    let {tabId, tabType, meta = {}}: {
         tabId: string;
         tabType: app.TerminalTabType;
         meta: Record<string, string>;
-        onInitialConnectionFailure?: (tabId: string, error: unknown) => boolean;
     } = $props();
 
     let waveColor = $state<string | null>(null);
@@ -240,16 +239,6 @@
     let destroyed = false;
     const terminalLifetime = new AbortController();
     let disconnected = $state(false);
-    // Initial split panes are removed when their first connect attempt fails;
-    // reconnect attempts must never trigger that cleanup.
-    let initialConnection = true;
-    let initialConnectionFailureReported = false;
-    let initialConnectionFailureHandled = false;
-    function reportInitialConnectionFailure(error: unknown) {
-        if (!initialConnection || initialConnectionFailureReported || destroyed) return;
-        initialConnectionFailureReported = true;
-        initialConnectionFailureHandled = onInitialConnectionFailure?.(tabId, error) === true;
-    }
     // `connectAndWire` crosses several awaits. The generation guards the whole
     // component flow; ReservedSessionAttempt owns the finer Pending/Ready state.
     let telnetRemoteEcho = $state(false);
@@ -1169,7 +1158,6 @@
                 terminal.write(`\x1b[31m${errMsg(e)}\x1b[0m\r\n`);
                 terminal.write("\x1b[90mPress any key to retry.\x1b[0m\r\n");
                 disconnected = true;
-                reportInitialConnectionFailure(e);
                 return false;
             }
             if (disconnected) {
@@ -1227,7 +1215,6 @@
                 terminal.write(`\x1b[31m${errMsg(e)}\x1b[0m\r\n`);
                 terminal.write("\x1b[90mPress any key to reconnect.\x1b[0m\r\n");
                 disconnected = true;
-                reportInitialConnectionFailure(e);
                 return false;
             }
             // A peer can close after emitting the close event but before the
@@ -1266,7 +1253,6 @@
                 }
                 terminal.write(`\x1b[31m${errMsg(e)}\x1b[0m\r\n`);
                 disconnected = true;
-                reportInitialConnectionFailure(e);
                 return false;
             }
             if (disconnected) {
@@ -1301,7 +1287,6 @@
                 terminal.write(`\x1b[31m${errMsg(e)}\x1b[0m\r\n`);
                 terminal.write("\x1b[90mPress any key to reconnect.\x1b[0m\r\n");
                 disconnected = true;
-                reportInitialConnectionFailure(e);
                 return false;
             }
             clearSshPromptUi();
@@ -1395,7 +1380,6 @@
     }
 
     async function reconnect() {
-        initialConnection = false;
         terminal.write("\r\n\x1b[36mReconnecting ...\x1b[0m\r\n");
         const generation = connectGeneration + 1;
         const ok = await connectAndWire();
@@ -1693,18 +1677,10 @@
         // Connect
         if (destroyed) return;
         const generation = connectGeneration + 1;
-        const initialOk = await connectAndWire();
+        const ok = await connectAndWire();
         if (destroyed || connectGeneration !== generation) return;
-        if (!initialOk) {
-            if (!initialConnectionFailureReported) {
-                reportInitialConnectionFailure(new Error("Initial terminal connection failed"));
-            }
-            initialConnection = false;
-            if (initialConnectionFailureHandled) return;
-            setupReconnect();
-            return;
-        }
-        initialConnection = false;
+        if (!ok) disconnected = true;
+        // Failed connections keep their terminal and use the same retry path.
         setupReconnect();
 
         terminal.onTitleChange((title) => {

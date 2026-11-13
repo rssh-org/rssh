@@ -65,7 +65,6 @@ beforeEach(async () => {
       onResize: (path, ratio) => app.resizeLayoutPath(rootId, path, ratio),
       onClose: app.closePane,
       onContextMenu: vi.fn(),
-      onInitialConnectionFailure: vi.fn(() => false),
     },
   });
   await vi.waitFor(() => expect(target.querySelector(".card-name")?.textContent).toBe("Chosen server"));

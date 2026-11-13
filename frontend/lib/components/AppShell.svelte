@@ -78,7 +78,6 @@
     let menuCtx = $state<{ x: number; y: number; tab: Tab; tabBar?: boolean } | null>(null);
     let pinnedMenu = $state<{ x: number; y: number } | null>(null);
     let pinned = $state(false);
-    let pendingPaneSources = $state<Record<string, string>>({});
     const bypassStartupReconcile = !!window.__rssh_clone || !!window.__rssh_ai_handoff;
     let resourcePanesAllowed = $state(bypassStartupReconcile);
     const startup = new AbortController();
@@ -107,14 +106,6 @@
         void startupSettings.persist(startupSettings.snapshot());
     }
     $effect(persistSessionSnapshot);
-    $effect(() => {
-        const tabs = app.tabs();
-        for (const paneId of Object.keys(pendingPaneSources)) {
-            if (!tabs.some((tab) => tab.id === paneId) || app.sessionIdForTab(paneId)) {
-                delete pendingPaneSources[paneId];
-            }
-        }
-    });
 
     async function refreshNavigationData() {
         const current = ++navigationLoad;
@@ -148,12 +139,6 @@
        开了二次确认就先弹窗存住待关的 tab，否则直接关。home tab 不可关，跟 closeTab 一致。 */
     let closingTabs = $state<Tab[]>([]);
     function closeRequestedTabs(tabs: Tab[]) {
-        const ids = new Set(tabs.map(tab => tab.id));
-        for (const tab of app.tabs()) {
-            if (ids.has(tab.id) || (tab.workspaceId && ids.has(tab.workspaceId))) {
-                delete pendingPaneSources[tab.id];
-            }
-        }
         for (const tab of tabs) app.closeTab(tab.id);
     }
     function requestCloseTabs(ids: string[]) {
@@ -1037,7 +1022,6 @@
         if (!app.isTerminalWorkspace(workspaceId)) return;
         app.setActiveWorkspace(workspaceId);
         if (tab.paneOf) app.setActivePane(tab.id);
-        const sourcePaneId = app.activePaneId();
 
         const newId = `${opensHome ? "home" : tab.type}:${crypto.randomUUID()}`;
         const newTab: Tab = opensHome ? {
@@ -1053,11 +1037,8 @@
         try {
             const paneId = app.addPane(workspaceId, side, newTab);
             if (!paneId) throw new Error(t("toast.error.add"));
-            if (app.isTerminalTabType(newTab.type)) pendingPaneSources[paneId] = sourcePaneId;
         } catch (error) {
-            delete pendingPaneSources[newId];
-            // addPane is synchronous, but keep rollback here so a future store
-            // implementation cannot leave a hidden tab after a failed connect.
+            // Roll back only a failure to add the pane itself, not its connection.
             if (app.tabs().some((candidate) => candidate.id === newId)) app.closePane(newId);
             toast.error(errMsg(error));
         }
@@ -1224,28 +1205,6 @@
         if (isTouchContextMenu(e)) return;
         const tab = app.tabs().find((candidate) => candidate.id === tabId);
         if (tab) openCtxMenu(e, tab);
-    }
-
-    function handleInitialConnectionFailure(tabId: string, error: unknown): boolean {
-        const tab = app.tabs().find((candidate) => candidate.id === tabId);
-        if (!tab?.paneOf) {
-            toast.error(errMsg(error));
-            return false;
-        }
-        const sourcePaneId = pendingPaneSources[tabId];
-        const workspaceId = tab.workspaceId;
-        app.closePane(tabId);
-        delete pendingPaneSources[tabId];
-        if (
-            sourcePaneId
-            && workspaceId
-            && app.activeWorkspaceId() === workspaceId
-            && app.paneIdsForWorkspace(workspaceId).includes(sourcePaneId)
-        ) {
-            app.setActivePane(sourcePaneId);
-        }
-        toast.error(errMsg(error));
-        return true;
     }
 
     function closeTerminalPane(tabId: string) {
@@ -1598,7 +1557,6 @@
                                     onResize={(path, ratio) => app.resizeLayoutPath(workspace.id, path, ratio)}
                                     onClose={closeTerminalPane}
                                     onContextMenu={openPaneContextMenu}
-                                    onInitialConnectionFailure={handleInitialConnectionFailure}
                                 />
                             </BackScope>
                         {/if}

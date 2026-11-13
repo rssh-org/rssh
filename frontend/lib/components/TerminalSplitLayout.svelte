@@ -19,7 +19,6 @@
         onResize,
         onClose,
         onContextMenu,
-        onInitialConnectionFailure,
     }: {
         layout: TerminalLayout;
         activePaneId: string;
@@ -27,7 +26,6 @@
         onResize: (path: number[], ratio: number) => void;
         onClose: (tabId: string) => void;
         onContextMenu: (event: MouseEvent, tabId: string) => void;
-        onInitialConnectionFailure: (tabId: string, error: unknown) => boolean;
     } = $props();
 
     type Bounds = Pick<LayoutLeaf, "left" | "top" | "width" | "height">;
@@ -177,7 +175,6 @@
                         tabId={tab.id}
                         tabType={tab.type}
                         meta={tab.meta ?? {}}
-                        {onInitialConnectionFailure}
                     />
                 {/if}
             </div>

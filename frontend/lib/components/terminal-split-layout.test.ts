@@ -10,10 +10,6 @@ const terminalPaneSource = readFileSync(
   join(process.cwd(), "frontend/lib/components/TerminalPane.svelte"),
   "utf8",
 );
-const appShellSource = readFileSync(
-  join(process.cwd(), "frontend/lib/components/AppShell.svelte"),
-  "utf8",
-);
 
 describe("TerminalSplitLayout", () => {
   it("localizes pane controls", () => {
@@ -44,15 +40,4 @@ describe("TerminalSplitLayout", () => {
     );
   });
 
-  it("records the pane actually targeted by a split for failure recovery", () => {
-    const splitCurrentPane = appShellSource.match(
-      /function splitCurrentPane[\s\S]*?\n    function buildMenu/,
-    )?.[0] ?? "";
-    const activateWorkspace = splitCurrentPane.indexOf("app.setActiveWorkspace(workspaceId)");
-    const captureSource = splitCurrentPane.indexOf("const sourcePaneId = app.activePaneId()");
-
-    expect(activateWorkspace).toBeGreaterThan(-1);
-    expect(captureSource).toBeGreaterThan(activateWorkspace);
-    expect(splitCurrentPane).toContain("pendingPaneSources[paneId] = sourcePaneId");
-  });
 });
