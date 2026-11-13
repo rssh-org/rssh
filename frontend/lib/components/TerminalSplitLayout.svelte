@@ -123,6 +123,8 @@
             onclick={() => onActivate(tab.id)}
             onkeydown={(event) => {
                 if (event.currentTarget !== event.target) return;
+                // Active Home panes handle Enter in their own navigation handler.
+                if (event.key === "Enter" && tab.type === "home" && activePaneId === tab.id) return;
                 if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
                     onActivate(tab.id);

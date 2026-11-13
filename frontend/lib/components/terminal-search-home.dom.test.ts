@@ -84,7 +84,7 @@ afterEach(async () => {
 });
 
 describe("terminal search beside Home", () => {
-  it("keeps Home arrow and Enter navigation working while a sibling search stays open", async () => {
+  it.each(["body", "pane"] as const)("keeps Home navigation working from %s focus while a sibling search stays open", async (focusTarget) => {
     expect(canHandleBack()).toBe(true);
     const search = target.querySelector(".search-bar")!;
     target.querySelector(".home")!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
@@ -92,17 +92,55 @@ describe("terminal search beside Home", () => {
     expect(app.activePaneId()).toBe(homeId);
     expect(canHandleBack()).toBe(false);
 
+    const keyboardTarget = focusTarget === "pane"
+      ? target.querySelector<HTMLElement>(".home")!.closest<HTMLElement>(".pane")!
+      : document.body;
+    if (focusTarget === "pane") {
+      keyboardTarget.focus();
+      expect(document.activeElement).toBe(keyboardTarget);
+    }
     const arrow = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
-    document.body.dispatchEvent(arrow);
+    keyboardTarget.dispatchEvent(arrow);
     await settle();
     expect(arrow.defaultPrevented).toBe(true);
     expect(target.querySelector(".card-btn.selected")).not.toBeNull();
-    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    keyboardTarget.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await settle();
 
     expect(app.activeTab()).toMatchObject({ type: "ssh", label: "Chosen server", paneOf: rootId });
     expect(app.paneIdsForWorkspace(rootId)).toHaveLength(2);
     expect(target.querySelector(".search-bar")).toBe(search);
+  });
+
+  it.each(["Enter", " "])("uses %j to activate an inactive Home pane without opening a connection", async (key) => {
+    const pane = target.querySelector<HTMLElement>(".home")!.closest<HTMLElement>(".pane")!;
+    pane.focus();
+    expect(app.activePaneId()).toBe(rootId);
+
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    pane.dispatchEvent(event);
+    await settle();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(app.activePaneId()).toBe(homeId);
+    expect(app.activeTab()?.type).toBe("home");
+    expect(target.querySelector(".card-btn.selected")).toBeNull();
+  });
+
+  it("keeps Space as pane activation after a Home connection is selected", async () => {
+    const pane = target.querySelector<HTMLElement>(".home")!.closest<HTMLElement>(".pane")!;
+    app.setActivePane(homeId);
+    await settle();
+    pane.focus();
+    pane.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    await settle();
+    expect(target.querySelector(".card-btn.selected")).not.toBeNull();
+
+    const space = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    pane.dispatchEvent(space);
+    await settle();
+    expect(space.defaultPrevented).toBe(true);
+    expect(app.activeTab()?.type).toBe("home");
   });
 
   it("preserves search until its terminal is focused and then lets Back close it", async () => {
