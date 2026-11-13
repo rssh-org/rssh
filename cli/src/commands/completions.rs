@@ -120,7 +120,11 @@ mod tests {
     #[cfg(any(macos, linux))]
     fn check_zsh_registration(autoload: bool) {
         let directory = tempfile::tempdir().unwrap();
-        let script = directory.path().join("_rssh");
+        // compaudit also checks fpath parents. Keep the fixture below our
+        // private directory rather than directly below a shared /tmp.
+        let functions = directory.path().join("functions");
+        std::fs::create_dir(&functions).unwrap();
+        let script = functions.join("_rssh");
         let mut output = Vec::new();
         write_completions("zsh", &mut output).unwrap();
         std::fs::write(&script, output).unwrap();
@@ -132,6 +136,10 @@ mod tests {
             .args([
                 "-fc",
                 r#"
+# Only use stock completion functions and our private fixture, excluding
+# unrelated site-functions without bypassing compaudit's permission checks.
+fpath=( ${^fpath}/compinit(N:h) )
+(( $#fpath )) || exit 1
 fpath=("$1" $fpath)
 autoload -Uz compinit
 compinit -D
@@ -150,8 +158,10 @@ ${_comps[rssh]}
 "#,
                 "completion-test",
             ])
-            .arg(directory.path())
+            .arg(&functions)
             .arg(if autoload { "autoload" } else { "source" })
+            .env("HOME", directory.path())
+            .env("ZDOTDIR", directory.path())
             .output();
         let result = match result {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {

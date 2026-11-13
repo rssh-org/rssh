@@ -225,7 +225,11 @@ mod tests {
             .args([
                 "-f",
                 "-c",
-                r#"source "$HOME/.zshrc"
+                r#"# Exclude unrelated site-functions from the runner's fpath while
+# retaining the real compinit/compaudit and their normal permission checks.
+fpath=( ${^fpath}/compinit(N:h) )
+(( $#fpath )) || exit 1
+source "$HOME/.zshrc"
 [[ ${_comps[rssh]} == _rssh_test ]] || exit 1
 compinit() { print -u2 'compinit must not run twice'; return 1; }
 source "$HOME/.zshrc"
