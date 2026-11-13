@@ -13,6 +13,7 @@
   import { pickBroadcastText } from "../terminal/broadcast-text.ts";
   import AppIcon from "./AppIcon.svelte";
   import { tabIconName } from "./app-icon";
+  import { t as translate } from "../i18n/index.svelte.ts";
 
   let { tabId, active = false }: { tabId: string; active?: boolean } = $props();
 
@@ -47,6 +48,14 @@
     hoverAnchor = (e.currentTarget as HTMLElement).getBoundingClientRect();
   }
   function clearHover() { hoveredTabId = null; hoverAnchor = null; }
+
+  function openSession(tid: string) {
+    const target = app.tabs().find(tab => tab.id === tid);
+    if (!target) return;
+    clearHover();
+    app.setActiveWorkspace(target.workspaceId ?? target.id);
+    app.setActivePane(target.id);
+  }
 
   function broadcast() {
     const ranges = view.state.selection.ranges.map(r => ({ from: r.from, to: r.to }));
@@ -156,22 +165,31 @@
     {:else}
       <div class="session-list">
         {#each sessions as s (s.tabId)}
-          <button
-            type="button"
-            class="session-item"
-            class:selected={selectedTabIds.has(s.tabId)}
-            aria-pressed={selectedTabIds.has(s.tabId)}
-            onclick={() => toggle(s.tabId)}
-            onmouseenter={(e) => onHover(s.tabId, e)}
-            onmouseleave={clearHover}
-            title={s.label}
-          >
-            <SessionMinimap tabId={s.tabId} />
-            <span class="session-meta">
-              <span class="session-type"><AppIcon name={tabIconName(s.type)} size={13} /></span>
-              <span class="session-label">{s.label}</span>
-            </span>
-          </button>
+          <div class="session-item">
+            <button
+              type="button"
+              class="session-open"
+              onclick={() => openSession(s.tabId)}
+              onmouseenter={(e) => onHover(s.tabId, e)}
+              onmouseleave={clearHover}
+              aria-label={translate("terminal.pane.activate", { label: s.label })}
+              title={s.label}
+            >
+              <SessionMinimap tabId={s.tabId} />
+              <span class="session-meta">
+                <span class="session-type"><AppIcon name={tabIconName(s.type)} size={13} /></span>
+                <span class="session-label">{s.label}</span>
+              </span>
+            </button>
+            <label class="session-select" title={translate("edit.select_target", { label: s.label })}>
+              <input
+                type="checkbox"
+                checked={selectedTabIds.has(s.tabId)}
+                onchange={() => toggle(s.tabId)}
+                aria-label={translate("edit.select_target", { label: s.label })}
+              />
+            </label>
+          </div>
         {/each}
       </div>
       <div class="select-actions">
@@ -199,6 +217,7 @@
     display: flex;
     height: 100%;
     width: 100%;
+    min-height: 0;
   }
 
   .editor-area {
@@ -220,6 +239,7 @@
     background: var(--bg);
     padding: 12px;
     gap: 8px;
+    min-height: 0;
   }
 
   .panel-header {
@@ -238,6 +258,7 @@
 
   .session-list {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -245,7 +266,13 @@
   }
 
   .session-item {
+    position: relative;
+    flex-shrink: 0;
+  }
+
+  .session-open {
     display: flex;
+    width: 100%;
     flex-direction: column;
     gap: 4px;
     padding: 6px;
@@ -257,19 +284,36 @@
     color: var(--text-sub);
     background: none;
     text-align: left;
-    transition: background 0.1s, border-color 0.1s, box-shadow 0.1s;
+    transition: background 0.1s;
   }
-  .session-item:hover { background: var(--surface); color: var(--text); }
+  .session-open:hover { background: var(--surface); color: var(--text); }
 
-  /* Selected = the codebase's halo language (see TerminalPane .block-halo):
-     a solid accent edge carries the signal, the outer glow is just gravy — so
-     selection stays legible even where WKWebView weakens box-shadow blur. */
-  .session-item.selected {
-    color: var(--text);
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    box-shadow: 0 0 0 1px var(--accent),
-                0 0 12px -2px color-mix(in srgb, var(--accent) 65%, transparent);
+  .session-open:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .session-select {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    cursor: pointer;
+  }
+
+  .session-select input {
+    margin: 0;
+  }
+
+  .session-select input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
   }
 
   .session-meta {

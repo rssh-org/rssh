@@ -90,6 +90,7 @@ const zh: Messages = {
   "tab.context.split.left": "左",
   "tab.context.split.right": "右",
   "terminal.pane.activate": "激活 {label}",
+  "edit.select_target": "选择 {label} 作为广播目标",
   "terminal.pane.close": "关闭窗格",
   "terminal.pane.resize": "调整窗格大小",
   "terminal.keyboard": "屏幕键盘",

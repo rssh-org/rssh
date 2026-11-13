@@ -88,6 +88,7 @@ const en = {
   "tab.context.split.left": "Left",
   "tab.context.split.right": "Right",
   "terminal.pane.activate": "Activate {label}",
+  "edit.select_target": "Select {label} for broadcast",
   "terminal.pane.close": "Close pane",
   "terminal.pane.resize": "Resize panes",
   "terminal.keyboard": "On-screen keyboard",
