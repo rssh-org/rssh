@@ -262,7 +262,7 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 8px;
   }
 
   .session-item {
@@ -275,8 +275,8 @@
     width: 100%;
     flex-direction: column;
     gap: 4px;
-    padding: 6px;
-    border: 1px solid transparent;
+    padding: 8px;
+    border: 1px solid var(--divider);
     border-radius: var(--radius-sm);
     cursor: pointer;
     font-family: inherit;
@@ -284,9 +284,13 @@
     color: var(--text-sub);
     background: none;
     text-align: left;
-    transition: background 0.1s;
+    transition: background 0.1s, border-color 0.1s;
   }
-  .session-open:hover { background: var(--surface); color: var(--text); }
+  .session-open:hover {
+    background: var(--surface);
+    border-color: var(--text-dim);
+    color: var(--text);
+  }
 
   .session-open:focus-visible {
     outline: 2px solid var(--accent);
@@ -302,8 +306,6 @@
     justify-content: center;
     width: 44px;
     height: 44px;
-    border-radius: var(--radius-sm);
-    background: var(--bg);
     cursor: pointer;
   }
 
