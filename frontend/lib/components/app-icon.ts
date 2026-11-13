@@ -3,6 +3,7 @@ import type { ConnectionKind, DynamicPlatform, TabType } from "../stores/app.sve
 export const APP_ICON_NAMES = [
   "add",
   "ai",
+  "auto",
   "aws",
   "check",
   "cloud-download",

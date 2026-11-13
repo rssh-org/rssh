@@ -60,9 +60,9 @@ export interface AiSettings {
   endpoint: string | null;
   has_api_key: boolean;
   has_credentials?: boolean;
-  /** 危险模式总闸。off 时下面 8 个 auto_* 视同 false（持久化保留，方便切回时复原）。 */
+  /** 自动模式总开关。off 时下面的 auto_* 视同 false（持久化保留，方便切回时复原）。 */
   danger_mode: boolean;
-  /** per-tool 自动批准。仅当 danger_mode=true 时生效；UI 上 danger 关时整组禁用。 */
+  /** per-tool 自动批准。仅当 danger_mode=true 时生效；UI 上自动模式关闭时整组禁用。 */
   auto_run_command: boolean;
   auto_match_file: boolean;
   auto_download_file: boolean;

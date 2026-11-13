@@ -67,25 +67,23 @@
         return PROTOCOL_CARDS.find((c) => c.protocol === protocol)?.label ?? protocol;
     }
 
-    // ─── Danger mode（全局，跟 provider 无关）────────────────────────
-    // dangerMode 直接派生自 store —— DangerModeToggle 改动后这里自动同步，不再维护
+    // ─── Automatic mode（全局，跟 provider 无关）────────────────────────
+    // autoMode 直接派生自 store —— DangerModeToggle 改动后这里自动同步，不再维护
     // 本地镜像。saving 状态与确认模态都归 DangerModeToggle 管。
-    let dangerMode = $derived(ai.settings()?.danger_mode === true);
-    let dangerNote = $state<string | null>(null);
+    let autoMode = $derived(ai.settings()?.danger_mode === true);
+    let autoModeNote = $state<string | null>(null);
 
-    // per-tool 自动批准。每个 checkbox 各自一个 boolean state。8 个字段平铺；
-    // 也可以塞成数组遍历，但显式 boolean 比 metadata 表调试时更直观，也避免一行
-    // toggle bug 同时拆掉 8 个开关。
-    let autoRunCommand = $state(true);
+    // Per-tool defaults mirror the backend; loaded settings remain authoritative.
+    let autoRunCommand = $state(false);
     let autoMatchFile = $state(true);
     let autoDownloadFile = $state(false);
     let autoAnalyzeLocally = $state(false);
-    let autoPatchCp = $state(false);
-    let autoPatchModify = $state(false);
-    let autoPatchDiff = $state(false);
+    let autoPatchCp = $state(true);
+    let autoPatchModify = $state(true);
+    let autoPatchDiff = $state(true);
     let autoPatchMv = $state(false);
-    let autoWebSearch = $state(false);
-    let autoWebFetch = $state(false);
+    let autoWebSearch = $state(true);
+    let autoWebFetch = $state(true);
     let savingAuto = $state(false);
 
     /** 子开关写回后端。失败把 UI 状态回滚到 prev，避免界面与持久化失同步。 */
@@ -94,7 +92,7 @@
                                     | "autoPatchDiff" | "autoPatchMv" | "autoWebSearch" | "autoWebFetch",
                                next: boolean) {
         savingAuto = true;
-        dangerNote = null;
+        autoModeNote = null;
         try {
             await ai.saveSettings({ [field]: next });
         } catch (err) {
@@ -114,7 +112,7 @@
                     case "autoWebFetch":       autoWebFetch       = false; break;
                 }
             }
-            dangerNote = t("ai.settings.danger.save_failed", { error: errMsg(err) });
+            autoModeNote = t("ai.settings.danger.save_failed", { error: errMsg(err) });
         } finally {
             savingAuto = false;
         }
@@ -675,28 +673,29 @@
     {/if}
 
     <div class="section-label">{t("ai.settings.danger.section")}</div>
-    <!-- 危险模式 + 8 个 per-tool 自动批准合在一个 .card.surface-raised（参考 SyncScreen）。
+    <!-- 自动模式与 per-tool 自动批准合在一个 .card.surface-raised（参考 SyncScreen）。
          视觉上是一组语义关联的配置，不再拆成两个浮空卡片。 -->
-    <div class="card surface-raised danger-card" class:on={dangerMode}>
-        <div class="danger-head">
-            <div class="danger-head-body">
-                <div id="danger-mode-title" class="danger-title"
-                     class:on={dangerMode} class:off={!dangerMode}>
+    <div class="card surface-raised auto-mode-card" class:on={autoMode}>
+        <div class="auto-mode-head">
+            <div class="auto-mode-head-body">
+                <div id="auto-mode-title" class="auto-mode-title"
+                     class:on={autoMode} class:off={!autoMode}>
+                    <AppIcon name="auto" />
                     {t("ai.settings.danger.label")}
                 </div>
-                <div id="danger-mode-desc" class="danger-desc">{t("ai.settings.danger.desc")}</div>
-                {#if dangerNote}
-                    <div class="danger-err">{dangerNote}</div>
+                <div id="auto-mode-desc" class="auto-mode-desc">{t("ai.settings.danger.desc")}</div>
+                {#if autoModeNote}
+                    <div class="auto-mode-err">{autoModeNote}</div>
                 {/if}
             </div>
-            <DangerModeToggle onError={(m) => (dangerNote = t("ai.settings.danger.save_failed", { error: m }))}>
+            <DangerModeToggle onError={(m) => (autoModeNote = t("ai.settings.danger.save_failed", { error: m }))}>
                 {#snippet trigger(requestToggle, saving)}
                     <label class="switch">
-                        <input type="checkbox" checked={dangerMode}
+                        <input type="checkbox" checked={autoMode}
                                disabled={saving}
-                               onclick={(e) => { e.preventDefault(); dangerNote = null; requestToggle(); }}
-                               aria-labelledby="danger-mode-title"
-                               aria-describedby="danger-mode-desc"/>
+                               onclick={(e) => { e.preventDefault(); autoModeNote = null; requestToggle(); }}
+                               aria-labelledby="auto-mode-title"
+                               aria-describedby="auto-mode-desc"/>
                         <span class="slider"></span>
                     </label>
                 {/snippet}
@@ -706,66 +705,66 @@
         <div class="card-divider"></div>
 
         <!-- per-tool 自动批准。danger_mode 关时整组 disabled —— 视觉灰显，不隐藏，
-             让用户知道这些选项存在、是怎么分粒度的；开 danger 时立刻可用。 -->
-        <div class="auto-group" class:disabled={!dangerMode}>
+             让用户知道这些选项存在、是怎么分粒度的；开启自动模式时立刻可用。 -->
+        <div class="auto-group" class:disabled={!autoMode}>
             <div class="auto-group-title">{t("ai.settings.danger.auto.section")}</div>
             <label class="auto-row">
                 <input type="checkbox" bind:checked={autoRunCommand}
-                       disabled={!dangerMode || savingAuto}
+                       disabled={!autoMode || savingAuto}
                        onchange={(e) => persistAuto("autoRunCommand", (e.target as HTMLInputElement).checked)}/>
                 <span>{t("ai.settings.danger.auto.run_command")}</span>
             </label>
             <label class="auto-row">
                 <input type="checkbox" bind:checked={autoMatchFile}
-                       disabled={!dangerMode || savingAuto}
+                       disabled={!autoMode || savingAuto}
                        onchange={(e) => persistAuto("autoMatchFile", (e.target as HTMLInputElement).checked)}/>
                 <span>{t("ai.settings.danger.auto.match_file")}</span>
             </label>
             <label class="auto-row">
                 <input type="checkbox" bind:checked={autoDownloadFile}
-                       disabled={!dangerMode || savingAuto}
+                       disabled={!autoMode || savingAuto}
                        onchange={(e) => persistAuto("autoDownloadFile", (e.target as HTMLInputElement).checked)}/>
                 <span>{t("ai.settings.danger.auto.download_file")}</span>
             </label>
             <label class="auto-row">
                 <input type="checkbox" bind:checked={autoAnalyzeLocally}
-                       disabled={!dangerMode || savingAuto}
+                       disabled={!autoMode || savingAuto}
                        onchange={(e) => persistAuto("autoAnalyzeLocally", (e.target as HTMLInputElement).checked)}/>
                 <span>{t("ai.settings.danger.auto.analyze_locally")}</span>
             </label>
             <label class="auto-row">
                 <input type="checkbox" bind:checked={autoPatchCp}
-                       disabled={!dangerMode || savingAuto}
+                       disabled={!autoMode || savingAuto}
                        onchange={(e) => persistAuto("autoPatchCp", (e.target as HTMLInputElement).checked)}/>
                 <span>{t("ai.settings.danger.auto.patch_cp")}</span>
             </label>
             <label class="auto-row">
                 <input type="checkbox" bind:checked={autoPatchModify}
-                       disabled={!dangerMode || savingAuto}
+                       disabled={!autoMode || savingAuto}
                        onchange={(e) => persistAuto("autoPatchModify", (e.target as HTMLInputElement).checked)}/>
                 <span>{t("ai.settings.danger.auto.patch_modify")}</span>
             </label>
             <label class="auto-row">
                 <input type="checkbox" bind:checked={autoPatchDiff}
-                       disabled={!dangerMode || savingAuto}
+                       disabled={!autoMode || savingAuto}
                        onchange={(e) => persistAuto("autoPatchDiff", (e.target as HTMLInputElement).checked)}/>
                 <span>{t("ai.settings.danger.auto.patch_diff")}</span>
             </label>
             <label class="auto-row">
                 <input type="checkbox" bind:checked={autoPatchMv}
-                       disabled={!dangerMode || savingAuto}
+                       disabled={!autoMode || savingAuto}
                        onchange={(e) => persistAuto("autoPatchMv", (e.target as HTMLInputElement).checked)}/>
                 <span>{t("ai.settings.danger.auto.patch_mv")}</span>
             </label>
             <label class="auto-row">
                 <input type="checkbox" bind:checked={autoWebSearch}
-                       disabled={!dangerMode || savingAuto}
+                       disabled={!autoMode || savingAuto}
                        onchange={(e) => persistAuto("autoWebSearch", (e.target as HTMLInputElement).checked)}/>
                 <span>{t("ai.settings.danger.auto.web_search")}</span>
             </label>
             <label class="auto-row">
                 <input type="checkbox" bind:checked={autoWebFetch}
-                       disabled={!dangerMode || savingAuto}
+                       disabled={!autoMode || savingAuto}
                        onchange={(e) => persistAuto("autoWebFetch", (e.target as HTMLInputElement).checked)}/>
                 <span>{t("ai.settings.danger.auto.web_fetch")}</span>
             </label>
@@ -1148,11 +1147,11 @@
         padding-right: 0;
     }
 
-    /* Provider / Danger 卡片：复用全局 .card.surface-raised 提供 bg + 阴影 + 圆角，
+    /* Provider / 自动模式卡片：复用全局 .card.surface-raised 提供 bg + 阴影 + 圆角，
        本地只加 padding + 内布局，跟 SyncScreen 同款。 */
     .provider-card,
     .mcp-card,
-    .danger-card,
+    .auto-mode-card,
     .list-card {
         padding: 18px;
         display: flex;
@@ -1172,32 +1171,34 @@
     }
 
     /* 主开关行：title/desc 在左，switch 在右；不再依赖全局 .switch-card 容器。 */
-    .danger-head {
+    .auto-mode-head {
         display: flex;
         align-items: center;
         gap: 12px;
     }
-    .danger-head-body {
+    .auto-mode-head-body {
         flex: 1;
         display: flex;
         flex-direction: column;
         gap: 4px;
     }
-    .danger-title {
+    .auto-mode-title {
+        display: flex;
+        align-items: center;
+        gap: 7px;
         font-size: 13px;
         font-weight: 600;
         color: var(--text);
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }
-    /* "开启"时压成 error 红 —— 让危险态视觉无法忽视，防止用户开了忘了又跑命令。 */
-    .danger-title.on { color: var(--error); }
-    .danger-desc {
+    .auto-mode-title.on { color: var(--accent); }
+    .auto-mode-desc {
         font-size: 11px;
         color: var(--text-dim);
         line-height: 1.5;
     }
-    .danger-err {
+    .auto-mode-err {
         font-size: 12px;
         color: var(--error);
     }
@@ -1209,7 +1210,7 @@
         margin: 2px -18px;
     }
 
-    /* per-tool 自动批准 —— 嵌在 .danger-card 内，不再有自己的 bg/border。 */
+    /* per-tool 自动批准 —— 嵌在 .auto-mode-card 内，不再有自己的 bg/border。 */
     .auto-group {
         display: flex;
         flex-direction: column;
