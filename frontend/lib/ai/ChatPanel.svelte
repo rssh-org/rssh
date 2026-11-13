@@ -1,7 +1,7 @@
 <script lang="ts">
     import * as ai from "./store.svelte.ts";
     import * as mcp from "../mcp/store.svelte.ts";
-    import { isRawDeviceKind, type AiTargetKind, type ChatItem, type ConversationMeta, type ShellKind } from "./types.ts";
+    import { isRawDeviceKind, type AiTargetKind, type ChatItem, type ConversationMeta } from "./types.ts";
     import CommandConfirmDialog from "./CommandConfirmDialog.svelte";
     import WebToolConfirmCard from "./WebToolConfirmCard.svelte";
     import DownloadConfirmCard from "./DownloadConfirmCard.svelte";
@@ -10,6 +10,7 @@
     import MatchConfirmCard from "./MatchConfirmCard.svelte";
     import AuditPanel from "./AuditPanel.svelte";
     import Modal from "../components/Modal.svelte";
+    import Select from "../components/Select.svelte";
     import DangerModeToggle from "./DangerModeToggle.svelte";
     import { renderMarkdown } from "./markdown.ts";
     import { formatTokenCount } from "./tokens.ts";
@@ -373,12 +374,9 @@
         }
     }
 
-    async function changeShell(event: Event) {
-        const select = event.currentTarget as HTMLSelectElement;
-        const next = select.value as ShellKind;
+    async function changeShell(next: string | number | null) {
+        if (next !== "posix" && next !== "powershell" && next !== "cmd") return;
         const owner = snapshotOwner();
-        // Keep displaying the acknowledged value until the session saves it.
-        select.value = ai.shellForTab(owner.tabId);
         try {
             await ai.setSessionShell(owner.tabId, next, owner.lease);
         } catch (error) {
@@ -399,13 +397,16 @@
         </span>
         {/if}
         {#if !isRawDeviceKind(targetKind)}
-        <select class="shell-select" value={selectedShell} onchange={changeShell}
+        <div class="shell-select" title={t("ai.toolbar.shell")}>
+            <Select bind:value={() => selectedShell, changeShell}
+                options={[
+                    { value: "posix", label: "POSIX" },
+                    { value: "powershell", label: "PowerShell" },
+                    { value: "cmd", label: "CMD" },
+                ]}
                 disabled={busy || shellBusy || streaming || !!ai.pendingCommand(tabId) || mcpRequests.some(request => request.busy)}
-                title={t("ai.toolbar.shell")} aria-label={t("ai.toolbar.shell")}>
-            <option value="posix">POSIX</option>
-            <option value="powershell">PowerShell</option>
-            <option value="cmd">CMD</option>
-        </select>
+                ariaLabel={t("ai.toolbar.shell")} />
+        </div>
         {/if}
         <!-- Audit log toggle: file-text icon in chat view, chat bubble in audit view (= go back).
              Toolbar controls render unconditionally (stable layout); they disable until the
@@ -684,6 +685,8 @@
         flex-shrink: 0;
         width: 100px;
         min-width: 0;
+    }
+    .shell-select :global(.rssh-select-trigger) {
         padding: 4px 6px;
         font-size: 11px;
         height: 28px;
