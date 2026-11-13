@@ -34,6 +34,7 @@
   <div class="connection-body">
     <div class="connection-title">{t(mcp.endpoint() ? "mcp.running" : "mcp.stopped")}</div>
     <div class="hint">{t("mcp.description")}</div>
+    <div class="hint">{t("mcp.start_hint")}</div>
   </div>
   <button class="btn btn-sm" disabled={busy} onclick={() => act(mcp.endpoint() ? mcp.stop : mcp.start)}>
     {t(mcp.endpoint() ? "mcp.stop" : "mcp.start")}

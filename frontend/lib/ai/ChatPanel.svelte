@@ -11,6 +11,7 @@
     import AuditPanel from "./AuditPanel.svelte";
     import Modal from "../components/Modal.svelte";
     import Select from "../components/Select.svelte";
+    import AppIcon from "../components/AppIcon.svelte";
     import DangerModeToggle from "./DangerModeToggle.svelte";
     import { renderMarkdown } from "./markdown.ts";
     import { formatTokenCount } from "./tokens.ts";
@@ -64,9 +65,9 @@
     let items: ChatItem[] = $derived(ai.chatItems(tabId));
     // 流式响应进行中 —— send 按钮换成"停止"按钮。依赖 items 变化重算（last item 的 streaming flag）。
     let streaming = $derived(ai.isStreaming(tabId));
-    // 危险模式标记 —— 用户在 AI Settings 里切换后，标题旁的红色后缀立刻同步。
+    // 自动模式标记与 AI Settings 共享 store，切换后工具栏立即同步。
     // 走 ai.settings() 读 store 的 $state，自动响应式（不需要手动 loadSettings 触发）。
-    let dangerMode = $derived(ai.settings()?.danger_mode === true);
+    let autoMode = $derived(ai.settings()?.danger_mode === true);
     // 本会话累计 token 用量（结束会话/新开会话即归零重计）。
     let tokens = $derived(ai.tokenUsage(tabId));
     // Currently running model: prefer the model the active session actually started
@@ -426,21 +427,15 @@
                 {/if}
             </svg>
         </button>
-        <!-- Danger-mode toggle: always visible, selected (red) when ON. The toggle
-             logic + confirm modal live in DangerModeToggle (shared with AiSettings —
-             one safety contract); here we only render the icon. No disabled={!session}
-             — danger_mode is a global setting, settable before the session starts. -->
+        <!-- Automatic mode is global and available before a session starts.
+             The toolbar shares its toggle and confirmation with AI settings. -->
         <DangerModeToggle {active} onError={(m) => (banner = m)}>
             {#snippet trigger(requestToggle, saving)}
-                <button class="btn-icon danger-toggle" class:on={dangerMode}
+                <button class="btn-icon auto-mode-toggle" class:on={autoMode}
                         onclick={requestToggle} disabled={saving}
-                        title={dangerMode ? t("ai.title.danger_tip") : t("ai.toolbar.danger_enable")}
-                        aria-label={t("ai.toolbar.danger_aria")} aria-pressed={dangerMode}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-                        <line x1="12" y1="9" x2="12" y2="13"/>
-                        <line x1="12" y1="17" x2="12.01" y2="17"/>
-                    </svg>
+                        title={autoMode ? t("ai.title.danger_tip") : t("ai.toolbar.danger_enable")}
+                        aria-label={t("ai.toolbar.danger_aria")} aria-pressed={autoMode}>
+                    <AppIcon name="auto" />
                 </button>
             {/snippet}
         </DangerModeToggle>
@@ -758,16 +753,14 @@
         cursor: default;
     }
     .btn-icon:disabled:hover { background: transparent; }
-    /* Danger-mode toggle, selected state: red icon + red-tinted fill so it reads
-       as "on" among the otherwise-neutral toolbar icons. The :hover rule keeps it
-       red (overriding .btn-icon:hover's neutral color via higher specificity). */
-    .danger-toggle.on {
-        color: var(--error);
-        background: color-mix(in srgb, var(--error) 14%, transparent);
+    /* Theme accent marks automatic approval as enabled. */
+    .auto-mode-toggle.on {
+        color: var(--accent);
+        background: color-mix(in srgb, var(--accent) 14%, transparent);
     }
-    .danger-toggle.on:hover {
-        color: var(--error);
-        background: color-mix(in srgb, var(--error) 22%, transparent);
+    .auto-mode-toggle.on:hover {
+        color: var(--accent);
+        background: color-mix(in srgb, var(--accent) 22%, transparent);
     }
     .banner {
         display: flex; align-items: center; gap: 8px;

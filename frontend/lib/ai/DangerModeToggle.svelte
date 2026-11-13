@@ -1,11 +1,6 @@
-<!-- Headless danger-mode toggle: the ONE home of the safety contract — enabling
-     pops a confirm modal (auto-approve runs every proposed command with no
-     confirmation, a foot-gun), disabling is immediate (off = the safe default).
-     The trigger control (settings checkbox / toolbar icon) is delegated to the
-     `trigger` snippet so each surface renders its own look while sharing this
-     logic + the confirm modal. Never call saveSettings({dangerMode:true})
-     anywhere else — route every toggle through requestToggle so the warning
-     can't be bypassed. -->
+<!-- Shared automatic-mode toggle. Enabling confirms automatic approval of the
+     selected tools; disabling takes effect immediately. Settings and toolbar
+     controls share this logic through the trigger snippet. -->
 <script lang="ts" module>
     // danger_mode 是全局设置；所有 ChatPanel/AiSettings 实例共享一次写入闸门。
     // 切 tab 不能让第二个 toggle 绕过第一个仍在进行的 save。
@@ -48,7 +43,7 @@
         try {
             await operation;
         } catch (e) {
-            console.error("[ai] toggle danger mode:", e);
+            console.error("[ai] toggle automatic mode:", e);
             onError?.(errMsg(e));
         } finally {
             if (toggleInFlight === operation) toggleInFlight = null;
@@ -65,15 +60,15 @@
 
 {#if showDialog}
     <Modal onClose={() => (showDialog = false)} class="stack"
-           aria-labelledby="danger-confirm-title" aria-describedby="danger-confirm-body">
-        <h3 id="danger-confirm-title" class="title">
-            <AppIcon name="warning" size={18} />
+           aria-labelledby="auto-mode-confirm-title" aria-describedby="auto-mode-confirm-body">
+        <h3 id="auto-mode-confirm-title" class="title">
+            <AppIcon name="auto" size={18} />
             {t("ai.settings.danger.confirm_title")}
         </h3>
-        <div id="danger-confirm-body" class="body">{t("ai.settings.danger.confirm_body")}</div>
+        <div id="auto-mode-confirm-body" class="body">{t("ai.settings.danger.confirm_body")}</div>
         <div class="modal-actions">
             <button class="btn btn-sm" onclick={() => (showDialog = false)}>{t("common.cancel")}</button>
-            <button class="btn btn-sm btn-danger-solid" onclick={() => apply(true)} disabled={saving}>
+            <button class="btn btn-sm btn-accent" onclick={() => apply(true)} disabled={saving}>
                 {t("ai.settings.danger.confirm_enable")}
             </button>
         </div>
@@ -86,7 +81,7 @@
         align-items: center;
         gap: 7px;
         font-size: 16px;
-        color: var(--error);
+        color: var(--accent);
         font-weight: 700;
     }
     .body {
@@ -95,11 +90,4 @@
         line-height: 1.55;
         white-space: pre-line;
     }
-    /* "Enable anyway" — error fill so clicking it reads as stepping on a mine. */
-    .btn-danger-solid {
-        background: var(--error);
-        color: var(--white);
-        border-color: var(--error);
-    }
-    .btn-danger-solid:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

@@ -96,15 +96,13 @@ pub async fn ai_codex_login_cancel(
 pub async fn ai_codex_logout(state: &AppState, provider_id: String) -> AppResult<()> {
     state.codex_auth.logout(&provider_id).await
 }
-/// 危险模式（全局，不分 provider）：总闸；开启后才允许下面的 per-tool 自动批准生效。
-/// 这是 issue #39 的明确需求——用户在受控环境（隔离 VM、靶机）里期望像 Claude Code
-/// 一样无打扰自主跑，但要分粒度——文件改动比命令风险高一档，得让用户自己决定。
+/// 自动模式（全局，不分 provider）：总闸；开启后才允许下面的 per-tool 自动批准生效。
+/// 保留旧存储键，让已保存的用户选择继续生效。
 fn key_danger_mode() -> String {
     "ai_danger_mode".into()
 }
 /// per-tool 自动批准开关。仅当 danger_mode=on 时生效。
-/// run_command / match_file 默认 true（向后兼容旧 danger_mode 全开的行为），
-/// 其它默认 false（写动作 / 大副作用，明确表示需要新设默认就开）。
+/// 默认自动批准文件搜索、补丁准备三步和网页工具；命令、传输、分析及补丁覆盖需确认。
 fn key_auto(name: &str) -> String {
     format!("ai_auto_{name}")
 }
@@ -1510,8 +1508,8 @@ pub struct AiSettings {
     pub has_api_key: bool,
     #[serde(default)]
     pub has_credentials: bool,
-    /// 危险模式总闸。off 时下面所有 auto_* 视同 false（per-tool 设置仍持久化，
-    /// 但运行时不生效，方便用户切回 danger 时复原选择）。
+    /// 自动模式总闸。off 时下面所有 auto_* 视同 false（per-tool 设置仍持久化，
+    /// 但运行时不生效，方便用户切回自动模式时复原选择）。保留旧 wire 字段名。
     pub danger_mode: bool,
     /// per-tool 自动批准。命名直接映射到前端 CommandProposed.kind。
     pub auto_run_command: bool,
@@ -1526,10 +1524,12 @@ pub struct AiSettings {
     pub auto_web_fetch: bool,
 }
 
-/// per-tool auto-approve 字段的默认值 —— 在 ai_settings_get / ai_settings_set 间共享。
-/// run_command + match_file 默认开（向后兼容旧 danger_mode 全开行为），其余默认关。
+/// 未保存过的 per-tool 自动批准设置使用这些默认值；显式保存的选择始终优先。
 fn auto_default(name: &str) -> bool {
-    matches!(name, "run_command" | "match_file")
+    matches!(
+        name,
+        "match_file" | "patch_cp" | "patch_modify" | "patch_diff" | "web_search" | "web_fetch"
+    )
 }
 
 fn read_auto(state: &AppState, name: &str) -> AppResult<bool> {
@@ -1579,7 +1579,7 @@ pub async fn ai_settings_get_impl(
     };
     let danger_mode = crate::db::settings::get(&state.db, &key_danger_mode())?
         .map(|v| v == "1")
-        .unwrap_or(false);
+        .unwrap_or(true);
 
     Ok(AiSettings {
         system_prompt: prompts::get(&state.db)?,
@@ -1947,6 +1947,71 @@ pub async fn ai_settings_set_impl(state: &AppState, patch: AiSettingsPatch) -> A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn automatic_mode_defaults_enable_only_selected_tools() {
+        let (host, _events) = crate::ssh::test_support::headless_host();
+        let settings = ai_settings_get_impl(host.state(), None).await.unwrap();
+
+        assert!(settings.danger_mode);
+        assert!(settings.auto_match_file);
+        assert!(settings.auto_patch_cp);
+        assert!(settings.auto_patch_modify);
+        assert!(settings.auto_patch_diff);
+        assert!(settings.auto_web_search);
+        assert!(settings.auto_web_fetch);
+        assert!(!settings.auto_run_command);
+        assert!(!settings.auto_download_file);
+        assert!(!settings.auto_analyze_locally);
+        assert!(!settings.auto_patch_mv);
+    }
+
+    #[tokio::test]
+    async fn automatic_mode_defaults_preserve_saved_choices_and_partial_updates() {
+        let (host, _events) = crate::ssh::test_support::headless_host();
+        let state = host.state();
+        ai_settings_set_impl(
+            state,
+            AiSettingsPatch {
+                danger_mode: Some(false),
+                auto_run_command: Some(true),
+                auto_match_file: Some(false),
+                auto_download_file: Some(true),
+                auto_analyze_locally: Some(true),
+                auto_patch_cp: Some(false),
+                auto_patch_modify: Some(false),
+                auto_patch_diff: Some(false),
+                auto_patch_mv: Some(true),
+                auto_web_search: Some(false),
+                auto_web_fetch: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        ai_settings_set_impl(
+            state,
+            AiSettingsPatch {
+                system_prompt: Some("Updated prompt".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let settings = ai_settings_get_impl(state, None).await.unwrap();
+        assert!(!settings.danger_mode);
+        assert!(!settings.auto_match_file);
+        assert!(!settings.auto_patch_cp);
+        assert!(!settings.auto_patch_modify);
+        assert!(!settings.auto_patch_diff);
+        assert!(!settings.auto_web_search);
+        assert!(!settings.auto_web_fetch);
+        assert!(settings.auto_run_command);
+        assert!(settings.auto_download_file);
+        assert!(settings.auto_analyze_locally);
+        assert!(settings.auto_patch_mv);
+    }
 
     #[tokio::test]
     async fn openai_provider_protocols_survive_save_list_and_settings_reload() {
