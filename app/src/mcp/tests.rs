@@ -173,6 +173,45 @@ async fn read_result(response: reqwest::Response) -> Value {
 }
 
 #[tokio::test]
+async fn closing_an_owner_cancels_gui_start_waiting_for_the_start_lock() {
+    let fixture = Fixture::new().await;
+    stop(&fixture.state, &fixture.owner).unwrap();
+    let lock = fixture.state.agent_bridge.mcp_start_lock.lock().await;
+    let starting = start(fixture.state.clone(), fixture.owner.clone());
+    tokio::pin!(starting);
+    assert!(futures_util::poll!(&mut starting).is_pending());
+
+    rssh_core::commands::lifecycle::close_owner(&fixture.state, &fixture.owner);
+    drop(lock);
+
+    assert!(starting.await.is_err());
+    assert!(fixture
+        .state
+        .agent_bridge
+        .endpoint(&fixture.owner)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn concurrent_gui_and_cli_starts_reuse_the_same_endpoint() {
+    let fixture = Fixture::new().await;
+    stop(&fixture.state, &fixture.owner).unwrap();
+    let (first, second, third) = tokio::join!(
+        start(fixture.state.clone(), fixture.owner.clone()),
+        start(fixture.state.clone(), fixture.owner.clone()),
+        start(fixture.state.clone(), fixture.owner.clone()),
+    );
+    let first = first.unwrap().endpoint.unwrap();
+    for result in [second, third] {
+        let endpoint = result.unwrap().endpoint.unwrap();
+        assert_eq!(endpoint.url, first.url);
+        assert_eq!(endpoint.token, first.token);
+    }
+    assert_ne!(first.token, fixture.endpoint.token);
+}
+
+#[tokio::test]
 async fn streamable_http_initializes_and_exposes_only_terminal_tools() {
     let fixture = Fixture::new().await;
     let session = fixture.initialize().await;

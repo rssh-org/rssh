@@ -18,12 +18,16 @@
 rg 'emit\(|format!\("[a-z]+:' core/src app/src   # 核对最终 channel 的构造位置
 ```
 
-### R2. CLI ↔ GUI 走 OSC 7337，不要再造 IPC
+### R2. 内嵌 CLI 走 OSC，外部 CLI 走本地 IPC
 
-GUI 内嵌终端跑 `rssh-cli` 时，CLI 通过 OSC 7337 转义序列与 GUI 通信，xterm parser 解码后调 store。要扩通信，加个 OSC kind，**不要**起 socket / pipe / tauri event。
+- **GUI 内嵌终端**：CLI ↔ GUI 使用 OSC 7337；扩展通信时增加 OSC kind，不另建通信通道。
+- **外部 CLI / 本地 Agent**：通过本地 IPC 与 GUI / Headless 宿主通信，macOS / Linux 使用 Unix socket，Windows 使用 Named Pipe。平台差异用 `#[cfg(...)]` + trait 隔离，共享请求协议和业务逻辑。
+
+新增通信能力复用对应通道。
 
 ```bash
 rg 'OSC_RSSH_ID|7337' frontend cli/src
+rg 'LocalTransport|native_transport' core/src/mcp_control app/src/mcp/control.rs cli/src/commands/mcp.rs
 ```
 
 ### R3. 新增前端 command 必须检查两个后端适配器
@@ -339,7 +343,7 @@ rg 'invoke\("|generate_handler!|"[a-z_]+" =>' frontend/lib app/src/tauri/mod.rs 
 ## 不要做的事（速查）
 
 - 创建分析/计划文档（R6）
-- 起新 IPC 通道（R3 / R2）
+- 绕过既有 OSC / 本地 IPC 机制另建通信通道（R2）
 - 在组件里建跨页全局状态（R8）
 - 把 secret 写 DB 明文（R5）
 - 绕过 lifecycle registry 直接注册 transport handle（R11）

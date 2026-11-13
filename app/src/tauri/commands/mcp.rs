@@ -12,6 +12,29 @@ fn window_sink(window: tauri::Window) -> Sink {
     Arc::new(move |event, payload| window.emit_to(target.as_str(), event, payload).is_ok())
 }
 
+#[cfg(any(windows, macos, linux))]
+pub(crate) fn register_control_window(window: &tauri::Window) {
+    use tauri::Manager;
+    let Some(control) = window.try_state::<Arc<crate::mcp::control::Control>>() else {
+        return;
+    };
+    // A real window exists before its first page or terminal is ready.
+    let Ok(title) = window.title() else {
+        return;
+    };
+    if let Err(error) = control.register(
+        SessionOwner::Window(window.label().into()),
+        if title.is_empty() {
+            window.label().into()
+        } else {
+            title
+        },
+        window_sink(window.clone()),
+    ) {
+        log::warn!("MCP CLI window registration failed: {error}");
+    }
+}
+
 #[tauri::command]
 pub async fn mcp_start(
     window: tauri::Window,

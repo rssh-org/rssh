@@ -11,8 +11,19 @@ use rssh_core::error::AppError;
 use rssh_core::error::AppResult;
 use rssh_core::state::{AppState, SessionOwner};
 
+#[cfg(any(windows, macos, linux))]
+pub mod control;
+
+pub fn scope_id(owner: &SessionOwner) -> String {
+    match owner {
+        SessionOwner::Window(label) => format!("window-{label}"),
+        SessionOwner::Headless(id) => format!("headless-{id}"),
+    }
+}
+
 #[derive(Clone, serde::Serialize)]
 pub struct Status {
+    pub scope_id: String,
     pub endpoint: Option<EndpointInfo>,
     pub sessions: Vec<AgentSession>,
     pub requests: Vec<agent::SessionRequest>,
@@ -20,6 +31,7 @@ pub struct Status {
 
 pub fn status(state: &AppState, owner: &SessionOwner) -> AppResult<Status> {
     Ok(Status {
+        scope_id: scope_id(owner),
         endpoint: state.agent_bridge.endpoint(owner)?,
         sessions: agent::list_sessions(state, owner)?,
         requests: agent::pending_sessions(state, owner)?,
@@ -260,10 +272,13 @@ mod http {
     }
 
     pub(super) async fn start(state: Arc<AppState>, owner: SessionOwner) -> AppResult<()> {
-        if state.agent_bridge.endpoint(&owner)?.is_some() {
+        // Reserve before waiting so host teardown can revoke queued GUI starts
+        // too. Concurrent starts join this generation and reuse its endpoint.
+        let reservation = state.agent_bridge.reserve_endpoint(&owner)?;
+        let _starting = state.agent_bridge.mcp_start_lock.lock().await;
+        if reservation.endpoint()?.is_some() {
             return Ok(());
         }
-        let reservation = state.agent_bridge.reserve_endpoint(&owner)?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let authority = listener.local_addr()?.to_string();
         let origin = format!("http://{authority}");
@@ -303,6 +318,7 @@ mod http {
             },
             shutdown,
         )?;
+        let state = state.clone();
         tokio::spawn(async move {
             let server = axum::serve(listener, router).with_graceful_shutdown(async move {
                 if !*stopped.borrow() {

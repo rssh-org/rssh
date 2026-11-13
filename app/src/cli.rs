@@ -170,7 +170,8 @@ mod tests {
         assert!(version_is_older("0.9.9", CLI_VERSION));
         assert!(!version_is_older(CLI_VERSION, CLI_VERSION));
         assert!(!version_is_older("1.1.0", CLI_VERSION));
-        assert!(!version_is_older("1.0", CLI_VERSION));
+        assert!(version_is_older("1.0.0", CLI_VERSION));
+        assert!(!version_is_older("1.0", "1.0.0"));
     }
 
     #[test]

@@ -146,6 +146,10 @@ pub fn run_with(
     let builder = builder.plugin(crate::platform::tauri::navigation::init());
     builder
         .on_page_load(|_webview, _payload| {
+            #[cfg(any(windows, macos, linux))]
+            if matches!(_payload.event(), tauri::webview::PageLoadEvent::Started) {
+                commands::mcp::register_control_window(&_webview.window());
+            }
             #[cfg(any(android, ohos))]
             if matches!(_payload.event(), tauri::webview::PageLoadEvent::Started) {
                 let app = _webview.app_handle().clone();
@@ -174,6 +178,13 @@ pub fn run_with(
                     let runtime = tauri::async_runtime::handle();
                     let _guard = runtime.inner().enter();
                     let state = _window.state::<Arc<AppState>>();
+                    #[cfg(any(windows, macos, linux))]
+                    if let Some(control) = _window.try_state::<Arc<crate::mcp::control::Control>>()
+                    {
+                        control.unregister(&rssh_core::state::SessionOwner::Window(
+                            _window.label().into(),
+                        ));
+                    }
                     // Close only sessions belonging to this window.
                     rssh_core::commands::lifecycle::close_window_sessions(&state, _window.label());
                 }
@@ -185,7 +196,21 @@ pub fn run_with(
             // The native host owns asset access; the engine owns shared state.
             app.asset_protocol_scope()
                 .allow_directory(state.data_dir.join("plugins"), true)?;
-            app.manage(Arc::new(state));
+            let state = Arc::new(state);
+            app.manage(state.clone());
+            #[cfg(any(windows, macos, linux))]
+            match tauri::async_runtime::block_on(crate::mcp::control::ControlService::start(
+                state, "desktop",
+            )) {
+                Ok(service) => {
+                    app.manage(service.control.clone());
+                    app.manage(service);
+                    for window in app.webview_windows().into_values() {
+                        commands::mcp::register_control_window(&window.as_ref().window());
+                    }
+                }
+                Err(error) => log::warn!("MCP CLI control is unavailable: {error}"),
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -420,6 +445,14 @@ pub fn run_with(
             commands::ai::ai_codex_login_cancel,
             commands::ai::ai_codex_logout,
         ])
-        .run(context)
-        .expect("RSSH startup failed");
+        .build(context)
+        .expect("RSSH startup failed")
+        .run(|_app, _event| {
+            #[cfg(any(windows, macos, linux))]
+            if matches!(_event, tauri::RunEvent::Exit) {
+                if let Some(service) = _app.try_state::<crate::mcp::control::ControlService>() {
+                    service.shutdown();
+                }
+            }
+        });
 }

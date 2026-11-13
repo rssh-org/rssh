@@ -164,3 +164,47 @@ it("keeps a rapid restart behind the final timeline save and endpoint stop", asy
   expect(sequence.indexOf("mcp_stop")).toBeLessThan(sequence.indexOf("mcp_start"));
   expect(store.endpoint()?.token).toBe("new");
 });
+
+describe("external MCP startup", () => {
+  it("refreshes the current owner when the CLI starts or stops its endpoint", async () => {
+    let endpoint: { url: string; token: string } | null = null;
+    f.invoke.mockImplementation(async () => ({ scope_id: "window-main", endpoint, sessions: [], requests: [] }));
+    const store = await import("./store.svelte.ts");
+    await store.refresh();
+    expect(store.endpoint()).toBeNull();
+    expect(f.listeners.has("mcp:changed:window-main")).toBe(true);
+    expect(f.listeners.has("mcp:changed:window-other")).toBe(false);
+    endpoint = { url: "http://127.0.0.1:4321/mcp", token: "external" };
+    f.listeners.get("mcp:changed:window-main")!({ payload: {} });
+    await vi.waitFor(() => expect(store.endpoint()).toEqual(endpoint));
+    expect(f.start).not.toHaveBeenCalled();
+    endpoint = null;
+    f.listeners.get("mcp:changed:window-main")!({ payload: {} });
+    await vi.waitFor(() => expect(store.endpoint()).toBeNull());
+  });
+
+  it("rechecks after subscribing to cover startup during the first status read", async () => {
+    const endpoint = { url: "http://127.0.0.1:4321/mcp", token: "external" };
+    f.invoke.mockResolvedValue({ scope_id: "headless-client", endpoint, sessions: [], requests: [] });
+    f.invoke.mockResolvedValueOnce({ scope_id: "headless-client", endpoint: null, sessions: [], requests: [] });
+    const store = await import("./store.svelte.ts");
+    await store.refresh();
+    expect(store.endpoint()).toEqual(endpoint);
+    expect(f.invoke).toHaveBeenCalledTimes(2);
+    await store.refresh();
+    expect(f.invoke).toHaveBeenCalledTimes(3);
+  });
+
+  it("releases the owner subscription and ignores late events on disconnect", async () => {
+    f.invoke.mockResolvedValue({ scope_id: "window-main", endpoint: null, sessions: [], requests: [] });
+    const store = await import("./store.svelte.ts");
+    await store.refresh();
+    const staleCallback = f.listeners.get("mcp:changed:window-main")!;
+    f.invoke.mockClear();
+    store.disconnect();
+    expect(f.listeners.has("mcp:changed:window-main")).toBe(false);
+    staleCallback({ payload: {} });
+    await Promise.resolve();
+    expect(f.invoke).not.toHaveBeenCalled();
+  });
+});

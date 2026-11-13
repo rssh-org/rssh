@@ -50,6 +50,14 @@ fn build_state() -> AppResult<AppState> {
 /// on stdout (the launcher reads it), then serve until the process is killed.
 pub async fn run() -> std::io::Result<()> {
     let state = Arc::new(build_state().map_err(|e| std::io::Error::other(e.to_string()))?);
+    let control_service =
+        match crate::mcp::control::ControlService::start(state.clone(), "headless").await {
+            Ok(service) => Some(service),
+            Err(error) => {
+                log::warn!("MCP CLI control is unavailable: {error}");
+                None
+            }
+        };
     let token = uuid::Uuid::new_v4().to_string();
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
@@ -78,15 +86,23 @@ pub async fn run() -> std::io::Result<()> {
         };
         let expected = token.clone();
         let state = state.clone();
+        let control = control_service
+            .as_ref()
+            .map(|service| service.control.clone());
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, expected, state).await {
+            if let Err(e) = handle_conn(stream, expected, state, control).await {
                 log::warn!("rssh-server: connection ended: {e}");
             }
         });
     }
 }
 
-async fn handle_conn(stream: TcpStream, expected: String, state: Arc<AppState>) -> ConnResult {
+async fn handle_conn(
+    stream: TcpStream,
+    expected: String,
+    state: Arc<AppState>,
+    control: Option<Arc<crate::mcp::control::Control>>,
+) -> ConnResult {
     // Sniff the request without consuming it (peek): a WebSocket upgrade takes the
     // ws path below; any other GET is served the embedded frontend over HTTP, so a
     // single port serves both the UI and the IPC socket.
@@ -121,6 +137,33 @@ async fn handle_conn(stream: TcpStream, expected: String, state: Arc<AppState>) 
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     let connection_owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+    let _control_registration = if let Some(control) = control {
+        let events = tx.clone();
+        match control.register(
+            connection_owner.clone(),
+            "RSSH browser / JetBrains".into(),
+            Arc::new(move |event, payload| {
+                events
+                    .send(Message::Text(
+                        json!({"type":"event", "event":event, "payload":payload}).to_string(),
+                    ))
+                    .is_ok()
+            }),
+        ) {
+            Ok(()) => Some(ControlRegistration {
+                control,
+                owner: connection_owner.clone(),
+            }),
+            Err(error) => {
+                // CLI bootstrap is optional; losing it must not reject an
+                // already authenticated browser or JetBrains frontend.
+                log::warn!("rssh-server: CLI control registration failed; continuing WebSocket service: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     // Broadcasts "connection gone" to in-flight invoke tasks. A task blocked on a
     // frontend response (SSH auth / passphrase / host-key prompt) would otherwise
     // wait forever after the socket drops — the headless emit is a sink no-op, so
@@ -193,10 +236,22 @@ async fn handle_conn(stream: TcpStream, expected: String, state: Arc<AppState>) 
     // connections and native windows share AppState, so global waiter cleanup would
     // incorrectly cancel their in-flight SSH handshakes.
     let _ = shutdown_tx.send(true);
+    drop(_control_registration);
     writer.abort();
     let _ = writer.await;
     crate::commands::lifecycle::close_owner(&state, &connection_owner);
     Ok(())
+}
+
+struct ControlRegistration {
+    control: Arc<crate::mcp::control::Control>,
+    owner: SessionOwner,
+}
+
+impl Drop for ControlRegistration {
+    fn drop(&mut self) {
+        self.control.unregister(&self.owner);
+    }
 }
 
 /// Synchronous command dispatch. Each arm mirrors the matching `#[tauri::command]`.
@@ -2353,9 +2408,147 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
-            handle_conn(stream, "test-launch-token".into(), state).await
+            handle_conn(stream, "test-launch-token".into(), state, None).await
         });
         (address, task)
+    }
+
+    #[tokio::test]
+    async fn cli_control_tracks_the_existing_headless_connection_owner() {
+        let (state, _directory) = test_state();
+        let service = crate::mcp::control::ControlService::start(state.clone(), "headless")
+            .await
+            .unwrap();
+        let descriptor = rssh_core::mcp_control::read_descriptors(&state.data_dir)
+            .unwrap()
+            .descriptors
+            .remove(0);
+        use rssh_core::mcp_control::{request, ControlRequest};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let control = service.control.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_conn(stream, "test-launch-token".into(), state, Some(control)).await
+        });
+        let stream = TcpStream::connect(address).await.unwrap();
+        let (mut socket, _) = tokio_tungstenite::client_async(
+            format!("ws://{address}/?token=test-launch-token"),
+            stream,
+        )
+        .await
+        .unwrap();
+        socket
+            .send(Message::Text(
+                json!({"type":"invoke", "id":1, "cmd":"mcp_status", "args":{}}).to_string(),
+            ))
+            .await
+            .unwrap();
+        let reply: Value =
+            serde_json::from_slice(&socket.next().await.unwrap().unwrap().into_data()).unwrap();
+        assert_eq!(reply["ok"], true);
+        let owner_id = reply["result"]["scope_id"].as_str().unwrap();
+        let targets = request(&descriptor.endpoint, &ControlRequest::Targets)
+            .await
+            .unwrap();
+        assert_eq!(targets["targets"][0]["owner_id"], owner_id);
+        let started = request(
+            &descriptor.endpoint,
+            &ControlRequest::Start {
+                owner_id: owner_id.into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(started.get("error").is_none(), "{started}");
+        assert!(started["headers"]["Authorization"]
+            .as_str()
+            .unwrap()
+            .starts_with("Bearer "));
+        let event: Value =
+            serde_json::from_slice(&socket.next().await.unwrap().unwrap().into_data()).unwrap();
+        assert_eq!(event["event"], format!("mcp:changed:{owner_id}"));
+        let stopped = request(
+            &descriptor.endpoint,
+            &ControlRequest::Stop {
+                owner_id: owner_id.into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stopped["running"], false);
+        assert!(stopped["connection"].is_null());
+        let event: Value =
+            serde_json::from_slice(&socket.next().await.unwrap().unwrap().into_data()).unwrap();
+        assert_eq!(event["event"], format!("mcp:changed:{owner_id}"));
+        socket.close(None).await.unwrap();
+        server.await.unwrap().unwrap();
+        let targets = request(&descriptor.endpoint, &ControlRequest::Targets)
+            .await
+            .unwrap();
+        assert_eq!(targets["targets"], json!([]));
+        let gone = request(
+            &descriptor.endpoint,
+            &ControlRequest::Start {
+                owner_id: owner_id.into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(gone["error"]["code"], "mcp_owner_unavailable");
+    }
+
+    #[tokio::test]
+    async fn stopped_cli_control_does_not_block_headless_websocket_commands() {
+        let (state, _directory) = test_state();
+        let service = crate::mcp::control::ControlService::start(state.clone(), "headless")
+            .await
+            .unwrap();
+        service.shutdown();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let control = service.control.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_conn(stream, "test-launch-token".into(), state, Some(control)).await
+        });
+        let stream = TcpStream::connect(address).await.unwrap();
+        let (mut client, _) = tokio_tungstenite::client_async(
+            format!("ws://{address}/?token=test-launch-token"),
+            stream,
+        )
+        .await
+        .unwrap();
+        for (id, command) in [(1, "get_runtime_capabilities"), (2, "list_groups")] {
+            client
+                .send(Message::Text(
+                    json!({"type":"invoke", "id":id, "cmd":command, "args":{}}).to_string(),
+                ))
+                .await
+                .unwrap();
+            let response = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let response: Value = serde_json::from_slice(&response.into_data()).unwrap();
+            assert_eq!(response["type"], "response");
+            assert_eq!(response["id"], id);
+            assert_eq!(response["ok"], true);
+            if command == "get_runtime_capabilities" {
+                assert_eq!(response["result"]["cliInstall"], false);
+            } else {
+                assert!(response["result"].is_array());
+            }
+        }
+        client.close(None).await.unwrap();
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

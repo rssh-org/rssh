@@ -147,16 +147,29 @@ struct Inner {
 #[derive(Default)]
 pub struct AgentBridge {
     inner: Mutex<Inner>,
+    /// Serialize listener creation and CLI stop requests. Host teardown can
+    /// still revoke endpoint reservations without awaiting this lock.
+    pub mcp_start_lock: tokio::sync::Mutex<()>,
 }
 
 pub struct EndpointReservation<'a> {
     bridge: &'a AgentBridge,
     owner: SessionOwner,
     nonce: uuid::Uuid,
-    committed: bool,
+    cleanup_pending: bool,
 }
 
 impl EndpointReservation<'_> {
+    /// A stop invalidates this generation even while its start is waiting.
+    pub fn endpoint(&self) -> AppResult<Option<EndpointInfo>> {
+        locked(&self.bridge.inner)?
+            .endpoints
+            .get(&self.owner)
+            .filter(|endpoint| endpoint.nonce == self.nonce)
+            .map(|endpoint| endpoint.info.clone())
+            .ok_or_else(|| error("agent_endpoint_stopped"))
+    }
+
     pub fn commit(
         mut self,
         info: EndpointInfo,
@@ -170,21 +183,21 @@ impl EndpointReservation<'_> {
             .ok_or_else(|| error("agent_endpoint_stopped"))?;
         endpoint.info = Some(info.clone());
         endpoint.shutdown = Some(shutdown);
-        self.committed = true;
+        self.cleanup_pending = false;
         Ok(info)
     }
 }
 
 impl Drop for EndpointReservation<'_> {
     fn drop(&mut self) {
-        if self.committed {
+        if !self.cleanup_pending {
             return;
         }
         if let Ok(mut inner) = self.bridge.inner.lock() {
             if inner
                 .endpoints
                 .get(&self.owner)
-                .is_some_and(|e| e.nonce == self.nonce)
+                .is_some_and(|e| e.nonce == self.nonce && e.info.is_none())
             {
                 inner.endpoints.remove(&self.owner);
             }
@@ -200,10 +213,16 @@ impl AgentBridge {
             .and_then(|e| e.info.clone()))
     }
 
+    /// Reserve or join the current generation before awaiting the start lock.
     pub fn reserve_endpoint(&self, owner: &SessionOwner) -> AppResult<EndpointReservation<'_>> {
         let mut inner = locked(&self.inner)?;
-        if inner.endpoints.contains_key(owner) {
-            return Err(error("agent_endpoint_running"));
+        if let Some(endpoint) = inner.endpoints.get(owner) {
+            return Ok(EndpointReservation {
+                bridge: self,
+                owner: owner.clone(),
+                nonce: endpoint.nonce,
+                cleanup_pending: false,
+            });
         }
         let nonce = uuid::Uuid::new_v4();
         inner.endpoints.insert(
@@ -218,7 +237,7 @@ impl AgentBridge {
             bridge: self,
             owner: owner.clone(),
             nonce,
-            committed: false,
+            cleanup_pending: true,
         })
     }
 
@@ -896,6 +915,62 @@ mod tests {
     use crate::ai::commands;
     use std::sync::Arc;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn joined_endpoint_start_can_commit_before_the_original_reservation() {
+        let bridge = AgentBridge::default();
+        let owner = SessionOwner::Window("main".into());
+        let original = bridge.reserve_endpoint(&owner).unwrap();
+        let joined = bridge.reserve_endpoint(&owner).unwrap();
+        let (shutdown, _) = watch::channel(false);
+        let info = EndpointInfo {
+            url: "http://127.0.0.1:1/mcp".into(),
+            token: "shared-endpoint".into(),
+        };
+
+        joined.commit(info.clone(), shutdown).unwrap();
+        assert_eq!(original.endpoint().unwrap().unwrap().token, info.token);
+        drop(original);
+        assert_eq!(bridge.endpoint(&owner).unwrap().unwrap().token, info.token);
+    }
+
+    #[test]
+    fn stopped_endpoint_reservations_cannot_adopt_or_remove_a_replacement() {
+        let bridge = AgentBridge::default();
+        let owner = SessionOwner::Window("main".into());
+        let original = bridge.reserve_endpoint(&owner).unwrap();
+        let joined = bridge.reserve_endpoint(&owner).unwrap();
+        bridge.stop_endpoint(&owner).unwrap();
+        let replacement = bridge.reserve_endpoint(&owner).unwrap();
+        let (shutdown, _) = watch::channel(false);
+        replacement
+            .commit(
+                EndpointInfo {
+                    url: "http://127.0.0.1:2/mcp".into(),
+                    token: "replacement".into(),
+                },
+                shutdown,
+            )
+            .unwrap();
+
+        assert!(original.endpoint().is_err());
+        assert!(joined.endpoint().is_err());
+        let (shutdown, _) = watch::channel(false);
+        assert!(joined
+            .commit(
+                EndpointInfo {
+                    url: "http://127.0.0.1:3/mcp".into(),
+                    token: "stale".into(),
+                },
+                shutdown
+            )
+            .is_err());
+        drop(original);
+        assert_eq!(
+            bridge.endpoint(&owner).unwrap().unwrap().token,
+            "replacement"
+        );
+    }
 
     struct Fixture {
         host: Host,

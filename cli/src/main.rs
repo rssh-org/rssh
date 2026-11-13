@@ -65,6 +65,11 @@ enum Cmd {
         #[command(subcommand)]
         action: ConfigCmd,
     },
+    /// Manage MCP in a running local RSSH frontend; always outputs JSON
+    Mcp {
+        #[command(subcommand)]
+        action: commands::mcp::McpCmd,
+    },
     /// Generate shell completion script
     Completions {
         /// "zsh", "bash", "fish", or "powershell" (alias: "pwsh")
@@ -234,7 +239,24 @@ fn main() {
         .completer("rssh")
         .complete();
 
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|error| {
+        if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("mcp"))
+            && error.use_stderr()
+        {
+            println!("{}", serde_json::json!({"error": {"code": "invalid_arguments", "message": error.to_string()}}));
+            std::process::exit(1);
+        }
+        error.exit();
+    });
+
+    if let Some(Cmd::Mcp { action }) = cli.command.as_ref() {
+        let (output, success) = commands::mcp::run(action);
+        println!("{output}");
+        if !success {
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // No subcommand → try launching GUI on Linux.
     #[cfg(linux)]
@@ -297,6 +319,7 @@ fn main() {
             GroupCmd::Rm { name } => commands::group::cmd_rm_group(&conn, &name),
         },
         Some(Cmd::Config { action }) => commands::config::cmd_config(&conn, action),
+        Some(Cmd::Mcp { .. }) => unreachable!("handled before database initialization"),
         Some(Cmd::Completions { .. }) => unreachable!("handled before database initialization"),
     };
 

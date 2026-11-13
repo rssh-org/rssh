@@ -2923,3 +2923,143 @@ describe("sumAuditTokens", () => {
     expect(ai.sumAuditTokens({ entries: [] } as never)).toEqual({ tokens_in: 0, tokens_out: 0 });
   });
 });
+
+describe("external MCP conversation shutdown", () => {
+  const tabId = "external-mcp-tab";
+  const info = {
+    tab_id: tabId,
+    instance_id: "external-mcp-instance",
+    target_id: "external-mcp-terminal",
+    conversation_id: "external-mcp-conversation",
+    skill: "general",
+    provider: "",
+    model: "",
+    shell: "posix" as const,
+  };
+  const args = { tabId, targetKind: "local" as const, targetId: info.target_id };
+
+  function listener(kind: string) {
+    const callback = listenMock.mock.calls.find(([event]) => event === `ai:${kind}:${tabId}`)?.[1];
+    if (!callback) throw new Error(`Missing ${kind} listener`);
+    return callback;
+  }
+
+  async function start(
+    source: "mcp" | "ai" = "mcp",
+    handlers: Record<string, () => unknown> = {},
+  ) {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    ai.activateTab(tabId);
+    ai.openPanel(tabId);
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "mcp_accept_session" || command === "ai_session_start") return { ...info, source };
+      if (handlers[command]) return handlers[command]();
+      return null;
+    });
+    const lease = ai.captureSessionLease(tabId);
+    if (source === "mcp") await ai.startMcpSession({ ...args, lease }, "external-request");
+    else await ai.startSession({ ...args, lease, skill: "general", provider: "", model: "" });
+    return ai;
+  }
+
+  it("drains and persists the final MCP timeline before releasing its backend lease", async () => {
+    let releaseDrain!: (mutations: unknown[]) => void;
+    const drained = new Promise<unknown[]>(resolve => { releaseDrain = resolve; });
+    let releasePersist!: () => void;
+    const persisted = new Promise<void>(resolve => { releasePersist = resolve; });
+    const ai = await start("mcp", {
+      ai_session_prepare_stop: () => drained,
+      ai_conversation_save_timeline: () => persisted,
+    });
+    listener("command_proposed")({ payload: {
+      id: "pending-external-command", kind: "run_command", cmd: "echo test", explain: "", side_effect: "",
+      execution: { full_cmd: "echo test", sentinel: "sentinel", timeout_s: 30 },
+    } });
+
+    listener("session_ended")({ payload: {} });
+    expect(ai.sessionForTab(tabId)).toBeUndefined();
+    expect(ai.chatItems(tabId)).toEqual([]);
+    // Join the teardown that the event started; calling stopSession before
+    // checking the synchronous reset would mask missing event handling.
+    const teardown = ai.stopSession(tabId);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("ai_session_prepare_stop", {
+      tabId, instanceId: info.instance_id,
+    }));
+    expect(invokeMock.mock.calls.some(([command]) => command === "ai_conversation_save_timeline")).toBe(false);
+    expect(invokeMock.mock.calls.some(([command]) => command === "ai_session_stop")).toBe(false);
+
+    releaseDrain([{ kind: "command_rejected", payload: { id: "pending-external-command", reason: "Session closed" } }]);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("ai_conversation_save_timeline", expect.anything()));
+    const save = invokeMock.mock.calls.find(([command]) => command === "ai_conversation_save_timeline")?.[1] as { id: string; timeline: string };
+    expect(save.id).toBe(info.conversation_id);
+    expect(JSON.parse(save.timeline)).toEqual([
+      expect.objectContaining({ kind: "command", rejected: { reason: "Session closed" } }),
+      expect.objectContaining({ kind: "note", text: expect.any(String) }),
+    ]);
+    expect(invokeMock.mock.calls.some(([command]) => command === "ai_session_stop")).toBe(false);
+
+    releasePersist();
+    await teardown;
+    expect(invokeMock).toHaveBeenCalledWith("ai_session_stop", { tabId, instanceId: info.instance_id });
+    const order = invokeMock.mock.calls.map(([command]) => command);
+    expect(order.indexOf("ai_session_prepare_stop")).toBeLessThan(order.indexOf("ai_conversation_save_timeline"));
+    expect(order.indexOf("ai_conversation_save_timeline")).toBeLessThan(order.indexOf("ai_session_stop"));
+  });
+
+  it("interrupts an active internal probe without reporting a result to the stopped actor", async () => {
+    const ai = await start();
+    await registerIdleTerminals(tabId);
+    listener("internal_command")({ payload: {
+      id: "download-probe", full_cmd: "python3 --version", sentinel: "probe-sentinel",
+    } });
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("pty_write", expect.objectContaining({
+      sessionId: info.target_id,
+    })));
+    const session = { tabId, instanceId: info.instance_id };
+    expect(ai.isCommandRunning(session, "download-probe")).toBe(true);
+
+    listener("session_ended")({ payload: {} });
+    expect(ai.sessionForTab(tabId)).toBeUndefined();
+    expect(ai.commandExecutionStatus(session, "download-probe")).toBeNull();
+    await ai.stopSession(tabId);
+    await vi.advanceTimersByTimeAsync(61_000);
+
+    const interrupts = invokeMock.mock.calls.filter(([command, value]) =>
+      command === "pty_write" && JSON.stringify((value as { data?: number[] }).data) === "[3]");
+    expect(interrupts).toHaveLength(1);
+    expect(invokeMock.mock.calls.some(([command]) => command === "ai_command_result")).toBe(false);
+    expect(ai.commandExecutionStatus(session, "download-probe")).toBeNull();
+    expect(ai.sessionForTab(tabId)).toBeUndefined();
+  });
+
+  it("ignores a queued old ended callback after a replacement MCP instance starts", async () => {
+    const ai = await start();
+    const ended = listener("session_ended");
+    ended({ payload: {} });
+    await ai.stopSession(tabId);
+    const replacement = { ...info, instance_id: "replacement-instance", conversation_id: "replacement-conversation", source: "mcp" };
+    invokeMock.mockImplementation(async (command) => command === "mcp_accept_session" ? replacement : null);
+    await ai.startMcpSession({ ...args, lease: ai.captureSessionLease(tabId) }, "replacement-request");
+    invokeMock.mockClear();
+
+    ended({ payload: {} });
+    await Promise.resolve();
+
+    expect(ai.sessionForTab(tabId)).toEqual(replacement);
+    expect(ai.chatItems(tabId)).toEqual([]);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary AI conversations available when their actor reports ended", async () => {
+    const ai = await start("ai");
+    invokeMock.mockClear();
+
+    listener("session_ended")({ payload: {} });
+    await Promise.resolve();
+
+    expect(ai.sessionForTab(tabId)).toEqual({ ...info, source: "ai" });
+    expect(ai.chatItems(tabId)).toEqual([expect.objectContaining({ kind: "note" })]);
+    expect(invokeMock.mock.calls.some(([command]) => command === "ai_session_prepare_stop" || command === "ai_session_stop")).toBe(false);
+  });
+});

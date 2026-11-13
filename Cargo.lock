@@ -5546,9 +5546,11 @@ dependencies = [
  "rpassword",
  "rssh-core",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "url",
  "uuid",
 ]
 
