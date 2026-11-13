@@ -259,8 +259,8 @@ impl ShellKind {
         String::new()
     }
 
-    /// Map a local shell binary path (as remembered by `PtyHandle`) to a
-    /// ShellKind for local subprocess invocation (for example file downloads).
+    /// Map an explicitly configured shell binary path to a ShellKind for
+    /// subprocess invocation (for example connector file downloads).
     pub fn from_local_path(path: &str) -> Self {
         // File-name basename, case-insensitive. Path may be Unix-style
         // (`/bin/bash`), Windows-style (`C:\Windows\System32\cmd.exe`),

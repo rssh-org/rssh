@@ -375,11 +375,10 @@ fn session_info(
         }
         #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Pty => {
-            let session = locked(&state.pty_sessions)?
-                .get(id)
-                .cloned()
-                .ok_or_else(|| error("agent_session_unavailable"))?;
-            ("local", OwnedAiTarget::Pty(session))
+            if !locked(&state.pty_sessions)?.contains_key(id) {
+                return Err(error("agent_session_unavailable"));
+            }
+            ("local", OwnedAiTarget::Pty)
         }
         #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Serial => ("serial", OwnedAiTarget::Serial),

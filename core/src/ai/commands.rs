@@ -1194,8 +1194,8 @@ pub async fn ai_session_set_shell(
     })
 }
 
-/// SSH 重连后重新绑定 target。actor 更新连接和 shell 类型，让后续命令、
-/// file_ops / SFTP 使用新目标的环境。history / audit / pending 全保留。
+/// SSH 重连后重新绑定 target。actor 更新连接并保留会话选择的 shell，
+/// 让后续命令、file_ops / SFTP 使用新目标。history / audit / pending 全保留。
 ///
 /// 错误模型：target_id 必须在 state.sessions / pty_sessions 里存在，否则
 /// rebind 后立即触发的 file_ops 会拿到孤儿 handle 失败。前端通常在 SSH 重连

@@ -1069,9 +1069,7 @@
             listeners.forEach((unlisten) => unlisten());
             throw error;
         }
-        return () => {
-            listeners.splice(0).forEach((unlisten) => unlisten());
-        };
+        return () => listeners.splice(0).forEach((unlisten) => unlisten());
     }
 
     const reservedSessionAttempt = createReservedSessionAttempt({

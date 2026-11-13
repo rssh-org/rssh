@@ -44,12 +44,10 @@ impl Drop for ChildReaper {
 
 /// 本地 PTY 会话句柄，Clone + Send + Sync。
 /// `_reaper` 跟着 PtyHandle 走，最后一份 clone 消失时回收子进程。
-/// `shell_path()` 只返回启动参数中明确指定的 shell。
 #[derive(Clone)]
 pub struct PtyHandle {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
-    shell_path: Arc<str>,
     connector: Option<Arc<ConnectorSpec>>,
     _reaper: Arc<ChildReaper>,
 }
@@ -72,17 +70,6 @@ impl PtyHandle {
             .map_err(|e| {
                 AppError::pty("pty_op_failed", serde_json::json!({ "err": e.to_string() }))
             })
-    }
-
-    /// 实际启动的 shell。SSM 启动的是连接客户端，不能把它当作远端 shell。
-    pub fn shell_path(&self) -> Option<&str> {
-        match self.connector() {
-            Some(
-                ConnectorSpec::DockerExec { shell, .. } | ConnectorSpec::KubectlExec { shell, .. },
-            ) => Some(shell),
-            Some(ConnectorSpec::AwsSsm { .. }) => None,
-            None => Some(&self.shell_path),
-        }
     }
 
     pub fn with_connector(mut self, connector: ConnectorSpec) -> Self {
@@ -355,7 +342,7 @@ pub fn spawn(
     if !cfg!(windows) {
         cmd.arg("-l");
     }
-    spawn_builder(session_id, cols, rows, sink, cmd, shell)
+    spawn_builder(session_id, cols, rows, sink, cmd)
 }
 
 /// Start a specific local program under a PTY. Used by dynamic connectors such
@@ -379,8 +366,7 @@ pub fn spawn_command(
     for arg in args {
         cmd.arg(arg);
     }
-    let program_label = program.to_string_lossy().into_owned();
-    spawn_builder(session_id, cols, rows, sink, cmd, program_label)
+    spawn_builder(session_id, cols, rows, sink, cmd)
 }
 
 fn spawn_builder(
@@ -389,7 +375,6 @@ fn spawn_builder(
     rows: u16,
     sink: PtySink,
     cmd: CommandBuilder,
-    shell_path: String,
 ) -> AppResult<(String, PtyHandle)> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -419,7 +404,6 @@ fn spawn_builder(
     let handle = PtyHandle {
         writer: Arc::new(Mutex::new(writer)),
         master: Arc::new(Mutex::new(pair.master)),
-        shell_path: Arc::from(shell_path.as_str()),
         connector: None,
         _reaper: Arc::new(ChildReaper {
             child: Mutex::new(Some(child)),
@@ -492,22 +476,5 @@ mod tests {
         let output = String::from_utf8_lossy(&output);
         assert!(output.contains("PTY_INPUT:hello-pty"), "{output}");
         assert!(output.contains("41 103"), "{output}");
-        assert_eq!(handle.shell_path(), Some("/bin/sh"));
-        for shell in ["pwsh", "cmd.exe"] {
-            let connector = handle.clone().with_connector(ConnectorSpec::DockerExec {
-                context: "test".into(),
-                container_id: "container".into(),
-                container_name: "test".into(),
-                shell: shell.into(),
-            });
-            assert_eq!(connector.shell_path(), Some(shell));
-        }
-        let connector = handle.with_connector(ConnectorSpec::AwsSsm {
-            profile: String::new(),
-            region: "us-east-1".into(),
-            instance_id: "i-0123456789abcdef0".into(),
-            account_id: "123456789012".into(),
-        });
-        assert_eq!(connector.shell_path(), None);
     }
 }

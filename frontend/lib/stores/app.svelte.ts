@@ -1389,9 +1389,6 @@ export async function dynamicDiscoveryToolStatus(platform: DynamicPlatform): Pro
 export async function loadDynamicDiscoveryContexts(platform: DynamicPlatform): Promise<DynamicDiscoveryContext[]> {
   return invoke<DynamicDiscoveryContext[]>("list_dynamic_discovery_contexts", { platform });
 }
-export async function discoverDynamicTargets(): Promise<DynamicDiscoverySnapshot> {
-  return invoke<DynamicDiscoverySnapshot>("discover_dynamic_targets");
-}
 export async function loadSnippets(): Promise<Snippet[]> {
   return invoke<Snippet[]>("load_snippets");
 }

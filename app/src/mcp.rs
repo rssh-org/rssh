@@ -98,7 +98,7 @@ mod http {
     fn tool_definitions() -> Vec<Tool> {
         let list = Tool::new(
             "list_sessions",
-            "List connected terminals in this RSSH window. Select the returned session_id and call open_session to request access. An empty tab_id means the terminal frontend is still registering; retry discovery before opening it. Shell metadata reflects RSSH's existing detection/configuration and can be stale after a nested shell.",
+            "List connected terminals in this RSSH window. Select the returned session_id and call open_session to request access. An empty tab_id means the terminal frontend is still registering; retry discovery before opening it. Shell metadata reflects the active conversation's manual selection, or defaults to POSIX without an active conversation. Serial and Telnet retain their transport kind. The selection does not change the terminal's actual shell.",
             json!({"type":"object", "properties":{}, "additionalProperties":false})
                 .as_object().unwrap().clone(),
         ).annotate(ToolAnnotations::new().read_only(true));
