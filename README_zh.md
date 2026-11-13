@@ -142,6 +142,26 @@ macOS、Windows、Linux 和 Android 安装包从 [Releases](https://github.com/r
 安装：**Settings → Plugins → ⚙ → Install Plugin from Disk…**，选对应平台的 zip 后重启。
 打开底部 **RSSH** 工具窗口即可使用；标题栏的 ✕ 停止内置 server。
 
+## 通过 CLI 连接本地 Agent
+
+同时更新 RSSH 应用/服务端和已安装的 CLI，保持桌面窗口或本机 JetBrains/浏览器前端打开，然后让本地 Agent 执行：
+
+```sh
+rssh mcp start
+```
+
+命令会为已有前端开启 MCP，输出包含 `url`、`headers.Authorization` 和 `transport: "streamable-http"` 的 JSON。Agent 可以据此配置自己的 MCP 客户端，通过 `list_sessions` 验证连接，再用 `open_session` 申请使用终端。终端访问仍需在 RSSH 中接受，命令审批也继续由 RSSH 处理。CLI 不修改 Agent 配置；新配置能否在当前对话立即生效，取决于 Agent 是否支持重载 MCP。
+
+用 `rssh mcp status` 查询 MCP 服务是否开启及其连接信息，用 `rssh mcp stop` 停止服务。停止后返回包含 `running: false` 和 `connection: null` 的 JSON。有多个匹配的前端时，命令会返回错误和候选项，可按其中的实例和 owner ID 明确选择；`start`、`stop`、`status` 均支持相同的选择参数：
+
+```sh
+rssh mcp start --instance <实例UUID> --owner <owner-id>
+```
+
+这些命令的 stdout 始终输出 JSON，错误也以 JSON 返回并使用非零退出码，失效实例会作为警告报告。连接仅限本机，停止 MCP 或关闭所属前端后即失效。桌面 GUI、本机 Headless/JetBrains 前端支持此入口；原生移动 GUI 不提供这个桌面控制服务。
+
+这些 CLI 命令通过本机 loopback HTTP 控制入口调用，不额外鉴权，也不访问加密存储。Host / Origin 校验拦截跨站请求，该控制入口不提供同机不同用户之间的隔离。返回给 Agent 的 MCP 连接仍使用自身的 Bearer token，并保留 RSSH 的终端访问授权流程。
+
 ## 开发
 
 参见 [CONTRIBUTING.md](CONTRIBUTING.md)。

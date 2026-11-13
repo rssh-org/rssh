@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type Event as TauriEvent, type UnlistenFn } from "@tauri-apps/api/event";
 import { saveTextFile, fileStamp } from "../save-file.ts";
 import { createSidePanelState } from "../stores/panel-state.svelte.ts";
+import { toast } from "../stores/toast.svelte.ts";
 import { t, errMsg, locale as currentLocale } from "../i18n/index.svelte.ts";
 import { extractOutput, findSentinel } from "./pty-output.ts";
 import { decodeStreamChunk } from "../terminal/stream-decode.ts";
@@ -2422,6 +2423,17 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
 
   await addListener<{}>(`ai:session_ended:${tab}`, () => {
     pushChat(tab, { kind: "note", text: t("ai.session.ended_note"), at: Date.now() });
+    if (info.source === "mcp") {
+      // External MCP stop only revokes access and signals the actor. Reuse the
+      // normal teardown to drain terminal execution, save the final timeline,
+      // and release this exact instance's backend conversation lease.
+      for (const execution of _commandExecutions.values()) {
+        if (execution.tabId === tab && execution.instanceId === info.instance_id) {
+          cancelCommandExecution(session, execution.commandId);
+        }
+      }
+      void endConversation(tab).catch(error => toast.error(errMsg(error)));
+    }
   });
 
     assertTabLive(tab, generation);

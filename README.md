@@ -144,6 +144,26 @@ Install: **Settings → Plugins → ⚙ → Install Plugin from Disk…**, pick 
 your OS and restart. Open the **RSSH** tool window (bottom) to start; the ✕ in its
 title bar stops the embedded server.
 
+## Connect a local agent through the CLI
+
+Update both the RSSH app/server and the installed CLI, keep a desktop window or local JetBrains/browser frontend open, then ask your agent to run:
+
+```sh
+rssh mcp start
+```
+
+The command enables MCP in that existing frontend and prints JSON with `url`, `headers.Authorization`, and `transport: "streamable-http"`. The agent can use those fields in its own MCP client configuration, verify `list_sessions`, and request access through `open_session`. RSSH still asks you to accept access to the terminal, and command approval remains in RSSH. The CLI does not edit agent configuration; whether a newly configured server becomes available immediately depends on the agent's MCP reload support.
+
+Use `rssh mcp status` to query whether the MCP service is running and retrieve its connection information, and `rssh mcp stop` to disable it. Stop returns JSON with `running: false` and `connection: null`. With more than one matching frontend, the command returns an error with candidates; choose one explicitly using the returned instance and owner IDs. `start`, `stop`, and `status` all accept the same selectors:
+
+```sh
+rssh mcp start --instance <instance-uuid> --owner <owner-id>
+```
+
+These commands print JSON on stdout, including errors, and return a nonzero exit code on failure. Stale instances are reported as warnings. The connection is local to this machine and expires when MCP stops or its owning frontend closes. This works with desktop GUI and local headless/JetBrains frontends; native mobile GUI does not expose this desktop control service.
+
+These CLI commands use a loopback HTTP control endpoint without additional authentication or access to encrypted storage. Host and Origin checks block cross-site requests; the control endpoint does not isolate users on the same machine. The MCP connection returned to your agent still uses its Bearer token and RSSH's terminal access approval.
+
 ## Development
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

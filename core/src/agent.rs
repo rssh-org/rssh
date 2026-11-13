@@ -147,6 +147,9 @@ struct Inner {
 #[derive(Default)]
 pub struct AgentBridge {
     inner: Mutex<Inner>,
+    /// Serialize listener creation and CLI stop requests. Host teardown can
+    /// still revoke endpoint reservations without awaiting this lock.
+    pub mcp_start_lock: tokio::sync::Mutex<()>,
 }
 
 pub struct EndpointReservation<'a> {

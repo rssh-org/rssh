@@ -23,7 +23,7 @@ export interface SessionRequest {
   title: string;
 }
 interface PendingRequest extends SessionRequest { busy: boolean; error?: string }
-interface Status { endpoint: Endpoint | null; sessions: AgentSession[]; requests: SessionRequest[] }
+interface Status { scope_id?: string; endpoint: Endpoint | null; sessions: AgentSession[]; requests: SessionRequest[] }
 type ConnectedSession = { sessionId: string; tabId: string; label: string; type: string };
 
 let _endpoint = $state<Endpoint | null>(null);
@@ -35,6 +35,7 @@ let mutations: Promise<unknown> = Promise.resolve();
 const subscriptions = new Map<string, Promise<UnlistenFn>>();
 const registrations = new Map<string, string>();
 const earlyRequests = new Map<string, SessionRequest[]>();
+let endpointSubscription: { scopeId: string; stop?: UnlistenFn } | null = null;
 
 export function endpoint() { return _endpoint; }
 export function error() { return _error; }
@@ -92,7 +93,33 @@ function mutate(action: () => Promise<void>): Promise<void> {
   return operation;
 }
 
+async function observeEndpoint(scopeId: string): Promise<boolean> {
+  if (endpointSubscription?.scopeId === scopeId) return false;
+  endpointSubscription?.stop?.();
+  const subscription: { scopeId: string; stop?: UnlistenFn } = { scopeId };
+  endpointSubscription = subscription;
+  try {
+    const stop = await listen(`mcp:changed:${scopeId}`, () => {
+      if (endpointSubscription !== subscription) return;
+      void refresh().catch(error => { _error = errMsg(error); });
+    });
+    if (endpointSubscription !== subscription) { stop(); return false; }
+    subscription.stop = stop;
+    return true;
+  } catch (error) {
+    if (endpointSubscription === subscription) endpointSubscription = null;
+    throw error;
+  }
+}
+
 async function applyStatus(status: Status, expected: number) {
+  if (revision !== expected) return;
+  if (status.scope_id && await observeEndpoint(status.scope_id)) {
+    // A CLI may start MCP between the first status read and listener setup.
+    // Read again after subscribing so that transition cannot be missed.
+    if (revision !== expected) return;
+    status = await invoke<Status>("mcp_status");
+  }
   if (revision !== expected) return;
   _endpoint = status.endpoint;
   _sessions = status.sessions.filter(s => app.sessionIdForTab(s.tab_id) === s.session_id);
@@ -222,6 +249,8 @@ export async function reject(id: string) {
 
 export function disconnect() {
   ++revision;
+  endpointSubscription?.stop?.();
+  endpointSubscription = null;
   for (const id of [...subscriptions.keys()]) detach(id);
   _endpoint = null;
   _requests = [];

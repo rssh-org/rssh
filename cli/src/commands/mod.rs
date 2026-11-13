@@ -4,5 +4,6 @@ pub mod config;
 pub mod edit;
 pub mod group;
 pub mod ls;
+pub mod mcp;
 pub mod open;
 pub mod rm;

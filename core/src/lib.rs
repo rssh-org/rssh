@@ -8,6 +8,7 @@ pub mod db;
 pub mod emitter;
 pub mod error;
 pub mod files;
+pub mod mcp_control;
 pub mod migration;
 pub mod models;
 pub mod redaction;
@@ -20,4 +21,4 @@ pub mod telnet_profile;
 pub mod terminal;
 
 pub use ssh::bastion;
-pub const CLI_VERSION: &str = "1.0.0";
+pub const CLI_VERSION: &str = "1.1.0";

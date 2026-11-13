@@ -22,6 +22,8 @@ rg 'emit\(|format!\("[a-z]+:' core/src app/src   # 核对最终 channel 的构�
 
 GUI 内嵌终端跑 `rssh-cli` 时，CLI 通过 OSC 7337 转义序列与 GUI 通信，xterm parser 解码后调 store。要扩通信，加个 OSC kind，**不要**起 socket / pipe / tauri event。
 
+外部本机 Agent 管理 MCP 是用户明确允许的例外：`rssh mcp start/stop/status` 使用仅 loopback 的普通 HTTP 控制入口，不增加控制 token 或鉴权，不访问 `SecretStore`；内部目标发现只用于选择所属窗口。该入口只允许发现目标、启停及查询 MCP，不能扩展成任意 command 转发器。Host / Origin 校验用于拦截跨站访问，不提供同机不同用户之间的隔离。MCP 服务本身仍保留 Bearer 和会话授权流程。内嵌终端的既有 open / fwd 通信仍用 OSC 7337。
+
 ```bash
 rg 'OSC_RSSH_ID|7337' frontend cli/src
 ```
