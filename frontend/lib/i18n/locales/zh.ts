@@ -1155,6 +1155,7 @@ const zh: Messages = {
   "error.cli_not_bundled": "CLI 二进制未打包到此版本。构建：cargo build --release -p rssh-cli",
   "error.cli_osascript_failed": "运行 osascript 失败：{err}",
   "error.cli_install_cancelled": "安装被取消或失败",
+  "error.cli_completions_failed": "生成 CLI 补全脚本失败：{err}",
   "error.cli_priv_request_failed": "申请权限失败：{err}",
 
   // ── 密钥存储（envelope 加密 DB + master-key 后端）──

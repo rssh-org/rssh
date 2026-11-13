@@ -1,3 +1,5 @@
+#[cfg(any(feature = "tauri", test))]
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -179,6 +181,113 @@ mod tests {
         assert!(version_is_older("rssh 1.0.0", CLI_VERSION));
         assert!(version_is_older("", CLI_VERSION));
     }
+
+    #[test]
+    fn zsh_install_preserves_config_and_refreshes_script_without_duplicate_init() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("custom-zdotdir");
+        std::fs::create_dir(&config).unwrap();
+        let existing = "# user's config\nexport EDITOR=vim";
+        std::fs::write(config.join(".zshrc"), existing).unwrap();
+
+        install_zsh_completions(home.path(), &config, b"first script").unwrap();
+        let first = std::fs::read_to_string(config.join(".zshrc")).unwrap();
+        install_zsh_completions(home.path(), &config, b"updated script").unwrap();
+
+        assert!(first.starts_with(existing));
+        assert_eq!(
+            std::fs::read_to_string(config.join(".zshrc")).unwrap(),
+            first
+        );
+        assert!(!home.path().join(".zshrc").exists());
+        assert_eq!(
+            std::fs::read(home.path().join(".zsh/completions/_rssh")).unwrap(),
+            b"updated script"
+        );
+    }
+
+    #[cfg(any(macos, linux))]
+    #[test]
+    fn zsh_install_registers_completion_in_a_fresh_shell_and_preserves_existing_compinit() {
+        match Command::new("zsh").arg("--version").output() {
+            Ok(output) => assert!(output.status.success()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("failed to run zsh: {error}"),
+        }
+        let home = tempfile::tempdir().unwrap();
+        install_zsh_completions(
+            home.path(),
+            home.path(),
+            b"_rssh_test() { :; }\ncompdef _rssh_test rssh\n",
+        )
+        .unwrap();
+        let output = Command::new("zsh")
+            .args([
+                "-f",
+                "-c",
+                r#"source "$HOME/.zshrc"
+[[ ${_comps[rssh]} == _rssh_test ]] || exit 1
+compinit() { print -u2 'compinit must not run twice'; return 1; }
+source "$HOME/.zshrc"
+[[ ${_comps[rssh]} == _rssh_test ]]"#,
+            ])
+            .env("HOME", home.path())
+            .env("ZDOTDIR", home.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        assert!(output.stderr.is_empty(), "{:?}", output);
+    }
+
+    #[test]
+    fn zsh_install_reports_unreadable_config_instead_of_replacing_it() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".zshrc")).unwrap();
+        assert!(install_zsh_completions(home.path(), home.path(), b"script").is_err());
+        assert!(home.path().join(".zshrc").is_dir());
+    }
+
+    #[cfg(any(macos, linux))]
+    #[test]
+    fn zsh_install_discovers_zdotdir_from_zshenv_without_loading_zshrc() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("custom zsh config");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::write(
+            home.path().join(".zshenv"),
+            "print -r -- 'startup output'\nprint -u2 -- 'startup diagnostic'\nexport ZDOTDIR=\"$HOME/custom zsh config\"\n",
+        )
+        .unwrap();
+        std::fs::write(config.join(".zshrc"), "return 42\n").unwrap();
+
+        let detected = match zsh_config_dir("zsh", home.path(), None) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            result => result.unwrap(),
+        };
+        assert_eq!(detected, config);
+        install_zsh_completions(home.path(), &detected, b"completion script").unwrap();
+        assert!(!home.path().join(".zshrc").exists());
+        assert!(std::fs::read_to_string(config.join(".zshrc"))
+            .unwrap()
+            .contains(ZSH_COMPLETION_INIT));
+    }
+
+    #[cfg(any(macos, linux))]
+    #[test]
+    fn zsh_config_probe_preserves_startup_errors() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".zshenv"),
+            "print -u2 -- 'startup failed'\nexit 17\n",
+        )
+        .unwrap();
+        let error = zsh_config_dir("zsh", home.path(), None).unwrap_err();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return;
+        }
+        assert!(error.to_string().contains("startup failed"));
+        assert!(error.to_string().contains("17"));
+    }
 }
 
 #[cfg(feature = "tauri")]
@@ -257,26 +366,30 @@ pub fn cli_install(app: AppHandle) -> AppResult<String> {
     }
 
     // Setup completions (user-level, no admin needed)
-    setup_completions(&dest);
+    setup_completions(&dest)?;
 
     Ok(dest.display().to_string())
 }
 
 #[cfg(feature = "tauri")]
-fn setup_completions(cli: &PathBuf) {
+fn setup_completions(cli: &PathBuf) -> AppResult<()> {
     let home = match dirs::home_dir() {
         Some(h) => h,
-        None => return,
+        None => return Ok(()),
     };
 
     let shell = std::env::var("SHELL").unwrap_or_default();
 
     if shell.contains("zsh") {
-        let dir = home.join(".zsh/completions");
-        let _ = std::fs::create_dir_all(&dir);
-        if let Ok(out) = Command::new(cli).arg("completions").arg("zsh").output() {
-            let _ = std::fs::write(dir.join("_rssh"), &out.stdout);
+        let out = Command::new(cli).arg("completions").arg("zsh").output()?;
+        if !out.status.success() || out.stdout.is_empty() {
+            return Err(AppError::other(
+                "cli_completions_failed",
+                serde_json::json!({ "err": String::from_utf8_lossy(&out.stderr).trim() }),
+            ));
         }
+        let config_dir = zsh_config_dir(&shell, &home, std::env::var_os("ZDOTDIR").as_deref())?;
+        install_zsh_completions(&home, &config_dir, &out.stdout)?;
     } else if shell.contains("bash") {
         let dir = home
             .join(".local")
@@ -317,4 +430,102 @@ fn setup_completions(cli: &PathBuf) {
             }
         }
     }
+
+    Ok(())
+}
+
+// Source the registration after compinit, even when another framework already
+// initialized completion. Merely writing an _rssh file does not load it in zsh.
+#[cfg(any(feature = "tauri", test))]
+const ZSH_COMPLETION_INIT: &str = r#"# >>> RSSH completions >>>
+if [[ -r "$HOME/.zsh/completions/_rssh" ]]; then
+    if (( ! $+functions[compdef] )); then
+        autoload -Uz compinit
+        compinit
+    fi
+    source "$HOME/.zsh/completions/_rssh"
+fi
+# <<< RSSH completions <<<
+"#;
+
+#[cfg(any(feature = "tauri", test))]
+fn zsh_config_dir(
+    shell: &str,
+    home: &Path,
+    inherited_zdotdir: Option<&std::ffi::OsStr>,
+) -> std::io::Result<PathBuf> {
+    // GUI launches need not inherit ZDOTDIR. Let zsh evaluate .zshenv, without
+    // loading interactive .zshrc, and frame the result apart from startup output.
+    let mut command = Command::new(shell);
+    command
+        .args([
+            "-c",
+            r#"rssh_completion_dir="${ZDOTDIR-$HOME}/"
+builtin printf '\0RSSH_ZDOTDIR\0%s\0' "${rssh_completion_dir:a}""#,
+        ])
+        .env("HOME", home)
+        .env_remove("ZDOTDIR");
+    if let Some(zdotdir) = inherited_zdotdir {
+        command.env("ZDOTDIR", zdotdir);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "zsh configuration probe ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    if !output.stderr.is_empty() {
+        log::warn!(
+            "zsh configuration probe: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    const MARKER: &[u8] = b"\0RSSH_ZDOTDIR\0";
+    let directory = output
+        .stdout
+        .windows(MARKER.len())
+        .position(|value| value == MARKER)
+        .and_then(|start| {
+            let value = &output.stdout[start + MARKER.len()..];
+            value
+                .iter()
+                .position(|byte| *byte == 0)
+                .map(|end| &value[..end])
+        })
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "zsh did not return its configuration directory",
+            )
+        })?;
+    let directory = std::str::from_utf8(directory)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(PathBuf::from(directory))
+}
+
+#[cfg(any(feature = "tauri", test))]
+fn install_zsh_completions(home: &Path, config_dir: &Path, script: &[u8]) -> std::io::Result<()> {
+    let dir = home.join(".zsh/completions");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("_rssh"), script)?;
+
+    let rc = config_dir.join(".zshrc");
+    let mut content = match std::fs::read_to_string(&rc) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    if !content.contains("# >>> RSSH completions >>>") {
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push('\n');
+        content.push_str(ZSH_COMPLETION_INIT);
+        std::fs::create_dir_all(config_dir)?;
+        std::fs::write(rc, content)?;
+    }
+    Ok(())
 }

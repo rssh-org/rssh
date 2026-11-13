@@ -19,6 +19,12 @@ enum NameKind {
 }
 
 pub fn print_completions(shell: &str) {
+    if let Err(error) = write_completions(shell, &mut io::stdout()) {
+        eprintln!("Failed to generate completions: {error}");
+    }
+}
+
+fn write_completions(shell: &str, output: &mut dyn io::Write) -> io::Result<()> {
     let shell: &dyn EnvCompleter = match shell {
         "bash" => &Bash,
         "zsh" => &Zsh,
@@ -26,15 +32,20 @@ pub fn print_completions(shell: &str) {
         "powershell" | "pwsh" => &Powershell,
         _ => {
             eprintln!("Supported shells: zsh, bash, powershell, fish");
-            return;
+            return Ok(());
         }
     };
 
-    if let Err(error) =
-        shell.write_registration(COMPLETE_VAR, "rssh", "rssh", "rssh", &mut io::stdout())
-    {
-        eprintln!("Failed to generate completions: {error}");
+    shell.write_registration(COMPLETE_VAR, "rssh", "rssh", "rssh", output)?;
+    if shell.is("zsh") {
+        // clap's dynamic registration supports sourcing. When zsh autoloads
+        // this file as _rssh, also dispatch the completion that loaded it.
+        writeln!(
+            output,
+            "\nif [[ $funcstack[1] == _rssh ]]; then\n    ${{_comps[rssh]}} \"$@\"\nfi"
+        )?;
     }
+    Ok(())
 }
 
 pub fn complete_profiles(current: &OsStr) -> Vec<CompletionCandidate> {
@@ -105,6 +116,72 @@ mod tests {
     use clap::CommandFactory;
 
     use super::*;
+
+    #[cfg(any(macos, linux))]
+    fn check_zsh_registration(autoload: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("_rssh");
+        let mut output = Vec::new();
+        write_completions("zsh", &mut output).unwrap();
+        std::fs::write(&script, output).unwrap();
+
+        // Exercise zsh's real compinit/autoload dispatch. Stub the candidate
+        // provider and renderer so this runs without ZLE, a database, or an
+        // installed rssh executable.
+        let result = std::process::Command::new("zsh")
+            .args([
+                "-fc",
+                r#"
+fpath=("$1" $fpath)
+autoload -Uz compinit
+compinit -D
+rssh() {
+    [[ $_RSSH_COMPLETE == zsh && $_CLAP_COMPLETE_INDEX == 1 ]] || return 1
+    print -r -- 'profile:Manage SSH profiles'
+}
+_describe() { print -r -- "candidate:${other[1]}"; }
+if [[ $2 == source ]]; then
+    source "$1/_rssh"
+fi
+print -r -- ready
+words=(rssh pr)
+CURRENT=2
+${_comps[rssh]}
+"#,
+                "completion-test",
+            ])
+            .arg(directory.path())
+            .arg(if autoload { "autoload" } else { "source" })
+            .output();
+        let result = match result {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                eprintln!("Skipping zsh registration test: zsh is not installed");
+                return;
+            }
+            other => other.unwrap(),
+        };
+        assert!(
+            result.status.success(),
+            "zsh failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            "ready\ncandidate:profile:Manage SSH profiles\n"
+        );
+    }
+
+    #[test]
+    #[cfg(any(macos, linux))]
+    fn zsh_autoload_completes_on_first_call() {
+        check_zsh_registration(true);
+    }
+
+    #[test]
+    #[cfg(any(macos, linux))]
+    fn zsh_source_registers_without_attempting_completion() {
+        check_zsh_registration(false);
+    }
 
     #[test]
     fn candidates_filter_by_current_prefix() {

@@ -31,11 +31,12 @@ jobs:
 
       # Workspace tests cover shared core, CLI and app; the Tauri adapter
       # check also needs the Linux desktop libraries.
+      # Run the real zsh completion regression tests instead of skipping them.
       - run: |
           sudo apt-get update
           sudo apt-get install -y \
             libgtk-3-dev libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev librsvg2-dev libudev-dev
+            libayatana-appindicator3-dev librsvg2-dev libudev-dev zsh
 
       - name: Frontend tests (vitest)
         run: npm test

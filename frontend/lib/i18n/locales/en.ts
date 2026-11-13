@@ -1152,6 +1152,7 @@ const en = {
   "error.cli_not_bundled": "CLI binary not bundled in this build. Build with: cargo build --release -p rssh-cli",
   "error.cli_osascript_failed": "Run osascript failed: {err}",
   "error.cli_install_cancelled": "Installation cancelled or failed",
+  "error.cli_completions_failed": "Failed to generate CLI completions: {err}",
   "error.cli_priv_request_failed": "Request privileges failed: {err}",
 
   // ── secret storage (envelope-encrypted DB + master-key backend) ──
