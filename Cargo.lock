@@ -5543,7 +5543,6 @@ dependencies = [
  "clap",
  "clap_complete",
  "log",
- "reqwest 0.12.28",
  "rpassword",
  "rssh-core",
  "rusqlite",
@@ -5551,6 +5550,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "url",
  "uuid",
 ]
 

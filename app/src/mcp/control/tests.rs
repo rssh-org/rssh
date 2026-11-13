@@ -1,7 +1,9 @@
 use super::*;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 struct Fixture {
     service: ControlService,
+    endpoint: String,
     client: reqwest::Client,
     owner: SessionOwner,
     events: Arc<Mutex<Vec<String>>>,
@@ -31,6 +33,11 @@ impl Fixture {
         let service = ControlService::start(Arc::new(state), "desktop")
             .await
             .unwrap();
+        let endpoint = mcp_control::read_descriptors(directory.path())
+            .unwrap()
+            .descriptors
+            .remove(0)
+            .endpoint;
         let events = Arc::new(Mutex::new(Vec::new()));
         let emitted = events.clone();
         let owner = SessionOwner::Window("main".into());
@@ -47,9 +54,10 @@ impl Fixture {
             .unwrap();
         Self {
             service,
+            endpoint,
             client: reqwest::Client::builder()
                 .no_proxy()
-                .timeout(std::time::Duration::from_secs(5))
+                .timeout(Duration::from_secs(5))
                 .build()
                 .unwrap(),
             owner,
@@ -58,20 +66,30 @@ impl Fixture {
         }
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("http://{}{path}", self.service.control.authority)
+    async fn call(&self, request: ControlRequest) -> Value {
+        mcp_control::request(&self.endpoint, &request)
+            .await
+            .unwrap()
     }
 
-    fn post(&self, path: &str, owner: &SessionOwner) -> reqwest::RequestBuilder {
-        self.client
-            .post(self.url(path))
-            .json(&json!({"owner_id": super::super::scope_id(owner)}))
+    async fn raw(&self, value: &Value) -> Value {
+        let mut stream = native_transport().connect(&self.endpoint).await.unwrap();
+        mcp_control::write_json(&mut stream, value, RESPONSE_LIMIT)
+            .await
+            .unwrap();
+        mcp_control::read_json(&mut stream, RESPONSE_LIMIT)
+            .await
+            .unwrap()
     }
 
     async fn start(&self, owner: &SessionOwner) -> Value {
-        let response = self.post("/v1/mcp/start", owner).send().await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        response.json().await.unwrap()
+        let response = self
+            .call(ControlRequest::Start {
+                owner_id: super::super::scope_id(owner),
+            })
+            .await;
+        assert!(response.get("error").is_none(), "{response}");
+        response
     }
 }
 
@@ -84,33 +102,21 @@ async fn discovers_empty_windows_and_bootstraps_the_existing_mcp_endpoint() {
         .descriptors
         .remove(0);
     assert_eq!(descriptor.instance_id, control.instance_id);
-    let targets: Value = fixture
-        .client
-        .get(fixture.url("/v1/targets"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    assert_eq!(descriptor.endpoint, fixture.endpoint);
+    let targets = fixture.call(ControlRequest::Targets).await;
     assert_eq!(
         targets["targets"],
         json!([{"owner_id":"window-main", "label":"Main window"}])
     );
-    let status: Value = fixture
-        .post("/v1/mcp/status", &fixture.owner)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let status = fixture
+        .call(ControlRequest::Status {
+            owner_id: "window-main".into(),
+        })
+        .await;
     assert_eq!(status["running"], false);
     assert!(status["connection"].is_null());
-
     let connection = fixture.start(&fixture.owner).await;
-    let again = fixture.start(&fixture.owner).await;
-    assert_eq!(connection, again);
+    assert_eq!(fixture.start(&fixture.owner).await, connection);
     assert_eq!(connection["transport"], "streamable-http");
     let endpoint = control
         .state
@@ -127,6 +133,7 @@ async fn discovers_empty_windows_and_bootstraps_the_existing_mcp_endpoint() {
         fixture.events.lock().unwrap().as_slice(),
         ["mcp:changed:window-main", "mcp:changed:window-main"]
     );
+    // Only CLI control changed transport: MCP itself retains HTTP and its token.
     for token in [None, Some("wrong")] {
         let request = fixture
             .client
@@ -139,7 +146,7 @@ async fn discovers_empty_windows_and_bootstraps_the_existing_mcp_endpoint() {
         };
         assert_eq!(
             request.send().await.unwrap().status(),
-            StatusCode::UNAUTHORIZED
+            reqwest::StatusCode::UNAUTHORIZED
         );
     }
     let initialized = fixture.client.post(&endpoint.url).bearer_auth(endpoint.token)
@@ -147,104 +154,54 @@ async fn discovers_empty_windows_and_bootstraps_the_existing_mcp_endpoint() {
         .json(&json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{
             "protocolVersion":"2025-11-25", "capabilities":{}, "clientInfo":{"name":"control-test", "version":"1"}
         }})).send().await.unwrap();
-    assert_eq!(initialized.status(), StatusCode::OK);
-    let status: Value = fixture
-        .post("/v1/mcp/status", &fixture.owner)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(status["connection"], connection);
+    assert_eq!(initialized.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        fixture
+            .call(ControlRequest::Status {
+                owner_id: "window-main".into()
+            })
+            .await["connection"],
+        connection
+    );
 }
 
 #[tokio::test]
-async fn rejects_browser_origins_foreign_hosts_and_invalid_requests() {
+async fn rejects_unsupported_methods_extra_fields_and_oversized_frames() {
     let fixture = Fixture::new().await;
-    let own_origin = format!("http://{}", fixture.service.control.authority);
-    for origin in ["https://untrusted.example", "null", own_origin.as_str()] {
-        for path in ["/v1/mcp/start", "/v1/mcp/status", "/v1/mcp/stop"] {
-            let response = fixture
-                .post(path, &fixture.owner)
-                .header("Origin", origin)
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        }
-        let response = fixture
-            .client
-            .get(fixture.url("/v1/targets"))
-            .header("Origin", origin)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert!(!response
-            .headers()
-            .contains_key("Access-Control-Allow-Origin"));
-    }
-    for host in ["untrusted.example", "localhost", "127.0.0.1"] {
-        let response = fixture
-            .post("/v1/mcp/start", &fixture.owner)
-            .header("Host", host)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    }
-    for content_type in [
-        None,
-        Some("text/plain"),
-        Some("application/x-www-form-urlencoded"),
+    for request in [
+        json!({"method":"arbitrary_command", "params":{}}),
+        json!({"method":"start", "params":{"owner_id":"window-main", "command":"other"}}),
+        json!({"method":"start", "params":{"owner_id":42}}),
+        json!({"method":"targets", "extra":true}),
     ] {
-        let request = fixture
-            .client
-            .post(fixture.url("/v1/mcp/start"))
-            .body(r#"{"owner_id":"window-main"}"#);
-        let request = match content_type {
-            Some(content_type) => request.header("Content-Type", content_type),
-            None => request,
-        };
-        assert_eq!(
-            request.send().await.unwrap().status(),
-            StatusCode::UNSUPPORTED_MEDIA_TYPE
-        );
+        let response = fixture.raw(&request).await;
+        assert_eq!(response["error"]["code"], "invalid_request", "{request}");
     }
-    let preflight = fixture
-        .client
-        .request(reqwest::Method::OPTIONS, fixture.url("/v1/mcp/start"))
-        .header("Origin", "https://untrusted.example")
-        .header("Access-Control-Request-Method", "POST")
-        .header("Access-Control-Request-Headers", "Content-Type")
-        .send()
+    let mut stream = native_transport().connect(&fixture.endpoint).await.unwrap();
+    stream.write_all(&3_u32.to_be_bytes()).await.unwrap();
+    stream.write_all(b"bad").await.unwrap();
+    let response: Value = mcp_control::read_json(&mut stream, RESPONSE_LIMIT)
         .await
         .unwrap();
-    assert_eq!(preflight.status(), StatusCode::FORBIDDEN);
-    assert!(!preflight
-        .headers()
-        .contains_key("Access-Control-Allow-Origin"));
-    let too_large = fixture
-        .post("/v1/mcp/start", &fixture.owner)
-        .body(" ".repeat(8193))
-        .send()
+    assert_eq!(response["error"]["code"], "invalid_request");
+    let mut oversized = native_transport().connect(&fixture.endpoint).await.unwrap();
+    oversized
+        .write_u32((REQUEST_LIMIT + 1) as u32)
         .await
         .unwrap();
-    assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    let invalid = fixture
-        .post("/v1/mcp/start", &fixture.owner)
-        .json(&json!({"owner_id":"window-main", "command":"other"}))
-        .send()
+    // The listener rejects an oversized length without waiting for its body.
+    let response: Value = mcp_control::read_json(&mut oversized, RESPONSE_LIMIT)
         .await
         .unwrap();
-    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-    let unknown = fixture
-        .post("/v1/mcp/start", &SessionOwner::Window("missing".into()))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response["error"]["code"], "invalid_request");
+    assert_eq!(
+        fixture
+            .call(ControlRequest::Start {
+                owner_id: "missing".into()
+            })
+            .await["error"]["code"],
+        "mcp_owner_unavailable"
+    );
     assert!(fixture
         .service
         .control
@@ -253,6 +210,42 @@ async fn rejects_browser_origins_foreign_hosts_and_invalid_requests() {
         .endpoint(&fixture.owner)
         .unwrap()
         .is_none());
+    // Malformed clients must not stop the listener or consume its next request.
+    assert_eq!(
+        fixture.call(ControlRequest::Targets).await["targets"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn shutdown_closes_idle_clients_and_the_local_listener() {
+    let fixture = Fixture::new().await;
+    let mut idle = native_transport().connect(&fixture.endpoint).await.unwrap();
+    // Also prove another connection can be served while one client sends nothing.
+    assert!(fixture
+        .call(ControlRequest::Targets)
+        .await
+        .get("targets")
+        .is_some());
+    fixture.service.shutdown();
+    let mut byte = [0];
+    let closed = tokio::time::timeout(Duration::from_secs(1), idle.read(&mut byte))
+        .await
+        .unwrap();
+    assert!(matches!(closed, Ok(0)) || closed.is_err());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if native_transport().connect(&fixture.endpoint).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -353,30 +346,12 @@ async fn stop_revokes_only_the_selected_endpoint_and_keeps_bootstrap_available()
         .register(other.clone(), "Other".into(), Arc::new(|_, _| true))
         .unwrap();
     let other_connection = fixture.start(&other).await;
-    let rejected = fixture
-        .client
-        .post(fixture.url("/v1/mcp/stop"))
-        .header("Origin", "https://untrusted.example")
-        .json(&json!({"owner_id":"window-main"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
-    assert!(control
-        .state
-        .agent_bridge
-        .endpoint(&fixture.owner)
-        .unwrap()
-        .is_some());
-
     for _ in 0..2 {
-        let response = fixture
-            .post("/v1/mcp/stop", &fixture.owner)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let stopped: Value = response.json().await.unwrap();
+        let stopped = fixture
+            .call(ControlRequest::Stop {
+                owner_id: "window-main".into(),
+            })
+            .await;
         assert_eq!(
             stopped,
             json!({
@@ -405,19 +380,15 @@ async fn stop_revokes_only_the_selected_endpoint_and_keeps_bootstrap_available()
         fixture.events.lock().unwrap().last().unwrap(),
         "mcp:changed:window-main"
     );
-    // Listener shutdown can close the connection or reject it; the old token
-    // must never authenticate successfully after the stop response.
+    // The stopped MCP listener must not accept the old MCP bearer token.
     if let Ok(response) = fixture.client
         .post(connection["url"].as_str().unwrap())
         .header("Authorization", connection["headers"]["Authorization"].as_str().unwrap())
         .header("Accept", "application/json, text/event-stream")
         .json(&json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{
             "protocolVersion":"2025-11-25", "capabilities":{}, "clientInfo":{"name":"stopped-test", "version":"1"}
-        }}))
-        .send().await
-    {
-        assert!(!response.status().is_success());
-    }
+        }})).send().await
+    { assert!(!response.status().is_success()); }
     let restarted = fixture.start(&fixture.owner).await;
     assert_ne!(
         restarted["headers"]["Authorization"],
@@ -514,31 +485,28 @@ impl rssh_core::secret::SecretStore for UnavailableSecretStore {
 async fn control_lifecycle_does_not_access_an_unavailable_secret_store() {
     let store = Arc::new(UnavailableSecretStore::default());
     let fixture = Fixture::with_secret_store(Some(store.clone())).await;
-    let discovered = fixture
-        .client
-        .get(fixture.url("/v1/targets"))
-        .send()
+    assert!(fixture
+        .call(ControlRequest::Targets)
         .await
-        .unwrap();
-    assert_eq!(discovered.status(), StatusCode::OK);
+        .get("targets")
+        .is_some());
     let connection = fixture.start(&fixture.owner).await;
-    let status = fixture
-        .post("/v1/mcp/status", &fixture.owner)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(status.status(), StatusCode::OK);
     assert_eq!(
-        status.json::<Value>().await.unwrap()["connection"],
+        fixture
+            .call(ControlRequest::Status {
+                owner_id: "window-main".into()
+            })
+            .await["connection"],
         connection
     );
-    let stopped = fixture
-        .post("/v1/mcp/stop", &fixture.owner)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(stopped.status(), StatusCode::OK);
-    assert_eq!(stopped.json::<Value>().await.unwrap()["running"], false);
+    assert_eq!(
+        fixture
+            .call(ControlRequest::Stop {
+                owner_id: "window-main".into()
+            })
+            .await["running"],
+        false
+    );
     fixture.service.shutdown();
     assert_eq!(store.0.load(Ordering::Relaxed), 0);
     assert!(

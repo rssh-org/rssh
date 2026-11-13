@@ -19,9 +19,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-mcp:
+    # Named pipes need a native Windows runner; the Unix suite cannot exercise
+    # instance replacement, concurrent clients, or pending-read cancellation.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Native MCP transport and framing tests
+        run: cargo test -p rssh-core mcp_control
+
+      - name: MCP CLI protocol tests
+        run: cargo test -p rssh-cli mcp
+
+      - run: npm ci
+
+      - name: Build frontend for embedded server
+        run: npm run build
+
+      - name: MCP host and lifecycle tests
+        run: cargo test -p rssh-app --no-default-features --features server --lib mcp
+
+      - name: Headless owner control integration
+        run: cargo test -p rssh-app --no-default-features --features server --lib cli_control_tracks_the_existing_headless_connection_owner
+
   test:
     # Same recipe as release.yml's test job (proven there on tag builds):
-    # platform-neutral tests + protocol parsing, one ubuntu leg is enough.
+    # full shared suite on Linux; native named-pipe coverage runs above.
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4

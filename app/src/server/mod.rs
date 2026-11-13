@@ -139,7 +139,7 @@ async fn handle_conn(
     let connection_owner = SessionOwner::Headless(uuid::Uuid::new_v4());
     let _control_registration = if let Some(control) = control {
         let events = tx.clone();
-        control.register(
+        match control.register(
             connection_owner.clone(),
             "RSSH browser / JetBrains".into(),
             Arc::new(move |event, payload| {
@@ -149,11 +149,18 @@ async fn handle_conn(
                     ))
                     .is_ok()
             }),
-        )?;
-        Some(ControlRegistration {
-            control,
-            owner: connection_owner.clone(),
-        })
+        ) {
+            Ok(()) => Some(ControlRegistration {
+                control,
+                owner: connection_owner.clone(),
+            }),
+            Err(error) => {
+                // CLI bootstrap is optional; losing it must not reject an
+                // already authenticated browser or JetBrains frontend.
+                log::warn!("rssh-server: CLI control registration failed; continuing WebSocket service: {error}");
+                None
+            }
+        }
     } else {
         None
     };
@@ -2416,12 +2423,7 @@ mod tests {
             .unwrap()
             .descriptors
             .remove(0);
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .unwrap();
-        let base = format!("http://127.0.0.1:{}", descriptor.port);
+        use rssh_core::mcp_control::{request, ControlRequest};
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let control = service.control.clone();
@@ -2446,23 +2448,19 @@ mod tests {
             serde_json::from_slice(&socket.next().await.unwrap().unwrap().into_data()).unwrap();
         assert_eq!(reply["ok"], true);
         let owner_id = reply["result"]["scope_id"].as_str().unwrap();
-        let targets: Value = client
-            .get(format!("{base}/v1/targets"))
-            .send()
-            .await
-            .unwrap()
-            .json()
+        let targets = request(&descriptor.endpoint, &ControlRequest::Targets)
             .await
             .unwrap();
         assert_eq!(targets["targets"][0]["owner_id"], owner_id);
-        let started = client
-            .post(format!("{base}/v1/mcp/start"))
-            .json(&json!({"owner_id":owner_id}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(started.status(), reqwest::StatusCode::OK);
-        let started: Value = started.json().await.unwrap();
+        let started = request(
+            &descriptor.endpoint,
+            &ControlRequest::Start {
+                owner_id: owner_id.into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(started.get("error").is_none(), "{started}");
         assert!(started["headers"]["Authorization"]
             .as_str()
             .unwrap()
@@ -2470,15 +2468,14 @@ mod tests {
         let event: Value =
             serde_json::from_slice(&socket.next().await.unwrap().unwrap().into_data()).unwrap();
         assert_eq!(event["event"], format!("mcp:changed:{owner_id}"));
-        let stopped: Value = client
-            .post(format!("{base}/v1/mcp/stop"))
-            .json(&json!({"owner_id":owner_id}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+        let stopped = request(
+            &descriptor.endpoint,
+            &ControlRequest::Stop {
+                owner_id: owner_id.into(),
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(stopped["running"], false);
         assert!(stopped["connection"].is_null());
         let event: Value =
@@ -2486,22 +2483,72 @@ mod tests {
         assert_eq!(event["event"], format!("mcp:changed:{owner_id}"));
         socket.close(None).await.unwrap();
         server.await.unwrap().unwrap();
-        let targets: Value = client
-            .get(format!("{base}/v1/targets"))
-            .send()
-            .await
-            .unwrap()
-            .json()
+        let targets = request(&descriptor.endpoint, &ControlRequest::Targets)
             .await
             .unwrap();
         assert_eq!(targets["targets"], json!([]));
-        let gone = client
-            .post(format!("{base}/v1/mcp/start"))
-            .json(&json!({"owner_id":owner_id}))
-            .send()
+        let gone = request(
+            &descriptor.endpoint,
+            &ControlRequest::Start {
+                owner_id: owner_id.into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(gone["error"]["code"], "mcp_owner_unavailable");
+    }
+
+    #[tokio::test]
+    async fn stopped_cli_control_does_not_block_headless_websocket_commands() {
+        let (state, _directory) = test_state();
+        let service = crate::mcp::control::ControlService::start(state.clone(), "headless")
             .await
             .unwrap();
-        assert_eq!(gone.status(), reqwest::StatusCode::NOT_FOUND);
+        service.shutdown();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let control = service.control.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_conn(stream, "test-launch-token".into(), state, Some(control)).await
+        });
+        let stream = TcpStream::connect(address).await.unwrap();
+        let (mut client, _) = tokio_tungstenite::client_async(
+            format!("ws://{address}/?token=test-launch-token"),
+            stream,
+        )
+        .await
+        .unwrap();
+        for (id, command) in [(1, "get_runtime_capabilities"), (2, "list_groups")] {
+            client
+                .send(Message::Text(
+                    json!({"type":"invoke", "id":id, "cmd":command, "args":{}}).to_string(),
+                ))
+                .await
+                .unwrap();
+            let response = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let response: Value = serde_json::from_slice(&response.into_data()).unwrap();
+            assert_eq!(response["type"], "response");
+            assert_eq!(response["id"], id);
+            assert_eq!(response["ok"], true);
+            if command == "get_runtime_capabilities" {
+                assert_eq!(response["result"]["cliInstall"], false);
+            } else {
+                assert!(response["result"].is_array());
+            }
+        }
+        client.close(None).await.unwrap();
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

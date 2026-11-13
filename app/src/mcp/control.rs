@@ -1,22 +1,20 @@
-//! Local-only control for CLI clients of an existing MCP host.
+//! Local IPC control for CLI clients of an existing MCP host.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
-use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::Router;
 use rssh_core::emitter::Sink;
 use rssh_core::error::{locked, AppError, AppResult};
-use rssh_core::mcp_control::{self, ControlDescriptor, CONTROL_VERSION};
+use rssh_core::mcp_control::{
+    self, native_transport, BoxStream, ControlDescriptor, ControlRequest, CONTROL_VERSION,
+    REQUEST_LIMIT, RESPONSE_LIMIT,
+};
 use rssh_core::state::{AppState, SessionOwner};
-use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 
 struct Target {
     owner: SessionOwner,
@@ -28,12 +26,11 @@ struct Target {
 pub struct Control {
     state: Arc<AppState>,
     instance_id: String,
-    authority: String,
     stopped: AtomicBool,
     targets: Mutex<HashMap<String, Arc<Target>>>,
 }
 
-/// The host owns this guard, not the server task, so host shutdown cancels serving.
+/// The host owns this guard, not the listener task, so closing the host stops IPC.
 pub struct ControlService {
     pub control: Arc<Control>,
     shutdown: watch::Sender<bool>,
@@ -41,13 +38,12 @@ pub struct ControlService {
 
 impl ControlService {
     pub async fn start(state: Arc<AppState>, host: &str) -> AppResult<Self> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
         let instance_id = uuid::Uuid::new_v4().to_string();
+        let endpoint = native_transport().endpoint(&instance_id)?;
+        let mut listener = native_transport().bind(&endpoint).await?;
         let control = Arc::new(Control {
             state,
             instance_id: instance_id.clone(),
-            authority: address.to_string(),
             stopped: AtomicBool::new(false),
             targets: Mutex::new(HashMap::new()),
         });
@@ -55,36 +51,70 @@ impl ControlService {
             version: CONTROL_VERSION,
             instance_id,
             pid: std::process::id(),
-            port: address.port(),
+            endpoint,
             host: host.to_owned(),
         };
         mcp_control::publish_descriptor(&control.state.data_dir, &descriptor)?;
-        let router = Router::new()
-            .route("/v1/targets", get(list_targets))
-            .route("/v1/mcp/start", post(start_endpoint))
-            .route("/v1/mcp/stop", post(stop_endpoint))
-            .route("/v1/mcp/status", post(endpoint_status))
-            .fallback(|| async {
-                failure(StatusCode::NOT_FOUND, "not_found", "Unknown control route")
-            })
-            .with_state(control.clone())
-            .layer(middleware::from_fn_with_state(
-                control.clone(),
-                validate_request,
-            ));
         let (shutdown, mut stopped) = watch::channel(false);
         let serving = control.clone();
         tokio::spawn(async move {
-            let result = axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    if !*stopped.borrow() {
-                        let _ = stopped.changed().await;
+            let mut requests = JoinSet::new();
+            let mut accept_failures = 0;
+            loop {
+                if *stopped.borrow() {
+                    break;
+                }
+                tokio::select! {
+                    biased;
+                    _ = stopped.changed() => break,
+                    Some(result) = requests.join_next(), if !requests.is_empty() => {
+                        if let Err(error) = result {
+                            log::warn!("MCP control request task failed: {error}");
+                        }
                     }
-                })
-                .await;
-            if let Err(error) = result {
-                log::warn!("MCP control server stopped: {error}");
+                    accepted = listener.accept(), if requests.len() < 64 => {
+                        match accepted {
+                            Ok(stream) => {
+                                accept_failures = 0;
+                                let control = serving.clone();
+                                requests.spawn(async move {
+                                    match tokio::time::timeout(
+                                        Duration::from_secs(5),
+                                        serve_connection(control, stream),
+                                    ).await {
+                                        Ok(Ok(())) => {}
+                                        Ok(Err(error)) => log::debug!("MCP control connection ended: {error}"),
+                                        Err(_) => log::debug!("MCP control connection timed out"),
+                                    }
+                                });
+                            }
+                            Err(error) => {
+                                log::warn!("MCP control accept failed: {error}");
+                                accept_failures += 1;
+                                // Transient disconnects or resource pressure can
+                                // recover; a broken listener must not stay published.
+                                if matches!(error.kind(),
+                                    std::io::ErrorKind::PermissionDenied |
+                                    std::io::ErrorKind::InvalidInput |
+                                    std::io::ErrorKind::Unsupported |
+                                    std::io::ErrorKind::NotFound
+                                ) || accept_failures >= 100 {
+                                    break;
+                                }
+                                tokio::select! {
+                                    _ = stopped.changed() => break,
+                                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                                }
+                            }
+                        }
+                    }
+                }
             }
+            // Drop the listening endpoint and all pending reads before the host
+            // state can disappear. Domain shutdown revokes any committed MCP.
+            drop(listener);
+            requests.abort_all();
+            while requests.join_next().await.is_some() {}
             serving.cleanup();
         });
         Ok(Self { control, shutdown })
@@ -242,182 +272,72 @@ impl Control {
     }
 }
 
-async fn validate_request(
-    State(control): State<Arc<Control>>,
-    request: Request,
-    next: Next,
-) -> Response {
-    if control.stopped.load(Ordering::Acquire) {
-        return failure(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "control_stopped",
-            "Control server is shutting down",
-        );
-    }
-    let host_valid = request
-        .headers()
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        == Some(control.authority.as_str());
-    if !host_valid || request.headers().contains_key(header::ORIGIN) {
-        return failure(
-            StatusCode::FORBIDDEN,
-            "invalid_origin",
-            "Invalid control request origin",
-        );
-    }
-    next.run(request).await
+async fn serve_connection(control: Arc<Control>, mut stream: BoxStream) -> std::io::Result<()> {
+    let response = match mcp_control::read_json::<ControlRequest>(&mut stream, REQUEST_LIMIT).await
+    {
+        Ok(request) => dispatch(&control, request)
+            .await
+            .unwrap_or_else(app_failure),
+        Err(_) => failure(
+            "invalid_request",
+            "Expected a bounded JSON MCP control request",
+        ),
+    };
+    mcp_control::write_json(&mut stream, &response, RESPONSE_LIMIT).await
 }
 
-async fn list_targets(State(control): State<Arc<Control>>) -> Response {
-    match locked(&control.targets) {
-        Ok(targets) => {
+async fn dispatch(control: &Control, request: ControlRequest) -> AppResult<Value> {
+    if control.stopped.load(Ordering::Acquire) {
+        return Err(AppError::other("mcp_control_stopped", json!({})));
+    }
+    match request {
+        ControlRequest::Targets => {
+            let targets = locked(&control.targets)?;
             let mut targets: Vec<_> = targets
                 .iter()
-                .map(|(id, target)| json!({"owner_id": id, "label": target.label}))
+                .map(|(id, target)| json!({"owner_id":id, "label":target.label}))
                 .collect();
             targets.sort_by(|a, b| a["owner_id"].as_str().cmp(&b["owner_id"].as_str()));
-            response(
-                StatusCode::OK,
-                json!({"instance_id": control.instance_id, "targets": targets}),
-            )
+            Ok(json!({"instance_id":control.instance_id, "targets":targets}))
         }
-        Err(error) => app_failure(error),
+        ControlRequest::Start { owner_id } => {
+            let target = control.target(&owner_id)?;
+            let endpoint = control.start(target).await?;
+            Ok(control.connection(&owner_id, endpoint))
+        }
+        ControlRequest::Status { owner_id } => {
+            let target = control.target(&owner_id)?;
+            let endpoint = control.state.agent_bridge.endpoint(&target.owner)?;
+            Ok(json!({
+                "running":endpoint.is_some(),
+                "connection":endpoint.map(|endpoint| control.connection(&owner_id, endpoint)),
+                "instance_id":control.instance_id,
+                "owner_id":owner_id,
+            }))
+        }
+        ControlRequest::Stop { owner_id } => {
+            let target = control.target(&owner_id)?;
+            control.stop(target).await?;
+            Ok(json!({
+                "running":false, "connection":null,
+                "instance_id":control.instance_id, "owner_id":owner_id,
+            }))
+        }
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OwnerInput {
-    owner_id: String,
+fn failure(code: &str, message: &str) -> Value {
+    json!({"error":{"code":code,"message":message}})
 }
 
-async fn input(request: Request) -> Result<OwnerInput, Response> {
-    let json_content_type = request
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
-    if !json_content_type {
-        return Err(failure(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "invalid_request",
-            "Expected Content-Type application/json",
-        ));
-    }
-
-    let body = axum::body::to_bytes(request.into_body(), 8 * 1024)
-        .await
-        .map_err(|_| {
-            failure(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "invalid_request",
-                "Control request exceeds the size limit",
-            )
-        })?;
-    serde_json::from_slice(&body).map_err(|_| {
-        failure(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "Expected a JSON object containing owner_id",
-        )
-    })
-}
-
-async fn start_endpoint(State(control): State<Arc<Control>>, request: Request) -> Response {
-    let input = match input(request).await {
-        Ok(input) => input,
-        Err(error) => return error,
-    };
-    let target = match control.target(&input.owner_id) {
-        Ok(target) => target,
-        Err(error) => return app_failure(error),
-    };
-    match control.start(target).await {
-        Ok(endpoint) => response(
-            StatusCode::OK,
-            control.connection(&input.owner_id, endpoint),
-        ),
-        Err(error) => app_failure(error),
-    }
-}
-
-async fn endpoint_status(State(control): State<Arc<Control>>, request: Request) -> Response {
-    let input = match input(request).await {
-        Ok(input) => input,
-        Err(error) => return error,
-    };
-    let target = match control.target(&input.owner_id) {
-        Ok(target) => target,
-        Err(error) => return app_failure(error),
-    };
-    match control.state.agent_bridge.endpoint(&target.owner) {
-        Ok(endpoint) => response(
-            StatusCode::OK,
-            json!({
-                "running": endpoint.is_some(),
-                "connection": endpoint.map(|endpoint| control.connection(&input.owner_id, endpoint)),
-                "instance_id": control.instance_id,
-                "owner_id": input.owner_id,
-            }),
-        ),
-        Err(error) => app_failure(error),
-    }
-}
-
-async fn stop_endpoint(State(control): State<Arc<Control>>, request: Request) -> Response {
-    let input = match input(request).await {
-        Ok(input) => input,
-        Err(error) => return error,
-    };
-    let target = match control.target(&input.owner_id) {
-        Ok(target) => target,
-        Err(error) => return app_failure(error),
-    };
-    match control.stop(target).await {
-        Ok(()) => response(
-            StatusCode::OK,
-            json!({
-                "running": false,
-                "connection": null,
-                "instance_id": control.instance_id,
-                "owner_id": input.owner_id,
-            }),
-        ),
-        Err(error) => app_failure(error),
-    }
-}
-
-fn response(status: StatusCode, value: Value) -> Response {
-    (
-        status,
-        [
-            (header::CONTENT_TYPE, "application/json"),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        value.to_string(),
-    )
-        .into_response()
-}
-
-fn failure(status: StatusCode, code: &str, message: &str) -> Response {
-    response(status, json!({"error": {"code": code, "message": message}}))
-}
-
-fn app_failure(error: AppError) -> Response {
-    let status = if error.code() == "mcp_owner_unavailable" {
-        StatusCode::NOT_FOUND
-    } else {
-        StatusCode::INTERNAL_SERVER_ERROR
-    };
+fn app_failure(error: AppError) -> Value {
     let message = if error.code() == "mcp_owner_unavailable" {
         "The selected RSSH window or connection is no longer available".to_owned()
     } else {
         log::warn!("MCP control request failed: {error}");
         format!("MCP control request failed ({})", error.code())
     };
-    failure(status, error.code(), &message)
+    failure(error.code(), &message)
 }
 
 #[cfg(test)]

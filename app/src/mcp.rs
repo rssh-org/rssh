@@ -272,11 +272,13 @@ mod http {
     }
 
     pub(super) async fn start(state: Arc<AppState>, owner: SessionOwner) -> AppResult<()> {
+        // Reserve before waiting so host teardown can revoke queued GUI starts
+        // too. Concurrent starts join this generation and reuse its endpoint.
+        let reservation = state.agent_bridge.reserve_endpoint(&owner)?;
         let _starting = state.agent_bridge.mcp_start_lock.lock().await;
-        if state.agent_bridge.endpoint(&owner)?.is_some() {
+        if reservation.endpoint()?.is_some() {
             return Ok(());
         }
-        let reservation = state.agent_bridge.reserve_endpoint(&owner)?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let authority = listener.local_addr()?.to_string();
         let origin = format!("http://{authority}");

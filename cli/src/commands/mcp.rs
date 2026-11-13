@@ -1,16 +1,12 @@
 //! Machine-readable bootstrap for the MCP service owned by a running frontend.
 
-use std::time::Duration;
-
 use clap::{Args, Subcommand};
-use reqwest::{Client, Method};
 use rssh_core::error::AppError;
-use rssh_core::mcp_control::{self, ControlDescriptor};
+use rssh_core::mcp_control::{self, ControlDescriptor, ControlRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 const NO_TARGET: &str = "Run an updated RSSH desktop GUI or a local headless/JetBrains frontend, then retry. The GUI/server and CLI must both support MCP control.";
-const MAX_RESPONSE_BYTES: usize = 128 * 1024;
 
 #[derive(Subcommand)]
 pub enum McpCmd {
@@ -80,65 +76,25 @@ impl From<AppError> for Failure {
     }
 }
 
-fn client() -> Result<Client, Failure> {
-    Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(1))
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|error| Failure::new("mcp_control_http", error.to_string()))
+impl From<std::io::Error> for Failure {
+    fn from(error: std::io::Error) -> Self {
+        let code = match error.kind() {
+            std::io::ErrorKind::InvalidData => "mcp_control_response",
+            _ => "mcp_control_unreachable",
+        };
+        Self::new(code, error.to_string())
+    }
 }
 
 async fn request(
-    client: &Client,
     descriptor: &ControlDescriptor,
-    path: &str,
-    body: Option<Value>,
+    command: &ControlRequest,
 ) -> Result<Value, Failure> {
-    let url = format!("http://127.0.0.1:{}{path}", descriptor.port);
-    let mut request = client.request(
-        if body.is_some() {
-            Method::POST
-        } else {
-            Method::GET
-        },
-        url,
-    );
-    if let Some(body) = body {
-        request = request.json(&body);
-    }
-    let mut response = request
-        .send()
-        .await
-        .map_err(|error| Failure::new("mcp_control_unreachable", error.to_string()))?;
-    let status = response.status();
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| Failure::new("mcp_control_response", error.to_string()))?
-    {
-        if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
-            return Err(Failure::new(
-                "mcp_control_response",
-                "Control response exceeds the size limit",
-            ));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
-        Failure::new(
-            "mcp_control_response",
-            format!("Invalid control JSON response (HTTP {})", status.as_u16()),
-        )
-    })?;
-    if !status.is_success() {
+    let value = mcp_control::request(&descriptor.endpoint, command).await?;
+    if let Some(error) = value.get("error") {
         return Err(Failure::new(
-            value["error"]["code"]
-                .as_str()
-                .unwrap_or("mcp_control_http"),
-            value["error"]["message"]
+            error["code"].as_str().unwrap_or("mcp_control_response"),
+            error["message"]
                 .as_str()
                 .unwrap_or("Local MCP control request failed"),
         ));
@@ -147,13 +103,12 @@ async fn request(
 }
 
 async fn discover(
-    client: &Client,
     descriptors: Vec<ControlDescriptor>,
 ) -> Result<(Vec<Instance>, Vec<Value>), Failure> {
     let mut live = Vec::new();
     let mut ignored = Vec::new();
     for descriptor in descriptors {
-        let result = request(client, &descriptor, "/v1/targets", None)
+        let result = request(&descriptor, &ControlRequest::Targets)
             .await
             .and_then(|value| {
                 let targets: Targets = serde_json::from_value(value)
@@ -244,9 +199,7 @@ fn select<'a>(
 }
 
 fn validate_connection(value: &Value, instance: &Instance, target: &Target) -> Result<(), Failure> {
-    let endpoint = value["url"]
-        .as_str()
-        .and_then(|s| reqwest::Url::parse(s).ok());
+    let endpoint = value["url"].as_str().and_then(|s| url::Url::parse(s).ok());
     if value["instance_id"] != instance.descriptor.instance_id
         || value["owner_id"] != target.owner_id
         || value["transport"] != "streamable-http"
@@ -274,24 +227,18 @@ fn validate_connection(value: &Value, instance: &Instance, target: &Target) -> R
     Ok(())
 }
 
-async fn execute(
-    action: &McpCmd,
-    client: &Client,
-    instances: &[Instance],
-) -> Result<Value, Failure> {
-    let (path, selection) = match action {
-        McpCmd::Start(selection) => ("/v1/mcp/start", selection),
-        McpCmd::Status(selection) => ("/v1/mcp/status", selection),
-        McpCmd::Stop(selection) => ("/v1/mcp/stop", selection),
+async fn execute(action: &McpCmd, instances: &[Instance]) -> Result<Value, Failure> {
+    let selection = match action {
+        McpCmd::Start(selection) | McpCmd::Status(selection) | McpCmd::Stop(selection) => selection,
     };
     let (instance, target) = select(instances, selection)?;
-    let value = request(
-        client,
-        &instance.descriptor,
-        path,
-        Some(json!({"owner_id": target.owner_id})),
-    )
-    .await?;
+    let owner_id = target.owner_id.clone();
+    let command = match action {
+        McpCmd::Start(_) => ControlRequest::Start { owner_id },
+        McpCmd::Stop(_) => ControlRequest::Stop { owner_id },
+        McpCmd::Status(_) => ControlRequest::Status { owner_id },
+    };
+    let value = request(&instance.descriptor, &command).await?;
     if matches!(action, McpCmd::Start(_)) {
         validate_connection(&value, instance, target)?;
     } else {
@@ -328,15 +275,14 @@ pub fn run(action: &McpCmd) -> (Value, bool) {
         let data_dir = rssh_core::db::data_dir()?;
         let scan = mcp_control::read_descriptors(&data_dir)?;
         warnings.extend(scan.ignored.into_iter().map(|message| json!({"error": {"code": "mcp_control_descriptor_invalid", "message": message}})));
-        let client = client()?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| Failure::new("mcp_control_runtime", error.to_string()))?;
         runtime.block_on(async {
-            let (instances, ignored) = discover(&client, scan.descriptors).await?;
+            let (instances, ignored) = discover(scan.descriptors).await?;
             warnings.extend(ignored);
-            execute(action, &client, &instances).await
+            execute(action, &instances).await
         })
     })();
     let (mut output, success) = match result {
@@ -353,7 +299,57 @@ pub fn run(action: &McpCmd) -> (Value, bool) {
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use mcp_control::{native_transport, read_json, write_json, REQUEST_LIMIT, RESPONSE_LIMIT};
+    use tokio::io::AsyncWriteExt;
+
+    fn instance() -> Instance {
+        let instance_id = uuid::Uuid::new_v4().to_string();
+        Instance {
+            descriptor: ControlDescriptor {
+                version: mcp_control::CONTROL_VERSION,
+                endpoint: native_transport().endpoint(&instance_id).unwrap(),
+                instance_id,
+                pid: 1,
+                host: "desktop".into(),
+            },
+            targets: vec![Target {
+                owner_id: "window:main".into(),
+                label: "Main".into(),
+            }],
+        }
+    }
+
+    fn connection(instance: &Instance) -> Value {
+        json!({
+            "url": "http://127.0.0.1:12345/mcp",
+            "headers": {"Authorization": "Bearer endpoint-token"},
+            "transport": "streamable-http",
+            "instance_id": instance.descriptor.instance_id,
+            "owner_id": "window:main",
+        })
+    }
+
+    async fn serve(
+        instance: &Instance,
+        exchanges: Vec<(ControlRequest, Value)>,
+    ) -> tokio::task::JoinHandle<()> {
+        let mut listener = native_transport()
+            .bind(&instance.descriptor.endpoint)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            for (expected, response) in exchanges {
+                let mut stream = listener.accept().await.unwrap();
+                let request: Value = read_json(&mut *stream, REQUEST_LIMIT).await.unwrap();
+                assert_eq!(request, serde_json::to_value(expected).unwrap());
+                assert!(request.get("token").is_none());
+                assert!(request.get("headers").is_none());
+                write_json(&mut *stream, &response, RESPONSE_LIMIT)
+                    .await
+                    .unwrap();
+            }
+        })
+    }
 
     #[test]
     fn public_mcp_commands_are_only_start_stop_and_status() {
@@ -368,48 +364,6 @@ mod tests {
             assert!(crate::Cli::try_parse_from(["rssh", "mcp", action]).is_ok());
         }
         assert!(crate::Cli::try_parse_from(["rssh", "mcp", "list"]).is_err());
-    }
-
-    async fn read_request(stream: &mut tokio::net::TcpStream) -> String {
-        let mut bytes = Vec::new();
-        loop {
-            let mut chunk = [0; 4096];
-            let count = stream.read(&mut chunk).await.unwrap();
-            assert!(count > 0, "request ended before its complete body");
-            bytes.extend_from_slice(&chunk[..count]);
-            if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
-                let headers = std::str::from_utf8(&bytes[..end])
-                    .unwrap()
-                    .to_ascii_lowercase();
-                let length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.strip_prefix("content-length:")
-                            .map(|value| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap_or(0);
-                if bytes.len() >= end + 4 + length {
-                    return String::from_utf8(bytes).unwrap();
-                }
-            }
-            assert!(bytes.len() <= 8192);
-        }
-    }
-
-    fn instance() -> Instance {
-        Instance {
-            descriptor: ControlDescriptor {
-                version: mcp_control::CONTROL_VERSION,
-                instance_id: uuid::Uuid::new_v4().to_string(),
-                pid: 1,
-                port: 12345,
-                host: "desktop".into(),
-            },
-            targets: vec![Target {
-                owner_id: "window:main".into(),
-                label: "Main".into(),
-            }],
-        }
     }
 
     #[test]
@@ -443,82 +397,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_posts_selected_owner_and_returns_the_connection_json() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut instance = instance();
-        instance.descriptor.port = listener.local_addr().unwrap().port();
-        let connection = json!({"url":"http://127.0.0.1:12345/mcp", "headers":{"Authorization":"Bearer endpoint-token"}, "transport":"streamable-http", "instance_id": instance.descriptor.instance_id, "owner_id":"window:main"});
-        let expected = connection.clone();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request = read_request(&mut stream).await;
-            assert!(request.starts_with("POST /v1/mcp/start HTTP/1.1"));
-            assert!(!request.to_ascii_lowercase().contains("authorization:"));
-            assert!(request.contains("\"owner_id\":\"window:main\""));
-            let body = connection.to_string();
-            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
-        });
-        let result = execute(
-            &McpCmd::Start(Selection::default()),
-            &client().unwrap(),
-            &[instance],
-        )
-        .await
-        .unwrap();
-        assert_eq!(result, expected);
+    async fn descriptor_discovery_start_status_stop_need_no_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let instance = instance();
+        let connection = connection(&instance);
+        let owner_id = "window:main".to_owned();
+        let server = serve(&instance, vec![
+            (ControlRequest::Targets, json!({"instance_id": instance.descriptor.instance_id, "targets": instance.targets})),
+            (ControlRequest::Start { owner_id: owner_id.clone() }, connection.clone()),
+            (ControlRequest::Status { owner_id: owner_id.clone() }, json!({"instance_id": instance.descriptor.instance_id, "owner_id": owner_id, "running": true, "connection": connection})),
+            (ControlRequest::Stop { owner_id: owner_id.clone() }, json!({"instance_id": instance.descriptor.instance_id, "owner_id": owner_id, "running": false, "connection": null})),
+        ]).await;
+        mcp_control::publish_descriptor(directory.path(), &instance.descriptor).unwrap();
+        let scan = mcp_control::read_descriptors(directory.path()).unwrap();
+        let (instances, warnings) = discover(scan.descriptors).await.unwrap();
+        assert!(warnings.is_empty());
+        let started = execute(&McpCmd::Start(Selection::default()), &instances)
+            .await
+            .unwrap();
+        assert_eq!(started, connection);
+        let status = execute(&McpCmd::Status(Selection::default()), &instances)
+            .await
+            .unwrap();
+        assert_eq!(status["running"], true);
+        assert_eq!(status["connection"], connection);
+        let stopped = execute(&McpCmd::Stop(Selection::default()), &instances)
+            .await
+            .unwrap();
+        assert_eq!(stopped["running"], false);
+        assert_eq!(stopped["connection"], Value::Null);
+        assert!(!directory.path().join("rssh.db").exists());
         server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn control_client_does_not_follow_redirects() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut instance = instance();
-        instance.descriptor.port = listener.local_addr().unwrap().port();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            read_request(&mut stream).await;
-            let body = r#"{"error":{"code":"redirect_denied","message":"No redirect"}}"#;
-            stream.write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/steal\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
-        });
-        let error = request(
-            &client().unwrap(),
-            &instance.descriptor,
-            "/v1/targets",
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.code, "redirect_denied");
+    async fn server_error_code_and_message_remain_machine_readable() {
+        let instance = instance();
+        let expected = json!({"error":{"code":"mcp_owner_unavailable","message":"The selected frontend closed"}});
+        let server = serve(&instance, vec![(ControlRequest::Targets, expected.clone())]).await;
+        let error = request(&instance.descriptor, &ControlRequest::Targets)
+            .await
+            .unwrap_err();
+        assert_eq!(error.json(), expected);
         server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn stop_posts_selected_owner_and_requires_a_stopped_response() {
+    async fn stop_requires_a_stopped_response() {
         for running in [false, true] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let mut instance = instance();
-            instance.descriptor.port = listener.local_addr().unwrap().port();
-            let connection = json!({"url":"http://127.0.0.1:12345/mcp", "headers":{"Authorization":"Bearer endpoint-token"}, "transport":"streamable-http", "instance_id": instance.descriptor.instance_id, "owner_id":"window:main"});
-            let response = json!({"running": running, "connection": if running { connection } else { Value::Null }, "instance_id": instance.descriptor.instance_id, "owner_id":"window:main"});
-            let expected = response.clone();
-            let server = tokio::spawn(async move {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let request = read_request(&mut stream).await;
-                assert!(request.starts_with("POST /v1/mcp/stop HTTP/1.1"));
-                assert!(!request.to_ascii_lowercase().contains("authorization:"));
-                let (_, body) = request.split_once("\r\n\r\n").unwrap();
-                assert_eq!(
-                    serde_json::from_str::<Value>(body).unwrap(),
-                    json!({"owner_id":"window:main"})
-                );
-                let body = response.to_string();
-                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            let instance = instance();
+            let response = json!({
+                "running": running,
+                "connection": if running { connection(&instance) } else { Value::Null },
+                "instance_id": instance.descriptor.instance_id,
+                "owner_id": "window:main",
             });
+            let server = serve(
+                &instance,
+                vec![(
+                    ControlRequest::Stop {
+                        owner_id: "window:main".into(),
+                    },
+                    response.clone(),
+                )],
+            )
+            .await;
             let selection = Selection {
                 instance: Some(uuid::Uuid::parse_str(&instance.descriptor.instance_id).unwrap()),
                 owner: Some("window:main".into()),
             };
-            let result = execute(&McpCmd::Stop(selection), &client().unwrap(), &[instance]).await;
+            let result = execute(&McpCmd::Stop(selection), &[instance]).await;
             if running {
                 let error = result.unwrap_err();
                 assert_eq!(error.code, "mcp_control_response");
@@ -527,48 +475,25 @@ mod tests {
                     "MCP stop response reports the service is still running"
                 );
             } else {
-                assert_eq!(result.unwrap(), expected);
+                assert_eq!(result.unwrap(), response);
             }
             server.await.unwrap();
         }
     }
 
-    #[test]
-    fn invalid_connection_cannot_redirect_the_agent_to_an_external_host() {
-        let instance = instance();
-        let connection = json!({"url":"http://example.com/mcp", "headers":{"Authorization":"Bearer endpoint-token"}, "transport":"streamable-http", "instance_id": instance.descriptor.instance_id, "owner_id":"window:main"});
-        assert!(validate_connection(&connection, &instance, &instance.targets[0]).is_err());
-    }
-
     #[tokio::test]
     async fn discovery_reports_stale_instances_without_hiding_live_frontends() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut good = instance();
-        good.descriptor.port = listener.local_addr().unwrap().port();
-        let reply = json!({"instance_id": good.descriptor.instance_id, "targets":good.targets});
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            assert!(read_request(&mut stream)
-                .await
-                .starts_with("GET /v1/targets HTTP/1.1"));
-            let body = reply.to_string();
-            stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-        });
-        let stale_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut stale = instance();
-        stale.descriptor.port = stale_listener.local_addr().unwrap().port();
-        drop(stale_listener);
-        let client = client().unwrap();
-        let (live, warnings) = discover(&client, vec![stale.descriptor, good.descriptor])
+        let good = instance();
+        let stale = instance();
+        let server = serve(
+            &good,
+            vec![(
+                ControlRequest::Targets,
+                json!({"instance_id":good.descriptor.instance_id,"targets":good.targets}),
+            )],
+        )
+        .await;
+        let (live, warnings) = discover(vec![stale.descriptor, good.descriptor])
             .await
             .unwrap();
         assert_eq!(live.len(), 1);
@@ -579,69 +504,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn descriptor_discovery_start_status_stop_need_no_credentials() {
-        let directory = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut instance = instance();
-        instance.descriptor.port = listener.local_addr().unwrap().port();
-        mcp_control::publish_descriptor(directory.path(), &instance.descriptor).unwrap();
-        assert!(!directory.path().join("rssh.db").exists());
-        let instance_id = instance.descriptor.instance_id.clone();
-        let connection = json!({"url":"http://127.0.0.1:12345/mcp", "headers":{"Authorization":"Bearer endpoint-token"}, "transport":"streamable-http", "instance_id": instance_id, "owner_id":"window:main"});
-        let expected_connection = connection.clone();
-        let server = tokio::spawn(async move {
-            for route in [
-                "GET /v1/targets",
-                "POST /v1/mcp/start",
-                "POST /v1/mcp/status",
-                "POST /v1/mcp/stop",
-            ] {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let request = read_request(&mut stream).await;
-                assert!(request.starts_with(&format!("{route} HTTP/1.1")));
-                let (headers, body) = request.split_once("\r\n\r\n").unwrap();
-                assert!(!headers.to_ascii_lowercase().contains("authorization:"));
-                if route.starts_with("POST ") {
-                    assert_eq!(
-                        serde_json::from_str::<Value>(body).unwrap(),
-                        json!({"owner_id":"window:main"})
-                    );
-                }
-                let response = match route {
-                    "GET /v1/targets" => {
-                        json!({"instance_id": instance_id, "targets":[{"owner_id":"window:main","label":"Main"}]})
-                    }
-                    "POST /v1/mcp/start" => connection.clone(),
-                    "POST /v1/mcp/status" => {
-                        json!({"instance_id": instance_id, "owner_id":"window:main", "running":true,"connection":connection})
-                    }
-                    _ => {
-                        json!({"instance_id": instance_id, "owner_id":"window:main", "running":false,"connection":null})
-                    }
-                };
-                let body = response.to_string();
-                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
-            }
-        });
-        let client = client().unwrap();
-        let scan = mcp_control::read_descriptors(directory.path()).unwrap();
-        let (instances, warnings) = discover(&client, scan.descriptors).await.unwrap();
-        assert!(warnings.is_empty());
-        let started = execute(&McpCmd::Start(Selection::default()), &client, &instances)
-            .await
-            .unwrap();
-        assert_eq!(started, expected_connection);
-        let status = execute(&McpCmd::Status(Selection::default()), &client, &instances)
-            .await
-            .unwrap();
-        assert_eq!(status["running"], true);
-        assert_eq!(status["connection"], expected_connection);
-        let stopped = execute(&McpCmd::Stop(Selection::default()), &client, &instances)
-            .await
-            .unwrap();
-        assert_eq!(stopped["running"], false);
-        assert_eq!(stopped["connection"], Value::Null);
-        assert!(!directory.path().join("rssh.db").exists());
+    async fn wrong_instance_response_is_not_a_live_target() {
+        let instance = instance();
+        let server = serve(
+            &instance,
+            vec![(
+                ControlRequest::Targets,
+                json!({"instance_id":uuid::Uuid::new_v4().to_string(),"targets":instance.targets}),
+            )],
+        )
+        .await;
+        let (live, warnings) = discover(vec![instance.descriptor]).await.unwrap();
+        assert!(live.is_empty());
+        assert_eq!(warnings[0]["error"]["code"], "mcp_control_response");
         server.await.unwrap();
+    }
+
+    #[test]
+    fn invalid_connection_cannot_redirect_the_agent_to_an_external_host() {
+        let instance = instance();
+        let mut connection = connection(&instance);
+        connection["url"] = json!("http://example.com/mcp");
+        assert!(validate_connection(&connection, &instance, &instance.targets[0]).is_err());
+    }
+
+    #[tokio::test]
+    async fn oversized_response_is_a_json_cli_error() {
+        let instance = instance();
+        let mut listener = native_transport()
+            .bind(&instance.descriptor.endpoint)
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            let _: ControlRequest = read_json(&mut *stream, REQUEST_LIMIT).await.unwrap();
+            stream
+                .write_all(&((RESPONSE_LIMIT + 1) as u32).to_be_bytes())
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+        });
+        let error = request(&instance.descriptor, &ControlRequest::Targets)
+            .await
+            .unwrap_err();
+        assert_eq!(error.json()["error"]["code"], "mcp_control_response");
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn transport_timeouts_remain_json_cli_errors() {
+        let error = Failure::from(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "MCP control request timed out",
+        ));
+        assert_eq!(
+            error.json(),
+            json!({"error":{"code":"mcp_control_unreachable","message":"MCP control request timed out"}})
+        );
     }
 }

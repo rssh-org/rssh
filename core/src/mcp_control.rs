@@ -1,4 +1,4 @@
-//! Non-secret discovery metadata for local MCP control.
+//! Discovery metadata and framed JSON over native local MCP control transports.
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -8,7 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 
-pub const CONTROL_VERSION: u32 = 1;
+mod transport;
+mod wire;
+
+pub use transport::{native_transport, BoxStream, LocalListener, LocalStream, LocalTransport};
+pub use wire::{read_json, request, write_json, ControlRequest, REQUEST_LIMIT, RESPONSE_LIMIT};
+
+pub const CONTROL_VERSION: u32 = 2;
 const MAX_DESCRIPTOR_BYTES: u64 = 4096;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -17,7 +23,7 @@ pub struct ControlDescriptor {
     pub version: u32,
     pub instance_id: String,
     pub pid: u32,
-    pub port: u16,
+    pub endpoint: String,
     pub host: String,
 }
 
@@ -45,9 +51,12 @@ fn validate_instance(instance_id: &str) -> AppResult<()> {
 impl ControlDescriptor {
     pub fn validate(&self) -> AppResult<()> {
         validate_instance(&self.instance_id)?;
-        if self.version != CONTROL_VERSION || self.port == 0 || self.pid == 0 {
-            return Err(invalid("unsupported version, port, or process ID"));
+        if self.version != CONTROL_VERSION || self.pid == 0 {
+            return Err(invalid("unsupported version or process ID"));
         }
+        native_transport()
+            .validate_endpoint(&self.endpoint, &self.instance_id)
+            .map_err(|_| invalid("endpoint does not match this platform and instance"))?;
         if !matches!(self.host.as_str(), "desktop" | "headless") {
             return Err(invalid("unsupported host"));
         }
@@ -156,16 +165,17 @@ fn remove_metadata(directory: &Path, instance_id: &str) -> AppResult<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(macos, linux, windows)))]
 mod tests {
     use super::*;
 
     fn descriptor() -> ControlDescriptor {
+        let instance_id = uuid::Uuid::new_v4().to_string();
         ControlDescriptor {
             version: CONTROL_VERSION,
-            instance_id: uuid::Uuid::new_v4().to_string(),
+            endpoint: native_transport().endpoint(&instance_id).unwrap(),
+            instance_id,
             pid: 1,
-            port: 12345,
             host: "desktop".into(),
         }
     }
@@ -206,5 +216,34 @@ mod tests {
         let scan = read_descriptors(dir.path()).unwrap();
         assert_eq!(scan.descriptors.len(), 1);
         assert_eq!(scan.ignored.len(), 1);
+    }
+
+    #[test]
+    fn discovery_rejects_legacy_http_and_mismatched_native_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid = descriptor();
+        publish_descriptor(dir.path(), &valid).unwrap();
+        let legacy_id = uuid::Uuid::new_v4().to_string();
+        fs::write(
+            descriptor_dir(dir.path()).join(format!("{legacy_id}.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1, "instance_id": legacy_id, "pid": 1,
+                "port": 12345, "host": "desktop"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut other = descriptor();
+        other.endpoint = valid.endpoint.clone();
+        assert!(publish_descriptor(dir.path(), &other).is_err());
+        fs::write(
+            descriptor_dir(dir.path()).join(format!("{}.json", other.instance_id)),
+            serde_json::to_vec(&other).unwrap(),
+        )
+        .unwrap();
+        let scan = read_descriptors(dir.path()).unwrap();
+        assert_eq!(scan.descriptors.len(), 1);
+        assert_eq!(scan.descriptors[0].instance_id, valid.instance_id);
+        assert_eq!(scan.ignored.len(), 2);
     }
 }
