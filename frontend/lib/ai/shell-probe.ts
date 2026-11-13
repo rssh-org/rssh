@@ -1,5 +1,6 @@
 /** Remote-shell probe shared by SSH and connector-backed PTYs. */
 import type { ShellKind } from "./types.ts";
+import { stripAnsi } from "./pty-output.ts";
 
 /** Map one evaluated output line's two captured groups to a shell family.
  * null means the response completed, but its shell signature is unsupported. */
@@ -33,7 +34,9 @@ export function createShellProbe(sessionId: string): ShellProbe {
   return {
     command,
     classify(buffer) {
-      const match = response.exec(buffer);
+      // Normalize the accumulated private buffer so split control sequences
+      // stay intact. The terminal still receives the original bytes unchanged.
+      const match = response.exec(stripAnsi(buffer));
       return match ? { shell: classifyShell(match[1], match[2]) } : null;
     },
   };

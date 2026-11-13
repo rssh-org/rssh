@@ -60,6 +60,24 @@ describe("createShellProbe", () => {
     expect(probe.classify(`${echo}${probe.command.slice(5)}\r\n`)).toEqual({ shell: "cmd" });
   });
 
+  it("recognizes Bash output after bracketed-paste controls without matching the input echo", () => {
+    const probe = createShellProbe(crypto.randomUUID());
+    const echo = `\x1b[?2004huser@host:~$ ${probe.command}\r\n\x1b[?2004l\r`;
+    expect(probe.classify(echo)).toBeNull();
+    expect(probe.classify(`${echo}${evaluated(probe.command, "", "12345")}\r\n`)).toEqual({ shell: "posix" });
+  });
+
+  it.each([
+    ["Core", "token", "powershell"],
+    ["$PSEdition", "$$", "cmd"],
+    ["Unknown", "token", null],
+  ] as const)("normalizes OSC, colors and CR before classifying %s", (edition, dollar, shell) => {
+    const probe = createShellProbe(crypto.randomUUID());
+    const controls = "\x1b]0;terminal title\x07\x1b[32m\r";
+    expect(probe.classify(`${controls}${probe.command}\x1b[0m\r\n`)).toBeNull();
+    expect(probe.classify(`${controls}${evaluated(probe.command, edition, dollar)}\x1b[0m\r\n`)).toEqual({ shell });
+  });
+
   it("ignores old markers and unrelated output", () => {
     const old = createShellProbe(crypto.randomUUID());
     const current = createShellProbe(crypto.randomUUID());

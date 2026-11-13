@@ -166,6 +166,33 @@ describe("remote shell response collection", () => {
     expect(await probing).toBe(true);
   });
 
+  it.each(["ssh", "pty"] as const)("recognizes fragmented bracketed-paste output on %s without mutating terminal bytes", async (transport) => {
+    await setup();
+    ai.prepareRemoteShellProbe("target", transport);
+    const probing = ai.ensureRemoteShellProbe("target", transport);
+    output(transport, `\x1b[?2004huser@host$ ${command()}\r\n`);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls("ai_cache_remote_shell")).toHaveLength(0);
+
+    // Split both the CSI sequence and the marker at every byte boundary.
+    const response = new TextEncoder().encode(`\x1b[?2004l\r${evaluated()}`);
+    const original = response.slice();
+    for (let offset = 0; offset < response.length - 1; offset++) {
+      ai.observeRemoteShellOutput("target", transport, response.subarray(offset, offset + 1));
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls("ai_cache_remote_shell")).toHaveLength(0);
+    ai.observeRemoteShellOutput("target", transport, response.subarray(-1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls("ai_cache_remote_shell")).toEqual([
+      ["ai_cache_remote_shell", { targetId: "target", shell: "posix" }],
+    ]);
+    expect(await probing).toBe(true);
+    expect(response).toEqual(original);
+    expect(listenMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("does not classify an oversized echoed line's continuation as CMD", async () => {
     await setup();
     ai.prepareRemoteShellProbe("target", "ssh");
@@ -287,7 +314,7 @@ describe("remote shell response collection", () => {
     await vi.advanceTimersByTimeAsync(180_000);
     expect(calls("ai_session_start")).toHaveLength(0);
     expect(calls("mcp_accept_session")).toHaveLength(0);
-    output("ssh", evaluated("Core", "token"));
+    output("ssh", `\x1b[?2004l\r${evaluated()}`);
     await vi.advanceTimersByTimeAsync(0);
     expect(calls("ai_cache_remote_shell")).toHaveLength(1);
     expect(calls("ai_session_start")).toHaveLength(0);
@@ -339,8 +366,11 @@ describe("remote shell response collection", () => {
     const probing = ai.ensureRemoteShellProbe("replacement", "ssh");
     const rebind = ai.rebindTarget(args.tabId, "ssh", "replacement", lease);
     const result = close ? expect(rebind).rejects.toThrow(/closed/i) : expect(rebind).resolves.toBeUndefined();
-    output("ssh", evaluated("Core", "token", "replacement"), "replacement");
+    output("ssh", `\x1b[?2004l\r${evaluated("", "1234", "replacement")}`, "replacement");
     await vi.advanceTimersByTimeAsync(0);
+    expect(calls("ai_cache_remote_shell")).toEqual([
+      ["ai_cache_remote_shell", { targetId: "replacement", shell: "posix" }],
+    ]);
     expect(calls("ai_session_rebind_target")).toHaveLength(0);
     if (close) await ai.closePanel(args.tabId);
     cache.resolve(null);
