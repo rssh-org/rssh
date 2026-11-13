@@ -889,8 +889,6 @@ pub fn reserve_sftp_child<'a>(
 pub enum OwnedAiTarget {
     Ssh {
         handle: crate::ssh::client::SshHandle,
-        profile_id: String,
-        shell_probe_enqueued: bool,
     },
     #[cfg(any(windows, macos, linux, ohos))]
     Pty(crate::terminal::pty::PtyHandle),
@@ -942,8 +940,6 @@ pub fn with_owned_ready_ai_target<T>(
             .get(id)
             .map(|session| OwnedAiTarget::Ssh {
                 handle: session.ssh_handle().clone(),
-                profile_id: session.profile_id().to_owned(),
-                shell_probe_enqueued: session.shell_probe_enqueued(),
             })
             .ok_or_else(|| {
                 AppError::other(
@@ -1441,7 +1437,6 @@ mod tests {
             passphrase_cache: Mutex::new(HashMap::new()),
             ai_sessions: Mutex::new(HashMap::new()),
             ai_session_owners: Arc::new(Mutex::new(HashMap::new())),
-            ai_remote_shell_cache: Mutex::new(HashMap::new()),
             agent_bridge: crate::agent::AgentBridge::default(),
             data_dir: PathBuf::new(),
         }
@@ -2405,6 +2400,7 @@ mod tests {
                 model: "model".to_owned(),
                 provider: "provider".to_owned(),
                 source: crate::ai::session::SessionSource::Ai,
+                shell: tokio::sync::watch::channel(Default::default()).1,
                 action_tx,
                 audit: Arc::new(Mutex::new(crate::ai::audit::AuditLog::default())),
                 cancel_slot: Arc::new(Mutex::new(None)),
@@ -2472,6 +2468,7 @@ mod tests {
                 model: "model".to_owned(),
                 provider: "provider".to_owned(),
                 source: crate::ai::session::SessionSource::Ai,
+                shell: tokio::sync::watch::channel(Default::default()).1,
                 action_tx,
                 audit: Arc::new(Mutex::new(crate::ai::audit::AuditLog::default())),
                 cancel_slot: Arc::new(Mutex::new(Some(stream_cancel))),

@@ -16,7 +16,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name, callback) =
 vi.mock("../components/TerminalSplitLayout.svelte", async () => import("../components/test-fixtures/TerminalWorkspace.svelte"));
 
 let component: ReturnType<typeof mount> | undefined;
-const terminal = { session_id: "transport", tab_id: "local:requested-pane", nonce: "nonce", name: "Target", kind: "local", shell: { kind: "posix", source: "launch_config" } };
+const terminal = { session_id: "transport", tab_id: "local:requested-pane", nonce: "nonce", name: "Target", kind: "local", shell: { kind: "posix", source: "default" } };
 const actor = { tab_id: terminal.tab_id, instance_id: "actor", target_id: terminal.session_id, conversation_id: "conversation", source: "mcp", skill: "general", provider: "", model: "" };
 async function settle() { flushSync(); await tick(); flushSync(); }
 

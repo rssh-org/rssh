@@ -139,6 +139,7 @@ pub async fn ai_session_start(
     model: String,
     locale: Option<String>,
     resume: Option<String>,
+    shell: Option<rssh_core::ai::shell::ShellKind>,
 ) -> AppResult<AiSessionInfo> {
     rssh_core::ai::commands::ai_session_start(
         crate::tauri_host::host(app),
@@ -151,6 +152,7 @@ pub async fn ai_session_start(
         model,
         locale,
         resume,
+        shell,
     )
     .await
 }
@@ -288,30 +290,18 @@ pub async fn ai_session_rollback_context(
 }
 
 #[tauri::command]
-pub async fn ai_remote_shell_probe_needed(
+pub async fn ai_session_set_shell(
     window: tauri::Window,
     state: State<'_, Arc<AppState>>,
-    target_id: String,
-) -> AppResult<bool> {
-    rssh_core::ai::commands::ai_remote_shell_probe_needed(
-        rssh_core::state::SessionOwner::Window(window.label().to_owned()),
-        state.inner().as_ref(),
-        target_id,
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn ai_cache_remote_shell(
-    window: tauri::Window,
-    state: State<'_, Arc<AppState>>,
-    target_id: String,
+    tab_id: String,
+    instance_id: String,
     shell: rssh_core::ai::shell::ShellKind,
-) -> AppResult<()> {
-    rssh_core::ai::commands::ai_cache_remote_shell(
+) -> AppResult<AiSessionInfo> {
+    rssh_core::ai::commands::ai_session_set_shell(
         rssh_core::state::SessionOwner::Window(window.label().to_owned()),
         state.inner().as_ref(),
-        target_id,
+        tab_id,
+        Some(instance_id),
         shell,
     )
     .await

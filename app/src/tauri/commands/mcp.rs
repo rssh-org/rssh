@@ -80,10 +80,11 @@ pub async fn mcp_accept_session(
     window: tauri::Window,
     state: State<'_, Arc<AppState>>,
     request_id: String,
+    shell: Option<rssh_core::ai::shell::ShellKind>,
 ) -> AppResult<AiSessionInfo> {
     let owner = SessionOwner::Window(window.label().into());
     let host = Host::new(state.inner().clone(), window_sink(window));
-    agent::accept_session(state.inner().as_ref(), host, &owner, &request_id).await
+    agent::accept_session(state.inner().as_ref(), host, &owner, &request_id, shell).await
 }
 
 #[tauri::command]

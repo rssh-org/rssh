@@ -17,13 +17,13 @@ vi.mock("../stores/app.svelte.ts", () => ({
   tabs: () => [{ id: "tab", type: "local" }], setActiveWorkspace: vi.fn(), setActivePane: vi.fn(),
 }));
 vi.mock("../clipboard.ts", () => ({ writeText: vi.fn() }));
-const session = { session_id: "transport", tab_id: "tab", nonce: "nonce", name: "Server", kind: "local", shell: { kind: "posix", source: "launch_config" } };
+const session = { session_id: "transport", tab_id: "tab", nonce: "nonce", name: "Server", kind: "local", shell: { kind: "posix", source: "default" } };
 const request = { id: "request", session_id: "transport", tab_id: "tab", nonce: "nonce", kind: "local", title: "Investigate startup failure" };
-const info = { tab_id: "tab", instance_id: "actor", target_id: "transport", conversation_id: "conversation", source: "mcp", skill: "general", model: "", provider: "" };
+const info = { tab_id: "tab", instance_id: "actor", target_id: "transport", conversation_id: "conversation", source: "mcp", skill: "general", model: "", provider: "", shell: "posix" };
 let component: ReturnType<typeof mount> | undefined;
 
 async function settle() { flushSync(); await tick(); await Promise.resolve(); flushSync(); }
-async function render(targetKind: "local" | "ssh" = "local") {
+async function render(targetKind: "local" | "ssh" | "serial" | "telnet" = "local") {
   component = mount(ChatPanel, { target: document.body, props: { tabId: "tab", targetKind, targetId: "transport", active: true } });
   await settle();
 }
@@ -37,7 +37,7 @@ beforeEach(async () => {
   f.invoke.mockImplementation(async (command, args) => {
     if (command === "ai_settings_get") return { provider: "", model: "", has_api_key: false, danger_mode: false };
     if (command === "mcp_status") return { endpoint: null, sessions: [session], requests: [] };
-    if (command === "mcp_accept_session" || command === "ai_session_start") return info;
+    if (command === "mcp_accept_session" || command === "ai_session_start" || command === "ai_session_set_shell") return { ...info, shell: args.shell ?? "posix" };
     if (command === "ai_conversations_list") return [];
     if (command === "ai_conversation_timeline") return "[]";
     if (command === "ai_audit_get") return { entries: [] };
@@ -52,6 +52,49 @@ afterEach(async () => {
   unregisterAlternateScreenProvider("tab");
   mcp.disconnect();
   document.body.innerHTML = "";
+});
+
+describe("conversation shell toolbar", () => {
+  it("places the default selector directly before audit and uses the choice for a new AI conversation", async () => {
+    await render();
+    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Conversation shell"]')!;
+    expect(select.value).toBe("posix");
+    expect(select.nextElementSibling?.getAttribute("aria-label")).toBe("View audit log");
+    select.value = "powershell";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    expect(select.value).toBe("powershell");
+    expect(f.invoke).not.toHaveBeenCalledWith("ai_session_set_shell", expect.anything());
+    await ai.startSession({ tabId: "tab", targetKind: "local", targetId: "transport", skill: "", provider: "", model: "", lease: ai.captureSessionLease("tab") });
+    expect(f.invoke).toHaveBeenCalledWith("ai_session_start", expect.objectContaining({ shell: "powershell" }));
+  });
+
+  it("applies the same draft and live selector to MCP conversations", async () => {
+    await mcp.refresh();
+    await render();
+    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Conversation shell"]')!;
+    select.value = "powershell";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    f.listeners.get("agent:session_requested:transport")!({ payload: request });
+    await settle();
+    await mcp.accept("request");
+    await settle();
+    expect(f.invoke).toHaveBeenCalledWith("mcp_accept_session", { requestId: "request", shell: "powershell" });
+    expect(select.value).toBe("powershell");
+    select.value = "cmd";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(select.value).toBe("cmd");
+    });
+    expect(f.invoke).toHaveBeenCalledWith("ai_session_set_shell", { tabId: "tab", instanceId: "actor", shell: "cmd" });
+  });
+
+  it.each(["serial", "telnet"] as const)("does not offer shell syntax for a %s device", async (kind) => {
+    await render(kind);
+    expect(document.querySelector('[aria-label="Conversation shell"]')).toBeNull();
+  });
 });
 
 describe("MCP inside the AI conversation", () => {
@@ -102,7 +145,7 @@ describe("MCP inside the AI conversation", () => {
       expect(f.invoke).toHaveBeenCalledWith("mcp_session_ready", { requestId: "request", instanceId: "actor" });
       expect(document.querySelector('textarea')).toBeNull();
     });
-    expect(f.invoke).toHaveBeenCalledWith("mcp_accept_session", { requestId: "request" });
+    expect(f.invoke).toHaveBeenCalledWith("mcp_accept_session", { requestId: "request", shell: "posix" });
     expect(f.invoke).not.toHaveBeenCalledWith("ai_session_start", expect.anything());
     expect(document.querySelector('button[aria-label="End MCP conversation and revoke control"]')).not.toBeNull();
   });

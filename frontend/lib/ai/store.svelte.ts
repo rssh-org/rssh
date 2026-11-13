@@ -14,7 +14,6 @@ import { t, errMsg, locale as currentLocale } from "../i18n/index.svelte.ts";
 import { extractOutput, findSentinel } from "./pty-output.ts";
 import { decodeStreamChunk } from "../terminal/stream-decode.ts";
 import { truncateCommand } from "./format.ts";
-import { createShellProbe } from "./shell-probe.ts";
 import {
   applyTerminalMutations,
   restoreTimeline,
@@ -91,6 +90,9 @@ const panel = createSidePanelState({
 });
 let _position = $state<AiPosition>(loadPos());
 let _sessionByTab = $state<Record<string, AiSessionInfo>>({});
+let _draftShellByTab = $state<Record<string, ShellKind>>({});
+let _shellChangeByTab = $state<Record<string, number>>({});
+let _sessionStartingByTab = $state<Record<string, boolean>>({});
 let _chatByTab = $state<Record<string, ChatItem[]>>({});
 let _pendingByTab = $state<Record<string, CommandProposed | null>>({});
 let _keyboardLockedByTab = $state<Record<string, boolean>>({});
@@ -143,6 +145,10 @@ type PendingConversationMutation = Readonly<{
   operation: Promise<void>;
 }> | Readonly<{
   kind: "clear";
+  sequence: number;
+  operation: Promise<void>;
+}> | Readonly<{
+  kind: "shell";
   sequence: number;
   operation: Promise<void>;
 }> | Readonly<{
@@ -245,7 +251,6 @@ export function endConversation(tab_id: string): Promise<void> {
   // 面板关闭即结束这轮 conversation。先换 generation，所有迟到 listener/start
   // continuation 都失效；宽度是 tab 偏好，不属于 conversation，继续保留。
   _tabGeneration[tab_id] = tabGeneration(tab_id) + 1;
-  cancelSessionProbeWait(tab_id);
   if (_sessionByTab[tab_id] || _sessionLaunchesByTab[tab_id]?.size) {
     return stopSession(tab_id);
   }
@@ -285,7 +290,7 @@ export function discardPanelState(tab_id: string) {
  * generation 不同而失效。正常产品路径使用 UUID，不依赖复用。 */
 export function activateTab(tab_id: string) {
   _tabGeneration[tab_id] = tabGeneration(tab_id) + 1;
-  cancelSessionProbeWait(tab_id);
+  delete _draftShellByTab[tab_id];
   _disposedTabs.delete(tab_id);
   panel.seedWidth(tab_id);
 }
@@ -293,7 +298,6 @@ export function activateTab(tab_id: string) {
 /** closeTab 的唯一 AI teardown：先同步封死后续异步 continuation，再清 UI/actor。 */
 export async function disposeTab(tab_id: string): Promise<void> {
   _tabGeneration[tab_id] = tabGeneration(tab_id) + 1;
-  cancelSessionProbeWait(tab_id);
   _disposedTabs.add(tab_id);
   discardPanelState(tab_id);
   if (!_sessionByTab[tab_id] && !_sessionLaunchesByTab[tab_id]?.size) {
@@ -325,6 +329,51 @@ export function sessionForTab(tab_id: string): AiSessionInfo | undefined {
 }
 export function listAllSessions(): AiSessionInfo[] {
   return Object.values(_sessionByTab);
+}
+
+/** A draft belongs to the next conversation, never to the remote connection. */
+export function shellForTab(tab_id: string): ShellKind {
+  const shell = _sessionByTab[tab_id]?.shell ?? _draftShellByTab[tab_id];
+  return shell === "cmd" || shell === "powershell" ? shell : "posix";
+}
+
+export function shellSelectionBusy(tab_id: string): boolean {
+  return _sessionStartingByTab[tab_id] === true || _shellChangeByTab[tab_id] !== undefined;
+}
+
+export async function setSessionShell(tab_id: string, shell: ShellKind, lease: SessionLease): Promise<void> {
+  assertLeaseLive(tab_id, lease);
+  if (shellSelectionBusy(tab_id)) throw new Error(t("error.ai_shell_change_busy"));
+  const session = _sessionByTab[tab_id];
+  if (!session) {
+    _draftShellByTab[tab_id] = shell;
+    return;
+  }
+  if (isRawDeviceKind(_targetKindByTab[tab_id])) throw new Error(t("error.ai_shell_change_unavailable"));
+  if (shell === shellForTab(tab_id)) return;
+  const sequence = ++_nextConversationMutationId;
+  _shellChangeByTab[tab_id] = sequence;
+  const operation = enqueueConversationMutation(tab_id, async () => {
+    assertLeaseLive(tab_id, lease);
+    const updated = await invoke<AiSessionInfo>("ai_session_set_shell", {
+      tabId: tab_id,
+      instanceId: session.instance_id,
+      shell,
+    });
+    if (!isTabLive(tab_id, lease.generation)) return;
+    const current = _sessionByTab[tab_id];
+    if (!current || current.instance_id !== session.instance_id) return;
+    // A reconnect may have updated target_id while this acknowledgement travelled.
+    _sessionByTab[tab_id] = { ...current, shell: updated.shell };
+  });
+  const pending: PendingConversationMutation = { kind: "shell", sequence, operation };
+  trackConversationMutation(tab_id, pending);
+  try {
+    await operation;
+  } finally {
+    untrackConversationMutation(tab_id, pending);
+    if (_shellChangeByTab[tab_id] === sequence) delete _shellChangeByTab[tab_id];
+  }
 }
 
 export function chatItems(tab_id: string): ChatItem[] {
@@ -677,7 +726,7 @@ export async function startMcpSession(
   return launchSession(
     { ...args, skill: "", provider: "", model: "" },
     null,
-    () => invoke<AiSessionInfo>("mcp_accept_session", { requestId }),
+    () => invoke<AiSessionInfo>("mcp_accept_session", { requestId, shell: shellForTab(args.tabId) }),
   );
 }
 
@@ -703,6 +752,7 @@ async function launchSession(
     await teardown;
     assertTabLive(args.tabId, generation);
   }
+  _sessionStartingByTab[args.tabId] = true;
   const launch = launchSessionAtGeneration(args, resumeId, generation, start);
   const launches = _sessionLaunchesByTab[args.tabId] ?? new Set<Promise<AiSessionInfo>>();
   _sessionLaunchesByTab[args.tabId] = launches;
@@ -713,6 +763,7 @@ async function launchSession(
     launches.delete(launch);
     if (launches.size === 0 && _sessionLaunchesByTab[args.tabId] === launches) {
       delete _sessionLaunchesByTab[args.tabId];
+      delete _sessionStartingByTab[args.tabId];
     }
   }
 }
@@ -723,11 +774,6 @@ async function launchSessionAtGeneration(
   generation: number,
   start?: () => Promise<AiSessionInfo>,
 ): Promise<AiSessionInfo> {
-  const probe = pendingRemoteShellProbe(args.targetKind, args.targetId);
-  if (probe) {
-    await waitForSessionProbe(args.tabId, probe);
-    assertTabLive(args.tabId, generation);
-  }
   let info: AiSessionInfo;
   try {
     info = await (start ? start() : invoke<AiSessionInfo>("ai_session_start", {
@@ -738,6 +784,7 @@ async function launchSessionAtGeneration(
       model: args.model,
       locale: currentLocale(),
       resume: resumeId,
+      shell: resumeId ? undefined : shellForTab(args.tabId),
     }));
   } catch (error) {
     // Closing can cancel a Rust Pending reservation before start returns. The
@@ -816,6 +863,8 @@ function clearSessionState(tab_id: string) {
   }
   detachListeners(tab_id);
   delete _sessionByTab[tab_id];
+  delete _draftShellByTab[tab_id];
+  delete _shellChangeByTab[tab_id];
   delete _pendingByTab[tab_id];
   delete _keyboardLockedByTab[tab_id];
   delete _targetKindByTab[tab_id];
@@ -1143,12 +1192,6 @@ export async function rebindTarget(
   const bound = _sessionByTab[tab_id];
   if (!bound) throw new SessionClosedError(tab_id);
   const conversationId = bound.conversation_id;
-  const probe = pendingRemoteShellProbe(target_kind, target_id);
-  if (probe) {
-    await waitForSessionProbe(tab_id, probe);
-    assertTabLive(tab_id, generation);
-    if (_sessionByTab[tab_id]?.instance_id !== bound.instance_id) throw new SessionClosedError(tab_id);
-  }
   await invoke("ai_session_rebind_target", {
     tabId: tab_id,
     instanceId: bound.instance_id,
@@ -1175,160 +1218,6 @@ export async function cancelStream(tab_id: string, lease: SessionLease): Promise
     tabId: session.tabId,
     instanceId: session.instanceId,
   });
-}
-
-type ShellProbeTransport = "ssh" | "pty";
-type ShellProbeResponse = { shell: ShellKind | null } | { error: unknown } | null;
-interface RemoteShellProbe {
-  controller: AbortController;
-  response: Promise<ShellProbeResponse>;
-  finish(response: ShellProbeResponse): void;
-  observe(raw: Uint8Array): void;
-  promise?: Promise<boolean>;
-}
-const remoteShellProbes = new Map<string, RemoteShellProbe>();
-const sessionProbeWaits = new Map<string, AbortController>();
-
-/** Release callers on cancellation even if an IPC response never arrives. Late
- * rejection is still consumed; the operation retains its own cleanup guards. */
-function settleProbeOnAbort(probe: Promise<boolean>, signal: AbortSignal): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    const cancelled = () => {
-      signal.removeEventListener("abort", cancelled);
-      resolve(false);
-    };
-    signal.addEventListener("abort", cancelled, { once: true });
-    if (signal.aborted) cancelled();
-    probe.then((value) => {
-      signal.removeEventListener("abort", cancelled);
-      resolve(value);
-    }, (error) => {
-      signal.removeEventListener("abort", cancelled);
-      reject(error);
-    });
-  });
-}
-
-function waitForSessionProbe(tabId: string, probe: Promise<boolean>): Promise<boolean> {
-  let controller = sessionProbeWaits.get(tabId);
-  if (!controller) {
-    controller = new AbortController();
-    sessionProbeWaits.set(tabId, controller);
-  }
-  return settleProbeOnAbort(probe, controller.signal);
-}
-
-function cancelSessionProbeWait(tabId: string): void {
-  sessionProbeWaits.get(tabId)?.abort();
-  sessionProbeWaits.delete(tabId);
-}
-
-function pendingRemoteShellProbe(kind: AiTargetKind, targetId: string): Promise<boolean> | undefined {
-  const transport = kind === "ssh" ? "ssh" : kind === "local" ? "pty" : null;
-  return transport ? remoteShellProbes.get(`${transport}:${targetId}`)?.promise : undefined;
-}
-
-/** The backend owns the setting, known-shell decision, and cache lifetime. */
-export async function remoteShellProbeNeeded(target_id: string): Promise<boolean> {
-  return invoke<boolean>("ai_remote_shell_probe_needed", { targetId: target_id });
-}
-
-/** Prepare before connect/spawn: the backend may emit its probe response before
- * the connect IPC returns. This collector has no IPC or rejecting promise. */
-export function prepareRemoteShellProbe(targetId: string, transport: ShellProbeTransport = "ssh"): void {
-  const key = `${transport}:${targetId}`;
-  if (remoteShellProbes.has(key)) return;
-  const probe = createShellProbe(targetId);
-  const decoder = new TextDecoder("utf-8", { fatal: false });
-  const TAIL_CAP = 16 * 1024;
-  let buffer = "";
-  let discardingLine = false;
-  let complete = false;
-  let resolve!: (response: ShellProbeResponse) => void;
-  const response = new Promise<ShellProbeResponse>((done) => { resolve = done; });
-  const finish = (result: ShellProbeResponse) => {
-    if (complete) return;
-    complete = true;
-    buffer = "";
-    resolve(result);
-  };
-  remoteShellProbes.set(key, {
-    controller: new AbortController(),
-    response,
-    finish,
-    observe(raw) {
-      if (complete) return;
-      try {
-        let text = decoder.decode(raw, { stream: true });
-        if (discardingLine) {
-          const newline = text.indexOf("\n");
-          if (newline < 0) return;
-          text = text.slice(newline + 1);
-          discardingLine = false;
-        }
-        buffer += text;
-        // Inspect complete lines before trimming a large following output burst.
-        const result = probe.classify(buffer);
-        buffer = buffer.slice(buffer.lastIndexOf("\n") + 1);
-        if (buffer.length > TAIL_CAP) {
-          buffer = "";
-          // A continuation of an oversized echoed line is not a new line start.
-          discardingLine = true;
-        }
-        if (result) finish(result);
-      } catch (error) {
-        finish({ error });
-      }
-    },
-  });
-}
-
-/** Observe the existing terminal data subscription without changing its bytes. */
-export function observeRemoteShellOutput(targetId: string, transport: ShellProbeTransport, raw: Uint8Array): void {
-  remoteShellProbes.get(`${transport}:${targetId}`)?.observe(raw);
-}
-
-/** Called after connect, before effects publish the session. The backend already
- * enqueued the probe before SSH's unchanged init-command path. AI/MCP await the
- * response and cache acknowledgement; elapsed time never determines readiness. */
-export function ensureRemoteShellProbe(targetId: string, transport: ShellProbeTransport = "ssh"): Promise<boolean> {
-  prepareRemoteShellProbe(targetId, transport);
-  const collector = remoteShellProbes.get(`${transport}:${targetId}`)!;
-  if (collector.promise) return collector.promise;
-  const assertConnected = () => {
-    if (collector.controller.signal.aborted) throw new SessionClosedError(targetId);
-  };
-  const operation = (async () => {
-    const needed = await remoteShellProbeNeeded(targetId);
-    assertConnected();
-    if (!needed) {
-      collector.finish(null);
-      return false;
-    }
-    const response = await collector.response;
-    assertConnected();
-    if (response && "error" in response) throw response.error;
-    if (!response?.shell) throw new Error(t("ai.error.shell_unrecognized"));
-    await invoke("ai_cache_remote_shell", { targetId, shell: response.shell });
-    assertConnected();
-    return true;
-  })();
-  // Keep failed promises until teardown so later AI starts cannot bypass a
-  // failed detection and silently fall back to the wrong shell family.
-  collector.promise = settleProbeOnAbort(operation, collector.controller.signal).then((detected) => {
-    assertConnected();
-    return detected;
-  });
-  return collector.promise;
-}
-
-export function cancelRemoteShellProbe(targetId: string, transport: ShellProbeTransport = "ssh"): void {
-  const key = `${transport}:${targetId}`;
-  const collector = remoteShellProbes.get(key);
-  if (!collector) return;
-  collector.controller.abort();
-  collector.finish(null);
-  remoteShellProbes.delete(key);
 }
 
 /** 当前会话的助手消息是否正在流式输出 —— UI 用它把"发送"按钮切成"停止"。 */
@@ -1868,7 +1757,6 @@ type AiSettingsPatch = Partial<{
   autoPatchMv: boolean;
   autoWebSearch: boolean;
   autoWebFetch: boolean;
-  autoDetectRemoteShell: boolean;
 }>;
 
 type AutoApprovalSettingKey =

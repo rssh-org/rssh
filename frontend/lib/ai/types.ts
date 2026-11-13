@@ -73,8 +73,6 @@ export interface AiSettings {
   auto_patch_mv: boolean;
   auto_web_search: boolean;
   auto_web_fetch: boolean;
-  /** 远端 shell 自动探测：off 时远端假设 POSIX；on 时 AI panel 打开时发探针。默认 off。 */
-  auto_detect_remote_shell: boolean;
 }
 
 /** AI 工具卡片 kind —— 后端 emit command_proposed 时打的 tag；前端按它查 auto_* 设置。
@@ -187,6 +185,8 @@ export interface ModelInfo {
 }
 
 export interface AiSessionInfo {
+  /** Persisted with the conversation; raw-device transports have a fixed kind. */
+  shell?: ShellKind | "serial" | "telnet";
   /** Older sessions without this field are built-in AI conversations. */
   source?: "ai" | "mcp";
   /** Tab 内的会话身份；切 Tab / SSH 重连不变，显式关闭 AI 面板时结束。 */
@@ -211,9 +211,7 @@ export interface ConversationMeta {
   updated_at: number;
 }
 
-/** 远端 shell 三家族（lowercase wire format）。Rust 端 ShellKind 还有
- *  serial/telnet 两个 raw-device 变体，但它们只在后端由 AiTarget 推出、
- *  从不走这条 probe 通道 —— 这个类型只覆盖 SSH 探测能产出的家族。 */
+/** Shell syntax selected for this conversation. */
 export type ShellKind = "posix" | "cmd" | "powershell";
 
 /**

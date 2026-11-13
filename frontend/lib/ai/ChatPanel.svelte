@@ -1,7 +1,7 @@
 <script lang="ts">
     import * as ai from "./store.svelte.ts";
     import * as mcp from "../mcp/store.svelte.ts";
-    import type { AiTargetKind, ChatItem, ConversationMeta } from "./types.ts";
+    import { isRawDeviceKind, type AiTargetKind, type ChatItem, type ConversationMeta, type ShellKind } from "./types.ts";
     import CommandConfirmDialog from "./CommandConfirmDialog.svelte";
     import WebToolConfirmCard from "./WebToolConfirmCard.svelte";
     import DownloadConfirmCard from "./DownloadConfirmCard.svelte";
@@ -56,6 +56,8 @@
     } | null>(null);
 
     let session = $derived(ai.sessionForTab(tabId));
+    let selectedShell = $derived(ai.shellForTab(tabId));
+    let shellBusy = $derived(ai.shellSelectionBusy(tabId));
     let mcpSession = $derived(session?.source === "mcp");
     let mcpRequests = $derived(mcp.requestsForTab(tabId));
     let items: ChatItem[] = $derived(ai.chatItems(tabId));
@@ -77,9 +79,7 @@
     let conversations = $state<ConversationMeta[] | null>(null);
 
     onMount(async () => {
-        // 只拉 settings（提示词标题的 danger 旗等要它）。不在这里预启 session ——
-        // shell 探测已移到 SSH 连接成功时跑（TerminalPane），开 panel 不再为探测拉
-        // 起 actor。会话改为首次发消息时（send → ensureSession）惰性启动。
+        // 只拉 settings；会话在首次发消息时（send → ensureSession）惰性启动。
         if (!ai.settings()) {
             try { await ai.loadSettings(); } catch { /* 静默 */ }
         }
@@ -169,10 +169,8 @@
         }
     }
 
-    /** 没 session 就先启动；启动失败抛错。
-     *  系统提示词由设置提供；skill 参数仅保留旧 wire 兼容。
-     *  远端 shell 探测不在这里 —— 它在 SSH 连接时已跑过并写进 profile 缓存，
-     *  startSession 从缓存读初始 shell（缓存 miss 则 POSIX 兜底）。 */
+    /** 没 session 就用当前选择启动；系统提示词由设置提供。
+     *  skill 参数仅保留旧 wire 兼容。 */
     async function ensureSession(owner: PanelOwner): Promise<void> {
         if (ai.sessionForTab(owner.tabId)) return;
         if (ensureInFlight) return ensureInFlight;
@@ -374,6 +372,19 @@
             rollingBack = false;
         }
     }
+
+    async function changeShell(event: Event) {
+        const select = event.currentTarget as HTMLSelectElement;
+        const next = select.value as ShellKind;
+        const owner = snapshotOwner();
+        // Keep displaying the acknowledged value until the session saves it.
+        select.value = ai.shellForTab(owner.tabId);
+        try {
+            await ai.setSessionShell(owner.tabId, next, owner.lease);
+        } catch (error) {
+            toast.error(errMsg(error));
+        }
+    }
 </script>
 
 <div class="ai-panel" bind:this={panelEl}>
@@ -386,6 +397,15 @@
         <span class="tokens" title={t("ai.toolbar.tokens_tip", { tin: tokens.tokens_in, tout: tokens.tokens_out })}>
             ↑{formatTokenCount(tokens.tokens_in)} ↓{formatTokenCount(tokens.tokens_out)}
         </span>
+        {/if}
+        {#if !isRawDeviceKind(targetKind)}
+        <select class="shell-select" value={selectedShell} onchange={changeShell}
+                disabled={busy || shellBusy || streaming || !!ai.pendingCommand(tabId) || mcpRequests.some(request => request.busy)}
+                title={t("ai.toolbar.shell")} aria-label={t("ai.toolbar.shell")}>
+            <option value="posix">POSIX</option>
+            <option value="powershell">PowerShell</option>
+            <option value="cmd">CMD</option>
+        </select>
         {/if}
         <!-- Audit log toggle: file-text icon in chat view, chat bubble in audit view (= go back).
              Toolbar controls render unconditionally (stable layout); they disable until the
@@ -647,6 +667,7 @@
 
 <style>
     .ai-panel {
+        container-type: inline-size;
         display: flex;
         flex-direction: column;
         height: 100%;
@@ -658,6 +679,18 @@
         display: flex; align-items: center; gap: 8px;
         padding: 8px; border-bottom: 1px solid var(--divider);
         flex-shrink: 0;
+    }
+    .shell-select {
+        flex-shrink: 0;
+        width: 100px;
+        min-width: 0;
+        padding: 4px 6px;
+        font-size: 11px;
+        height: 28px;
+    }
+    @container (max-width: 360px) {
+        .toolbar { gap: 4px; }
+        .tokens { display: none; }
     }
     .mcp-request { flex-shrink: 0; padding: 12px; border-bottom: 1px solid var(--divider); background: var(--raised); }
     .mcp-request-copy { display: flex; flex-direction: column; gap: 6px; font-size: 12px; overflow-wrap: anywhere; }

@@ -260,8 +260,7 @@ impl ShellKind {
     }
 
     /// Map a local shell binary path (as remembered by `PtyHandle`) to a
-    /// ShellKind. Used only for local PTY tabs where the shell is already
-    /// known — no probing needed.
+    /// ShellKind for local subprocess invocation (for example file downloads).
     pub fn from_local_path(path: &str) -> Self {
         // File-name basename, case-insensitive. Path may be Unix-style
         // (`/bin/bash`), Windows-style (`C:\Windows\System32\cmd.exe`),
@@ -276,6 +275,17 @@ impl ShellKind {
             "cmd" => Self::Cmd,
             "powershell" | "pwsh" => Self::Powershell,
             _ => Self::Posix, // bash, zsh, fish, sh, dash, ksh, nu, xonsh, ...
+        }
+    }
+
+    /// Stable persisted/wire name, independent of display labels.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Posix => "posix",
+            Self::Cmd => "cmd",
+            Self::Powershell => "powershell",
+            Self::Serial => "serial",
+            Self::Telnet => "telnet",
         }
     }
 }

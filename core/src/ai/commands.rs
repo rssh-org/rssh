@@ -108,14 +108,6 @@ fn key_danger_mode() -> String {
 fn key_auto(name: &str) -> String {
     format!("ai_auto_{name}")
 }
-/// 远端 shell 自动探测开关。off（默认）时远端 shell 假设 POSIX（覆盖 ~99% Linux/macOS
-/// 远端，零探测开销保留现有行为）；on 时 AI panel 打开后台发一行 echo 探针，靠
-/// `$PSEdition`/`$$` 解析结果在三类 shell（POSIX / cmd.exe / PowerShell）间分类。
-/// 跟 per-tool `auto_*`（自动批准）语义不同，独立 key。
-fn key_auto_detect_remote_shell() -> String {
-    "ai_auto_detect_remote_shell".into()
-}
-
 // ─── Sync (export/import of provider rows) ─────────────────────────
 //
 // `danger_mode` and the `auto_*` family are deliberately NOT synced — they are
@@ -318,6 +310,7 @@ pub struct AiSessionInfo {
     pub model: String,
     pub provider: String,
     pub source: session::SessionSource,
+    pub shell: super::shell::ShellKind,
     /// Persistent row id in ai_conversations — the front-end keys its
     /// timeline autosaves on this.
     pub conversation_id: String,
@@ -339,6 +332,7 @@ impl AiSessionInfo {
             model: s.model.clone(),
             provider: s.provider.clone(),
             source: s.source,
+            shell: *s.shell.borrow(),
             conversation_id: s.conversation_id.clone(),
         }
     }
@@ -402,7 +396,7 @@ fn target_environment(
         AiTarget::Telnet(_) => SessionKind::Telnet,
     };
     let target = owned_ready_ai_target(state, target.id(), kind, owner)?;
-    let (shell, _) = resolved_target_shell(state, &target)?;
+    let (shell, _) = target_shell_default(&target);
     let handle = match target {
         OwnedAiTarget::Ssh { handle, .. } => Some(handle),
         _ => None,
@@ -410,78 +404,19 @@ fn target_environment(
     Ok((handle, shell))
 }
 
-enum TargetShell {
-    Known(super::shell::ShellKind),
-    Remote(String),
-}
-
-/// Known shell executables never need probing. Unknown remote defaults share
-/// the same setting and cache, scoped by the connection's remote identity.
-fn target_shell(target: &crate::commands::lifecycle::OwnedAiTarget) -> TargetShell {
+/// Transport defaults for terminal descriptions. Shell sessions are explicitly
+/// configured per conversation; raw devices keep their transport semantics.
+pub(crate) fn target_shell_default(
+    target: &crate::commands::lifecycle::OwnedAiTarget,
+) -> (super::shell::ShellKind, &'static str) {
     use super::shell::ShellKind;
     use crate::commands::lifecycle::OwnedAiTarget;
     match target {
-        OwnedAiTarget::Ssh { profile_id, .. } => TargetShell::Remote(format!("ssh:{profile_id}")),
         #[cfg(any(windows, macos, linux, ohos))]
-        OwnedAiTarget::Pty(handle) => match handle.connector() {
-            Some(crate::models::ConnectorSpec::AwsSsm {
-                profile,
-                account_id,
-                region,
-                instance_id,
-            }) => TargetShell::Remote(format!(
-                "aws_ssm:{}",
-                json!([profile, account_id, region, instance_id])
-            )),
-            _ => TargetShell::Known(
-                handle
-                    .shell_path()
-                    .map(ShellKind::from_local_path)
-                    .unwrap_or_default(),
-            ),
-        },
-        #[cfg(any(windows, macos, linux, ohos))]
-        OwnedAiTarget::Serial => TargetShell::Known(ShellKind::Serial),
-        OwnedAiTarget::Telnet => TargetShell::Known(ShellKind::Telnet),
+        OwnedAiTarget::Serial => (ShellKind::Serial, "transport"),
+        OwnedAiTarget::Telnet => (ShellKind::Telnet, "transport"),
+        _ => (ShellKind::Posix, "default"),
     }
-}
-
-/// Shared by AI sessions and MCP terminal descriptions; the source label keeps
-/// known launch configuration distinct from a probe result or POSIX fallback.
-pub(crate) fn resolved_target_shell(
-    state: &AppState,
-    target: &crate::commands::lifecycle::OwnedAiTarget,
-) -> AppResult<(super::shell::ShellKind, &'static str)> {
-    use super::shell::ShellKind;
-    match target_shell(target) {
-        TargetShell::Known(shell) => Ok((
-            shell,
-            match shell {
-                ShellKind::Serial | ShellKind::Telnet => "transport",
-                _ => "launch_config",
-            },
-        )),
-        TargetShell::Remote(key) => {
-            let cached = if remote_shell_detection_enabled(state)? {
-                locked(&state.ai_remote_shell_cache)?.get(&key).copied()
-            } else {
-                None
-            };
-            let source = if cached.is_some() {
-                "profile_cache"
-            } else {
-                "fallback"
-            };
-            Ok((cached.unwrap_or_default(), source))
-        }
-    }
-}
-
-fn remote_shell_detection_enabled(state: &AppState) -> AppResult<bool> {
-    Ok(
-        crate::db::settings::get(&state.db, &key_auto_detect_remote_shell())?.as_deref()
-            == Some("1"),
-    )
 }
 
 pub async fn ai_list_skills(state: &AppState) -> AppResult<Vec<SkillRecord>> {
@@ -576,9 +511,10 @@ pub async fn ai_session_start(
     model: String,
     locale: Option<String>,
     resume: Option<String>,
+    shell: Option<super::shell::ShellKind>,
 ) -> AppResult<AiSessionInfo> {
     ai_session_start_impl(
-        &state, app, owner, tab_id, target, skill, provider, model, locale, resume,
+        &state, app, owner, tab_id, target, skill, provider, model, locale, resume, shell,
     )
     .await
 }
@@ -596,9 +532,10 @@ pub async fn ai_session_start_impl(
     model: String,
     locale: Option<String>,
     resume: Option<String>,
+    shell: Option<super::shell::ShellKind>,
 ) -> AppResult<AiSessionInfo> {
     start_session_impl(
-        state, host, owner, tab_id, target, skill, provider, model, locale, resume, None,
+        state, host, owner, tab_id, target, skill, provider, model, locale, resume, None, shell,
     )
     .await
 }
@@ -611,6 +548,7 @@ pub async fn ai_mcp_session_start_impl(
     tab_id: String,
     target: AiTarget,
     title: String,
+    shell: Option<super::shell::ShellKind>,
 ) -> AppResult<AiSessionInfo> {
     start_session_impl(
         state,
@@ -624,6 +562,7 @@ pub async fn ai_mcp_session_start_impl(
         None,
         None,
         Some(title),
+        shell,
     )
     .await
 }
@@ -641,6 +580,7 @@ async fn start_session_impl(
     locale: Option<String>,
     resume: Option<String>,
     mcp_title: Option<String>,
+    shell: Option<super::shell::ShellKind>,
 ) -> AppResult<AiSessionInfo> {
     let mut owner_reservation =
         crate::commands::lifecycle::reserve_ai_owner(state, tab_id.clone(), owner.clone())?;
@@ -696,7 +636,20 @@ async fn start_session_impl(
         }
     };
 
-    let (ssh_handle, initial_shell) = target_environment(state, &owner, &target)?;
+    let (ssh_handle, transport_shell) = target_environment(state, &owner, &target)?;
+    let initial_shell = if transport_shell.is_raw_device() {
+        transport_shell
+    } else {
+        let selected = resumed
+            .as_ref()
+            .map(|row| row.shell)
+            .or(shell)
+            .unwrap_or_default();
+        if selected.is_raw_device() {
+            return Err(AppError::other("ai_shell_invalid", json!({})));
+        }
+        selected
+    };
 
     // Snapshot the editable template, response language and lazy skill catalog.
     // The actor renders placeholders using its current target shell per request.
@@ -763,8 +716,7 @@ async fn start_session_impl(
         max_output_bytes: sanitize::DEFAULT_MAX_OUTPUT_BYTES,
         ssh_handle,
         data_dir: state.data_dir.clone(),
-        // 本地 PTY: 上面从 PtyHandle.shell_path 推断（确定值）；
-        // 远端 SSH: 连接时探测命中过则用缓存值，否则 POSIX 默认（写一次，会话期不变）。
+        // Conversation-owned choice; reconnecting does not overwrite it.
         shell_kind: initial_shell,
         db: state.db.clone(),
         conversation_id,
@@ -803,11 +755,12 @@ pub(crate) fn activate_pending_ai_session(
     if is_new_conversation {
         // Ready actors use UPDATE-only autosaves, so their row must exist before
         // launch/publication. A create failure leaves PendingSession unlaunched.
-        crate::db::ai_conversation::create_with_source(
+        crate::db::ai_conversation::create_with_shell(
             &state.db,
             &conversation_id,
             target_key,
             pending.info().source,
+            *pending.info().shell.borrow(),
         )?;
     }
 
@@ -1221,103 +1174,24 @@ pub async fn ai_session_rollback_context(
     .await
 }
 
-/// Probe only live, owned targets with an unknown remote shell, when detection
-/// is enabled and their process-local cache has no result yet.
-pub async fn ai_remote_shell_probe_needed(
+/// Change the conversation shell through its actor, with persistence before ack.
+pub async fn ai_session_set_shell(
     owner: crate::state::SessionOwner,
     state: &AppState,
-    target_id: String,
-) -> AppResult<bool> {
-    ai_remote_shell_probe_needed_impl(state, &owner, target_id)
-}
-
-/// Transport-agnostic body shared by the Tauri command and the headless server.
-pub fn ai_remote_shell_probe_needed_impl(
-    state: &AppState,
-    owner: &crate::state::SessionOwner,
-    target_id: String,
-) -> AppResult<bool> {
-    Ok(crate::commands::lifecycle::with_owned_ready_ai_target(
-        state,
-        &target_id,
-        None,
-        owner,
-        |target| {
-            let enqueued = match &target {
-                crate::commands::lifecycle::OwnedAiTarget::Ssh {
-                    shell_probe_enqueued,
-                    ..
-                } => *shell_probe_enqueued,
-                #[cfg(any(windows, macos, linux, ohos))]
-                crate::commands::lifecycle::OwnedAiTarget::Pty(handle) => {
-                    handle.shell_probe_enqueued()
-                }
-                _ => false,
-            };
-            Ok(enqueued && remote_shell_probe_needed_for_target(state, &target)?)
-        },
-    )?
-    .unwrap_or(false))
-}
-
-fn remote_shell_probe_needed_for_target(
-    state: &AppState,
-    target: &crate::commands::lifecycle::OwnedAiTarget,
-) -> AppResult<bool> {
-    let TargetShell::Remote(key) = target_shell(target) else {
-        return Ok(false);
-    };
-    Ok(remote_shell_detection_enabled(state)?
-        && !locked(&state.ai_remote_shell_cache)?.contains_key(&key))
-}
-
-/// Queue the same shell probe during connection setup, before any init command.
-/// The frontend collects its response from the existing terminal data stream.
-pub fn remote_shell_probe_command(
-    state: &AppState,
-    target: &crate::commands::lifecycle::OwnedAiTarget,
-    session_id: &str,
-) -> AppResult<Option<String>> {
-    Ok(
-        remote_shell_probe_needed_for_target(state, target)?.then(|| {
-            let marker = format!("RSSH_SHELL_{}", session_id.replace('-', ""));
-            format!("echo {marker}=$PSEdition=$$=END\r")
-        }),
-    )
-}
-
-/// Cache the existing frontend probe's result. A result arriving after close
-/// or after detection was disabled is ignored; ownership is always checked.
-pub async fn ai_cache_remote_shell(
-    owner: crate::state::SessionOwner,
-    state: &AppState,
-    target_id: String,
+    tab_id: String,
+    instance_id: Option<String>,
     shell: super::shell::ShellKind,
-) -> AppResult<()> {
-    ai_cache_remote_shell_impl(state, &owner, target_id, shell)
-}
-
-pub fn ai_cache_remote_shell_impl(
-    state: &AppState,
-    owner: &crate::state::SessionOwner,
-    target_id: String,
-    shell: super::shell::ShellKind,
-) -> AppResult<()> {
-    crate::commands::lifecycle::with_owned_ready_ai_target(
-        state,
-        &target_id,
-        None,
-        owner,
-        |target| {
-            if let TargetShell::Remote(key) = target_shell(&target) {
-                if remote_shell_detection_enabled(state)? {
-                    locked(&state.ai_remote_shell_cache)?.insert(key, shell);
-                }
-            }
-            Ok(())
-        },
-    )?;
-    Ok(())
+) -> AppResult<AiSessionInfo> {
+    if shell.is_raw_device() {
+        return Err(AppError::other("ai_shell_invalid", json!({})));
+    }
+    ai_send_processed_action(state, &tab_id, &owner, instance_id.as_deref(), |ack| {
+        UserAction::SetShell { shell, ack }
+    })
+    .await?;
+    with_owned_ready_ai_session(state, &tab_id, &owner, instance_id.as_deref(), |s| {
+        Ok(AiSessionInfo::from(&*s))
+    })
 }
 
 /// SSH 重连后重新绑定 target。actor 更新连接和 shell 类型，让后续命令、
@@ -1650,9 +1524,6 @@ pub struct AiSettings {
     pub auto_patch_mv: bool,
     pub auto_web_search: bool,
     pub auto_web_fetch: bool,
-    /// 远端 shell 自动探测：off 时远端假设 POSIX；on 时 AI panel 打开后跑探针。
-    /// 详见 `key_auto_detect_remote_shell` 注释。
-    pub auto_detect_remote_shell: bool,
 }
 
 /// per-tool auto-approve 字段的默认值 —— 在 ai_settings_get / ai_settings_set 间共享。
@@ -1709,10 +1580,7 @@ pub async fn ai_settings_get_impl(
     let danger_mode = crate::db::settings::get(&state.db, &key_danger_mode())?
         .map(|v| v == "1")
         .unwrap_or(false);
-    let auto_detect_remote_shell =
-        crate::db::settings::get(&state.db, &key_auto_detect_remote_shell())?
-            .map(|v| v == "1")
-            .unwrap_or(false);
+
     Ok(AiSettings {
         system_prompt: prompts::get(&state.db)?,
         provider: row.as_ref().map(|r| r.id.clone()).unwrap_or_default(),
@@ -1733,7 +1601,6 @@ pub async fn ai_settings_get_impl(
         auto_patch_mv: read_auto(state, "patch_mv")?,
         auto_web_search: read_auto(state, "web_search")?,
         auto_web_fetch: read_auto(state, "web_fetch")?,
-        auto_detect_remote_shell,
     })
 }
 
@@ -2013,7 +1880,6 @@ pub struct AiSettingsPatch {
     pub auto_patch_mv: Option<bool>,
     pub auto_web_search: Option<bool>,
     pub auto_web_fetch: Option<bool>,
-    pub auto_detect_remote_shell: Option<bool>,
 }
 
 pub async fn ai_settings_set(state: &AppState, patch: AiSettingsPatch) -> AppResult<()> {
@@ -2036,7 +1902,6 @@ pub async fn ai_settings_set_impl(state: &AppState, patch: AiSettingsPatch) -> A
         auto_patch_mv,
         auto_web_search,
         auto_web_fetch,
-        auto_detect_remote_shell,
     } = patch;
     // provider 字段 = 激活哪个行（校验存在，fail-fast）。行本身的
     // name/protocol/model/endpoint/api_key 归 ai_provider_save 管。
@@ -2075,13 +1940,7 @@ pub async fn ai_settings_set_impl(state: &AppState, patch: AiSettingsPatch) -> A
             crate::db::settings::set(&state.db, &key_auto(name), if *on { "1" } else { "0" })?;
         }
     }
-    if let Some(on) = auto_detect_remote_shell {
-        crate::db::settings::set(
-            &state.db,
-            &key_auto_detect_remote_shell(),
-            if on { "1" } else { "0" },
-        )?;
-    }
+
     Ok(())
 }
 
@@ -2179,226 +2038,6 @@ mod tests {
                 Some(content),
             );
         }
-    }
-
-    #[cfg(any(windows, macos, linux))]
-    fn register_shell_probe_pty(
-        state: &AppState,
-        owner: &crate::state::SessionOwner,
-        connector: Option<crate::models::ConnectorSpec>,
-    ) -> String {
-        use crate::commands::lifecycle::{self, ReadySession};
-        use crate::state::SessionKind;
-        let id = uuid::Uuid::new_v4().to_string();
-        let reservation =
-            lifecycle::reserve_resource(state, &id, SessionKind::Pty, owner.clone()).unwrap();
-        let (_, handle) =
-            crate::terminal::pty::spawn(id.clone(), 80, 24, std::sync::Arc::new(|_, _| {}), None)
-                .unwrap();
-        let mut handle = match connector {
-            Some(connector) => handle.with_connector(connector),
-            None => handle,
-        };
-        // This ready-session fixture represents a probe queued during connect.
-        handle.mark_shell_probe_enqueued();
-        reservation.activate(ReadySession::Pty(handle)).unwrap();
-        id
-    }
-
-    #[cfg(any(windows, macos, linux))]
-    fn shell_probe_ssm(
-        profile: &str,
-        account: &str,
-        region: &str,
-        instance: &str,
-    ) -> crate::models::ConnectorSpec {
-        crate::models::ConnectorSpec::AwsSsm {
-            profile: profile.into(),
-            account_id: account.into(),
-            region: region.into(),
-            instance_id: instance.into(),
-        }
-    }
-
-    #[cfg(any(windows, macos, linux))]
-    #[tokio::test]
-    async fn ssm_target_uses_remote_shell_probe_setting_and_cache() {
-        use super::super::shell::ShellKind;
-        use crate::commands::lifecycle;
-        use crate::state::{SessionKind, SessionOwner};
-        let (host, _events) = crate::ssh::test_support::headless_host();
-        let state = host.state();
-        let owner = SessionOwner::Window("remote-shell-probe-test".into());
-        // Legacy serialized OS-derived shell hints must not bypass the setting.
-        let spec = serde_json::from_value(json!({
-            "type": "aws_ssm", "profile": "production", "account_id": "123456789012",
-            "region": "us-east-1", "instance_id": "i-0123456789abcdef0", "shell": "powershell"
-        }))
-        .unwrap();
-        let id = register_shell_probe_pty(state, &owner, Some(spec));
-        let target = AiTarget::Local(id.clone());
-        assert_eq!(
-            target_environment(state, &owner, &target).unwrap().1,
-            ShellKind::Posix
-        );
-        crate::db::settings::set(&state.db, &key_auto_detect_remote_shell(), "1").unwrap();
-        assert!(ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
-        ai_cache_remote_shell(owner.clone(), state, id.clone(), ShellKind::Cmd)
-            .await
-            .unwrap();
-        assert!(!ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
-        assert_eq!(
-            target_environment(state, &owner, &target).unwrap().1,
-            ShellKind::Cmd
-        );
-        let mcp_shell = &crate::agent::list_sessions(state, &owner).unwrap()[0].shell;
-        assert_eq!(mcp_shell.kind, ShellKind::Cmd);
-        assert_eq!(mcp_shell.source, "profile_cache");
-        crate::db::settings::set(&state.db, &key_auto_detect_remote_shell(), "0").unwrap();
-        assert_eq!(
-            target_environment(state, &owner, &target).unwrap().1,
-            ShellKind::Posix
-        );
-        assert!(!ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
-        let mcp_shell = &crate::agent::list_sessions(state, &owner).unwrap()[0].shell;
-        assert_eq!(mcp_shell.kind, ShellKind::Posix);
-        assert_eq!(mcp_shell.source, "fallback");
-        lifecycle::close_resource_and_wait(state, &id, SessionKind::Pty, &owner)
-            .await
-            .unwrap();
-    }
-
-    #[cfg(any(windows, macos, linux))]
-    #[tokio::test]
-    async fn remote_shell_cache_scopes_ssm_identity_and_skips_known_shells() {
-        use super::super::shell::ShellKind;
-        use crate::commands::lifecycle;
-        use crate::models::ConnectorSpec;
-        use crate::state::{SessionKind, SessionOwner};
-        let (host, _events) = crate::ssh::test_support::headless_host();
-        let state = host.state();
-        let owner = SessionOwner::Window("remote-shell-cache-test".into());
-        crate::db::settings::set(&state.db, &key_auto_detect_remote_shell(), "1").unwrap();
-        let register = |spec| register_shell_probe_pty(state, &owner, spec);
-        let first = register(Some(shell_probe_ssm(
-            "prod", "account", "region", "instance",
-        )));
-        ai_cache_remote_shell_impl(state, &owner, first.clone(), ShellKind::Powershell).unwrap();
-        lifecycle::close_resource_and_wait(state, &first, SessionKind::Pty, &owner)
-            .await
-            .unwrap();
-        let reconnect = register(Some(shell_probe_ssm(
-            "prod", "account", "region", "instance",
-        )));
-        assert!(!ai_remote_shell_probe_needed_impl(state, &owner, reconnect.clone()).unwrap());
-        assert_eq!(
-            target_environment(state, &owner, &AiTarget::Local(reconnect.clone()))
-                .unwrap()
-                .1,
-            ShellKind::Powershell
-        );
-        for spec in [
-            shell_probe_ssm("other", "account", "region", "instance"),
-            shell_probe_ssm("prod", "other", "region", "instance"),
-            shell_probe_ssm("prod", "account", "other", "instance"),
-            shell_probe_ssm("prod", "account", "region", "other"),
-        ] {
-            let id = register(Some(spec));
-            assert!(ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
-            assert_eq!(
-                target_environment(state, &owner, &AiTarget::Local(id.clone()))
-                    .unwrap()
-                    .1,
-                ShellKind::Posix
-            );
-            lifecycle::close_resource_and_wait(state, &id, SessionKind::Pty, &owner)
-                .await
-                .unwrap();
-        }
-        for spec in [
-            None,
-            Some(ConnectorSpec::DockerExec {
-                context: "dev".into(),
-                container_id: "container".into(),
-                container_name: "container".into(),
-                shell: "pwsh".into(),
-            }),
-            Some(ConnectorSpec::KubectlExec {
-                context: "dev".into(),
-                namespace: "ns".into(),
-                pod: "pod".into(),
-                container: None,
-                shell: "cmd.exe".into(),
-            }),
-        ] {
-            let id = register(spec);
-            let before = target_environment(state, &owner, &AiTarget::Local(id.clone()))
-                .unwrap()
-                .1;
-            assert!(!ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
-            ai_cache_remote_shell_impl(state, &owner, id.clone(), ShellKind::Posix).unwrap();
-            assert_eq!(
-                target_environment(state, &owner, &AiTarget::Local(id.clone()))
-                    .unwrap()
-                    .1,
-                before
-            );
-            lifecycle::close_resource_and_wait(state, &id, SessionKind::Pty, &owner)
-                .await
-                .unwrap();
-        }
-        assert_eq!(state.ai_remote_shell_cache.lock().unwrap().len(), 1);
-        lifecycle::close_resource_and_wait(state, &reconnect, SessionKind::Pty, &owner)
-            .await
-            .unwrap();
-    }
-
-    #[cfg(any(windows, macos, linux))]
-    #[tokio::test]
-    async fn remote_shell_probe_checks_owner_and_ignores_late_results() {
-        use super::super::shell::ShellKind;
-        use crate::commands::lifecycle;
-        use crate::state::{SessionKind, SessionOwner};
-        let (host, _events) = crate::ssh::test_support::headless_host();
-        let state = host.state();
-        let owner = SessionOwner::Window("remote-shell-owner".into());
-        let other = SessionOwner::Window("other-owner".into());
-        let id = register_shell_probe_pty(
-            state,
-            &owner,
-            Some(shell_probe_ssm("prod", "account", "region", "instance")),
-        );
-        // Owner validation also applies while detection is disabled.
-        assert_eq!(
-            ai_remote_shell_probe_needed_impl(state, &other, id.clone())
-                .unwrap_err()
-                .code(),
-            "session_owner_mismatch"
-        );
-        assert_eq!(
-            ai_cache_remote_shell_impl(state, &other, id.clone(), ShellKind::Cmd)
-                .unwrap_err()
-                .code(),
-            "session_owner_mismatch"
-        );
-        ai_cache_remote_shell_impl(state, &owner, id.clone(), ShellKind::Cmd).unwrap();
-        assert!(state.ai_remote_shell_cache.lock().unwrap().is_empty());
-        crate::db::settings::set(&state.db, &key_auto_detect_remote_shell(), "1").unwrap();
-        assert!(ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
-        lifecycle::close_resource_and_wait(state, &id, SessionKind::Pty, &owner)
-            .await
-            .unwrap();
-        assert!(!ai_remote_shell_probe_needed_impl(state, &owner, id.clone()).unwrap());
-        ai_cache_remote_shell_impl(state, &owner, id, ShellKind::Cmd).unwrap();
-        let missing = uuid::Uuid::new_v4().to_string();
-        assert!(!ai_remote_shell_probe_needed_impl(state, &owner, missing.clone()).unwrap());
-        ai_cache_remote_shell_impl(state, &owner, missing, ShellKind::Cmd).unwrap();
-        let pending = uuid::Uuid::new_v4().to_string();
-        let _reservation =
-            lifecycle::reserve_resource(state, &pending, SessionKind::Pty, owner.clone()).unwrap();
-        assert!(!ai_remote_shell_probe_needed_impl(state, &owner, pending.clone()).unwrap());
-        ai_cache_remote_shell_impl(state, &owner, pending, ShellKind::Cmd).unwrap();
-        assert!(state.ai_remote_shell_cache.lock().unwrap().is_empty());
     }
 
     #[cfg(any(windows, macos, linux))]
@@ -2500,6 +2139,7 @@ mod tests {
             "connector-tab".into(),
             target.clone(),
             "Inspect container".into(),
+            Some(super::super::shell::ShellKind::Cmd),
         )
         .await
         .unwrap();
@@ -2585,6 +2225,7 @@ mod tests {
                 String::new(),
                 None,
                 Some(info.conversation_id.clone()),
+                None,
             )
             .await
             .err()
@@ -2602,10 +2243,12 @@ mod tests {
             String::new(),
             None,
             Some(info.conversation_id.clone()),
+            Some(super::super::shell::ShellKind::Posix),
         )
         .await
         .unwrap();
         assert_eq!(resumed.conversation_id, info.conversation_id);
+        assert_eq!(resumed.shell, info.shell);
         lifecycle::close_ai_session(state, &resumed.tab_id, &owner, Some(&resumed.instance_id))
             .await
             .unwrap();
@@ -2647,10 +2290,26 @@ mod tests {
             "mcp-tab".into(),
             target.clone(),
             "Inspect switch".into(),
+            None,
         )
         .await
         .unwrap();
         assert_eq!(info.source, session::SessionSource::Mcp);
+        assert_eq!(info.shell, super::super::shell::ShellKind::Telnet);
+        assert_eq!(
+            ai_session_set_shell(
+                owner.clone(),
+                state,
+                info.tab_id.clone(),
+                Some(info.instance_id.clone()),
+                super::super::shell::ShellKind::Posix
+            )
+            .await
+            .err()
+            .unwrap()
+            .code(),
+            "ai_shell_change_unavailable"
+        );
         assert!(info.provider.is_empty());
         assert!(info.model.is_empty());
         let error = ai_user_message_impl(
@@ -2697,6 +2356,7 @@ mod tests {
             String::new(),
             None,
             Some(info.conversation_id.clone()),
+            Some(super::super::shell::ShellKind::Posix),
         )
         .await
         .unwrap();
@@ -2721,14 +2381,12 @@ mod tests {
             "provider": "provider-ab12c",
             "dangerMode": true,
             "autoRunCommand": false,
-            "autoDetectRemoteShell": true,
             "systemPrompt": "  Complete prompt\n\n",
         }))
         .unwrap();
         assert_eq!(p.provider.as_deref(), Some("provider-ab12c"));
         assert_eq!(p.danger_mode, Some(true));
         assert_eq!(p.auto_run_command, Some(false));
-        assert_eq!(p.auto_detect_remote_shell, Some(true));
         assert_eq!(p.system_prompt.as_deref(), Some("  Complete prompt\n\n"));
     }
 

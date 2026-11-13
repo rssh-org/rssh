@@ -78,7 +78,7 @@ pub async fn ssh_connect(
 
     let known_hosts_path = crate::ssh::known_hosts::path_for(&state.data_dir);
     let init_command = profile.init_command.clone();
-    let mut result = client::run_blocking_ssh(move || async move {
+    let result = client::run_blocking_ssh(move || async move {
         client::connect(client::ConnectParams {
             session_id,
             profile,
@@ -97,19 +97,6 @@ pub async fn ssh_connect(
         .await
     })
     .await?;
-
-    if let Some(command) = crate::ai::commands::remote_shell_probe_command(
-        state,
-        &crate::commands::lifecycle::OwnedAiTarget::Ssh {
-            handle: result.handle.ssh_handle().clone(),
-            profile_id: result.handle.profile_id().to_owned(),
-            shell_probe_enqueued: result.handle.shell_probe_enqueued(),
-        },
-        &result.session_id,
-    )? {
-        result.handle.write(command.as_bytes())?;
-        result.handle.mark_shell_probe_enqueued();
-    }
 
     // 执行初始命令（shell 已就绪，直接写入）
     if let Some(ref cmd) = init_command {

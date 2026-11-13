@@ -182,12 +182,14 @@ export async function accept(id: string) {
   let started: AiSessionInfo | undefined;
   try {
     assertRequestCurrent(request);
+    const shell = ai.sessionForTab(request.tab_id) ? "posix" : ai.shellForTab(request.tab_id);
     const ending = ai.endConversation(request.tab_id);
     // endConversation changes the generation synchronously. Capture that
     // lifetime before awaiting its save, so closing the panel revokes this accept.
     const lease = ai.captureSessionLease(request.tab_id);
     await ending;
     assertRequestCurrent(request);
+    await ai.setSessionShell(request.tab_id, shell, lease);
     started = await ai.startMcpSession({
       tabId: request.tab_id, targetKind: request.kind, targetId: request.session_id,
       lease,

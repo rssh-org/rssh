@@ -10,6 +10,7 @@
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+use crate::ai::shell::ShellKind;
 use crate::error::AppResult;
 
 use super::Db;
@@ -44,6 +45,13 @@ fn source_from_row(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Co
     }
 }
 
+fn shell_from_row(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<ShellKind> {
+    let value: String = row.get(index)?;
+    serde_json::from_value(serde_json::Value::String(value)).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
 /// Listing entry — everything except the two blobs, so the picker UI never
 /// drags megabytes of history across the IPC boundary.
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +61,7 @@ pub struct ConversationMeta {
     pub created_at: i64,
     pub updated_at: i64,
     pub source: ConversationSource,
+    pub shell: ShellKind,
 }
 
 /// Full row, fetched once on resume.
@@ -65,13 +74,14 @@ pub struct ConversationRow {
     pub timeline_json: String,
     pub audit_json: String,
     pub source: ConversationSource,
+    pub shell: ShellKind,
 }
 
 /// Most recently active first — the picker shows "continue where I left off".
 pub fn list(db: &Db, target_key: &str) -> AppResult<Vec<ConversationMeta>> {
     let conn = db.lock()?;
     let mut stmt = conn.prepare(
-        "SELECT id, title, created_at, updated_at, source FROM ai_conversations
+        "SELECT id, title, created_at, updated_at, source, shell FROM ai_conversations
          WHERE target_key = ?1 ORDER BY updated_at DESC, id",
     )?;
     let rows = stmt
@@ -82,6 +92,7 @@ pub fn list(db: &Db, target_key: &str) -> AppResult<Vec<ConversationMeta>> {
                 created_at: r.get(2)?,
                 updated_at: r.get(3)?,
                 source: source_from_row(r, 4)?,
+                shell: shell_from_row(r, 5)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -92,7 +103,7 @@ pub fn get(db: &Db, id: &str) -> AppResult<Option<ConversationRow>> {
     let conn = db.lock()?;
     let row = conn
         .query_row(
-            "SELECT id, target_key, title, history_json, timeline_json, audit_json, source
+            "SELECT id, target_key, title, history_json, timeline_json, audit_json, source, shell
              FROM ai_conversations WHERE id = ?1",
             [id],
             |r| {
@@ -104,6 +115,7 @@ pub fn get(db: &Db, id: &str) -> AppResult<Option<ConversationRow>> {
                     timeline_json: r.get(4)?,
                     audit_json: r.get(5)?,
                     source: source_from_row(r, 6)?,
+                    shell: shell_from_row(r, 7)?,
                 })
             },
         )
@@ -127,13 +139,39 @@ pub fn create_with_source(
     target_key: &str,
     source: ConversationSource,
 ) -> AppResult<()> {
+    create_with_shell(db, id, target_key, source, ShellKind::default())
+}
+
+pub fn create_with_shell(
+    db: &Db,
+    id: &str,
+    target_key: &str,
+    source: ConversationSource,
+    shell: ShellKind,
+) -> AppResult<()> {
     let conn = db.lock()?;
     let now = chrono::Utc::now().timestamp_millis();
     conn.execute(
-        "INSERT OR IGNORE INTO ai_conversations (id, target_key, created_at, updated_at, source)
-         VALUES (?1, ?2, ?3, ?3, ?4)",
-        params![id, target_key, now, source.as_str()],
+        "INSERT OR IGNORE INTO ai_conversations (id, target_key, created_at, updated_at, source, shell)
+         VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
+        params![id, target_key, now, source.as_str(), shell.as_str()],
     )?;
+    Ok(())
+}
+
+/// Only the actor changes this column; history/timeline saves leave it intact.
+pub fn set_shell(db: &Db, id: &str, shell: ShellKind) -> AppResult<()> {
+    let conn = db.lock()?;
+    let changed = conn.execute(
+        "UPDATE ai_conversations SET shell = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, shell.as_str(), chrono::Utc::now().timestamp_millis()],
+    )?;
+    if changed == 0 {
+        return Err(crate::error::AppError::not_found(
+            "conversation_not_found",
+            serde_json::json!({}),
+        ));
+    }
     Ok(())
 }
 
@@ -211,6 +249,25 @@ mod tests {
     fn save(db: &Db, id: &str, key: &str, title: &str, history: &str) {
         create(db, id, key).unwrap();
         save_history(db, id, title, history).unwrap();
+    }
+
+    #[test]
+    fn shell_choice_survives_history_and_timeline_saves_for_both_sources() {
+        let db = Db::open_in_memory().unwrap();
+        for source in [ConversationSource::Ai, ConversationSource::Mcp] {
+            let id = source.as_str();
+            create_with_shell(&db, id, "local", source, ShellKind::Cmd).unwrap();
+            assert_eq!(get(&db, id).unwrap().unwrap().shell, ShellKind::Cmd);
+            set_shell(&db, id, ShellKind::Powershell).unwrap();
+            save_history_and_audit(&db, id, "Title", "[]", "[]").unwrap();
+            set_timeline(&db, id, "[]").unwrap();
+            let row = get(&db, id).unwrap().unwrap();
+            assert_eq!(row.shell, ShellKind::Powershell);
+            assert_eq!(row.source, source);
+            delete(&db, id).unwrap();
+            assert!(set_shell(&db, id, ShellKind::Posix).is_err());
+            assert!(get(&db, id).unwrap().is_none());
+        }
     }
 
     #[test]
