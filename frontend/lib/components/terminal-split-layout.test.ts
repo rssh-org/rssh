@@ -10,15 +10,11 @@ const terminalPaneSource = readFileSync(
   join(process.cwd(), "frontend/lib/components/TerminalPane.svelte"),
   "utf8",
 );
-const appShellSource = readFileSync(
-  join(process.cwd(), "frontend/lib/components/AppShell.svelte"),
-  "utf8",
-);
 
 describe("TerminalSplitLayout", () => {
   it("localizes pane controls", () => {
     expect(source).toContain('import {t} from "../i18n/index.svelte.ts"');
-    expect(source).toContain('aria-label={t("terminal.pane.activate", {label: tab.label})}');
+    expect(source).toContain('aria-label={t("terminal.pane.activate", {label: app.tabLabel(tab)})}');
     expect(source).toContain('title={t("terminal.pane.close")}');
     expect(source).toContain('aria-label={t("terminal.pane.resize")}');
   });
@@ -44,15 +40,4 @@ describe("TerminalSplitLayout", () => {
     );
   });
 
-  it("records the pane actually targeted by a split for failure recovery", () => {
-    const splitCurrentPane = appShellSource.match(
-      /function splitCurrentPane[\s\S]*?\n    function buildMenu/,
-    )?.[0] ?? "";
-    const activateWorkspace = splitCurrentPane.indexOf("app.setActiveWorkspace(workspaceId)");
-    const captureSource = splitCurrentPane.indexOf("const sourcePaneId = app.activePaneId()");
-
-    expect(activateWorkspace).toBeGreaterThan(-1);
-    expect(captureSource).toBeGreaterThan(activateWorkspace);
-    expect(splitCurrentPane).toContain("pendingPaneSources[paneId] = sourcePaneId");
-  });
 });

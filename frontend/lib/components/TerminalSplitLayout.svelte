@@ -10,6 +10,7 @@
     } from "../terminal/layout.ts";
     import {t} from "../i18n/index.svelte.ts";
     import TerminalPane from "./TerminalPane.svelte";
+    import HomeScreen from "./HomeScreen.svelte";
 
     let {
         layout,
@@ -18,7 +19,6 @@
         onResize,
         onClose,
         onContextMenu,
-        onInitialConnectionFailure,
     }: {
         layout: TerminalLayout;
         activePaneId: string;
@@ -26,7 +26,6 @@
         onResize: (path: number[], ratio: number) => void;
         onClose: (tabId: string) => void;
         onContextMenu: (event: MouseEvent, tabId: string) => void;
-        onInitialConnectionFailure: (tabId: string, error: unknown) => boolean;
     } = $props();
 
     type Bounds = Pick<LayoutLeaf, "left" | "top" | "width" | "height">;
@@ -36,7 +35,7 @@
         const tabs = app.tabs();
         return layoutLeaves(layout).flatMap((pane) => {
             const tab = tabs.find((candidate) => candidate.id === pane.tabId);
-            return tab && app.isTerminalTabType(tab.type) ? [{ pane, tab }] : [];
+            return tab && (app.isTerminalTabType(tab.type) || tab.type === "home") ? [{ pane, tab }] : [];
         });
     });
 
@@ -118,10 +117,12 @@
             style={boundsStyle(pane)}
             role="button"
             tabindex="0"
-            aria-label={t("terminal.pane.activate", {label: tab.label})}
+            aria-label={t("terminal.pane.activate", {label: app.tabLabel(tab)})}
             onclick={() => onActivate(tab.id)}
             onkeydown={(event) => {
                 if (event.currentTarget !== event.target) return;
+                // Active Home panes handle Enter in their own navigation handler.
+                if (event.key === "Enter" && tab.type === "home" && activePaneId === tab.id) return;
                 if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
                     onActivate(tab.id);
@@ -135,19 +136,21 @@
             {#if paneLeaves.length > 1}
                 {@const connectionStatus = app.terminalConnectionStatus(tab.id)}
                 <header class="pane-header">
-                    <span class="pane-title">{tab.label}</span>
-                    <span
-                        class="session-status"
-                        class:connecting={connectionStatus === "connecting"}
-                        class:connected={connectionStatus === "connected"}
-                        class:disconnected={connectionStatus === "disconnected"}
-                    >
-                        {t(connectionStatus === "connecting"
-                            ? "common.connecting"
-                            : connectionStatus === "connected"
-                                ? "common.connected"
-                                : "common.disconnected")}
-                    </span>
+                    <span class="pane-title">{app.tabLabel(tab)}</span>
+                    {#if app.isTerminalTabType(tab.type)}
+                        <span
+                            class="session-status"
+                            class:connecting={connectionStatus === "connecting"}
+                            class:connected={connectionStatus === "connected"}
+                            class:disconnected={connectionStatus === "disconnected"}
+                        >
+                            {t(connectionStatus === "connecting"
+                                ? "common.connecting"
+                                : connectionStatus === "connected"
+                                    ? "common.connected"
+                                    : "common.disconnected")}
+                        </span>
+                    {/if}
                     {#if tab.paneOf}
                         <button
                             class="close-button"
@@ -165,12 +168,15 @@
                 </header>
             {/if}
             <div class="pane-content">
-                <TerminalPane
-                    tabId={tab.id}
-                    tabType={tab.type}
-                    meta={tab.meta ?? {}}
-                    {onInitialConnectionFailure}
-                />
+                {#if tab.type === "home"}
+                    <HomeScreen paneId={tab.id} />
+                {:else}
+                    <TerminalPane
+                        tabId={tab.id}
+                        tabType={tab.type}
+                        meta={tab.meta ?? {}}
+                    />
+                {/if}
             </div>
         </div>
     {/each}

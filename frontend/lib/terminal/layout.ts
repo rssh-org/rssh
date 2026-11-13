@@ -77,6 +77,13 @@ export function collectLeafIds(layout: TerminalLayout): string[] {
   return [...collectLeafIds(layout.first), ...collectLeafIds(layout.second)];
 }
 
+export function replaceLeaf(layout: TerminalLayout, targetId: string, newId: string): TerminalLayout {
+  if (layout.kind === "leaf") return layout.tabId === targetId ? leaf(newId) : layout;
+  const first = replaceLeaf(layout.first, targetId, newId);
+  const second = replaceLeaf(layout.second, targetId, newId);
+  return first === layout.first && second === layout.second ? layout : { ...layout, first, second };
+}
+
 
 export interface LayoutLeaf {
   tabId: string;

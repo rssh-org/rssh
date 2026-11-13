@@ -24,7 +24,6 @@ describe("terminal connection errors", () => {
       write: vi.fn((_data: string, callback?: () => void) => callback?.()),
       cols: 80, rows: 24, buffer: { normal: { cursorX: 0, cursorY: 0 } },
     };
-    const reportInitialConnectionFailure = vi.fn();
     const invoke = vi.fn().mockRejectedValue(error);
     const reservedSessionAttempt = createReservedSessionAttempt({
       makeId: () => "new-session",
@@ -36,14 +35,13 @@ describe("terminal connection errors", () => {
       reservedSessionAttempt, clearSshPromptUi: () => {}, TextDecoder,
       tabType, isLocal: tabType === "local", isPtyConnector: false,
       tabId: "new-tab", meta: { profileId: "profile-1" },
-      terminal, invoke, reportInitialConnectionFailure, errMsg,
+      terminal, invoke, errMsg,
       outputFeeder: { flush: async () => true }, resetTerminalConnection,
       terminalLifetime: new AbortController(),
     }) as () => Promise<boolean>;
 
     await expect(connect()).resolves.toBe(false);
     expect(invoke).toHaveBeenCalledWith(tabType === "ssh" ? "ssh_connect" : "pty_spawn", expect.objectContaining({ sessionId: "new-session" }));
-    expect(reportInitialConnectionFailure).toHaveBeenCalledWith(error);
     const output = terminal.write.mock.calls.map(([text]) => text).join("");
     expect(output).toContain(message);
     expect(output).not.toContain("__rssh_err__");
