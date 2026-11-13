@@ -970,7 +970,6 @@ mod tests {
             passphrase_cache: Default::default(),
             ai_sessions: Default::default(),
             ai_session_owners: Default::default(),
-            ai_remote_shell_cache: Default::default(),
             agent_bridge: Default::default(),
             data_dir: tempfile::tempdir().unwrap().keep(),
         }

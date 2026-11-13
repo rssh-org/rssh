@@ -33,6 +33,8 @@
   let formContext = $state("");
   let formNamespace = $state("");
   let formShell = $state("sh");
+  let formRegion = $state("");
+  let formOnlySsmAvailable = $state(false);
   let refreshingContexts = $state(false);
   let loadedSourceId = $state("");
 
@@ -41,9 +43,11 @@
     formPlatform = s.platform;
     formName = s.name ?? "";
     formEnabled = s.enabled ?? true;
-    formContext = s.context ?? "";
-    formShell = s.shell || "sh";
+    formContext = s.platform === "aws_ssm" ? s.profile : s.context;
+    formShell = s.platform === "aws_ssm" ? "sh" : (s.shell || "sh");
     formNamespace = s.platform === "k8s" ? (s.namespace ?? "") : "";
+    formRegion = s.platform === "aws_ssm" ? s.region : "";
+    formOnlySsmAvailable = s.platform === "aws_ssm" && s.only_ssm_available;
   }
 
   $effect(() => {
@@ -55,6 +59,7 @@
   const cliOptions: { platform: DynamicPlatform; label: string; command: string }[] = [
     { platform: "docker", label: "Docker CLI", command: "docker" },
     { platform: "k8s", label: "kubectl CLI", command: "kubectl" },
+    { platform: "aws_ssm", label: "AWS SSM", command: "AWS CLI v2 + session-manager-plugin" },
   ];
 
   const contextSelectId = $derived(`dynamic-context-select-${formId || "new"}`);
@@ -74,7 +79,9 @@
       ? t("dynamic_discovery.error.cli_unavailable", { cli: cliCommand(formPlatform) })
       : !formName.trim()
       ? t("dynamic_discovery.error.name_required")
-      : !formContext.trim()
+      : formPlatform === "aws_ssm"
+        ? (!formRegion.trim() ? t("dynamic_discovery.error.region_required") : "")
+        : !formContext.trim()
         ? t("dynamic_discovery.error.context_required")
         : !formShell.trim()
           ? t("dynamic_discovery.error.shell_required")
@@ -82,7 +89,17 @@
   );
 
   const finalSource = $derived<DynamicDiscoverySource>(
-    formPlatform === "docker"
+    formPlatform === "aws_ssm"
+      ? {
+          id: formId,
+          name: formName.trim(),
+          enabled: formEnabled,
+          platform: "aws_ssm",
+          profile: formContext.trim(),
+          region: formRegion.trim(),
+          only_ssm_available: formOnlySsmAvailable,
+        }
+      : formPlatform === "docker"
       ? {
           id: formId,
           name: formName.trim(),
@@ -104,7 +121,7 @@
 
   $effect(() => {
     const options = contextOptions;
-    if (!formContext.trim() && options.length > 0) {
+    if (formPlatform !== "aws_ssm" && !formContext.trim() && options.length > 0) {
       formContext = defaultContext(formPlatform);
     }
   });
@@ -118,7 +135,7 @@
   }
 
   function cliCommand(platform: DynamicPlatform): string {
-    return platform === "docker" ? "docker" : "kubectl";
+    return cliOptions.find((option) => option.platform === platform)!.command;
   }
 
   function cliStatus(platform: DynamicPlatform): string {
@@ -128,13 +145,14 @@
   }
 
   function defaultContext(platform: DynamicPlatform): string {
+    if (platform === "aws_ssm") return "";
     return contexts.find((c) => c.platform === platform && c.current)?.name
       ?? contexts.find((c) => c.platform === platform)?.name
       ?? "";
   }
 
   function defaultName(platform: DynamicPlatform): string {
-    return platform === "docker" ? "Docker" : "K8S";
+    return platform === "aws_ssm" ? "AWS SSM" : platform === "docker" ? "Docker" : "K8S";
   }
 
   function choosePlatform(platform: DynamicPlatform) {
@@ -143,7 +161,7 @@
     formPlatform = platform;
     formContext = defaultContext(platform);
     formNamespace = "";
-    if (!formName.trim() || formName === previousDefaultName || formName === "Docker" || formName === "K8S") {
+    if (!formName.trim() || formName === previousDefaultName) {
       formName = defaultName(platform);
     }
   }
@@ -202,17 +220,17 @@
   </label>
 
   <div class="field">
-    <label class="label-text" for={contextSelectId}>{t("dynamic_discovery.context")}</label>
+    <label class="label-text" for={contextSelectId}>{t(formPlatform === "aws_ssm" ? "dynamic_discovery.aws_profile" : "dynamic_discovery.context")}</label>
     <div class="context-row">
       <SearchSelect
         id={contextSelectId}
         bind:value={formContext}
         options={contextSelectOptions}
         allowCustom
-        ariaLabel={t("dynamic_discovery.context")}
-        placeholder={t("dynamic_discovery.context_placeholder")}
-        searchPlaceholder={t("dynamic_discovery.context_placeholder")}
-        emptyText={t("dynamic_discovery.context_empty")}
+        ariaLabel={t(formPlatform === "aws_ssm" ? "dynamic_discovery.aws_profile" : "dynamic_discovery.context")}
+        placeholder={t(formPlatform === "aws_ssm" ? "dynamic_discovery.aws_profile_placeholder" : "dynamic_discovery.context_placeholder")}
+        searchPlaceholder={t(formPlatform === "aws_ssm" ? "dynamic_discovery.aws_profile_placeholder" : "dynamic_discovery.context_placeholder")}
+        emptyText={t(formPlatform === "aws_ssm" ? "dynamic_discovery.aws_profile_empty" : "dynamic_discovery.context_empty")}
       />
       <button
         type="button"
@@ -220,7 +238,7 @@
         onclick={refreshContexts}
         disabled={refreshingContexts || !cliAvailable(formPlatform)}
       >
-        {t("dynamic_discovery.refresh_contexts")}
+        {t(formPlatform === "aws_ssm" ? "dynamic_discovery.refresh_profiles" : "dynamic_discovery.refresh_contexts")}
       </button>
     </div>
   </div>
@@ -232,10 +250,25 @@
     </label>
   {/if}
 
-  <label class="field">
-    <span class="label-text">{t("dynamic_discovery.shell")}</span>
-    <input type="text" bind:value={formShell} placeholder="sh" onkeydown={handleKeydown} />
-  </label>
+  {#if formPlatform === "aws_ssm"}
+    <label class="field">
+      <span class="label-text">{t("dynamic_discovery.aws_region")}</span>
+      <input type="text" bind:value={formRegion} placeholder="us-east-1" onkeydown={handleKeydown} />
+    </label>
+    <label class="filter-row">
+      <span>{t("dynamic_discovery.only_ssm_available")}</span>
+      <span class="switch">
+        <input type="checkbox" bind:checked={formOnlySsmAvailable} />
+        <span class="slider"></span>
+      </span>
+    </label>
+    <div class="field-hint">{t("dynamic_discovery.only_ssm_available_hint")}</div>
+  {:else}
+    <label class="field">
+      <span class="label-text">{t("dynamic_discovery.shell")}</span>
+      <input type="text" bind:value={formShell} placeholder="sh" onkeydown={handleKeydown} />
+    </label>
+  {/if}
 
   <div class="form-actions">
     <button class="btn btn-accent btn-sm" onclick={handleSave} disabled={!!formError}>{t("common.save")}</button>
@@ -341,6 +374,8 @@
   }
   .field { display: flex; flex-direction: column; gap: 4px; }
   .label-text { font-size: 12px; color: var(--text-sub); }
+  .filter-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
+  .field-hint { font-size: 12px; line-height: 1.5; color: var(--text-sub); }
   .context-row {
     display: flex;
     align-items: center;

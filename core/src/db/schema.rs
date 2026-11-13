@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppResult;
 
-const SCHEMA_VERSION: u32 = 36;
+const SCHEMA_VERSION: u32 = 37;
 
 fn column_exists(conn: &Connection, table: &str, col: &str) -> AppResult<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
@@ -782,6 +782,23 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
         )?;
     }
 
+    if version < 37 {
+        if table_exists(conn, "ai_conversations")?
+            && !column_exists(conn, "ai_conversations", "shell")?
+        {
+            conn.execute_batch(
+                "ALTER TABLE ai_conversations ADD COLUMN shell TEXT NOT NULL DEFAULT 'posix'
+                CHECK(shell IN ('posix', 'cmd', 'powershell', 'serial', 'telnet'));",
+            )?;
+        }
+        if table_exists(conn, "settings")? {
+            conn.execute(
+                "DELETE FROM settings WHERE key = 'ai_auto_detect_remote_shell'",
+                [],
+            )?;
+        }
+    }
+
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -791,6 +808,46 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn migration_37_defaults_existing_conversations_and_preserves_selected_shell() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_conversations (id TEXT PRIMARY KEY);
+            INSERT INTO ai_conversations VALUES ('existing');
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO settings VALUES ('ai_auto_detect_remote_shell', '1');
+            PRAGMA user_version = 36;",
+        )
+        .unwrap();
+        super::migrate(&conn).unwrap();
+        let shell: String = conn
+            .query_row(
+                "SELECT shell FROM ai_conversations WHERE id='existing'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(shell, "posix");
+        let settings: i64 = conn
+            .query_row("SELECT COUNT(*) FROM settings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(settings, 0);
+        conn.execute("UPDATE ai_conversations SET shell='powershell'", [])
+            .unwrap();
+        super::migrate(&conn).unwrap();
+        let shell: String = conn
+            .query_row(
+                "SELECT shell FROM ai_conversations WHERE id='existing'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(shell, "powershell");
+        assert!(conn
+            .execute("UPDATE ai_conversations SET shell='unknown'", [])
+            .is_err());
+    }
+
     #[test]
     fn migration_36_seeds_system_prompt_and_preserves_user_edits() {
         let conn = Connection::open_in_memory().unwrap();

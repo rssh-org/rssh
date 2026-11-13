@@ -13,7 +13,6 @@ const end = source.indexOf("function processInput", start);
 const connectCode = ts.transpileModule(source.slice(start, end), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText;
-
 describe("terminal connection errors", () => {
   it.each([
     { tabType: "ssh", code: "ssh_connect_timeout", params: { host: "test.invalid", port: 22, secs: 10 }, message: "test.invalid:22 connect timed out (10s)" },

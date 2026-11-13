@@ -368,7 +368,7 @@ async fn open_terminal(
     let result = tokio::spawn(async move { read_result(request.send().await.unwrap()).await });
     let requested = next_event(events, "agent:session_requested:").await;
     let request_id = requested["id"].as_str().unwrap();
-    let info = agent::accept_session(&fixture.state, host, &fixture.owner, request_id)
+    let info = agent::accept_session(&fixture.state, host, &fixture.owner, request_id, None)
         .await
         .unwrap();
     assert!(
@@ -398,9 +398,24 @@ async fn command_call_uses_the_ai_conversation_after_session_acceptance() {
     let session = fixture.initialize().await;
     let info = open_terminal(&fixture, &session, &id, host, &mut events).await;
     assert_eq!(info.source, rssh_core::ai::session::SessionSource::Mcp);
+    assert_eq!(info.shell, rssh_core::ai::shell::ShellKind::Posix);
+    let updated = rssh_core::ai::commands::ai_session_set_shell(
+        fixture.owner.clone(),
+        &fixture.state,
+        info.tab_id.clone(),
+        Some(info.instance_id.clone()),
+        rssh_core::ai::shell::ShellKind::Powershell,
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.shell, rssh_core::ai::shell::ShellKind::Powershell);
     let request = fixture.request(json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params":{"name":"run_command", "arguments":{"session_id":id,"cmd":"echo hello","explain":"Inspect terminal","side_effect":"read-only"}}}), Some(&session));
     let result = tokio::spawn(async move { read_result(request.send().await.unwrap()).await });
     let proposal = next_event(&mut events, "ai:command_proposed:").await;
+    assert!(proposal["execution"]["full_cmd"]
+        .as_str()
+        .unwrap()
+        .contains("$LASTEXITCODE"));
     rssh_core::ai::commands::ai_command_result_impl(
         &fixture.state,
         "tab-test",

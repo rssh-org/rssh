@@ -935,8 +935,7 @@ pub struct SessionHandle {
     tx: mpsc::UnboundedSender<SessionCmd>,
     ssh_handle: SshHandle,
     terminal_encoding: TerminalEncoding,
-    /// 本次连接对应的 Profile.id。AI 模块用它作 remote_shell_cache 的 key ——
-    /// 同一 profile 多次重连共享一份探测结果，不重发 probe。
+    /// 本次连接对应的 Profile.id，用于关联持久化的 AI 对话。
     profile_id: String,
 }
 

@@ -230,6 +230,17 @@ fn dispatch(
         // List the local shells the host offers (pure engine, no UI).
         "refresh_shells" => ok(crate::commands::pty::refresh_shells()),
 
+        // ---- dynamic discovery sources (CLI probes live in dispatch_async) ----
+        "list_dynamic_discovery_sources" => ok(
+            crate::commands::discovery::list_dynamic_discovery_sources(state),
+        ),
+        "save_dynamic_discovery_sources" => {
+            ok(crate::commands::discovery::save_dynamic_discovery_sources(
+                state,
+                arg(&args, "sources")?,
+            ))
+        }
+
         // ---- credentials (secret via SecretStore, metadata via DB) ----
         "list_credentials" => ok(crate::db::credential::list(&state.db)),
         "get_credential" => {
@@ -624,7 +635,7 @@ fn dispatch(
         "cli_status" => ok(Ok::<_, AppError>(crate::cli::cli_status_headless())),
         "cli_install" => Err(json!("cli_install_not_applicable_embedded")),
 
-        // ---- AI: audit save to a server-side path + remote-shell cache write ----
+        // ---- AI: audit save to a server-side path ----
         "ai_audit_save" => {
             let tab_id: String = arg(&args, "tabId")?;
             let file_path: String = arg(&args, "filePath")?;
@@ -640,21 +651,6 @@ fn dispatch(
                 .map_err(|error| err_value(error.into()))?;
             Ok(Value::Null)
         }
-        "ai_cache_remote_shell" => {
-            let target_id: String = arg(&args, "targetId")?;
-            let shell: crate::ai::shell::ShellKind = arg(&args, "shell")?;
-            if let Some(profile_id) = locked(&state.sessions)
-                .map_err(err_value)?
-                .get(&target_id)
-                .map(|h| h.profile_id().to_string())
-            {
-                locked(&state.ai_remote_shell_cache)
-                    .map_err(err_value)?
-                    .insert(profile_id, shell);
-            }
-            Ok(Value::Null)
-        }
-
         // `getVersion()` (@tauri-apps/api/app) → plugin:app|version. Desktop has
         // the Tauri app plugin; headless answers with the crate version (synced
         // across manifests at release) so About + update checks work embedded.
@@ -674,6 +670,26 @@ async fn dispatch_async(
     tx: &mpsc::UnboundedSender<Message>,
 ) -> Result<Value, Value> {
     match cmd {
+        "dynamic_discovery_tool_status" => ok(
+            crate::commands::discovery::dynamic_discovery_tool_status(arg(&args, "platform")?)
+                .await,
+        ),
+        "list_dynamic_discovery_contexts" => ok(
+            crate::commands::discovery::list_dynamic_discovery_contexts(arg(&args, "platform")?)
+                .await,
+        ),
+        "discover_dynamic_targets" => {
+            ok(crate::commands::discovery::discover_dynamic_targets(state).await)
+        }
+        "pty_spawn_connector" => ok(crate::commands::pty::pty_spawn_connector(
+            headless_host(state, tx),
+            owner.clone(),
+            state,
+            checked_u16_arg(&args, "cols", 80)?,
+            checked_u16_arg(&args, "rows", 24)?,
+            arg(&args, "spec")?,
+            optional_string_arg(&args, "sessionId")?,
+        )),
         "mcp_start" => ok(crate::mcp::start(state.clone(), owner.clone()).await),
         "mcp_status" => ok(crate::mcp::status(state, owner)),
         "mcp_stop" => ok(crate::mcp::stop(state, owner)),
@@ -704,6 +720,7 @@ async fn dispatch_async(
             headless_host(state, tx),
             owner,
             &arg::<String>(&args, "requestId")?,
+            arg(&args, "shell")?,
         )
         .await),
         "mcp_session_ready" => ok(rssh_core::agent::session_ready(
@@ -1190,6 +1207,7 @@ async fn dispatch_async(
                 args.get("resume")
                     .and_then(Value::as_str)
                     .map(str::to_string),
+                arg(&args, "shell")?,
             )
             .await)
         }
@@ -1336,9 +1354,14 @@ async fn dispatch_async(
             let g = audit.lock().map_err(|_| err_value(AppError::Lock))?;
             Ok(json!(g.to_log_string()))
         }
-        "ai_remote_shell_probe_needed" => ok(
-            crate::ai::commands::ai_remote_shell_probe_needed_impl(state, arg(&args, "targetId")?),
-        ),
+        "ai_session_set_shell" => ok(crate::ai::commands::ai_session_set_shell(
+            owner.clone(),
+            state,
+            arg(&args, "tabId")?,
+            Some(arg(&args, "instanceId")?),
+            arg(&args, "shell")?,
+        )
+        .await),
         "ai_conversations_list" => ok(crate::ai::commands::ai_conversations_list_impl(
             state,
             &arg(&args, "target")?,
@@ -1895,11 +1918,210 @@ mod tests {
             passphrase_cache: Mutex::new(HashMap::new()),
             ai_sessions: Mutex::new(HashMap::new()),
             ai_session_owners: Arc::new(Mutex::new(HashMap::new())),
-            ai_remote_shell_cache: Mutex::new(HashMap::new()),
             agent_bridge: rssh_core::agent::AgentBridge::default(),
             data_dir: dir.path().into(),
         };
         (Arc::new(state), dir)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_session_shell_is_owned_and_persisted() {
+        use crate::ai::{commands::AiTarget, shell::ShellKind};
+        use crate::commands::lifecycle::{self, ReadySession};
+        use crate::state::SessionKind;
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let other = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let id = uuid::Uuid::new_v4().to_string();
+        let reservation =
+            lifecycle::reserve_resource(&state, &id, SessionKind::Pty, owner.clone()).unwrap();
+        let (_, handle) =
+            crate::terminal::pty::spawn(id.clone(), 80, 24, Arc::new(|_, _| {}), None).unwrap();
+        reservation.activate(ReadySession::Pty(handle)).unwrap();
+        let info = crate::ai::commands::ai_mcp_session_start_impl(
+            &state,
+            headless_host(&state, &tx),
+            owner.clone(),
+            "shell-tab".into(),
+            AiTarget::Local(id.clone()),
+            "Manual shell".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(info.shell, ShellKind::Posix);
+        let args = json!({
+            "tabId": info.tab_id, "instanceId": info.instance_id, "shell": "powershell"
+        });
+        let error = dispatch_async(&state, &other, "ai_session_set_shell", args.clone(), &tx)
+            .await
+            .unwrap_err();
+        assert!(error.as_str().unwrap().starts_with("__rssh_err__|"));
+        let mut stale = args.clone();
+        stale["instanceId"] = json!(uuid::Uuid::new_v4().to_string());
+        assert!(
+            dispatch_async(&state, &owner, "ai_session_set_shell", stale, &tx)
+                .await
+                .is_err()
+        );
+        let saved = dispatch_async(&state, &owner, "ai_session_set_shell", args, &tx)
+            .await
+            .unwrap();
+        assert_eq!(saved["shell"], "powershell");
+        assert_eq!(saved["instance_id"], info.instance_id);
+        assert_eq!(
+            crate::db::ai_conversation::get(&state.db, &info.conversation_id)
+                .unwrap()
+                .unwrap()
+                .shell,
+            ShellKind::Powershell
+        );
+        lifecycle::close_ai_session(&state, &info.tab_id, &owner, Some(&info.instance_id))
+            .await
+            .unwrap();
+        lifecycle::close_resource_and_wait(&state, &id, SessionKind::Pty, &owner)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_dynamic_discovery_round_trips_sources_and_skips_disabled_sources() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sources = json!([{
+            "id": "docker-dev", "name": "Docker Dev", "enabled": false,
+            "platform": "docker", "context": "local", "shell": "sh"
+        }, {
+            "id": "aws-prod", "name": "AWS Production", "enabled": false,
+            "platform": "aws_ssm", "profile": "", "region": "ap-southeast-1",
+            "only_ssm_available": true
+        }]);
+        let capabilities =
+            dispatch_async(&state, &owner, "get_runtime_capabilities", json!({}), &tx)
+                .await
+                .unwrap();
+        assert_eq!(capabilities["localDiscovery"], true);
+        assert_eq!(
+            dispatch_async(
+                &state,
+                &owner,
+                "save_dynamic_discovery_sources",
+                json!({ "sources": sources }),
+                &tx,
+            )
+            .await
+            .unwrap(),
+            Value::Null,
+        );
+        assert_eq!(
+            dispatch_async(
+                &state,
+                &owner,
+                "list_dynamic_discovery_sources",
+                json!({}),
+                &tx
+            )
+            .await
+            .unwrap(),
+            sources,
+        );
+        assert_eq!(
+            dispatch_async(&state, &owner, "discover_dynamic_targets", json!({}), &tx)
+                .await
+                .unwrap(),
+            json!({ "targets": [], "errors": [] }),
+        );
+
+        let error = dispatch_async(
+            &state,
+            &owner,
+            "save_dynamic_discovery_sources",
+            json!({ "sources": [sources[0], sources[0]] }),
+            &tx,
+        )
+        .await
+        .unwrap_err();
+        let payload = error
+            .as_str()
+            .unwrap()
+            .strip_prefix("__rssh_err__|")
+            .unwrap();
+        let error: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(error["code"], "dynamic_discovery_duplicate_id");
+        assert_eq!(
+            dispatch_async(
+                &state,
+                &owner,
+                "list_dynamic_discovery_sources",
+                json!({}),
+                &tx
+            )
+            .await
+            .unwrap(),
+            sources,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_dynamic_discovery_tool_commands_validate_the_platform() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        for command in [
+            "dynamic_discovery_tool_status",
+            "list_dynamic_discovery_contexts",
+        ] {
+            let error = dispatch_async(
+                &state,
+                &owner,
+                command,
+                json!({ "platform": "unsupported" }),
+                &tx,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.as_str().unwrap().starts_with("bad arg 'platform':"));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_dynamic_connector_preserves_engine_validation_errors() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let spec = json!({
+            "type": "aws_ssm", "profile": "", "region": "",
+            "instance_id": "i-0123456789abcdef0", "account_id": "123456789012",
+            "shell": "sh"
+        });
+        for (session_id, expected_code) in [
+            ("invalid".to_owned(), "session_id_invalid"),
+            (
+                uuid::Uuid::new_v4().to_string(),
+                "dynamic_discovery_connector_invalid",
+            ),
+        ] {
+            let error = dispatch_async(
+                &state,
+                &owner,
+                "pty_spawn_connector",
+                json!({ "spec": spec, "sessionId": session_id, "cols": 80, "rows": 24 }),
+                &tx,
+            )
+            .await
+            .unwrap_err();
+            let payload = error
+                .as_str()
+                .unwrap()
+                .strip_prefix("__rssh_err__|")
+                .unwrap();
+            let error: Value = serde_json::from_str(payload).unwrap();
+            assert_eq!(error["code"], expected_code);
+            assert!(state.lifecycle_sessions.lock().unwrap().is_empty());
+            assert!(state.pty_sessions.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

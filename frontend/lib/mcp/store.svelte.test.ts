@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const f = vi.hoisted(() => ({
   invoke: vi.fn(), sessionId: vi.fn(), open: vi.fn(), end: vi.fn(), start: vi.fn(),
+  shell: vi.fn(), setShell: vi.fn(),
   lease: vi.fn(), current: vi.fn(), all: vi.fn(), listeners: new Map<string, (e: any) => void>(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: f.invoke }));
@@ -16,8 +17,9 @@ vi.mock("../stores/app.svelte.ts", () => ({
 vi.mock("../ai/store.svelte.ts", () => ({
   endConversation: f.end, startMcpSession: f.start, captureSessionLease: f.lease,
   sessionForTab: f.current, listAllSessions: f.all,
+  shellForTab: f.shell, setSessionShell: f.setShell,
 }));
-const session = { session_id: "transport", tab_id: "tab", nonce: "nonce", name: "Server", kind: "ssh", shell: { kind: "posix", source: "fallback" } };
+const session = { session_id: "transport", tab_id: "tab", nonce: "nonce", name: "Server", kind: "ssh", shell: { kind: "posix", source: "default" } };
 const request = { id: "request", session_id: "transport", tab_id: "tab", nonce: "nonce", kind: "ssh", title: "Debug server" };
 const info = { tab_id: "tab", instance_id: "actor", target_id: "transport", conversation_id: "conversation", source: "mcp" };
 
@@ -28,6 +30,8 @@ beforeEach(() => {
   f.sessionId.mockReturnValue("transport");
   f.end.mockResolvedValue(undefined);
   f.start.mockResolvedValue(info);
+  f.shell.mockReturnValue("posix");
+  f.setShell.mockResolvedValue(undefined);
   f.lease.mockReturnValue({});
   f.current.mockReturnValue(info);
   f.all.mockReturnValue([]);
@@ -45,6 +49,16 @@ async function ready() {
 }
 
 describe("MCP conversation authorization", () => {
+  it.each([false, true])("starts with the draft or resets an existing conversation's shell (existing=%s)", async (existing) => {
+    const store = await ready();
+    f.current.mockReturnValue(existing ? info : undefined);
+    f.shell.mockReturnValue("powershell");
+    f.end.mockImplementation(async () => { f.shell.mockReturnValue("posix"); });
+    await store.accept("request");
+    expect(f.setShell).toHaveBeenCalledWith("tab", existing ? "posix" : "powershell", f.lease.mock.results[0].value);
+    expect(f.start).toHaveBeenCalledOnce();
+  });
+
   it("opens the existing AI panel but starts no actor until accepted", async () => {
     const store = await ready();
     expect(store.requestsForTab("tab")).toEqual([expect.objectContaining(request)]);

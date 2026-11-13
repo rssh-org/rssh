@@ -386,6 +386,7 @@ pub enum DynamicDiscoveryPlatform {
     Docker,
     #[serde(rename = "k8s")]
     K8s,
+    AwsSsm,
 }
 
 fn default_container_shell() -> String {
@@ -408,6 +409,13 @@ pub enum DynamicDiscoveryConfig {
         #[serde(default = "default_container_shell")]
         shell: String,
     },
+    AwsSsm {
+        #[serde(default)]
+        profile: String,
+        region: String,
+        #[serde(default)]
+        only_ssm_available: bool,
+    },
 }
 
 impl DynamicDiscoveryConfig {
@@ -415,6 +423,7 @@ impl DynamicDiscoveryConfig {
         match self {
             Self::Docker { .. } => DynamicDiscoveryPlatform::Docker,
             Self::K8s { .. } => DynamicDiscoveryPlatform::K8s,
+            Self::AwsSsm { .. } => DynamicDiscoveryPlatform::AwsSsm,
         }
     }
 }
@@ -464,6 +473,12 @@ pub enum ConnectorSpec {
         pod: String,
         container: Option<String>,
         shell: String,
+    },
+    AwsSsm {
+        profile: String,
+        region: String,
+        instance_id: String,
+        account_id: String,
     },
 }
 

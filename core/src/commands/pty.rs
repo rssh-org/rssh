@@ -94,6 +94,35 @@ fn connector_command(spec: ConnectorSpec) -> AppResult<(DynamicDiscoveryPlatform
             args.push(shell);
             Ok((DynamicDiscoveryPlatform::K8s, args))
         }
+        ConnectorSpec::AwsSsm {
+            profile,
+            region,
+            instance_id,
+            account_id,
+        } => {
+            if region.trim().is_empty()
+                || account_id.len() != 12
+                || !account_id.chars().all(|ch| ch.is_ascii_digit())
+                || !instance_id
+                    .strip_prefix("i-")
+                    .is_some_and(|id| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_hexdigit()))
+                || [&profile, &region]
+                    .iter()
+                    .any(|value| value.chars().any(char::is_control))
+            {
+                return Err(AppError::config(
+                    "dynamic_discovery_connector_invalid",
+                    serde_json::json!({}),
+                ));
+            }
+            let mut args = crate::commands::discovery::aws_cli_args(&profile, &region);
+            args.extend([
+                "ssm".into(),
+                "start-session".into(),
+                format!("--target={instance_id}"),
+            ]);
+            Ok((DynamicDiscoveryPlatform::AwsSsm, args))
+        }
     }
 }
 
@@ -109,6 +138,10 @@ pub fn pty_spawn_connector(
     let session_id = crate::commands::lifecycle::resolve_session_id(session_id)?;
     let (platform, args) = connector_command(spec.clone())?;
     let program = crate::commands::discovery::resolve_dynamic_discovery_program(platform)?;
+    if platform == DynamicDiscoveryPlatform::AwsSsm {
+        // AWS CLI starts this helper itself; fail before reserving a terminal.
+        crate::commands::discovery::resolve_session_manager_plugin()?;
+    }
     let reservation =
         crate::commands::lifecycle::reserve_resource(&state, &session_id, SessionKind::Pty, owner)?;
     let sink: pty::PtySink = std::sync::Arc::new(move |id: &str, out: pty::PtyOut| match out {
@@ -128,10 +161,8 @@ pub fn pty_spawn_connector(
         program.search_path,
         args,
     )?;
-    reservation.activate_returned(
-        &id,
-        crate::commands::lifecycle::ReadySession::Pty(handle.with_connector(spec)),
-    )?;
+    let handle = handle.with_connector(spec);
+    reservation.activate_returned(&id, crate::commands::lifecycle::ReadySession::Pty(handle))?;
     Ok(id)
 }
 
@@ -172,4 +203,60 @@ pub fn pty_close(
     session_id: String,
 ) -> AppResult<()> {
     crate::commands::lifecycle::close_resource(&state, &session_id, SessionKind::Pty, &owner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aws_ssm_connects_by_instance_id_with_literal_arguments() {
+        let spec = serde_json::from_value(serde_json::json!({
+            "type": "aws_ssm", "profile": "profile with spaces;$(touch /tmp/no)",
+            "region": "ap-southeast-1", "instance_id": "i-0123456789abcdef0",
+            "account_id": "123456789012"
+        }))
+        .unwrap();
+        let (platform, args) = connector_command(spec).unwrap();
+        assert_eq!(serde_json::to_value(platform).unwrap(), "aws_ssm");
+        assert!(args.contains(&"--profile=profile with spaces;$(touch /tmp/no)".to_string()));
+        assert!(args.contains(&"--region=ap-southeast-1".to_string()));
+        assert!(args.contains(&"--target=i-0123456789abcdef0".to_string()));
+        assert!(args.windows(2).any(|pair| pair == ["ssm", "start-session"]));
+        assert!(!args.contains(&"sh".to_string()));
+    }
+
+    #[test]
+    fn aws_ssm_legacy_shell_hint_is_ignored() {
+        let mut commands = Vec::new();
+        for shell in ["sh", "powershell", "cmd"] {
+            let spec: ConnectorSpec = serde_json::from_value(serde_json::json!({
+                "type": "aws_ssm", "profile": "", "region": "us-east-1",
+                "instance_id": "i-0123456789abcdef0", "account_id": "123456789012", "shell": shell
+            }))
+            .unwrap();
+            assert!(serde_json::to_value(&spec).unwrap().get("shell").is_none());
+            commands.push(connector_command(spec).unwrap().1);
+        }
+        assert!(commands.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn aws_ssm_rejects_invalid_connector_identifiers() {
+        for (region, instance_id, account_id) in [
+            ("", "i-0123456789abcdef0", "123456789012"),
+            ("us-east-1", "--debug", "123456789012"),
+            ("us-east-1", "i-0123456789abcdef0", ""),
+        ] {
+            let spec = serde_json::from_value(serde_json::json!({
+                "type": "aws_ssm", "profile": "", "region": region,
+                "instance_id": instance_id, "account_id": account_id
+            }))
+            .unwrap();
+            assert_eq!(
+                connector_command(spec).unwrap_err().code(),
+                "dynamic_discovery_connector_invalid"
+            );
+        }
+    }
 }

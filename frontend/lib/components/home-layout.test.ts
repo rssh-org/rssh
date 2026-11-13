@@ -71,6 +71,7 @@ describe("buildHomeSections", () => {
       sorting: "name",
       items: [
         item("k8s:z", "Zulu pod", "kubectl_exec", null),
+        item("aws:instance", "EC2 host", "aws_ssm", null),
         item("forward:z", "Zulu tunnel", "forward", "prod"),
         item("ssh:z", "Zulu host", "ssh", "prod"),
         item("docker:a", "Alpha container", "docker_exec", null),
@@ -92,6 +93,7 @@ describe("buildHomeSections", () => {
       "type:telnet",
       "type:docker_exec",
       "type:kubectl_exec",
+      "type:aws_ssm",
     ]);
     expect(sections[0].items.map((entry) => entry.name)).toEqual(["Alpha host", "Zulu host"]);
     expect(sections.map((section) => section.label)).toEqual([
@@ -101,6 +103,7 @@ describe("buildHomeSections", () => {
       "label:telnet",
       "label:docker_exec",
       "label:kubectl_exec",
+      "label:aws_ssm",
     ]);
   });
 

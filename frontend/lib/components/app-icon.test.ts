@@ -34,10 +34,12 @@ describe("app icon registry", () => {
     expect(tabIconName("local")).toBe("terminal");
     expect(tabIconName("docker_exec")).toBe("docker");
     expect(tabIconName("kubectl_exec")).toBe("kubernetes");
+    expect(tabIconName("aws_ssm")).toBe("aws");
     expect(tabIconName("edit")).toBe("edit");
 
     expect(dynamicPlatformIconName("docker")).toBe("docker");
     expect(dynamicPlatformIconName("k8s")).toBe("kubernetes");
+    expect(dynamicPlatformIconName("aws_ssm")).toBe("aws");
     expect(new Set(APP_ICON_NAMES).size).toBe(APP_ICON_NAMES.length);
   });
 

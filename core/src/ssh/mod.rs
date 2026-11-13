@@ -56,7 +56,6 @@ pub(crate) mod test_support {
             passphrase_cache: Mutex::new(HashMap::new()),
             ai_sessions: Mutex::new(HashMap::new()),
             ai_session_owners: Arc::new(Mutex::new(HashMap::new())),
-            ai_remote_shell_cache: Mutex::new(HashMap::new()),
             agent_bridge: crate::agent::AgentBridge::default(),
             data_dir: PathBuf::new(),
         });

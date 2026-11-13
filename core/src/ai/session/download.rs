@@ -124,6 +124,12 @@ fn connector_command(
             args.push("--".into());
             (DynamicDiscoveryPlatform::K8s, args, shell)
         }
+        ConnectorSpec::AwsSsm { .. } => {
+            return Err(AppError::other(
+                "dynamic_discovery_aws_ssm_download_unsupported",
+                json!({}),
+            ));
+        }
     };
     // No TTY or terminal sentinels. The native reader writes only file bytes
     // to stdout, and source paths never become executable shell text.
@@ -337,6 +343,29 @@ mod tests {
             container_name: "container-name".into(),
             shell: "sh".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn aws_ssm_download_never_reads_the_same_path_on_the_host() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("local-secret");
+        let destination = directory.path().join("artifact");
+        std::fs::write(&source, b"host-only bytes").unwrap();
+        std::fs::write(&destination, b"existing artifact").unwrap();
+        let spec = ConnectorSpec::AwsSsm {
+            profile: String::new(),
+            region: "us-east-1".into(),
+            instance_id: "i-0123456789abcdef0".into(),
+            account_id: "123456789012".into(),
+        };
+        let error = copy_connector(&spec, source.to_str().unwrap(), &destination, 1024)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            "dynamic_discovery_aws_ssm_download_unsupported"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing artifact");
     }
 
     #[test]

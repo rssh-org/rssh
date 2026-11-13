@@ -1,13 +1,11 @@
-interface HomeRefreshDependencies<StaticData, DynamicData> {
+interface HomeRefreshDependencies<StaticData> {
   loadStatic: () => Promise<StaticData>;
-  loadDynamic: () => Promise<DynamicData>;
   applyStatic: (data: StaticData) => void;
-  applyDynamic: (data: DynamicData) => void;
   onError?: (error: unknown) => void;
 }
 
-export function createHomeRefresh<StaticData, DynamicData>(
-  dependencies: HomeRefreshDependencies<StaticData, DynamicData>,
+export function createHomeRefresh<StaticData>(
+  dependencies: HomeRefreshDependencies<StaticData>,
 ) {
   let generation = 0;
 
@@ -19,9 +17,6 @@ export function createHomeRefresh<StaticData, DynamicData>(
         if (current !== generation) return;
         dependencies.applyStatic(staticData);
 
-        const dynamicData = await dependencies.loadDynamic();
-        if (current !== generation) return;
-        dependencies.applyDynamic(dynamicData);
       } catch (error) {
         if (current === generation) dependencies.onError?.(error);
       }

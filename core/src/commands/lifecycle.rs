@@ -889,10 +889,9 @@ pub fn reserve_sftp_child<'a>(
 pub enum OwnedAiTarget {
     Ssh {
         handle: crate::ssh::client::SshHandle,
-        profile_id: String,
     },
     #[cfg(any(windows, macos, linux, ohos))]
-    PtyShellPath(String),
+    Pty,
     #[cfg(any(windows, macos, linux, ohos))]
     Serial,
     Telnet,
@@ -908,15 +907,15 @@ pub fn owned_ready_ai_target(
     let record = registry
         .get(id)
         .ok_or_else(|| AppError::not_found("session_not_found", serde_json::json!({ "id": id })))?;
-    if record.kind != kind || record.phase() != SessionPhase::Ready {
-        return Err(AppError::not_found(
-            "session_not_found",
-            serde_json::json!({ "id": id }),
-        ));
-    }
     if &record.owner != expected_owner {
         return Err(AppError::config(
             "session_owner_mismatch",
+            serde_json::json!({ "id": id }),
+        ));
+    }
+    if record.kind != kind || record.phase() != SessionPhase::Ready {
+        return Err(AppError::not_found(
+            "session_not_found",
             serde_json::json!({ "id": id }),
         ));
     }
@@ -929,7 +928,6 @@ pub fn owned_ready_ai_target(
             .get(id)
             .map(|session| OwnedAiTarget::Ssh {
                 handle: session.ssh_handle().clone(),
-                profile_id: session.profile_id().to_owned(),
             })
             .ok_or_else(|| {
                 AppError::other(
@@ -939,8 +937,8 @@ pub fn owned_ready_ai_target(
             }),
         #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Pty => locked(&state.pty_sessions)?
-            .get(id)
-            .map(|session| OwnedAiTarget::PtyShellPath(session.shell_path().to_owned()))
+            .contains_key(id)
+            .then_some(OwnedAiTarget::Pty)
             .ok_or_else(|| {
                 AppError::other(
                     "session_registry_inconsistent",
@@ -1426,7 +1424,6 @@ mod tests {
             passphrase_cache: Mutex::new(HashMap::new()),
             ai_sessions: Mutex::new(HashMap::new()),
             ai_session_owners: Arc::new(Mutex::new(HashMap::new())),
-            ai_remote_shell_cache: Mutex::new(HashMap::new()),
             agent_bridge: crate::agent::AgentBridge::default(),
             data_dir: PathBuf::new(),
         }
@@ -2390,6 +2387,7 @@ mod tests {
                 model: "model".to_owned(),
                 provider: "provider".to_owned(),
                 source: crate::ai::session::SessionSource::Ai,
+                shell: tokio::sync::watch::channel(Default::default()).1,
                 action_tx,
                 audit: Arc::new(Mutex::new(crate::ai::audit::AuditLog::default())),
                 cancel_slot: Arc::new(Mutex::new(None)),
@@ -2457,6 +2455,7 @@ mod tests {
                 model: "model".to_owned(),
                 provider: "provider".to_owned(),
                 source: crate::ai::session::SessionSource::Ai,
+                shell: tokio::sync::watch::channel(Default::default()).1,
                 action_tx,
                 audit: Arc::new(Mutex::new(crate::ai::audit::AuditLog::default())),
                 cancel_slot: Arc::new(Mutex::new(Some(stream_cancel))),

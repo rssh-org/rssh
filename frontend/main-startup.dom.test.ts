@@ -68,7 +68,7 @@ let unmount: typeof import("svelte").unmount;
 beforeEach(async () => {
   vi.resetModules();
   ({ flushSync, unmount } = await import("svelte"));
-  shellMounted.mockClear();
+  vi.clearAllMocks();
   document.body.innerHTML = '<div id="app"></div>';
   document.documentElement.removeAttribute("style");
   delete document.documentElement.dataset.shape;
@@ -84,10 +84,11 @@ afterEach(async () => {
   component = undefined;
   document.body.innerHTML = "";
   localStorage.clear();
-  for (const key of ["__TAURI_INTERNALS__", "__TAURI_EVENT_PLUGIN_INTERNALS__", "__RSSH_IPC_SHIM__"]) {
+  for (const key of ["__TAURI_INTERNALS__", "__TAURI_EVENT_PLUGIN_INTERNALS__", "__RSSH_IPC_SHIM__", "__rssh_clone", "__rssh_ai_handoff"]) {
     delete (window as unknown as Record<string, unknown>)[key];
   }
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 async function start() {
@@ -181,4 +182,45 @@ it("shows the startup error when the IPC connection closes before opening", asyn
     expect(document.querySelector('[role="alert"]')?.textContent).toContain("connection closed");
   });
   expect(shellMounted).not.toHaveBeenCalled();
+});
+
+it.each(["__rssh_clone", "__rssh_ai_handoff"])("starts and stops this window's discovery schedule after %s startup", async (handoff) => {
+  (window as unknown as Record<string, unknown>)[handoff] = "{}";
+  const socket = await start();
+  socket.open();
+  replyToSettings(socket);
+  socket.reply(socket.requests.find((request) => request.cmd === "get_runtime_capabilities")!, {
+    ...capabilities, localDiscovery: true, releaseUpdateCheck: true, cliInstall: true,
+  });
+  await vi.waitFor(() => {
+    flushSync();
+    expect(shellMounted).toHaveBeenCalledTimes(1);
+    expect(socket.requests.some((request) => request.cmd === "get_setting"
+      && request.args.key === "dynamic_discovery_refresh")).toBe(true);
+  });
+  const preferences = socket.requests.find((request) => request.cmd === "get_setting"
+    && request.args.key === "dynamic_discovery_refresh")!;
+  socket.reply(preferences, JSON.stringify({ auto_refresh: true, interval_seconds: 2 }));
+  const discoveries = () => socket.requests.filter((request) => request.cmd === "discover_dynamic_targets");
+  await vi.waitFor(() => expect(discoveries()).toHaveLength(1));
+
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const snapshot = { targets: [], errors: [{ source_id: "example", source_name: "Example", platform: "docker", message: "offline" }] };
+  socket.reply(discoveries()[0], snapshot);
+  const discovery = await import("./lib/stores/discovery.svelte.ts");
+  await vi.waitFor(() => expect(discovery.errors()).toEqual(snapshot.errors));
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(discoveries()).toHaveLength(2);
+  socket.reply(discoveries()[1], { targets: [], errors: [] });
+  await vi.waitFor(() => expect(discovery.errors()).toEqual([]));
+
+  for (const module of [
+    await import("./lib/stores/sync.svelte.ts"),
+    await import("./lib/stores/updates.svelte.ts"),
+    await import("./lib/stores/cli.svelte.ts"),
+  ]) expect(module.startBackgroundChecks).not.toHaveBeenCalled();
+  await unmount(component!);
+  component = undefined;
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(discoveries()).toHaveLength(2);
 });

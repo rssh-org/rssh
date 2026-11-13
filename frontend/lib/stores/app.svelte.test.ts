@@ -76,6 +76,25 @@ describe("sidebar layout preferences", () => {
 });
 
 describe("recent Home connections", () => {
+  it("opens AWS SSM targets as ephemeral PTY terminals with recent-history and AI support", async () => {
+    const app = await loadAppModule();
+    const spec = { type: "aws_ssm" as const, profile: "production", region: "us-east-1", instance_id: "i-0123456789abcdef0", account_id: "123456789012" };
+    app.connectDynamicTarget({
+      id: "aws_ssm:123456789012:us-east-1:i-0123456789abcdef0", source_id: "aws-source",
+      source_name: "AWS SSM", platform: "aws_ssm", name: "Production EC2", sub: "us-east-1", connector_spec: spec,
+    });
+
+    const tab = app.activeTab()!;
+    expect(tab.type).toBe("aws_ssm");
+    expect(tab.id).toMatch(/^aws_ssm:/);
+    expect(JSON.parse(tab.meta!.connectorSpec)).toEqual(spec);
+    expect(app.isTerminalTabType(tab.type)).toBe(true);
+    expect(app.isAiCapableTabType(tab.type)).toBe(true);
+    expect(app.aiTargetKind("aws_ssm")).toBe("local");
+    expect(app.recentHomeItemIds()).toEqual(["dynamic:aws-source:aws_ssm:123456789012:us-east-1:i-0123456789abcdef0"]);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
   it("records every saved or discovered GUI connection through addTab", async () => {
     const app = await loadAppModule();
 

@@ -215,8 +215,12 @@ pub enum UserAction {
         expected_user_messages: Vec<String>,
         ack: Option<oneshot::Sender<AppResult<Vec<AiTerminalMutation>>>>,
     },
-    /// SSH 重连或目标切换。actor 不变，更新连接和 shell 类型，
-    /// 让后续命令 / file_ops 使用新环境。remote_caps 也清掉重新探测。
+    /// Persist a manual choice when idle; running commands reject the change.
+    SetShell {
+        shell: super::shell::ShellKind,
+        ack: oneshot::Sender<AppResult<()>>,
+    },
+    /// Reconnect transport without replacing the conversation shell choice.
     RebindTarget {
         target_id: String,
         ssh_handle: Option<SshHandle>,
@@ -260,6 +264,7 @@ impl std::fmt::Debug for UserAction {
                 "RollbackContext({user_message_index}/{})",
                 expected_user_messages.len()
             ),
+            UserAction::SetShell { shell, .. } => write!(f, "SetShell({shell:?})"),
             UserAction::RebindTarget { target_id, .. } => {
                 write!(f, "RebindTarget({target_id})")
             }
@@ -280,6 +285,7 @@ pub struct DiagnoseSession {
     pub model: String,
     pub provider: String,
     pub source: SessionSource,
+    pub shell: watch::Receiver<super::shell::ShellKind>,
     pub action_tx: mpsc::UnboundedSender<UserAction>,
     pub audit: Arc<Mutex<AuditLog>>,
     /// 流式响应的取消句柄。actor 在 chat() 前把 Notify 装进 slot，chat 完成/取消后清空。
@@ -371,13 +377,8 @@ pub struct SessionConfig {
     pub ssh_handle: Option<SshHandle>,
     /// dump 文件落地目录（实际文件写到 <data_dir>/diagnose/<tab_id>/）。
     pub data_dir: PathBuf,
-    /// Target shell family — drives sentinel template selection in
-    /// `handle_run_command` and `ensure_remote_caps` / `run_file_op`.
-    /// Resolved at construction and refreshed when the target is rebound.
-    /// Default Posix is the safe fallback (Linux/macOS remotes, ~99% case).
-    /// Local PTY: derived from PtyHandle.shell_path.
-    /// Remote SSH: the profile-level cache value if a connect-time probe hit
-    /// (auto-detect on), else Posix.
+    /// Persisted conversation choice driving prompts, sentinel templates and
+    /// file operations. Serial/Telnet retain their fixed transport kind.
     pub shell_kind: super::shell::ShellKind,
     /// Conversation persistence. The actor autosaves `history` into
     /// ai_conversations at every consistent commit point (paired
@@ -455,6 +456,7 @@ pub fn start(mut cfg: SessionConfig, app: crate::emitter::Host) -> AppResult<Pen
     let (actor_done_tx, actor_done_rx) = watch::channel(false);
     let terminal_mutations = Arc::new(Mutex::new(Vec::new()));
 
+    let (shell_tx, shell) = watch::channel(cfg.shell_kind);
     let provider = cfg.provider.clone();
     let session = DiagnoseSession {
         tab_id: cfg.tab_id.clone(),
@@ -464,6 +466,7 @@ pub fn start(mut cfg: SessionConfig, app: crate::emitter::Host) -> AppResult<Pen
         model: cfg.model.clone(),
         provider,
         source: cfg.driver.source(),
+        shell,
         action_tx,
         audit: audit.clone(),
         cancel_slot: cancel_slot.clone(),
@@ -486,6 +489,7 @@ pub fn start(mut cfg: SessionConfig, app: crate::emitter::Host) -> AppResult<Pen
         remote_caps: None,
         terminal_mutations,
         context_epoch: 0,
+        shell_tx,
     };
 
     Ok(PendingSession {
@@ -499,6 +503,7 @@ pub fn start(mut cfg: SessionConfig, app: crate::emitter::Host) -> AppResult<Pen
 pub(in crate::ai::session) struct Actor {
     /// pub(in crate::ai::session) 给 `file_ops` 子模块的 `impl Actor` 访问 cfg.redact_rules / cfg.max_output_bytes
     pub(in crate::ai::session) cfg: SessionConfig,
+    shell_tx: watch::Sender<super::shell::ShellKind>,
     /// pub(in crate::ai::session) 给 file_ops handlers push ToolResult
     pub(in crate::ai::session) history: Vec<ChatMessage>,
     action_rx: mpsc::UnboundedReceiver<UserAction>,
@@ -649,6 +654,9 @@ impl Actor {
                         self.persist();
                     }
                 }
+                UserAction::SetShell { shell, ack } => {
+                    let _ = ack.send(self.set_shell(shell));
+                }
                 UserAction::ClearContext { ack } => {
                     self.clear_context(ack);
                 }
@@ -710,6 +718,9 @@ impl Actor {
                     self.persist();
                     self.emit("user_message", json!({ "text": text }));
                     Self::complete_action(ack, Ok(()));
+                }
+                Ok(UserAction::SetShell { ack, .. }) => {
+                    let _ = ack.send(Err(AppError::other("ai_session_stopped", json!({}))));
                 }
                 Ok(UserAction::ClearContext { ack }) => self.clear_context(ack),
                 Ok(UserAction::RollbackContext {
@@ -882,7 +893,12 @@ impl Actor {
                 } => {
                     self.cfg.target_id = target_id.clone();
                     self.cfg.ssh_handle = ssh_handle;
-                    self.cfg.shell_kind = shell_kind;
+                    // Resolve at processing time: a preceding queued SetShell
+                    // may have changed the choice since rebind was enqueued.
+                    if shell_kind.is_raw_device() || self.cfg.shell_kind.is_raw_device() {
+                        self.cfg.shell_kind = shell_kind;
+                    }
+                    self.shell_tx.send_replace(self.cfg.shell_kind);
                     // 新 target 的远端能力跟老的没关系（不同主机的 python3/perl 不一定都在）
                     self.remote_caps = None;
                     self.audit_push(AuditKind::Note {
@@ -892,6 +908,20 @@ impl Actor {
                 other => return Some(other),
             }
         }
+    }
+
+    fn set_shell(&mut self, shell: super::shell::ShellKind) -> AppResult<()> {
+        if self.cfg.shell_kind.is_raw_device() {
+            return Err(AppError::other("ai_shell_change_unavailable", json!({})));
+        }
+        if shell.is_raw_device() {
+            return Err(AppError::other("ai_shell_invalid", json!({})));
+        }
+        crate::db::ai_conversation::set_shell(&self.cfg.db, &self.cfg.conversation_id, shell)?;
+        self.cfg.shell_kind = shell;
+        self.shell_tx.send_replace(shell);
+        self.remote_caps = None;
+        Ok(())
     }
 
     async fn tool_context(&self) -> tools::ToolContext {
@@ -1420,6 +1450,9 @@ impl Actor {
                 } => {
                     Self::reject_tool_action(ack, &received_id);
                     continue;
+                }
+                UserAction::SetShell { ack, .. } => {
+                    let _ = ack.send(Err(AppError::other("ai_shell_change_busy", json!({}))));
                 }
                 UserAction::Message { text, ack } => {
                     // 工具调用中拒绝新消息（同 handle_run_command 现有行为）
@@ -2095,6 +2128,9 @@ impl Actor {
                 // 命令审批期间不能接受新消息：tool_use 必须有对应 tool_result 才能再开下一轮 user。
                 // 之前 _ => continue 把 Message 默默吞掉——用户敲完字消息消失，没有任何反馈。
                 // 现在显式 audit + emit ai:error，让用户知道"先决定命令再发消息"。
+                UserAction::SetShell { ack, .. } => {
+                    let _ = ack.send(Err(AppError::other("ai_shell_change_busy", json!({}))));
+                }
                 UserAction::Message { text, ack } => {
                     // 不要把用户原文裸塞进 audit——可能含 secret/PII（用户复制粘贴
                     // 时随手带的）。audit log 可能离开本机（用户分享给开发者排错），
@@ -2427,6 +2463,119 @@ mod tests {
         (pending, events, db)
     }
 
+    #[tokio::test]
+    async fn manual_shell_change_persists_and_cannot_change_pending_command() {
+        use super::super::shell::ShellKind;
+        let (mut pending, mut events, db) = pending_mcp_session();
+        pending.actor.set_shell(ShellKind::Cmd).unwrap();
+        assert_eq!(*pending.info().shell.borrow(), ShellKind::Cmd);
+        assert_eq!(
+            crate::db::ai_conversation::get(&db, "mcp-conversation")
+                .unwrap()
+                .unwrap()
+                .shell,
+            ShellKind::Cmd
+        );
+        let sender = pending.info().action_tx.clone();
+        let respond = async {
+            let (_, proposal) = events.recv().await.unwrap();
+            assert!(proposal["execution"]["full_cmd"]
+                .as_str()
+                .unwrap()
+                .contains("%errorlevel%"));
+            let (ack, changed) = oneshot::channel();
+            sender
+                .send(UserAction::SetShell {
+                    shell: ShellKind::Powershell,
+                    ack,
+                })
+                .unwrap();
+            assert_eq!(
+                changed.await.unwrap().unwrap_err().code(),
+                "ai_shell_change_busy"
+            );
+            sender
+                .send(UserAction::CommandResult {
+                    command_id: proposal["id"].as_str().unwrap().into(),
+                    exit_code: 0,
+                    output: "ok".into(),
+                    timed_out: false,
+                    early_terminated: false,
+                    ack: None,
+                })
+                .unwrap();
+        };
+        let command = pending.actor.execute_run_command(
+            "manual-shell-command".into(),
+            RunCommandInput {
+                cmd: "echo hello".into(),
+                explain: "Read".into(),
+                side_effect: "read-only".into(),
+                timeout_s: Some(10),
+            },
+        );
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(command, respond)
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+        assert_eq!(pending.actor.cfg.shell_kind, ShellKind::Cmd);
+        pending.actor.set_shell(ShellKind::Powershell).unwrap();
+        assert_eq!(*pending.info().shell.borrow(), ShellKind::Powershell);
+        assert!(pending.actor.set_shell(ShellKind::Serial).is_err());
+        crate::db::ai_conversation::delete(&db, "mcp-conversation").unwrap();
+        assert!(pending.actor.set_shell(ShellKind::Posix).is_err());
+        assert_eq!(pending.actor.cfg.shell_kind, ShellKind::Powershell);
+        assert_eq!(*pending.info().shell.borrow(), ShellKind::Powershell);
+    }
+
+    #[tokio::test]
+    async fn queued_rebind_keeps_the_latest_manual_shell_choice() {
+        use super::super::shell::ShellKind;
+        let (mut pending, _events, db) = pending_mcp_session();
+        let sender = pending.info().action_tx.clone();
+        let (ack, changed) = oneshot::channel();
+        sender
+            .send(UserAction::SetShell {
+                shell: ShellKind::Cmd,
+                ack,
+            })
+            .unwrap();
+        sender
+            .send(UserAction::RebindTarget {
+                target_id: "replacement".into(),
+                ssh_handle: None,
+                shell_kind: ShellKind::Posix,
+            })
+            .unwrap();
+        sender
+            .send(UserAction::Message {
+                text: "after rebind".into(),
+                ack: None,
+            })
+            .unwrap();
+        let Some(UserAction::SetShell { shell, ack }) = pending.actor.recv_action().await else {
+            panic!("shell change first")
+        };
+        let _ = ack.send(pending.actor.set_shell(shell));
+        changed.await.unwrap().unwrap();
+        assert!(matches!(
+            pending.actor.recv_action().await,
+            Some(UserAction::Message { .. })
+        ));
+        assert_eq!(pending.actor.cfg.target_id, "replacement");
+        assert_eq!(pending.actor.cfg.shell_kind, ShellKind::Cmd);
+        assert_eq!(*pending.info().shell.borrow(), ShellKind::Cmd);
+        assert_eq!(
+            crate::db::ai_conversation::get(&db, "mcp-conversation")
+                .unwrap()
+                .unwrap()
+                .shell,
+            ShellKind::Cmd
+        );
+    }
+
     fn mcp_session() -> (DiagnoseSession, TestEvents, Arc<crate::db::Db>) {
         let (pending, events, db) = pending_mcp_session();
         (pending.launch(uuid::Uuid::new_v4()), events, db)
@@ -2490,6 +2639,9 @@ mod tests {
         .into_iter()
         .enumerate()
         {
+            if !shell.is_raw_device() {
+                pending.actor.set_shell(shell).unwrap();
+            }
             sender
                 .send(UserAction::RebindTarget {
                     target_id: format!("target-{index}"),
@@ -2560,6 +2712,7 @@ mod tests {
             (ShellKind::Powershell, "& "),
             (ShellKind::Posix, "python3 -c "),
         ] {
+            pending.actor.set_shell(shell).unwrap();
             pending.actor.remote_caps = Some(file_ops::RemoteCapabilities {
                 python3: false,
                 perl: true,

@@ -146,6 +146,7 @@ describe("startup actions", () => {
     app.addTab({ id: "serial", type: "serial", label: "Serial", meta: { serialProfileId: "serial1", login_script: "secret" } });
     app.addTab({ id: "forward", type: "forward", label: "Forward", meta: { forwardId: "f1" } });
     app.addTab({ id: "container", type: "docker_exec", label: "Container", meta: { connectorSpec: "secret" } });
+    app.addTab({ id: "ec2", type: "aws_ssm", label: "EC2", meta: { connectorSpec: "secret" } });
     app.addTab({ id: "editor", type: "edit", label: "Editor", meta: { content: "secret" } });
     app.setActiveWorkspace("ssh");
     app.setActivePane("telnet");

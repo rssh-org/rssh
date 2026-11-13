@@ -88,28 +88,6 @@
     let autoWebFetch = $state(false);
     let savingAuto = $state(false);
 
-    // ─── 远端 shell 自动探测（与 danger_mode 解耦的独立开关）─────────
-    // 默认 off：99% Linux/macOS 远端假设 POSIX 即正确，零探测开销保持现状。
-    // 用户连 Windows / 改了 DefaultShell 的远端时手动开启，每次 SSH 连接成功后跑
-    // 一行 echo 探针自动定位 cmd.exe / PowerShell（对已连接会话开启需重连生效）。
-    let autoDetectRemoteShell = $state(false);
-    let savingShellDetect = $state(false);
-    let shellDetectNote = $state<string | null>(null);
-
-    async function persistAutoDetectShell(next: boolean) {
-        savingShellDetect = true;
-        shellDetectNote = null;
-        try {
-            await ai.saveSettings({ autoDetectRemoteShell: next });
-        } catch (err) {
-            // 失败回滚 UI 状态，保持跟后端单一真相
-            autoDetectRemoteShell = !next;
-            shellDetectNote = t("ai.settings.shell_detect.save_failed", { error: errMsg(err) });
-        } finally {
-            savingShellDetect = false;
-        }
-    }
-
     /** 子开关写回后端。失败把 UI 状态回滚到 prev，避免界面与持久化失同步。 */
     async function persistAuto(field: "autoRunCommand" | "autoMatchFile" | "autoDownloadFile"
                                     | "autoAnalyzeLocally" | "autoPatchCp" | "autoPatchModify"
@@ -342,7 +320,6 @@
         autoPatchMv = s.auto_patch_mv;
         autoWebSearch = s.auto_web_search;
         autoWebFetch = s.auto_web_fetch;
-        autoDetectRemoteShell = s.auto_detect_remote_shell;
         await refreshProviders();
         await refreshSkills();
         await refreshRedactRules();
@@ -791,31 +768,6 @@
                        disabled={!dangerMode || savingAuto}
                        onchange={(e) => persistAuto("autoWebFetch", (e.target as HTMLInputElement).checked)}/>
                 <span>{t("ai.settings.danger.auto.web_fetch")}</span>
-            </label>
-        </div>
-    </div>
-
-    <!-- 远端 shell 自动探测 —— 独立卡片，跟 danger_mode 解耦。
-         off（默认）：远端假设 POSIX，保持 99% 用户零开销。
-         on：SSH 连接成功后跑一行 echo 探针，定位 cmd.exe / PowerShell。 -->
-    <div class="card surface-raised">
-        <div class="danger-head">
-            <div class="danger-head-body">
-                <div id="shell-detect-title" class="danger-title">
-                    {t("ai.settings.shell_detect.label")}
-                </div>
-                <div id="shell-detect-desc" class="danger-desc">{t("ai.settings.shell_detect.desc")}</div>
-                {#if shellDetectNote}
-                    <div class="danger-err">{shellDetectNote}</div>
-                {/if}
-            </div>
-            <label class="switch">
-                <input type="checkbox" bind:checked={autoDetectRemoteShell}
-                       disabled={savingShellDetect}
-                       onchange={(e) => persistAutoDetectShell((e.target as HTMLInputElement).checked)}
-                       aria-labelledby="shell-detect-title"
-                       aria-describedby="shell-detect-desc"/>
-                <span class="slider"></span>
             </label>
         </div>
     </div>

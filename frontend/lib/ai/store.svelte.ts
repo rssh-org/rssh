@@ -14,7 +14,6 @@ import { t, errMsg, locale as currentLocale } from "../i18n/index.svelte.ts";
 import { extractOutput, findSentinel } from "./pty-output.ts";
 import { decodeStreamChunk } from "../terminal/stream-decode.ts";
 import { truncateCommand } from "./format.ts";
-import { PROBE_COMMAND, classifyProbeBuffer } from "./shell-probe.ts";
 import {
   applyTerminalMutations,
   restoreTimeline,
@@ -91,6 +90,9 @@ const panel = createSidePanelState({
 });
 let _position = $state<AiPosition>(loadPos());
 let _sessionByTab = $state<Record<string, AiSessionInfo>>({});
+let _draftShellByTab = $state<Record<string, ShellKind>>({});
+let _shellChangeByTab = $state<Record<string, number>>({});
+let _sessionStartingByTab = $state<Record<string, boolean>>({});
 let _chatByTab = $state<Record<string, ChatItem[]>>({});
 let _pendingByTab = $state<Record<string, CommandProposed | null>>({});
 let _keyboardLockedByTab = $state<Record<string, boolean>>({});
@@ -143,6 +145,10 @@ type PendingConversationMutation = Readonly<{
   operation: Promise<void>;
 }> | Readonly<{
   kind: "clear";
+  sequence: number;
+  operation: Promise<void>;
+}> | Readonly<{
+  kind: "shell";
   sequence: number;
   operation: Promise<void>;
 }> | Readonly<{
@@ -284,6 +290,7 @@ export function discardPanelState(tab_id: string) {
  * generation 不同而失效。正常产品路径使用 UUID，不依赖复用。 */
 export function activateTab(tab_id: string) {
   _tabGeneration[tab_id] = tabGeneration(tab_id) + 1;
+  delete _draftShellByTab[tab_id];
   _disposedTabs.delete(tab_id);
   panel.seedWidth(tab_id);
 }
@@ -322,6 +329,51 @@ export function sessionForTab(tab_id: string): AiSessionInfo | undefined {
 }
 export function listAllSessions(): AiSessionInfo[] {
   return Object.values(_sessionByTab);
+}
+
+/** A draft belongs to the next conversation, never to the remote connection. */
+export function shellForTab(tab_id: string): ShellKind {
+  const shell = _sessionByTab[tab_id]?.shell ?? _draftShellByTab[tab_id];
+  return shell === "cmd" || shell === "powershell" ? shell : "posix";
+}
+
+export function shellSelectionBusy(tab_id: string): boolean {
+  return _sessionStartingByTab[tab_id] === true || _shellChangeByTab[tab_id] !== undefined;
+}
+
+export async function setSessionShell(tab_id: string, shell: ShellKind, lease: SessionLease): Promise<void> {
+  assertLeaseLive(tab_id, lease);
+  if (shellSelectionBusy(tab_id)) throw new Error(t("error.ai_shell_change_busy"));
+  const session = _sessionByTab[tab_id];
+  if (!session) {
+    _draftShellByTab[tab_id] = shell;
+    return;
+  }
+  if (isRawDeviceKind(_targetKindByTab[tab_id])) throw new Error(t("error.ai_shell_change_unavailable"));
+  if (shell === shellForTab(tab_id)) return;
+  const sequence = ++_nextConversationMutationId;
+  _shellChangeByTab[tab_id] = sequence;
+  const operation = enqueueConversationMutation(tab_id, async () => {
+    assertLeaseLive(tab_id, lease);
+    const updated = await invoke<AiSessionInfo>("ai_session_set_shell", {
+      tabId: tab_id,
+      instanceId: session.instance_id,
+      shell,
+    });
+    if (!isTabLive(tab_id, lease.generation)) return;
+    const current = _sessionByTab[tab_id];
+    if (!current || current.instance_id !== session.instance_id) return;
+    // A reconnect may have updated target_id while this acknowledgement travelled.
+    _sessionByTab[tab_id] = { ...current, shell: updated.shell };
+  });
+  const pending: PendingConversationMutation = { kind: "shell", sequence, operation };
+  trackConversationMutation(tab_id, pending);
+  try {
+    await operation;
+  } finally {
+    untrackConversationMutation(tab_id, pending);
+    if (_shellChangeByTab[tab_id] === sequence) delete _shellChangeByTab[tab_id];
+  }
 }
 
 export function chatItems(tab_id: string): ChatItem[] {
@@ -674,7 +726,7 @@ export async function startMcpSession(
   return launchSession(
     { ...args, skill: "", provider: "", model: "" },
     null,
-    () => invoke<AiSessionInfo>("mcp_accept_session", { requestId }),
+    () => invoke<AiSessionInfo>("mcp_accept_session", { requestId, shell: shellForTab(args.tabId) }),
   );
 }
 
@@ -700,6 +752,7 @@ async function launchSession(
     await teardown;
     assertTabLive(args.tabId, generation);
   }
+  _sessionStartingByTab[args.tabId] = true;
   const launch = launchSessionAtGeneration(args, resumeId, generation, start);
   const launches = _sessionLaunchesByTab[args.tabId] ?? new Set<Promise<AiSessionInfo>>();
   _sessionLaunchesByTab[args.tabId] = launches;
@@ -710,6 +763,7 @@ async function launchSession(
     launches.delete(launch);
     if (launches.size === 0 && _sessionLaunchesByTab[args.tabId] === launches) {
       delete _sessionLaunchesByTab[args.tabId];
+      delete _sessionStartingByTab[args.tabId];
     }
   }
 }
@@ -730,6 +784,7 @@ async function launchSessionAtGeneration(
       model: args.model,
       locale: currentLocale(),
       resume: resumeId,
+      shell: resumeId ? undefined : shellForTab(args.tabId),
     }));
   } catch (error) {
     // Closing can cancel a Rust Pending reservation before start returns. The
@@ -808,6 +863,8 @@ function clearSessionState(tab_id: string) {
   }
   detachListeners(tab_id);
   delete _sessionByTab[tab_id];
+  delete _draftShellByTab[tab_id];
+  delete _shellChangeByTab[tab_id];
   delete _pendingByTab[tab_id];
   delete _keyboardLockedByTab[tab_id];
   delete _targetKindByTab[tab_id];
@@ -1161,81 +1218,6 @@ export async function cancelStream(tab_id: string, lease: SessionLease): Promise
     tabId: session.tabId,
     instanceId: session.instanceId,
   });
-}
-
-/** 连接时探测的门控：这个 SSH target 现在需要探测吗？
- *  后端判定 auto_detect on + 会话存在 + 该 profile 缓存 miss。命中缓存或开关关 →
- *  false，于是连接 / 重连都不会重复刷探针。本地 PTY 的 target_id 不在后端 sessions 里
- *  → 自然 false。 */
-export async function remoteShellProbeNeeded(target_id: string): Promise<boolean> {
-  return invoke<boolean>("ai_remote_shell_probe_needed", { targetId: target_id });
-}
-
-/** SSH 连接成功后探测远端 shell：粘一行 `echo P=$PSEdition=$$=E` 到 PTY，listen 1.5s
- *  解析输出，分类后写进程级缓存（ai_cache_remote_shell，key=profile_id）。AI session
- *  启动时从缓存读初始 shell —— 探测与 AI 会话生命周期解耦，无需 tab_id / actor。
- *
- *  返回 true = 探测成功并已写缓存。false = 超时 / classify 模糊（不写缓存，下次连接重探）。
- *
- *  时机：TerminalPane.connectAndWire 的 SSH 成功分支，且 remoteShellProbeNeeded 为真。
- *  init_command 已由后端在 ssh_connect 返回前写入 PTY，探针排在其后执行。
- *  视觉代价：用户看到一行 echo 滚过终端 —— 每个 profile 每进程仅一次（缓存门控）。
- *
- *  分类规则（见 shell-probe.ts，纯逻辑 + 单测）：回显行被 `(?<!echo )` lookbehind 排除，
- *  只认求值输出。powershell/posix 的求值签名一见即定；cmd 签名（== 被排除的回显签名）
- *  只可能来自真 cmd.exe 的求值输出，且只在 deadline 才采纳——给 posix/ps 求值行先到的机会，
- *  慢链路下求值行整个没到 → 不写缓存，POSIX 兜底重探（不会误缓存 cmd）。
- */
-export async function probeRemoteShell(target_id: string): Promise<boolean> {
-  const dataEvent = `ssh:data:${target_id}`;
-  const cache = (shell: ShellKind) =>
-    // 后端按 target_id 查 profile_id 写缓存；target 已断则静默跳过。
-    invoke("ai_cache_remote_shell", { targetId: target_id, shell });
-
-  // Tail-bounded buffer: the probe echo + its evaluated output land at the END
-  // of the stream (after any MOTD / init_command noise), so only the recent tail
-  // matters. Cap it so a chatty connect can't grow an unbounded string that
-  // classifyProbeBuffer re-scans every 80ms. Trim on a newline boundary so a cut
-  // can never open a line mid-token and let `^P=` false-match a sliced echo line.
-  const TAIL_CAP = 16 * 1024;
-  let buffer = "";
-  const unlisten = await listen<string>(dataEvent, (e) => {
-    buffer += new TextDecoder("utf-8", { fatal: false }).decode(decodeStreamChunk(e.payload));
-    if (buffer.length > TAIL_CAP) {
-      const tail = buffer.slice(-TAIL_CAP);
-      const nl = tail.indexOf("\n");
-      buffer = nl >= 0 ? tail.slice(nl + 1) : tail;
-    }
-  });
-  try {
-    await invoke("ssh_write", {
-      sessionId: target_id,
-      data: Array.from(new TextEncoder().encode(PROBE_COMMAND + "\r")),
-    });
-    // 1.5s deadline：远端通常 100-300ms 内回响，给 5x 头量容忍慢链路。
-    const deadline = Date.now() + 1500;
-    while (Date.now() < deadline) {
-      const { kind } = classifyProbeBuffer(buffer);
-      if (kind) {
-        await cache(kind); // posix/powershell 的求值行无歧义，立即定夺
-        return true;
-      }
-      await new Promise((r) => setTimeout(r, 80));
-    }
-    // 超时：没等到 posix/powershell 求值行。若 buffer 里有（非回显的）cmd 求值签名 → 真 cmd.exe；
-    // 慢链路下求值行整个没到（只有被 lookbehind 排除的回显）→ cmd=false → 不写缓存，POSIX 兜底。
-    if (classifyProbeBuffer(buffer).cmd) {
-      await cache("cmd");
-      return true;
-    }
-    console.warn("[ai] shell probe timed out — keeping POSIX fallback");
-    return false;
-  } catch (e) {
-    console.error("[ai] shell probe failed:", e);
-    return false;
-  } finally {
-    unlisten();
-  }
 }
 
 /** 当前会话的助手消息是否正在流式输出 —— UI 用它把"发送"按钮切成"停止"。 */
@@ -1775,7 +1757,6 @@ type AiSettingsPatch = Partial<{
   autoPatchMv: boolean;
   autoWebSearch: boolean;
   autoWebFetch: boolean;
-  autoDetectRemoteShell: boolean;
 }>;
 
 type AutoApprovalSettingKey =

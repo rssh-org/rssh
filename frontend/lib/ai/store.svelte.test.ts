@@ -43,6 +43,124 @@ async function registerIdleTerminals(...tabIds: string[]) {
   for (const tabId of tabIds) screen.registerAlternateScreenProvider(tabId, () => false);
 }
 
+describe("conversation shell selection", () => {
+  const info = { tab_id: "shell-tab", instance_id: "instance", target_id: "target", conversation_id: "conversation", skill: "general", provider: "", model: "", shell: "posix" as const };
+  const args = { tabId: "shell-tab", targetKind: "ssh" as const, targetId: "target", skill: "general", provider: "", model: "" };
+
+  async function setup() {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    ai.activateTab(args.tabId);
+    invokeMock.mockImplementation(async (name, value) => {
+      const input = value as { shell?: string };
+      if (name === "ai_session_start" || name === "mcp_accept_session") return { ...info, shell: input.shell ?? "cmd" };
+      if (name === "ai_session_set_shell") return { ...info, shell: input.shell };
+      if (name === "ai_conversation_timeline") return "[]";
+      if (name === "ai_audit_get") return { entries: [] };
+      return null;
+    });
+    return ai;
+  }
+
+  it("defaults to POSIX and isolates unstarted choices per tab", async () => {
+    const ai = await setup();
+    expect(ai.shellForTab(args.tabId)).toBe("posix");
+    await ai.setSessionShell(args.tabId, "powershell", ai.captureSessionLease(args.tabId));
+    expect(ai.shellForTab(args.tabId)).toBe("powershell");
+    expect(ai.shellForTab("another-tab")).toBe("posix");
+    expect(invokeMock).not.toHaveBeenCalled();
+    await ai.endConversation(args.tabId);
+    expect(ai.shellForTab(args.tabId)).toBe("posix");
+  });
+
+  it.each(["ai", "mcp"])("sends the selected shell when starting %s and retains it across reconnect", async (source) => {
+    const ai = await setup();
+    const lease = ai.captureSessionLease(args.tabId);
+    await ai.setSessionShell(args.tabId, "powershell", lease);
+    if (source === "mcp") await ai.startMcpSession({ ...args, lease }, "request");
+    else await ai.startSession({ ...args, lease });
+    expect(invokeMock).toHaveBeenCalledWith(source === "mcp" ? "mcp_accept_session" : "ai_session_start", expect.objectContaining({ shell: "powershell" }));
+    await ai.rebindTarget(args.tabId, "ssh", "replacement", lease);
+    expect(ai.shellForTab(args.tabId)).toBe("powershell");
+    expect(ai.sessionForTab(args.tabId)?.target_id).toBe("replacement");
+    await ai.endConversation(args.tabId);
+    expect(ai.shellForTab(args.tabId)).toBe("posix");
+  });
+
+  it("restores the backend conversation shell on resume instead of overwriting it with the draft", async () => {
+    const ai = await setup();
+    const lease = ai.captureSessionLease(args.tabId);
+    await ai.setSessionShell(args.tabId, "powershell", lease);
+    await ai.resumeSession({ ...args, lease }, "conversation");
+    expect(invokeMock).toHaveBeenCalledWith("ai_session_start", expect.objectContaining({ shell: undefined, resume: "conversation" }));
+    expect(ai.shellForTab(args.tabId)).toBe("cmd");
+  });
+
+  it.each(["ai", "mcp"])("publishes a %s shell change only after the persistence acknowledgement", async (source) => {
+    const ai = await setup();
+    const lease = ai.captureSessionLease(args.tabId);
+    if (source === "mcp") await ai.startMcpSession({ ...args, lease }, "request");
+    else await ai.startSession({ ...args, lease });
+    let finish!: (value: unknown) => void;
+    invokeMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const change = ai.setSessionShell(args.tabId, "powershell", lease);
+    expect(invokeMock).toHaveBeenLastCalledWith("ai_session_set_shell", { tabId: args.tabId, instanceId: info.instance_id, shell: "powershell" });
+    expect(ai.shellForTab(args.tabId)).toBe("posix");
+    expect(ai.shellSelectionBusy(args.tabId)).toBe(true);
+    await expect(ai.setSessionShell(args.tabId, "cmd", lease)).rejects.toThrow();
+    finish({ ...info, shell: "powershell" });
+    await change;
+    expect(ai.shellForTab(args.tabId)).toBe("powershell");
+    expect(ai.shellSelectionBusy(args.tabId)).toBe(false);
+  });
+
+  it("retains the acknowledged shell when the backend rejects a change", async () => {
+    const ai = await setup();
+    const lease = ai.captureSessionLease(args.tabId);
+    await ai.startSession({ ...args, lease });
+    invokeMock.mockRejectedValueOnce(new Error("busy"));
+    await expect(ai.setSessionShell(args.tabId, "powershell", lease)).rejects.toThrow("busy");
+    expect(ai.shellForTab(args.tabId)).toBe("posix");
+    expect(ai.shellSelectionBusy(args.tabId)).toBe(false);
+  });
+
+  it("does not restore a closed conversation when a shell acknowledgement arrives late", async () => {
+    const ai = await setup();
+    const lease = ai.captureSessionLease(args.tabId);
+    await ai.startSession({ ...args, lease });
+    let finish!: (value: unknown) => void;
+    invokeMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const change = ai.setSessionShell(args.tabId, "powershell", lease);
+    const closing = ai.endConversation(args.tabId);
+    expect(ai.shellForTab(args.tabId)).toBe("posix");
+    finish({ ...info, shell: "powershell" });
+    await Promise.all([change, closing]);
+    expect(ai.sessionForTab(args.tabId)).toBeUndefined();
+    expect(ai.shellForTab(args.tabId)).toBe("posix");
+  });
+
+  it("disallows a shell draft change after session creation has started", async () => {
+    const ai = await setup();
+    const lease = ai.captureSessionLease(args.tabId);
+    let finish!: (value: unknown) => void;
+    invokeMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const launching = ai.startSession({ ...args, lease });
+    expect(ai.shellSelectionBusy(args.tabId)).toBe(true);
+    await expect(ai.setSessionShell(args.tabId, "cmd", lease)).rejects.toThrow();
+    finish(info);
+    await launching;
+    expect(ai.shellSelectionBusy(args.tabId)).toBe(false);
+  });
+
+  it.each(["serial", "telnet"] as const)("keeps %s transport semantics fixed", async (targetKind) => {
+    const ai = await setup();
+    const lease = ai.captureSessionLease(args.tabId);
+    await ai.startSession({ ...args, targetKind, lease });
+    await expect(ai.setSessionShell(args.tabId, "powershell", lease)).rejects.toThrow();
+    expect(invokeMock.mock.calls.some(([name]) => name === "ai_session_set_shell")).toBe(false);
+  });
+});
+
 describe("panel visibility", () => {
   it("recognizes device-local subscription credentials separately from API keys", async () => {
     vi.resetModules();
@@ -197,7 +315,6 @@ describe("provider settings", () => {
     auto_patch_mv: false,
     auto_web_search: false,
     auto_web_fetch: false,
-    auto_detect_remote_shell: false,
   };
 
   it.each(["codex-subscription", "openai-completions"] as const)(
@@ -1903,7 +2020,6 @@ describe("tab lifecycle", () => {
       auto_patch_modify: false,
       auto_patch_diff: false,
       auto_patch_mv: false,
-      auto_detect_remote_shell: false,
     };
     let currentSettings = enabledSettings;
     invokeMock.mockImplementation(async (command: string) => {
@@ -1962,7 +2078,6 @@ describe("tab lifecycle", () => {
       auto_patch_modify: false,
       auto_patch_diff: false,
       auto_patch_mv: false,
-      auto_detect_remote_shell: false,
     };
     let backendSettings = enabledSettings;
     let resolveDisable!: () => void;
@@ -2030,7 +2145,6 @@ describe("tab lifecycle", () => {
       auto_patch_modify: false,
       auto_patch_diff: false,
       auto_patch_mv: false,
-      auto_detect_remote_shell: false,
     };
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "ai_settings_get") return enabledSettings;

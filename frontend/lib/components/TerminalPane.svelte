@@ -645,7 +645,7 @@
     let touchScrollCleanup: (() => void) | undefined;
 
     const isLocal = $derived(tabType === "local");
-    const isPtyConnector = $derived(tabType === "docker_exec" || tabType === "kubectl_exec");
+    const isPtyConnector = $derived(tabType === "docker_exec" || tabType === "kubectl_exec" || tabType === "aws_ssm");
     const isSsh = $derived(tabType === "ssh");
     // Transport table — the per-tab byte-stream IPC contract lives in DATA, not in
     // branches. Adding a transport is one more row, zero code change.
@@ -657,6 +657,7 @@
         local:  { write: "pty_write",    resize: "pty_resize",    data: "pty:data",    close: "pty:close",    closeCmd: "pty_close" },
         docker_exec:  { write: "pty_write", resize: "pty_resize", data: "pty:data", close: "pty:close", closeCmd: "pty_close" },
         kubectl_exec: { write: "pty_write", resize: "pty_resize", data: "pty:data", close: "pty:close", closeCmd: "pty_close" },
+        aws_ssm:     { write: "pty_write", resize: "pty_resize", data: "pty:data", close: "pty:close", closeCmd: "pty_close" },
         serial: { write: "serial_write", resize: null,            data: "serial:data", close: "serial:close", closeCmd: "serial_close" },
         telnet: { write: "telnet_write", resize: "telnet_resize", data: "telnet:data", close: "telnet:close", closeCmd: "telnet_close" },
     };
@@ -1338,18 +1339,6 @@
                 });
             }
         });
-
-        // 远端 shell 探测（仅 SSH）。连接成功时跑——此刻 init_command 已由后端在
-        // ssh_connect 返回前写入 PTY，探针排在其后。门控：auto_detect 开 + 该 profile
-        // 进程缓存未命中（remoteShellProbeNeeded）。命中即写 profile 缓存，供 AI 会话
-        // 启动时读初始 shell。fire-and-forget，不阻塞终端就绪；重连时缓存已命中 →
-        // needed=false，不重复刷探针。
-        if (isSsh) {
-            const sid = sessionId!;
-            void ai.remoteShellProbeNeeded(sid)
-                .then((needed) => { if (needed) return ai.probeRemoteShell(sid); })
-                .catch((e) => console.warn("[ai] connect-time shell probe skipped:", e));
-        }
 
         return true;
     }

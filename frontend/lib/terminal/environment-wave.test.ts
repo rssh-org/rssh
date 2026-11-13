@@ -96,7 +96,7 @@ describe("terminal wave snapshot", () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it.each(["local", "docker_exec", "kubectl_exec"] as const)(
+  it.each(["local", "docker_exec", "kubectl_exec", "aws_ssm"] as const)(
     "does not load decoration settings for %s terminals", async (type) => {
       const color = await loadTerminalWaveColor(type, { profileId: "unused" });
       expect(color).toBeNull();

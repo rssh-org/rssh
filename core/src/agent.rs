@@ -357,74 +357,49 @@ fn session_info(
     state: &AppState,
     id: &str,
     record: &SessionRecord,
+    selected_shell: Option<ShellKind>,
 ) -> AppResult<Option<AgentSession>> {
-    let (kind, shell) = match record.kind {
+    use crate::commands::lifecycle::OwnedAiTarget;
+    let (kind, target) = match record.kind {
         SessionKind::Ssh => {
             let sessions = locked(&state.sessions)?;
             let session = sessions
                 .get(id)
                 .ok_or_else(|| error("agent_session_unavailable"))?;
-            let auto = crate::db::settings::get(&state.db, "ai_auto_detect_remote_shell")?
-                .as_deref()
-                == Some("1");
-            let cached = if auto {
-                locked(&state.ai_remote_shell_cache)?
-                    .get(session.profile_id())
-                    .copied()
-            } else {
-                None
-            };
             (
                 "ssh",
-                ShellInfo {
-                    kind: cached.unwrap_or_default(),
-                    source: if cached.is_some() {
-                        "profile_cache"
-                    } else {
-                        "fallback"
-                    }
-                    .into(),
+                OwnedAiTarget::Ssh {
+                    handle: session.ssh_handle().clone(),
                 },
             )
         }
         #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Pty => {
-            let sessions = locked(&state.pty_sessions)?;
-            let session = sessions
-                .get(id)
-                .ok_or_else(|| error("agent_session_unavailable"))?;
-            (
-                "local",
-                ShellInfo {
-                    kind: ShellKind::from_local_path(session.shell_path()),
-                    source: "launch_config".into(),
-                },
-            )
+            if !locked(&state.pty_sessions)?.contains_key(id) {
+                return Err(error("agent_session_unavailable"));
+            }
+            ("local", OwnedAiTarget::Pty)
         }
         #[cfg(any(windows, macos, linux, ohos))]
-        SessionKind::Serial => (
-            "serial",
-            ShellInfo {
-                kind: ShellKind::Serial,
-                source: "transport".into(),
-            },
-        ),
-        SessionKind::Telnet => (
-            "telnet",
-            ShellInfo {
-                kind: ShellKind::Telnet,
-                source: "transport".into(),
-            },
-        ),
+        SessionKind::Serial => ("serial", OwnedAiTarget::Serial),
+        SessionKind::Telnet => ("telnet", OwnedAiTarget::Telnet),
         _ => return Ok(None),
     };
+    let (mut shell, mut source) = crate::ai::commands::target_shell_default(&target);
+    if let Some(selected) = selected_shell {
+        shell = selected;
+        source = "conversation";
+    }
     Ok(Some(AgentSession {
         session_id: id.into(),
         tab_id: String::new(),
         nonce: record.nonce.to_string(),
         name: format!("{kind} {id}"),
         kind: kind.into(),
-        shell,
+        shell: ShellInfo {
+            kind: shell,
+            source: source.into(),
+        },
     }))
 }
 
@@ -446,7 +421,11 @@ pub fn register_session(
         .get(&session_id)
         .filter(|r| &r.owner == owner && r.phase() == SessionPhase::Ready)
         .ok_or_else(|| error("agent_session_unavailable"))?;
-    let mut info = session_info(state, &session_id, record)?
+    let selected_shell = locked(&state.ai_sessions)?
+        .values()
+        .find(|s| s.target_id == session_id && !s.is_stopping())
+        .map(|s| *s.shell.borrow());
+    let mut info = session_info(state, &session_id, record, selected_shell)?
         .ok_or_else(|| error("agent_session_unsupported"))?;
     info.tab_id = tab_id;
     info.name = label;
@@ -487,6 +466,13 @@ fn list_sessions_inner(
     token: Option<&str>,
 ) -> AppResult<Vec<AgentSession>> {
     let registry = locked(&state.lifecycle_sessions)?;
+    // Snapshot before locking the bridge: lifecycle shutdown takes ai_sessions
+    // before agent_bridge.inner, so the reverse order would deadlock.
+    let shells: HashMap<String, ShellKind> = locked(&state.ai_sessions)?
+        .values()
+        .filter(|s| !s.is_stopping())
+        .map(|s| (s.target_id.clone(), *s.shell.borrow()))
+        .collect();
     let inner = locked(&state.agent_bridge.inner)?;
     if token.is_some_and(|token| !endpoint_matches(&inner, owner, token)) {
         return Err(error("agent_endpoint_stopped"));
@@ -496,7 +482,7 @@ fn list_sessions_inner(
         .iter()
         .filter(|(_, r)| &r.owner == owner && r.phase() == SessionPhase::Ready)
     {
-        let Some(mut info) = session_info(state, id, record)? else {
+        let Some(mut info) = session_info(state, id, record, shells.get(id).copied())? else {
             continue;
         };
         if let Some(registration) = inner
@@ -618,6 +604,7 @@ pub async fn accept_session(
     host: Host,
     owner: &SessionOwner,
     request_id: &str,
+    shell: Option<ShellKind>,
 ) -> AppResult<AiSessionInfo> {
     let request = {
         let registry = locked(&state.lifecycle_sessions)?;
@@ -652,6 +639,7 @@ pub async fn accept_session(
         request.tab_id.clone(),
         target,
         request.title.clone(),
+        shell,
     )
     .await
     {
@@ -988,7 +976,7 @@ mod tests {
                 request = self.event("agent:session_requested:") => request,
             };
             let id = request["id"].as_str().unwrap();
-            let info = accept_session(host.state(), host.clone(), &owner, id)
+            let info = accept_session(host.state(), host.clone(), &owner, id, None)
                 .await
                 .unwrap();
             assert!(
@@ -1016,6 +1004,28 @@ mod tests {
         fn drop(&mut self) {
             crate::commands::lifecycle::close_owner(self.host.state(), &self.owner);
         }
+    }
+
+    #[tokio::test]
+    async fn mcp_terminal_metadata_uses_the_active_conversation_shell() {
+        let mut fixture = Fixture::new();
+        let initial =
+            list_mcp_sessions(fixture.host.state(), &fixture.owner, "test-token").unwrap();
+        assert_eq!(initial[0].shell.kind, ShellKind::Posix);
+        let opened = fixture.open().await;
+        let info = commands::ai_session_set_shell(
+            fixture.owner.clone(),
+            fixture.host.state(),
+            fixture.info.tab_id.clone(),
+            Some(opened.instance_id),
+            ShellKind::Powershell,
+        )
+        .await
+        .unwrap();
+        assert_eq!(info.shell, ShellKind::Powershell);
+        let listed = list_mcp_sessions(fixture.host.state(), &fixture.owner, "test-token").unwrap();
+        assert_eq!(listed[0].shell.kind, ShellKind::Powershell);
+        assert_eq!(listed[0].shell.source, "conversation");
     }
 
     #[tokio::test]
@@ -1082,7 +1092,7 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, id);
 
-        let info = accept_session(host.state(), host.clone(), &owner, id)
+        let info = accept_session(host.state(), host.clone(), &owner, id, None)
             .await
             .unwrap();
         let error = tokio::time::timeout(
@@ -1126,13 +1136,13 @@ mod tests {
             id
         )
         .is_err());
-        let info = accept_session(host.state(), host.clone(), &owner, id)
+        let info = accept_session(host.state(), host.clone(), &owner, id, None)
             .await
             .unwrap();
         drop(opening);
         assert!(pending_sessions(host.state(), &owner).unwrap().is_empty());
         assert!(session_ready(host.state(), &owner, id, &info.instance_id).is_err());
-        assert!(accept_session(host.state(), host.clone(), &owner, id)
+        assert!(accept_session(host.state(), host.clone(), &owner, id, None)
             .await
             .is_err());
         let sessions = locked(&host.state().ai_sessions).unwrap();

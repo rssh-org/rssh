@@ -16,7 +16,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name, callback) =
 vi.mock("../components/TerminalSplitLayout.svelte", async () => import("../components/test-fixtures/TerminalWorkspace.svelte"));
 
 let component: ReturnType<typeof mount> | undefined;
-const terminal = { session_id: "transport", tab_id: "local:requested-pane", nonce: "nonce", name: "Target", kind: "local", shell: { kind: "posix", source: "launch_config" } };
+const terminal = { session_id: "transport", tab_id: "local:requested-pane", nonce: "nonce", name: "Target", kind: "local", shell: { kind: "posix", source: "default" } };
 const actor = { tab_id: terminal.tab_id, instance_id: "actor", target_id: terminal.session_id, conversation_id: "conversation", source: "mcp", skill: "general", provider: "", model: "" };
 async function settle() { flushSync(); await tick(); flushSync(); }
 
@@ -42,7 +42,7 @@ afterEach(async () => {
   document.body.innerHTML = "";
 });
 
-it.each(["local", "docker_exec", "kubectl_exec"] as const)("authorizes the requested %s split pane and runs commands in that PTY", async (type) => {
+it.each(["local", "docker_exec", "kubectl_exec", "aws_ssm"] as const)("authorizes the requested %s split pane and runs commands in that PTY", async (type) => {
   app.addTab({ id: "local:workspace", type: "local", label: "Workspace" });
   app.addPane("local:workspace", "right", { id: terminal.tab_id, type, label: "Target" });
   app.registerSession({ tabId: terminal.tab_id, sessionId: terminal.session_id, type });
