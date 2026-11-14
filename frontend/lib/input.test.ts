@@ -45,6 +45,34 @@ describe("context menu source", () => {
     } as unknown as MouseEvent)).toBe(true);
   });
 
+  it.each(["touch", "pen"])("keeps %s input through native selection-handle menu events", (pointerType) => {
+    const target = new EventTarget();
+    const cleanup = installInputTracking(target as Document);
+    try {
+      target.dispatchEvent(Object.assign(new Event("pointerdown"), { pointerType }));
+      target.dispatchEvent(Object.assign(new Event("pointerup"), { pointerType }));
+      expect(isTouchContextMenu({ pointerType } as PointerEvent)).toBe(true);
+
+      // Android's native handles do not send another DOM pointerdown. Older
+      // Chromium versions report their repeated context menus as mouse input.
+      for (const sourceCapabilities of [undefined, null, { firesTouchEvents: false }]) {
+        expect(isTouchContextMenu({
+          pointerType: "mouse", sourceCapabilities,
+        } as unknown as MouseEvent)).toBe(true);
+      }
+
+      target.dispatchEvent(Object.assign(new Event("pointerdown"), { pointerType: "mouse" }));
+      expect(isTouchContextMenu({ pointerType: "mouse" } as PointerEvent)).toBe(false);
+      expect(isTouchContextMenu({} as MouseEvent)).toBe(false);
+
+      target.dispatchEvent(Object.assign(new Event("pointerdown"), { pointerType }));
+      target.dispatchEvent(new Event("keydown"));
+      expect(isTouchContextMenu({ pointerType: "mouse" } as PointerEvent)).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+
   it("tracks mixed input for older WebViews and clears touch after a keyboard event", () => {
     const target = new EventTarget();
     const cleanup = installInputTracking(target as Document);

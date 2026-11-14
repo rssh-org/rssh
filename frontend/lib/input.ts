@@ -27,6 +27,12 @@ export function isTouchContextMenu(event: MouseEvent): boolean {
     sourceCapabilities?: { firesTouchEvents: boolean } | null;
   }).sourceCapabilities;
   if (sourceCapabilities?.firesTouchEvents === true) return true;
-  const pointerType = (event as PointerEvent).pointerType || lastPointerType;
-  return pointerType === "touch" || pointerType === "pen";
+  // Native selection-handle drags have no DOM pointerdown. Older Android
+  // WebViews label their contextmenu as "mouse", even after touch selection:
+  // https://issues.chromium.org/issues/41487195
+  // Keep the last actual touch/pen input until a mouse pointerdown or keydown
+  // replaces it; a contextmenu event alone must not switch the input source.
+  const pointerType = (event as PointerEvent).pointerType;
+  return pointerType === "touch" || pointerType === "pen"
+    || lastPointerType === "touch" || lastPointerType === "pen";
 }

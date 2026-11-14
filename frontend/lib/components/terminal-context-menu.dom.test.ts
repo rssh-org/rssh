@@ -73,6 +73,31 @@ function setup({
 }
 
 describe("terminal native touch context menu", () => {
+  it.each(["menu", "paste", "copyPaste"] as const)("preserves native handle drags in %s mode even when they report mouse input", (action) => {
+    const ui = setup({ action, selected: true });
+    ui.row.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+    ui.row.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "touch" }));
+    const selection = window.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(ui.row);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const selectedText = selection.toString();
+
+    expect(ui.menu("touch").defaultPrevented).toBe(false);
+    for (let drag = 0; drag < 3; drag++) {
+      // Native selection handles emit contextmenu without DOM pointerdown and
+      // without the touch sourceCapabilities hint on older Android WebViews.
+      const event = ui.menu("mouse");
+      expect(event.defaultPrevented).toBe(false);
+      expect(ui.xtermHandler).not.toHaveBeenCalled();
+      expect(ui.readClipboard).not.toHaveBeenCalled();
+      expect(ui.copySelection).not.toHaveBeenCalled();
+      expect(ui.clearSelection).not.toHaveBeenCalled();
+      expect(selection.toString()).toBe(selectedText);
+    }
+  });
+
   it("preserves selection for touch-generated compatibility mouse events", () => {
     const ui = setup({ action: "paste" });
     const event = new PointerEvent("contextmenu", {
