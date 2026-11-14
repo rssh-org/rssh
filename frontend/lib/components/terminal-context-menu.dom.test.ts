@@ -73,6 +73,20 @@ function setup({
 }
 
 describe("terminal native touch context menu", () => {
+  it("preserves selection for touch-generated compatibility mouse events", () => {
+    const ui = setup({ action: "paste" });
+    const event = new PointerEvent("contextmenu", {
+      bubbles: true, cancelable: true, pointerType: "mouse", button: 2,
+    });
+    Object.defineProperty(event, "sourceCapabilities", { value: { firesTouchEvents: true } });
+    ui.row.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(ui.xtermHandler).not.toHaveBeenCalled();
+    expect(ui.readClipboard).not.toHaveBeenCalled();
+    expect(ui.copySelection).not.toHaveBeenCalled();
+  });
+
   it.each(["touch", "pen"])("keeps the %s native menu without running xterm or clipboard actions", (pointerType) => {
     for (const action of ["menu", "paste", "copyPaste"] as const) {
       const ui = setup({ action, selected: true });
