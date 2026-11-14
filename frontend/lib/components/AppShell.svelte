@@ -210,6 +210,13 @@
                 },
             },
             {
+                display: keymap.format("settings.open"),
+                description: t("shortcut.settings.open"),
+                skipInSettings: true,
+                match: e => matchBinding(e, keymap.binding("settings.open")),
+                handler: () => selectSettings(),
+            },
+            {
                 display: "Ctrl+Tab / Ctrl+Shift+Tab",
                 description: t("shortcut.tab.cycle"),
                 match: e => TAB_CYCLE.some(b => matchBinding(e, b)),

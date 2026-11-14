@@ -885,6 +885,7 @@ const en = {
   "shortcut.tab.exit_cycle": "Exit Tab cycling mode",
   "shortcut.tab.goto": "Switch to Tab 1–9",
   "shortcut.ai.toggle": "Toggle AI panel",
+  "shortcut.settings.open": "Open Settings",
   "shortcut.term.copy": "Copy selection",
   "shortcut.term.paste": "Paste",
 

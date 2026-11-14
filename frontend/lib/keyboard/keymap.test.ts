@@ -71,6 +71,14 @@ describe("defaultBinding — D1: exact per-platform modifiers", () => {
     expect(matchBinding(ev({ key: "w", ctrlKey: true }), other)).toBe(true);
   });
 
+  it("defaults settings.open to ⌘, on mac and Ctrl+, elsewhere", () => {
+    const mac = defaultBinding("settings.open", true);
+    expect(mac).toEqual({ key: ",", meta: true });
+    expect(matchBinding(ev({ key: ",", metaKey: true }), mac)).toBe(true);
+    expect(matchBinding(ev({ key: ",", ctrlKey: true }), mac)).toBe(false);
+    expect(defaultBinding("settings.open", false)).toEqual({ key: ",", ctrl: true });
+  });
+
   it("keeps copy/paste on literal Ctrl+Shift on every platform", () => {
     expect(defaultBinding("term.paste", true)).toEqual({ key: "v", ctrl: true, shift: true });
     expect(defaultBinding("term.copy", false)).toEqual({ key: "c", ctrl: true, shift: true });
@@ -280,11 +288,11 @@ describe("optionArrowWordMotion — restore xterm-5 macOS word jump", () => {
 });
 
 describe("ACTIONS metadata", () => {
-  it("has 9 unique actions split 4 global / 5 terminal", () => {
-    expect(ACTIONS.length).toBe(9);
+  it("has 10 unique actions split 5 global / 5 terminal", () => {
+    expect(ACTIONS.length).toBe(10);
     const ids = ACTIONS.map((a) => a.id);
-    expect(new Set(ids).size).toBe(9);
-    expect(ACTIONS.filter((a) => a.surface === "global").length).toBe(4);
+    expect(new Set(ids).size).toBe(10);
+    expect(ACTIONS.filter((a) => a.surface === "global").length).toBe(5);
     expect(ACTIONS.filter((a) => a.surface === "terminal").length).toBe(5);
   });
 
