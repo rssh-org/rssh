@@ -888,6 +888,7 @@ const zh: Messages = {
   "shortcut.tab.exit_cycle": "退出 Tab 切换模式",
   "shortcut.tab.goto": "切换到第 1–9 个 Tab",
   "shortcut.ai.toggle": "切换 AI 面板",
+  "shortcut.settings.open": "打开设置",
   "shortcut.term.copy": "复制选区",
   "shortcut.term.paste": "粘贴",
 

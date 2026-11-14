@@ -50,6 +50,26 @@ afterEach(async () => {
   document.body.innerHTML = "";
 });
 
+describe("AppShell settings shortcut", () => {
+  it("opens settings with the primary modifier + comma", async () => {
+    await resize(900);
+    const target = document.createElement("div");
+    document.body.append(target);
+    component = mount(AppShell, { target });
+    await settle();
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: ",", bubbles: true }));
+    await settle();
+    expect(app.settingsActive()).toBe(false);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key: ",", metaKey: keymap.isMac, ctrlKey: !keymap.isMac, bubbles: true,
+    }));
+    await settle();
+    expect(app.settingsActive()).toBe(true);
+  });
+});
+
 describe("AppShell compact settings", () => {
   it("ignores an open dialog in a hidden terminal workspace and preserves it when returning", async () => {
     app.addTab({ id: "ssh:hidden-dialog", type: "ssh", label: "Production" });
