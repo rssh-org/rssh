@@ -6,6 +6,7 @@ import * as app from "../stores/app.svelte.ts";
 import * as theme from "../themes/store.svelte.ts";
 import * as runtime from "../stores/runtime.svelte.ts";
 import { setLocale } from "../i18n/index.svelte.ts";
+import { installInputTracking } from "../input.ts";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
@@ -19,6 +20,7 @@ const tabId = "local:block-tint-test";
 let component: ReturnType<typeof mount> | undefined;
 let terminal: Terminal;
 let target: HTMLDivElement;
+let stopInputTracking: () => void;
 
 async function settle() {
   flushSync();
@@ -51,6 +53,7 @@ async function queryColors() {
 }
 
 beforeEach(async () => {
+  stopInputTracking = installInputTracking();
   invokeMock.mockReset().mockImplementation(async (command, args) => {
     if (command === "pty_spawn") return args.sessionId;
     if (command === "list_highlights") return [];
@@ -94,11 +97,35 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  stopInputTracking();
   if (component) await unmount(component);
   component = undefined;
   app.closeTab(tabId);
   document.body.innerHTML = "";
   vi.restoreAllMocks();
+});
+
+it.each(["touch", "pen"])("leaves %s long-press selection available on command blocks without opening a menu", async (pointerType) => {
+  const block = target.querySelector(".block-hit")!;
+  block.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType }));
+  const events = [
+    new PointerEvent("contextmenu", { bubbles: true, cancelable: true, pointerType }),
+    new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+  ];
+  for (const event of events) {
+    block.dispatchEvent(event);
+    await settle();
+    expect(target.querySelector(".block-menu")).toBeNull();
+    expect(event.defaultPrevented).toBe(false);
+  }
+
+  // A connected mouse still has access to the same block actions.
+  block.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse" }));
+  const mouseMenu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 });
+  block.dispatchEvent(mouseMenu);
+  await settle();
+  expect(target.querySelector(".block-menu")).not.toBeNull();
+  expect(mouseMenu.defaultPrevented).toBe(true);
 });
 
 it("preserves application OSC colors when coloring and uncoloring a block", async () => {

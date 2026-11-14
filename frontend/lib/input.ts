@@ -21,6 +21,12 @@ export function installInputTracking(target: Document = document): () => void {
 }
 
 export function isTouchContextMenu(event: MouseEvent): boolean {
+  // Chromium may expose a touch-generated compatibility event as a mouse
+  // event. Prefer its explicit touch source without blocking a real mouse.
+  const sourceCapabilities = (event as MouseEvent & {
+    sourceCapabilities?: { firesTouchEvents: boolean } | null;
+  }).sourceCapabilities;
+  if (sourceCapabilities?.firesTouchEvents === true) return true;
   const pointerType = (event as PointerEvent).pointerType || lastPointerType;
   return pointerType === "touch" || pointerType === "pen";
 }

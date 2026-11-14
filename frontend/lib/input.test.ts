@@ -27,6 +27,24 @@ describe("context menu source", () => {
     expect(isTouchContextMenu({ pointerType: "mouse" } as PointerEvent)).toBe(false);
   });
 
+  it("recognizes touch-generated compatibility mouse events", () => {
+    expect(isTouchContextMenu({
+      pointerType: "mouse", sourceCapabilities: { firesTouchEvents: true },
+    } as unknown as MouseEvent)).toBe(true);
+    expect(isTouchContextMenu({
+      sourceCapabilities: { firesTouchEvents: true },
+    } as unknown as MouseEvent)).toBe(true);
+    expect(isTouchContextMenu({
+      pointerType: "mouse", sourceCapabilities: { firesTouchEvents: false },
+    } as unknown as MouseEvent)).toBe(false);
+    expect(isTouchContextMenu({
+      pointerType: "pen", sourceCapabilities: { firesTouchEvents: false },
+    } as unknown as MouseEvent)).toBe(true);
+    expect(isTouchContextMenu({
+      pointerType: "touch", sourceCapabilities: null,
+    } as unknown as MouseEvent)).toBe(true);
+  });
+
   it("tracks mixed input for older WebViews and clears touch after a keyboard event", () => {
     const target = new EventTarget();
     const cleanup = installInputTracking(target as Document);

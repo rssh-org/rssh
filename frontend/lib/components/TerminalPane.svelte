@@ -553,6 +553,8 @@
     }
 
     function openBlockMenu(r: BlockRect, e: MouseEvent) {
+        // The block gutter sits outside xterm's touch-selection capture guard.
+        if (isTouchContextMenu(e)) return;
         e.preventDefault();
         e.stopPropagation();
         if (!foldStore || !blockTracker) return;
