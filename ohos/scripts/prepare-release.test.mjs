@@ -29,7 +29,7 @@ function fixture(t) {
   write('package.json', JSON.stringify({ name: 'rssh', version: '0.0.1' }));
   write('package-lock.json', JSON.stringify({ version: '0.0.1', packages: { '': { version: '0.0.1' }, 'node_modules/example': { version: '7.0.0' } } }));
   write('app/tauri.conf.json', JSON.stringify({ version: '0.0.1', identifier: 'com.rssh.app' }));
-  for (const script of ['prepare-release.mjs', 'upload-agc.mjs']) {
+  for (const script of ['prepare-release.mjs', 'upload-agc.mjs', 'release-notes.mjs']) {
     write(`ohos/scripts/${script}`, readFileSync(new URL(script, import.meta.url), 'utf8'));
   }
   return { root, write };

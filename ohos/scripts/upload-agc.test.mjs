@@ -18,7 +18,17 @@ const appId = '123456789';
 const packageId = '157300000005952';
 const now = () => 1_800_000_000_000;
 
-async function fixture(t, { urlReply, uploadStatus = 200, apiStatus = 200, registrationReply, registrationStatus = 200, registrationBody, versionReply, versionStatus = 200, versionBody, compileReplies = [{ ret: { code: 0 }, pkgStateList: [{ pkgId: packageId, successStatus: 0 }] }], compileStatus = 200, compileBody, submitReply, submitStatus = 200, submitBody } = {}) {
+function releaseMetadata() {
+  return {
+    ret: { code: 0 }, appInfo: { defaultLang: 'zh-CN' },
+    languages: [
+      { lang: 'en-US', appName: 'RSSH', appDesc: 'English description', briefInfo: 'English summary', newFeatures: 'English release notes' },
+      { lang: 'zh-CN', appName: 'RSSH', appDesc: '中文应用描述', briefInfo: '中文简介', newFeatures: '', icon: 'PRIVATE_ICON_URL' },
+    ],
+  };
+}
+
+async function fixture(t, { urlReply, uploadStatus = 200, apiStatus = 200, registrationReply, registrationStatus = 200, registrationBody, versionReply, versionStatus = 200, versionBody, compileReplies = [{ ret: { code: 0 }, pkgStateList: [{ pkgId: packageId, successStatus: 0 }] }], compileStatus = 200, compileBody, submitReply, submitStatus = 200, submitBody, appInfoReplies, appInfoStatuses = [200], appInfoBodies = [], languageReply, languageStatus = 200, languageBody } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), 'rssh agc upload '));
   const file = path.join(dir, 'RSSH release.app');
   // Binary fixture exercises byte preservation (NUL and non-UTF8 included).
@@ -27,6 +37,8 @@ async function fixture(t, { urlReply, uploadStatus = 200, apiStatus = 200, regis
   const requests = [];
   const waits = [];
   let compileCalls = 0;
+  let appInfoCalls = 0;
+  const metadata = releaseMetadata();
   const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -73,6 +85,20 @@ async function fixture(t, { urlReply, uploadStatus = 200, apiStatus = 200, regis
       res.end(submitBody ?? JSON.stringify(submitReply ?? { ret: { code: 0 } }));
       return;
     }
+    if (req.url.startsWith('/api/publish/v3/app-info?')) {
+      const index = appInfoCalls++;
+      res.writeHead(appInfoStatuses[Math.min(index, appInfoStatuses.length - 1)], { 'content-type': 'application/json' });
+      res.end(appInfoBodies[index] ?? JSON.stringify(appInfoReplies?.[Math.min(index, appInfoReplies.length - 1)] ?? metadata));
+      return;
+    }
+    if (req.url.startsWith('/api/publish/v3/app-language-info?')) {
+      const update = JSON.parse(requests.at(-1).body);
+      const language = metadata.languages.find((entry) => entry.lang === update.lang);
+      if (language) Object.assign(language, update);
+      res.writeHead(languageStatus, { 'content-type': 'application/json' });
+      res.end(languageBody ?? JSON.stringify(languageReply ?? { ret: { code: 0 } }));
+      return;
+    }
     res.writeHead(500);
     res.end('Unexpected release/review endpoint');
   });
@@ -96,7 +122,7 @@ async function fixture(t, { urlReply, uploadStatus = 200, apiStatus = 200, regis
   };
   const options = { file, appId, serviceAccountJson };
   const sleep = async (ms) => waits.push({ ms, requestCount: requests.length });
-  return { file, bytes, requests, options, fetchImpl, sleep, waits };
+  return { file, bytes, requests, options, fetchImpl, sleep, waits, metadata };
 }
 
 test('next version code authenticates and queries every release type and state before incrementing the largest package code', async (t) => {
@@ -274,6 +300,110 @@ test('automatic review waits for this package to finish parsing and submits the 
   assert.deepEqual(JSON.parse(submit.body), { releaseType: 1, releasePhase: 0 });
 });
 
+test('release notes update only the existing default language after parsing and are verified before review', async (t) => {
+  const f = await fixture(t);
+  const original = structuredClone(f.metadata);
+  const releaseNotes = '修复终端文本选择，并改进连接配置。';
+  await uploadApp({ ...f.options, submitReview: true, releaseNotes }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep });
+  assert.equal(f.requests.length, 8);
+  assert.deepEqual(f.requests.slice(3).map((request) => [request.method, request.url]), [
+    ['GET', `/api/publish/v3/package/compile/status?appId=${appId}&pkgIds=${packageId}`],
+    ['GET', `/api/publish/v3/app-info?appId=${appId}&releaseType=1`],
+    ['PUT', `/api/publish/v3/app-language-info?appId=${appId}&releaseType=1&releasePhase=0`],
+    ['GET', `/api/publish/v3/app-info?appId=${appId}&releaseType=1`],
+    ['POST', `/api/publish/v3/app-submit?appId=${appId}`],
+  ]);
+  assert.deepEqual(JSON.parse(f.requests[5].body), { lang: 'zh-CN', newFeatures: releaseNotes });
+  assert.deepEqual(f.metadata.languages[0], original.languages[0], 'Do not translate or overwrite another locale.');
+  assert.deepEqual(f.metadata.languages[1], { ...original.languages[1], newFeatures: releaseNotes });
+  for (const request of f.requests.slice(4)) assert.equal(request.headers.authorization, f.requests[0].headers.authorization);
+  assert.deepEqual(f.waits, [{ ms: 120_000, requestCount: 3 }]);
+});
+
+test('release notes preserve Huawei locale codes that use an underscore', async (t) => {
+  const f = await fixture(t);
+  f.metadata.appInfo.defaultLang = 'he_IL';
+  f.metadata.languages[1].lang = 'he_IL';
+  await uploadApp({ ...f.options, submitReview: true, releaseNotes: 'Release improvements' }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep });
+  assert.deepEqual(JSON.parse(f.requests[5].body), { lang: 'he_IL', newFeatures: 'Release improvements' });
+  assert.equal(f.requests.length, 8);
+});
+
+test('release notes are truncated before the metadata request without splitting a Unicode character', async (t) => {
+  const f = await fixture(t);
+  await uploadApp({ ...f.options, submitReview: true, releaseNotes: '更'.repeat(499) + '🚀后续说明' }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep });
+  const updated = JSON.parse(f.requests.find((request) => request.url.includes('/app-language-info?')).body).newFeatures;
+  assert.ok(updated.length <= 500);
+  assert.ok(updated.startsWith('更'));
+  assert.ok(updated.isWellFormed());
+  assert.equal(f.requests.at(-1).method, 'POST');
+});
+
+for (const [name, releaseNotes, submitReview] of [
+  ['empty', '', true], ['blank', ' \n\t', true], ['null', null, true], ['nonstring', { text: 'notes' }, true],
+  ['without review', 'Release notes', false],
+]) {
+  test(`rejects ${name} release notes before uploading or changing metadata`, async (t) => {
+    const f = await fixture(t);
+    await assert.rejects(uploadApp({ ...f.options, submitReview, releaseNotes }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep }));
+    assert.deepEqual(f.requests, []);
+  });
+}
+
+for (const [name, patch] of [
+  ['missing app info', (data) => { delete data.appInfo; }],
+  ['missing default language', (data) => { delete data.appInfo.defaultLang; }],
+  ['invalid default language', (data) => { data.appInfo.defaultLang = 7; }],
+  ['missing languages', (data) => { delete data.languages; }],
+  ['malformed languages', (data) => { data.languages = {}; }],
+  ['unknown default language', (data) => { data.appInfo.defaultLang = 'fr-FR'; }],
+  ['duplicate default language', (data) => { data.languages.push({ ...data.languages[1] }); }],
+]) {
+  test(`release notes refuse ${name} rather than creating or guessing a locale`, async (t) => {
+    const data = releaseMetadata();
+    patch(data);
+    const f = await fixture(t, { appInfoReplies: [data] });
+    await assert.rejects(uploadApp({ ...f.options, submitReview: true, releaseNotes: '修复连接问题。' }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep }));
+    assert.equal(f.requests.length, 5);
+    assert.ok(f.requests.slice(3).every((request) => request.method === 'GET'));
+  });
+}
+
+for (const [name, config, requestCount] of [
+  ['lookup HTTP failure', { appInfoStatuses: [403] }, 5],
+  ['lookup invalid JSON', { appInfoBodies: ['SECRET'] }, 5],
+  ['lookup business failure', { appInfoReplies: [{ ret: { code: 204144644, msg: 'SECRET' } }] }, 5],
+  ['update HTTP failure', { languageStatus: 403 }, 6],
+  ['update invalid JSON', { languageBody: 'SECRET' }, 6],
+  ['update business failure', { languageReply: { ret: { code: 204144650, msg: 'SECRET' } } }, 6],
+  ['verification HTTP failure', { appInfoStatuses: [200, 403] }, 7],
+  ['verification invalid JSON', { appInfoBodies: [undefined, 'SECRET'] }, 7],
+  ['verification business failure', { appInfoReplies: [releaseMetadata(), { ret: { code: 204144644, msg: 'SECRET' } }] }, 7],
+]) {
+  test(`release notes ${name} prevents review and keeps private response data hidden`, async (t) => {
+    const f = await fixture(t, config);
+    await assert.rejects(uploadApp({ ...f.options, submitReview: true, releaseNotes: '修复连接问题。' }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep }), (error) => {
+      assert.doesNotMatch(error.message, /SECRET/);
+      return true;
+    });
+    assert.equal(f.requests.length, requestCount);
+    assert.ok(f.requests.every((request) => !request.url.includes('/app-submit?')));
+  });
+}
+
+for (const field of ['newFeatures', 'appName', 'appDesc', 'briefInfo']) {
+  test(`release notes verify ${field} after update and refuse to submit mismatched metadata`, async (t) => {
+    const original = releaseMetadata();
+    const changed = structuredClone(original);
+    changed.languages[1].newFeatures = '修复连接问题。';
+    changed.languages[1][field] = 'UNEXPECTED_METADATA';
+    const f = await fixture(t, { appInfoReplies: [original, changed] });
+    await assert.rejects(uploadApp({ ...f.options, submitReview: true, releaseNotes: '修复连接问题。' }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep }));
+    assert.equal(f.requests.length, 7);
+    assert.ok(f.requests.every((request) => !request.url.includes('/app-submit?')));
+  });
+}
+
 for (const code of [204144743, 204144666]) {
   test(`automatic review stops immediately if registration fails with ${code}`, async (t) => {
     const f = await fixture(t, { registrationReply: { ret: { code } } });
@@ -324,10 +454,10 @@ for (const [name, config, expected, requestCount] of [
   ['status business error', { compileReplies: [{ ret: { code: 204144718, msg: 'SECRET' } }] }, /code 204144718/, 4],
   ['submission HTTP error', { submitStatus: 403 }, /HTTP 403/, 5],
   ['submission invalid JSON', { submitBody: 'SECRET' }, /not valid JSON/, 5],
-  ['submission business error', { submitReply: { ret: { code: 204144664, msg: 'SECRET' } } }, /code 204144664/, 5],
+  ['submission business error', { submitReply: { ret: { code: 204144664, msg: 'Authorization: Bearer SECRET' } } }, /code 204144664/, 5],
   ['submission missing status', { submitReply: {} }, /missing or invalid/, 5],
 ]) {
-  test(`automatic review fails on ${name} without retrying or exposing the response`, async (t) => {
+  test(`automatic review fails on ${name} without retrying or exposing private response data`, async (t) => {
     const f = await fixture(t, config);
     await assert.rejects(uploadApp({ ...f.options, submitReview: true }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep }), (error) => {
       assert.match(error.message, expected);
@@ -354,6 +484,105 @@ test('automatic review never retries an ambiguous submission transport failure o
   assert.equal(submissions, 1);
   assert.equal(f.requests.length, 4);
 });
+
+test('review rejection retains the missing new-features reason and explains how to recover without retrying', async (t) => {
+  const f = await fixture(t, { submitReply: {
+    ret: { code: 204144692, msg: '请补充新版本特性', privateDetail: 'PRIVATE_DETAIL' },
+    privateResponse: 'PRIVATE_RESPONSE',
+  } });
+  await assert.rejects(uploadApp({ ...f.options, submitReview: true }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep }), (error) => {
+    assert.match(error.message, /review submission request failed \(code 204144692\)/);
+    assert.match(error.message, /AGC detail: 请补充新版本特性/);
+    assert.match(error.message, /uploaded, registered, and parsed/);
+    assert.match(error.message, /What's new/);
+    assert.match(error.message, /Rebuilding alone does not fill missing release information/);
+    assert.doesNotMatch(error.message, /PRIVATE_DETAIL|PRIVATE_RESPONSE/);
+    return true;
+  });
+  assert.equal(f.requests.length, 5);
+  assert.equal(f.requests.filter((request) => request.url.includes('/app-submit?')).length, 1);
+});
+
+test('review diagnostics redact reflected credentials and upload identifiers before logging', async (t) => {
+  const submitReply = { ret: { code: 204144692, msg: '' } };
+  const f = await fixture(t, { submitReply });
+  let reflected = [];
+  const fetchImpl = (url, options) => {
+    if (new URL(url).pathname === '/api/publish/v3/app-submit') {
+      reflected = [
+        options.headers.Authorization.replace(/^Bearer /, ''),
+        serviceAccountJson, account.private_key, account.key_id, account.sub_account,
+        JSON.stringify(account.private_key).slice(1, -1), encodeURIComponent(account.private_key),
+        appId, packageId, 'CN/test/RSSH.app', 'OBS scoped signature',
+        'https://upload.example.test/package?signature=do-not-log',
+        'https://another.example.test/private?signature=OTHER_SECRET',
+        'Bearer OTHER_TOKEN',
+        '-----BEGIN PRIVATE KEY-----\nANOTHER_PRIVATE_KEY\n-----END PRIVATE KEY-----',
+      ];
+      submitReply.ret.msg = `请补充新版本特性; ${reflected.join('; ')}`;
+    }
+    return f.fetchImpl(url, options);
+  };
+  await assert.rejects(uploadApp({ ...f.options, submitReview: true }, { fetchImpl, now, sleep: f.sleep }), (error) => {
+    assert.match(error.message, /请补充新版本特性/);
+    assert.match(error.message, /\[REDACTED/);
+    for (const value of reflected) assert.ok(!error.message.includes(value), 'Sensitive reflected values must be removed.');
+    assert.doesNotMatch(error.message, /do-not-log|OTHER_SECRET|OTHER_TOKEN|ANOTHER_PRIVATE_KEY/);
+    return true;
+  });
+  assert.equal(f.requests.length, 5);
+});
+
+test('review diagnostics remain a single bounded line without terminal control sequences', async (t) => {
+  const f = await fixture(t, { submitReply: { ret: {
+    code: 204144664, msg: `\u001b[31m请补充新版本特性\u001b[0m\r\n::error:: injected\u0000\u202e\u2028${'说明'.repeat(1000)}`,
+  } } });
+  await assert.rejects(uploadApp({ ...f.options, submitReview: true }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep }), (error) => {
+    assert.match(error.message, /AGC detail: 请补充新版本特性 ::error:: injected/);
+    assert.doesNotMatch(error.message, /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|\[31m|\[0m/gu);
+    const detail = error.message.split(' AGC detail: ')[1];
+    assert.equal(detail.length, 1001);
+    assert.ok(detail.endsWith('…'));
+    return true;
+  });
+  assert.equal(f.requests.length, 5);
+});
+
+test('review diagnostics cannot reconstruct an exposed JWT by removing embedded ANSI controls', async (t) => {
+  const submitReply = { ret: { code: 204144692, msg: '' } };
+  const f = await fixture(t, { submitReply });
+  let token;
+  const fetchImpl = (url, options) => {
+    if (new URL(url).pathname === '/api/publish/v3/app-submit') {
+      token = options.headers.Authorization.replace(/^Bearer /, '');
+      submitReply.ret.msg = `请补充新版本特性 ${token.slice(0, 20)}\u001b[31m${token.slice(20)}\u001b[0m`;
+    }
+    return f.fetchImpl(url, options);
+  };
+  await assert.rejects(uploadApp({ ...f.options, submitReview: true }, { fetchImpl, now, sleep: f.sleep }), (error) => {
+    assert.match(error.message, /请补充新版本特性/);
+    assert.ok(!error.message.includes(token));
+    assert.ok(!error.message.includes(token.slice(0, 20)));
+    return true;
+  });
+  assert.equal(f.requests.length, 5);
+});
+
+for (const [name, msg] of [
+  ['missing', undefined], ['null', null], ['number', 42], ['object', { private: 'SECRET' }],
+  ['array', ['SECRET']], ['empty', ''], ['whitespace', ' \r\n\t '], ['oversized', 'SECRET'.repeat(3000)],
+]) {
+  test(`review rejection safely handles a ${name} diagnostic without serializing it`, async (t) => {
+    const f = await fixture(t, { submitReply: { ret: { code: 204144692, msg } } });
+    await assert.rejects(uploadApp({ ...f.options, submitReview: true }, { fetchImpl: f.fetchImpl, now, sleep: f.sleep }), (error) => {
+      assert.match(error.message, /review submission request failed \(code 204144692\)/);
+      assert.match(error.message, /What's new/);
+      assert.doesNotMatch(error.message, /AGC detail:|SECRET/);
+      return true;
+    });
+    assert.equal(f.requests.length, 5);
+  });
+}
 
 for (const [name, config, expected] of [
   ['HTTP failure', { apiStatus: 403 }, /HTTP 403/],
@@ -472,7 +701,7 @@ test('invalid credentials and packages fail before any network access', async (t
 
 test('the CLI fails clearly when required configuration is absent, without printing it', () => {
   const run = spawnSync(process.execPath, ['ohos/scripts/upload-agc.mjs', 'RSSH.app'], {
-    encoding: 'utf8', env: { ...process.env, AGC_APP_ID: '', AGC_SERVICE_ACCOUNT_JSON: 'SECRET' },
+    encoding: 'utf8', env: { ...process.env, AGC_APP_ID: '', AGC_SERVICE_ACCOUNT_JSON: 'SECRET', AGC_RELEASE_NOTES_FILE: '' },
   });
   assert.equal(run.status, 1);
   assert.match(run.stderr, /AGC_APP_ID/);
@@ -496,7 +725,7 @@ test('the CLI keeps upload-only behavior unless --submit-review is passed', asyn
   `);
   const options = {
     encoding: 'utf8', timeout: 5000,
-    env: { ...process.env, AGC_APP_ID: appId, AGC_SERVICE_ACCOUNT_JSON: serviceAccountJson, AGC_CHINESE_MAINLAND_FLAG: '' },
+    env: { ...process.env, AGC_APP_ID: appId, AGC_SERVICE_ACCOUNT_JSON: serviceAccountJson, AGC_CHINESE_MAINLAND_FLAG: '', AGC_RELEASE_NOTES_FILE: '' },
   };
   const args = ['--import', preload, 'ohos/scripts/upload-agc.mjs', f.file];
   const uploadOnly = spawnSync(process.execPath, args, options);
@@ -509,4 +738,26 @@ test('the CLI keeps upload-only behavior unless --submit-review is passed', asyn
   const invalid = spawnSync(process.execPath, [...args, '--submit-reveiw'], options);
   assert.equal(invalid.status, 1);
   assert.match(invalid.stderr, /Usage:/);
+});
+
+test('the CLI requires a readable, nonempty release-notes file when configured', async (t) => {
+  const f = await fixture(t);
+  const notesFile = path.join(path.dirname(f.file), 'release notes.txt');
+  const options = {
+    encoding: 'utf8', timeout: 5000,
+    env: { ...process.env, AGC_APP_ID: appId, AGC_SERVICE_ACCOUNT_JSON: serviceAccountJson, AGC_RELEASE_NOTES_FILE: notesFile },
+  };
+  const args = ['ohos/scripts/upload-agc.mjs', f.file, '--submit-review'];
+  const missing = spawnSync(process.execPath, args, options);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /AGC_RELEASE_NOTES_FILE|release.notes file/i);
+  writeFileSync(notesFile, ' \n\t');
+  const empty = spawnSync(process.execPath, args, options);
+  assert.equal(empty.status, 1);
+  assert.match(empty.stderr, /release notes|newFeatures/i);
+  writeFileSync(notesFile, '修复终端文本选择。');
+  const withoutReview = spawnSync(process.execPath, args.slice(0, -1), options);
+  assert.equal(withoutReview.status, 1);
+  assert.match(withoutReview.stderr, /submit.review|submitReview/i);
+  assert.doesNotMatch(missing.stderr + empty.stderr + withoutReview.stderr, /PRIVATE KEY|test-developer/);
 });
