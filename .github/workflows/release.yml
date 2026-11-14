@@ -79,8 +79,9 @@ jobs:
   build-ohos:
     needs: test
     if: ${{ !contains(github.ref_name, '-') }}
+    # The reusable workflow needs push access to read draft release notes.
     permissions:
-      contents: read
+      contents: write
     uses: ./.github/workflows/release-ohos.yml
     with:
       version: ${{ github.ref_name }}
