@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Override with: ANDROID_VERSION=1.2.3 ./scripts/build-android.sh
+ANDROID_VERSION="${ANDROID_VERSION:-1.0.11}"
+
 cd "$(dirname "$0")/.."
 
 # ── Prerequisites check ──
@@ -30,6 +33,7 @@ fi
 
 echo "SDK: $ANDROID_SDK_ROOT"
 echo "NDK: $NDK_HOME"
+echo "Version: $ANDROID_VERSION"
 
 # ── Rust Android targets ──
 TARGETS=(aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android)
@@ -41,12 +45,12 @@ echo "=== 1. npm install ==="
 npm ci
 
 echo "=== 2. Build Tauri Android (universal APK) ==="
-npm run tauri -- android build --apk
+npm run tauri -- android build --apk --config "{\"version\":\"$ANDROID_VERSION\"}"
 
 # Split APKs land in different output dirs (--split-per-abi replaces the
 # universal output), so run it after the universal build. Same cargo cache.
 echo "=== 3. Build Tauri Android (arm64 split APK) ==="
-npm run tauri -- android build --apk --split-per-abi --target aarch64
+npm run tauri -- android build --apk --split-per-abi --target aarch64 --config "{\"version\":\"$ANDROID_VERSION\"}"
 
 echo "=== Done ==="
 echo ""

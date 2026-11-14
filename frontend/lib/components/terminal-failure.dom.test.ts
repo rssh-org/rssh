@@ -5,6 +5,7 @@ import * as app from "../stores/app.svelte.ts";
 import * as layout from "../stores/layout.svelte.ts";
 import * as runtime from "../stores/runtime.svelte.ts";
 import { setLocale, t } from "../i18n/index.svelte.ts";
+import { installInputTracking } from "../input.ts";
 
 const mocks = vi.hoisted(() => {
   const disposable = () => ({ dispose() {} });
@@ -73,6 +74,7 @@ const rootId = "ssh:failure-root";
 let component: ReturnType<typeof mount> | undefined;
 let target: HTMLDivElement;
 let stopViewport: (() => void) | undefined;
+let stopInputTracking: (() => void) | undefined;
 let rejectConnection: ((error: Error) => void) | undefined;
 let firstPaneAttempt: string | undefined;
 
@@ -83,6 +85,7 @@ async function settle() {
 }
 
 beforeEach(async () => {
+  stopInputTracking = installInputTracking();
   mocks.Terminal.instances = [];
   rejectConnection = undefined;
   firstPaneAttempt = undefined;
@@ -128,9 +131,80 @@ afterEach(async () => {
   component = undefined;
   stopViewport?.();
   stopViewport = undefined;
+  stopInputTracking?.();
+  stopInputTracking = undefined;
+  window.getSelection()?.removeAllRanges();
   for (const tab of app.workspaceTabs()) app.closeTab(tab.id);
   await settle();
   document.body.innerHTML = "";
+});
+
+describe("native terminal selection handle context menus", () => {
+  it.each(["terminal output", "pane"])("keeps handle drags on %s native, then accepts mouse and keyboard menus", async (area) => {
+    await app.setRightClickAction("menu");
+    const output = mocks.Terminal.instances[0].output;
+    const pane = output.closest<HTMLElement>(".pane")!;
+    const menuTarget = area === "terminal output" ? output : pane;
+    output.textContent = "selected terminal output";
+
+    output.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+    output.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "touch" }));
+    const selection = window.getSelection()!;
+    const range = document.createRange();
+    range.setStart(output.firstChild!, 0);
+    range.setEnd(output.firstChild!, 8);
+    selection.addRange(range);
+    expect(selection.toString()).toBe("selected");
+    const initialMenu = new PointerEvent("contextmenu", {
+      bubbles: true, cancelable: true, pointerType: "touch", button: 2,
+    });
+    output.dispatchEvent(initialMenu);
+    await settle();
+    expect(initialMenu.defaultPrevented).toBe(false);
+    expect(target.querySelector(".ctx-menu")).toBeNull();
+
+    // Android's native handles extend the DOM selection without a pointerdown
+    // in the page. Older WebViews then dispatch a mouse-tagged contextmenu.
+    for (const [index, sourceCapabilities] of [undefined, null, { firesTouchEvents: false }].entries()) {
+      range.setEnd(output.firstChild!, 10 + index * 5);
+      const selectedText = selection.toString();
+      expect(selectedText).toBe(output.textContent.slice(0, 10 + index * 5));
+      const event = new PointerEvent("contextmenu", {
+        bubbles: true, cancelable: true, pointerType: "mouse", button: 2,
+      });
+      if (sourceCapabilities !== undefined) {
+        Object.defineProperty(event, "sourceCapabilities", { value: sourceCapabilities });
+      }
+      menuTarget.dispatchEvent(event);
+      await settle();
+      expect(target.querySelector(".ctx-menu")).toBeNull();
+      expect(event.defaultPrevented).toBe(false);
+      expect(selection.toString()).toBe(selectedText);
+    }
+
+    // A real mouse supplies its own pointerdown and must regain the pane menu.
+    menuTarget.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true, pointerType: "mouse", button: 2,
+    }));
+    const mouseMenu = new PointerEvent("contextmenu", {
+      bubbles: true, cancelable: true, pointerType: "mouse", button: 2,
+    });
+    menuTarget.dispatchEvent(mouseMenu);
+    await settle();
+    expect(target.querySelector(".ctx-menu")).not.toBeNull();
+    expect(mouseMenu.defaultPrevented).toBe(true);
+    target.querySelector<HTMLElement>(".ctx-backdrop")!.click();
+    await settle();
+
+    // The keyboard context-menu key also supersedes the previous touch source.
+    output.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+    menuTarget.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ContextMenu" }));
+    const keyboardMenu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    menuTarget.dispatchEvent(keyboardMenu);
+    await settle();
+    expect(target.querySelector(".ctx-menu")).not.toBeNull();
+    expect(keyboardMenu.defaultPrevented).toBe(true);
+  });
 });
 
 describe("failed split connections", () => {
