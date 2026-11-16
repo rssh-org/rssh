@@ -248,16 +248,10 @@ async fn streamable_http_initializes_and_exposes_only_terminal_tools() {
             .find(|tool| tool.name == name)
             .unwrap();
         let exposed = &result["result"]["tools"][index];
-        assert_eq!(
-            exposed["description"],
-            format!(
-                "{} Use a session_id accepted through open_session.",
-                canonical.description
-            )
-        );
+        assert_eq!(exposed["description"], canonical.description);
         let mut expected_schema = canonical.input_schema;
         expected_schema["properties"]["session_id"] = json!({
-            "type":"string", "description":"Exact session_id returned by list_sessions."
+            "type":"string", "description":"Exact session_id returned by list_sessions and accepted through open_session."
         });
         expected_schema["required"]
             .as_array_mut()
