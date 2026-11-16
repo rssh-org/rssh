@@ -90,7 +90,7 @@ mod http {
             .expect("built-in AI tool");
         let mut schema = canonical.input_schema;
         schema["properties"]["session_id"] = json!({
-            "type":"string", "description":"Exact session_id returned by list_sessions."
+            "type":"string", "description":"Exact session_id returned by list_sessions and accepted through open_session."
         });
         schema["required"]
             .as_array_mut()
@@ -99,10 +99,7 @@ mod http {
         schema["additionalProperties"] = json!(false);
         Tool::new(
             canonical.name,
-            format!(
-                "{} Use a session_id accepted through open_session.",
-                canonical.description
-            ),
+            canonical.description,
             schema.as_object().unwrap().clone(),
         )
     }

@@ -66,6 +66,7 @@ enum Cmd {
         action: ConfigCmd,
     },
     /// Manage MCP in a running local RSSH frontend; always outputs JSON
+    #[command(after_help = commands::mcp::HELP_EXAMPLES)]
     Mcp {
         #[command(subcommand)]
         action: commands::mcp::McpCmd,

@@ -8,6 +8,31 @@ use serde_json::{json, Value};
 
 const NO_TARGET: &str = "Run an updated RSSH desktop GUI or a local headless/JetBrains frontend, then retry. The GUI/server and CLI must both support MCP control.";
 
+pub const HELP_EXAMPLES: &str = r#"Examples:
+  Keep an RSSH desktop GUI or local headless/JetBrains frontend running,
+  with the terminal you want to control already connected.
+
+  1. Start MCP:
+       rssh mcp start
+
+  2. Connect your MCP client using Streamable HTTP and the returned JSON:
+       URL:                  url
+       Authorization header: headers.Authorization (the full Bearer value)
+
+  3. Call the MCP tool list_sessions with {} to list all connected sessions
+     in the selected frontend. Copy the desired session_id from the result.
+
+  4. Call the MCP tool open_session to request access to that session:
+       {"session_id":"<session_id>","title":"Inspect the terminal"}
+     Wait for the user to accept the request in RSSH before continuing.
+
+  5. Call the MCP tool run_command to execute a command in that session:
+       {"session_id":"<session_id>","cmd":"echo hello","explain":"Print a greeting","side_effect":"read-only"}
+
+  Steps 3-5 are MCP tool calls made by your MCP client.
+  If multiple frontends match, use the returned candidates to select one:
+    rssh mcp start --instance <instance_id> --owner <owner_id>"#;
+
 #[derive(Subcommand)]
 pub enum McpCmd {
     /// Enable MCP and print its Streamable HTTP connection JSON
