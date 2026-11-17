@@ -92,7 +92,7 @@
     const capabilities = app.capabilities();
     switch (id) {
       case "cli": return capabilities.cliInstall;
-      case "dynamic-discovery": return capabilities.localDiscovery;
+      case "dynamic-discovery": return capabilities.localDiscovery || capabilities.cloudDiscovery;
       case "plugins": return capabilities.plugins;
       default: return true;
     }

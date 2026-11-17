@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod ai;
+pub mod aws;
 pub mod commands;
 pub mod crypto;
 pub mod db;

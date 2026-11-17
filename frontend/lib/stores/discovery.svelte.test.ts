@@ -413,6 +413,21 @@ describe("dynamic discovery refresh", () => {
     expect(discoverCalls()).toHaveLength(1);
   });
 
+  it("invalidates a reauthorized source even when its discovery configuration is unchanged", async () => {
+    const keep = { ...source, id: "keep" };
+    const sources = [source, keep];
+    const cached = {
+      targets: sources.map(({ id }) => ({ id, source_id: id })),
+      errors: sources.map(({ id }) => ({ source_id: id, message: "old account failure" })),
+    };
+    invokeMock.mockResolvedValueOnce(cached);
+    await discovery.refresh();
+    discovery.sourcesChanged(sources, sources, [source.id]);
+    expect(discovery.targets()).toEqual([cached.targets[1]]);
+    expect(discovery.errors()).toEqual([cached.errors[1]]);
+    expect(discoverCalls()).toHaveLength(1);
+  });
+
   it.each([false, true])("waits for an invalidated request before issuing one fresh manual refresh (old failure=%s)", async (oldFails) => {
     let finish!: (value: unknown) => void;
     let reject!: (error: Error) => void;

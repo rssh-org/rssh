@@ -59,7 +59,7 @@
 
   $effect(() => {
     // Each frontend window owns its discovery snapshot and refresh schedule.
-    if (!startupReady || !runtime.capabilities().localDiscovery) return;
+    if (!startupReady || !(runtime.capabilities().localDiscovery || runtime.capabilities().cloudDiscovery)) return;
     void untrack(() => discovery.startBackgroundRefresh()).catch((error) => {
       console.warn("[dynamic-discovery] refresh settings failed:", error);
     });

@@ -240,6 +240,9 @@ async fn handle_conn(
     writer.abort();
     let _ = writer.await;
     crate::commands::lifecycle::close_owner(&state, &connection_owner);
+    if let Err(error) = state.aws_auth.cancel_owner(&connection_owner).await {
+        log::warn!("Failed to cancel disconnected AWS authorization: {error}");
+    }
     Ok(())
 }
 
@@ -289,12 +292,6 @@ fn dispatch(
         "list_dynamic_discovery_sources" => ok(
             crate::commands::discovery::list_dynamic_discovery_sources(state),
         ),
-        "save_dynamic_discovery_sources" => {
-            ok(crate::commands::discovery::save_dynamic_discovery_sources(
-                state,
-                arg(&args, "sources")?,
-            ))
-        }
 
         // ---- credentials (secret via SecretStore, metadata via DB) ----
         "list_credentials" => ok(crate::db::credential::list(&state.db)),
@@ -725,6 +722,16 @@ async fn dispatch_async(
     tx: &mpsc::UnboundedSender<Message>,
 ) -> Result<Value, Value> {
     match cmd {
+        "save_dynamic_discovery_sources" => ok(
+            crate::commands::discovery::save_dynamic_discovery_sources_for_owner(
+                state.clone(),
+                arg(&args, "sources")?,
+                owner.clone(),
+                arg(&args, "authCommit")?,
+                arg(&args, "expectedSources")?,
+            )
+            .await,
+        ),
         "dynamic_discovery_tool_status" => ok(
             crate::commands::discovery::dynamic_discovery_tool_status(arg(&args, "platform")?)
                 .await,
@@ -736,6 +743,70 @@ async fn dispatch_async(
         "discover_dynamic_targets" => {
             ok(crate::commands::discovery::discover_dynamic_targets(state).await)
         }
+        "aws_signin_status" => ok(crate::commands::aws_signin::aws_signin_status(
+            state,
+            arg(&args, "sourceId")?,
+        )
+        .await),
+        "aws_signin_start" => ok(crate::commands::aws_signin::aws_signin_start(
+            owner.clone(),
+            state,
+            arg(&args, "sourceId")?,
+            arg(&args, "region")?,
+        )
+        .await),
+        "aws_signin_complete" => ok(crate::commands::aws_signin::aws_signin_complete(
+            owner.clone(),
+            state,
+            arg(&args, "sourceId")?,
+            arg(&args, "loginId")?,
+            arg(&args, "code")?,
+        )
+        .await),
+        "aws_signin_cancel" => ok(crate::commands::aws_signin::aws_signin_cancel(
+            owner.clone(),
+            state,
+            arg(&args, "sourceId")?,
+            arg(&args, "loginId")?,
+        )
+        .await),
+        "aws_signin_logout" => ok(crate::commands::aws_signin::aws_signin_logout(
+            state.clone(),
+            arg(&args, "sourceId")?,
+        )
+        .await),
+        "aws_ssm_open" => ok(crate::commands::aws_ssm::aws_ssm_open(
+            headless_host(state, tx),
+            owner.clone(),
+            state,
+            arg(&args, "sourceId")?,
+            arg(&args, "region")?,
+            arg(&args, "instanceId")?,
+            arg(&args, "accountId")?,
+            checked_u16_arg(&args, "cols", 80)?,
+            checked_u16_arg(&args, "rows", 24)?,
+            optional_string_arg(&args, "sessionId")?,
+        )
+        .await),
+        "aws_ssm_write" => ok(crate::commands::aws_ssm::aws_ssm_write(
+            owner.clone(),
+            state,
+            arg(&args, "sessionId")?,
+            arg(&args, "data")?,
+        )),
+        "aws_ssm_resize" => ok(crate::commands::aws_ssm::aws_ssm_resize(
+            owner.clone(),
+            state,
+            arg(&args, "sessionId")?,
+            checked_u16_arg(&args, "cols", 80)?,
+            checked_u16_arg(&args, "rows", 24)?,
+        )),
+        "aws_ssm_close" => ok(crate::commands::aws_ssm::aws_ssm_close(
+            owner.clone(),
+            state,
+            arg(&args, "sessionId")?,
+        )
+        .await),
         "pty_spawn_connector" => ok(crate::commands::pty::pty_spawn_connector(
             headless_host(state, tx),
             owner.clone(),
@@ -1949,6 +2020,10 @@ mod tests {
             Arc::new(crate::secret::DbStore::new(db.clone()));
         let state = AppState {
             serial_backend: serial::native_backend().unwrap(),
+            aws_auth: Arc::new(
+                rssh_core::aws::auth::AwsAuth::new(secret_store.clone(), dir.path().into())
+                    .unwrap(),
+            ),
             codex_auth: Arc::new(
                 crate::ai::codex_auth::CodexAuth::new(
                     db.clone(),
@@ -1964,6 +2039,7 @@ mod tests {
             pty_sessions: Mutex::new(HashMap::new()),
             serial_sessions: Mutex::new(HashMap::new()),
             telnet_sessions: Mutex::new(HashMap::new()),
+            ssm_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
             transfer_cancels: Mutex::new(HashMap::new()),
             active_forwards: Mutex::new(HashMap::new()),
@@ -1977,6 +2053,113 @@ mod tests {
             data_dir: dir.path().into(),
         };
         (Arc::new(state), dir)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_native_aws_auth_and_session_commands_preserve_ownership() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let other = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let source_id = uuid::Uuid::new_v4().to_string();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let capabilities =
+            dispatch_async(&state, &owner, "get_runtime_capabilities", json!({}), &tx)
+                .await
+                .unwrap();
+        assert_eq!(capabilities["cloudDiscovery"], true);
+        let status = dispatch_async(
+            &state,
+            &owner,
+            "aws_signin_status",
+            json!({"sourceId":source_id}),
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(status["authenticated"], false);
+        let started = dispatch_async(
+            &state,
+            &owner,
+            "aws_signin_start",
+            json!({"sourceId":source_id,"region":"ap-southeast-1"}),
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(started["authorization_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://ap-southeast-1.signin.aws.amazon.com/v1/authorize?"));
+        let cancel = json!({"sourceId":source_id,"loginId":started["login_id"]});
+        let error = dispatch_async(&state, &other, "aws_signin_cancel", cancel.clone(), &tx)
+            .await
+            .unwrap_err();
+        assert!(error.as_str().unwrap().contains("aws_login_owner_mismatch"));
+        dispatch_async(&state, &owner, "aws_signin_cancel", cancel, &tx)
+            .await
+            .unwrap();
+        let error = dispatch_async(
+            &state,
+            &owner,
+            "aws_signin_complete",
+            json!({"sourceId":source_id,"loginId":started["login_id"],"code":"unused"}),
+            &tx,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.as_str().unwrap().contains("aws_login_cancelled"));
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let error = dispatch_async(
+            &state,
+            &owner,
+            "aws_ssm_open",
+            json!({
+                "sourceId":source_id,"region":"ap-southeast-1","instanceId":"i-0123456789abcdef0",
+                "accountId":"123456789012","sessionId":session_id,"cols":80,"rows":24
+            }),
+            &tx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.as_str().unwrap().contains("aws_login_required"),
+            "{error}"
+        );
+        crate::commands::lifecycle::close_resource_and_wait(
+            &state,
+            &session_id,
+            crate::state::SessionKind::Ssm,
+            &owner,
+        )
+        .await
+        .unwrap();
+        assert!(state.ssm_sessions.lock().unwrap().is_empty());
+        assert_eq!(
+            state.lifecycle_sessions.lock().unwrap()[&session_id].phase(),
+            crate::state::SessionPhase::Closed
+        );
+        for command in ["aws_ssm_write", "aws_ssm_resize"] {
+            let error = dispatch_async(
+                &state,
+                &owner,
+                command,
+                json!({"sessionId":session_id,"data":[13],"cols":80,"rows":24}),
+                &tx,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.as_str().unwrap().contains("aws_ssm_not_found"));
+        }
+        dispatch_async(
+            &state,
+            &owner,
+            "aws_signin_logout",
+            json!({"sourceId":source_id}),
+            &tx,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2038,6 +2221,289 @@ mod tests {
         lifecycle::close_resource_and_wait(&state, &id, SessionKind::Pty, &owner)
             .await
             .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discovery_save_rejects_stale_snapshot_before_session_or_grant_cleanup() {
+        use crate::commands::lifecycle;
+        use rssh_core::state::{SessionKind, SessionPhase};
+
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let first = json!({"id":uuid::Uuid::new_v4().to_string(),"name":"First",
+            "enabled":true,"platform":"aws_native","region":"us-east-1"});
+        let added = json!({"id":uuid::Uuid::new_v4().to_string(),"name":"Added",
+            "enabled":true,"platform":"aws_native","region":"us-east-1"});
+        let expected = json!([first]);
+        let current = json!([first, added]);
+        // The optional argument keeps older clients' payloads valid.
+        dispatch_async(
+            &state,
+            &owner,
+            "save_dynamic_discovery_sources",
+            json!({"sources":expected}),
+            &tx,
+        )
+        .await
+        .unwrap();
+        dispatch_async(
+            &state,
+            &owner,
+            "save_dynamic_discovery_sources",
+            json!({"sources":current,"expectedSources":expected}),
+            &tx,
+        )
+        .await
+        .unwrap();
+        let source_id = added["id"].as_str().unwrap();
+        let key = rssh_core::aws::auth::credential_key(source_id);
+        state.secret_store.set(&key, "saved-grant").unwrap();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let pending =
+            lifecycle::reserve_resource(&state, &session_id, SessionKind::Ssm, owner.clone())
+                .unwrap();
+        pending.bind_discovery_source(source_id).unwrap();
+        for auth_commit in [
+            Value::Null,
+            json!({"source_id":first["id"],"login_id":uuid::Uuid::new_v4().to_string()}),
+        ] {
+            let error = dispatch_async(
+                &state,
+                &owner,
+                "save_dynamic_discovery_sources",
+                json!({"sources":expected,"expectedSources":expected,"authCommit":auth_commit}),
+                &tx,
+            )
+            .await
+            .unwrap_err();
+            let wire = error
+                .as_str()
+                .unwrap()
+                .strip_prefix("__rssh_err__|")
+                .unwrap();
+            let error: Value = serde_json::from_str(wire).unwrap();
+            assert_eq!(error["code"], "dynamic_discovery_sources_changed");
+            assert_eq!(
+                state.lifecycle_sessions.lock().unwrap()[&session_id].phase(),
+                SessionPhase::Pending
+            );
+            assert_eq!(
+                state.secret_store.get(&key).unwrap().as_deref(),
+                Some("saved-grant")
+            );
+            let saved = crate::commands::discovery::list_dynamic_discovery_sources(&state).unwrap();
+            assert_eq!(saved.len(), 2);
+            assert!(saved.iter().any(|source| source.id == source_id));
+        }
+        drop(pending);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discovery_save_rejects_foreign_or_unfinished_login_drafts() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let other = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let source_id = uuid::Uuid::new_v4().to_string();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let login = dispatch_async(
+            &state,
+            &owner,
+            "aws_signin_start",
+            json!({"sourceId":source_id,"region":"us-east-1"}),
+            &tx,
+        )
+        .await
+        .unwrap();
+        let request = json!({
+            "sources":[{"id":source_id,"name":"Draft AWS","enabled":true,
+                "platform":"aws_native","region":"us-east-1","only_ssm_available":false}],
+            "authCommit":{"source_id":source_id,"login_id":login["login_id"]}
+        });
+        let foreign = dispatch_async(
+            &state,
+            &other,
+            "save_dynamic_discovery_sources",
+            request.clone(),
+            &tx,
+        )
+        .await
+        .unwrap_err();
+        assert!(foreign
+            .as_str()
+            .unwrap()
+            .contains("aws_login_owner_mismatch"));
+        assert!(dispatch_async(
+            &state,
+            &owner,
+            "save_dynamic_discovery_sources",
+            request,
+            &tx,
+        )
+        .await
+        .is_err());
+        assert!(
+            crate::commands::discovery::list_dynamic_discovery_sources(&state)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!state
+            .secret_store
+            .exists(&rssh_core::aws::auth::credential_key(&source_id))
+            .unwrap());
+        dispatch_async(
+            &state,
+            &owner,
+            "aws_signin_cancel",
+            json!({"sourceId":source_id,"loginId":login["login_id"]}),
+            &tx,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discovery_save_waits_for_auth_lock_without_blocking_the_runtime() {
+        let (state, _dir) = test_state();
+        let lock_path = state.data_dir.join("aws-auth.lock");
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .unwrap();
+            lock.lock().unwrap();
+            ready_tx.send(()).unwrap();
+            // A watchdog makes the broken synchronous implementation fail
+            // rather than deadlocking the test runner forever.
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok()
+        });
+        ready_rx.await.unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let _ = release_tx.send(());
+        });
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let sources = json!([{
+            "id": "cli-source", "name": "CLI source", "enabled": false,
+            "platform": "aws_ssm", "profile": "", "region": "us-east-1",
+            "only_ssm_available": false
+        }]);
+        let saved = dispatch_async(
+            &state,
+            &owner,
+            "save_dynamic_discovery_sources",
+            json!({ "sources": sources }),
+            &tx,
+        )
+        .await;
+        let released_by_runtime = tokio::task::spawn_blocking(move || holder.join().unwrap())
+            .await
+            .unwrap();
+        release.await.unwrap();
+        assert!(
+            released_by_runtime,
+            "saving discovery sources blocked the current-thread runtime until the watchdog released the auth lock"
+        );
+        saved.unwrap();
+        assert_eq!(
+            crate::commands::discovery::list_dynamic_discovery_sources(&state)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discovery_save_keeps_source_gate_when_caller_is_cancelled_during_cleanup() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let source_id = uuid::Uuid::new_v4().to_string();
+        let sources = json!([{
+            "id": source_id, "name": "Native AWS", "enabled": false,
+            "platform": "aws_native", "region": "us-east-1",
+            "only_ssm_available": false
+        }]);
+        dispatch_async(
+            &state,
+            &owner,
+            "save_dynamic_discovery_sources",
+            json!({ "sources": sources }),
+            &tx,
+        )
+        .await
+        .unwrap();
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let reservation = crate::commands::lifecycle::reserve_resource(
+            &state,
+            &session_id,
+            SessionKind::Ssm,
+            owner.clone(),
+        )
+        .unwrap();
+        reservation.bind_discovery_source(&source_id).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let caller = tokio::spawn({
+            let state = state.clone();
+            let owner = owner.clone();
+            let tx = tx.clone();
+            async move {
+                dispatch_async(
+                    &state,
+                    &owner,
+                    "save_dynamic_discovery_sources",
+                    json!({ "sources": [] }),
+                    &tx,
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), operation.cancelled())
+            .await
+            .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+
+        // Retaining the source needs no session cleanup. It can only be held
+        // back by the first transaction's source gate after its caller exits.
+        let mut following_save = tokio::spawn({
+            let state = state.clone();
+            async move {
+                dispatch_async(
+                    &state,
+                    &owner,
+                    "save_dynamic_discovery_sources",
+                    json!({ "sources": sources }),
+                    &tx,
+                )
+                .await
+            }
+        });
+        let early_result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut following_save).await;
+        operation.complete(Ok(()));
+        assert!(
+            early_result.is_err(),
+            "cancelling the source-save caller released the gate before cleanup completed"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), following_save)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            crate::commands::discovery::list_dynamic_discovery_sources(&state).unwrap()[0].id,
+            source_id
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

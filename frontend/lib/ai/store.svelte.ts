@@ -1458,6 +1458,7 @@ async function executePtyCommand(
     local:  { write: "pty_write",    data: "pty:data" },
     serial: { write: "serial_write", data: "serial:data" },
     telnet: { write: "telnet_write", data: "telnet:data" },
+    ssm:    { write: "aws_ssm_write", data: "ssm:data" },
   };
   const writeCmd = TRANSPORT[target_kind].write;
   const dataEvent = `${TRANSPORT[target_kind].data}:${target_session_id}`;

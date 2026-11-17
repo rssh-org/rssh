@@ -219,7 +219,7 @@ export type ShellKind = "posix" | "cmd" | "powershell";
  * (lowercase wire format). Single source of truth so widening the set (e.g.
  * adding `serial`) lights up every switch via the compiler.
  */
-export type AiTargetKind = "ssh" | "local" | "serial" | "telnet";
+export type AiTargetKind = "ssh" | "local" | "serial" | "telnet" | "ssm";
 
 /**
  * Raw-device targets run without a shell: no sentinel, no meaningful exit

@@ -187,6 +187,13 @@ pub fn run_with(
                     }
                     // Close only sessions belonging to this window.
                     rssh_core::commands::lifecycle::close_window_sessions(&state, _window.label());
+                    let auth = state.aws_auth.clone();
+                    let owner = rssh_core::state::SessionOwner::Window(_window.label().into());
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = auth.cancel_owner(&owner).await {
+                            log::warn!("Failed to cancel closed-window AWS authorization: {error}");
+                        }
+                    });
                 }
                 _ => {}
             }
@@ -299,6 +306,16 @@ pub fn run_with(
             commands::session::ssh_host_key_cancel,
             // session lifecycle
             commands::lifecycle::reconcile_sessions,
+            // Native AWS: available without a local shell on every host.
+            commands::aws::aws_signin_status,
+            commands::aws::aws_signin_start,
+            commands::aws::aws_signin_complete,
+            commands::aws::aws_signin_cancel,
+            commands::aws::aws_signin_logout,
+            commands::aws::aws_ssm_open,
+            commands::aws::aws_ssm_write,
+            commands::aws::aws_ssm_resize,
+            commands::aws::aws_ssm_close,
             // PTY (desktop hosts and capability-probed HarmonyOS PC)
             #[cfg(any(windows, macos, linux, ohos))]
             commands::pty::list_shells,

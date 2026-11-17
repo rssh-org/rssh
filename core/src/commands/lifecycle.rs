@@ -535,6 +535,7 @@ pub(crate) fn register_prompt_waiter<T>(
 
 pub enum ReadySession {
     Ssh(crate::ssh::client::SessionHandle),
+    Ssm(crate::aws::ssm::SsmHandle),
     #[cfg(any(windows, macos, linux, ohos))]
     Pty(crate::terminal::pty::PtyHandle),
     #[cfg(any(windows, macos, linux, ohos))]
@@ -553,6 +554,7 @@ impl ReadySession {
     fn kind(&self) -> SessionKind {
         match self {
             Self::Ssh(_) => SessionKind::Ssh,
+            Self::Ssm(_) => SessionKind::Ssm,
             #[cfg(any(windows, macos, linux, ohos))]
             Self::Pty(_) => SessionKind::Pty,
             #[cfg(any(windows, macos, linux, ohos))]
@@ -567,6 +569,7 @@ impl ReadySession {
 
     fn cleanup(&self) -> Option<CleanupHandle> {
         match self {
+            Self::Ssm(handle) => Some(handle.cleanup()),
             #[cfg(any(windows, macos, linux, ohos))]
             Self::Serial(handle) => crate::terminal::serial::cleanup(handle),
             _ => None,
@@ -576,6 +579,7 @@ impl ReadySession {
     fn close(self) {
         match self {
             Self::Ssh(handle) => handle.force_disconnect(),
+            Self::Ssm(handle) => handle.cancel(),
             Self::Forward(handle) => handle.stop(),
             #[cfg(test)]
             Self::CleanupProbe { cleaned, .. } => {
@@ -593,6 +597,37 @@ impl ReadySession {
 impl ResourceReservation<'_> {
     pub fn id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn bind_discovery_source(&self, source_id: &str) -> AppResult<()> {
+        let mut registry = locked(&self.state.lifecycle_sessions)?;
+        let record = registry.get_mut(&self.session_id).ok_or_else(|| {
+            AppError::not_found(
+                "session_reservation_lost",
+                serde_json::json!({"id":self.session_id}),
+            )
+        })?;
+        if record.nonce != self.nonce
+            || record.kind != self.kind
+            || record.phase() != SessionPhase::Pending
+        {
+            return Err(AppError::not_found(
+                "session_reservation_lost",
+                serde_json::json!({"id":self.session_id}),
+            ));
+        }
+        if record
+            .discovery_source_id
+            .as_deref()
+            .is_some_and(|source| source != source_id)
+        {
+            return Err(AppError::config(
+                "session_registry_inconsistent",
+                serde_json::json!({"id":self.session_id}),
+            ));
+        }
+        record.discovery_source_id = Some(source_id.to_owned());
+        Ok(())
     }
 
     /// Register cancellation before beginning an asynchronous native open. The
@@ -739,6 +774,7 @@ fn insert_ready_handle(state: &AppState, session_id: &str, handle: ReadySession)
         #[cfg(any(windows, macos, linux, ohos))]
         ReadySession::Serial(handle) => insert_unique(&state.serial_sessions, session_id, handle),
         ReadySession::Telnet(handle) => insert_unique(&state.telnet_sessions, session_id, handle),
+        ReadySession::Ssm(handle) => insert_unique(&state.ssm_sessions, session_id, handle),
         ReadySession::Sftp(handle) => insert_unique(&state.sftp_sessions, session_id, handle),
         ReadySession::Forward(handle) => insert_unique(&state.active_forwards, session_id, handle),
         #[cfg(test)]
@@ -794,6 +830,7 @@ pub fn reserve_resource<'a>(
             owner,
             state: ResourceState::Pending(None),
             parent: None,
+            discovery_source_id: None,
         },
     );
     drop(registry);
@@ -868,6 +905,7 @@ pub fn reserve_sftp_child<'a>(
             owner,
             state: ResourceState::Pending(None),
             parent: Some(parent_id.to_owned()),
+            discovery_source_id: None,
         },
     );
     drop(registry);
@@ -895,6 +933,7 @@ pub enum OwnedAiTarget {
     #[cfg(any(windows, macos, linux, ohos))]
     Serial,
     Telnet,
+    Ssm,
 }
 
 pub fn owned_ready_ai_target(
@@ -964,6 +1003,15 @@ pub fn owned_ready_ai_target(
                     serde_json::json!({ "id": id }),
                 )
             }),
+        SessionKind::Ssm => locked(&state.ssm_sessions)?
+            .contains_key(id)
+            .then_some(OwnedAiTarget::Ssm)
+            .ok_or_else(|| {
+                AppError::other(
+                    "session_registry_inconsistent",
+                    serde_json::json!({ "id": id }),
+                )
+            }),
         SessionKind::Sftp | SessionKind::Forward => Err(AppError::config(
             "session_kind_mismatch",
             serde_json::json!({ "id": id }),
@@ -991,6 +1039,9 @@ fn take_ready_handle(
         SessionKind::Telnet => locked(&state.telnet_sessions)?
             .remove(session_id)
             .map(ReadySession::Telnet),
+        SessionKind::Ssm => locked(&state.ssm_sessions)?
+            .remove(session_id)
+            .map(ReadySession::Ssm),
         SessionKind::Sftp => locked(&state.sftp_sessions)?
             .remove(session_id)
             .map(ReadySession::Sftp),
@@ -1396,6 +1447,9 @@ mod tests {
         let secret_store: Arc<dyn crate::secret::SecretStore> =
             Arc::new(crate::secret::DbStore::new(db.clone()));
         AppState {
+            aws_auth: Arc::new(
+                crate::aws::auth::AwsAuth::new(secret_store.clone(), PathBuf::new()).unwrap(),
+            ),
             codex_auth: Arc::new(
                 crate::ai::codex_auth::CodexAuth::new(
                     db.clone(),
@@ -1408,6 +1462,7 @@ mod tests {
             secret_store,
             lifecycle_sessions: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            ssm_sessions: Mutex::new(HashMap::new()),
             #[cfg(any(windows, macos, linux, ohos))]
             pty_sessions: Mutex::new(HashMap::new()),
             #[cfg(any(windows, macos, linux, ohos))]
@@ -1663,7 +1718,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_close_is_idempotent_before_dispatch_and_after_failed_open() {
-        for kind in [SessionKind::Ssh, SessionKind::Telnet] {
+        for kind in [SessionKind::Ssh, SessionKind::Telnet, SessionKind::Ssm] {
             let state = empty_state();
             let owner = SessionOwner::Window("rssh-clone".into());
             let id = "550e8400-e29b-41d4-a716-446655440130";
@@ -1698,7 +1753,7 @@ mod tests {
 
     #[tokio::test]
     async fn idempotent_close_keeps_owner_and_kind_checks_for_closed_records() {
-        for kind in [SessionKind::Ssh, SessionKind::Telnet] {
+        for kind in [SessionKind::Ssh, SessionKind::Telnet, SessionKind::Ssm] {
             let state = empty_state();
             let owner = SessionOwner::Window("main".into());
             let other = SessionOwner::Window("rssh-clone".into());
@@ -2925,6 +2980,7 @@ mod tests {
                 owner: other.clone(),
                 state: ResourceState::Ready,
                 parent: None,
+                discovery_source_id: None,
             },
         );
         let target_error = crate::ai::commands::ai_session_rebind_target_impl(

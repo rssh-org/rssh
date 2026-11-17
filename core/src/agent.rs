@@ -402,6 +402,12 @@ fn session_info(
         #[cfg(any(windows, macos, linux, ohos))]
         SessionKind::Serial => ("serial", OwnedAiTarget::Serial),
         SessionKind::Telnet => ("telnet", OwnedAiTarget::Telnet),
+        SessionKind::Ssm => {
+            if !locked(&state.ssm_sessions)?.contains_key(id) {
+                return Err(error("agent_session_unavailable"));
+            }
+            ("ssm", OwnedAiTarget::Ssm)
+        }
         _ => return Ok(None),
     };
     let (mut shell, mut source) = crate::ai::commands::target_shell_default(&target);
@@ -649,6 +655,7 @@ pub async fn accept_session(
         "local" => crate::ai::commands::AiTarget::Local(request.session_id.clone()),
         "serial" => crate::ai::commands::AiTarget::Serial(request.session_id.clone()),
         "telnet" => crate::ai::commands::AiTarget::Telnet(request.session_id.clone()),
+        "ssm" => crate::ai::commands::AiTarget::Ssm(request.session_id.clone()),
         _ => return Err(error("agent_session_unsupported")),
     };
     let info = match crate::ai::commands::ai_mcp_session_start_impl(
@@ -1479,6 +1486,7 @@ mod tests {
                     owner: fixture.owner.clone(),
                     state: phase,
                     parent: None,
+                    discovery_source_id: None,
                 },
             );
         }

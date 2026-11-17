@@ -51,7 +51,8 @@ export function dynamicPlatformIconName(platform: DynamicPlatform): AppIconName 
   switch (platform) {
     case "docker": return "docker";
     case "k8s": return "kubernetes";
-    case "aws_ssm": return "aws";
+    case "aws_ssm":
+    case "aws_native": return "aws";
   }
 }
 
@@ -64,7 +65,8 @@ export function tabIconName(type: TabType): AppIconName {
     case "telnet": return "telnet";
     case "docker_exec": return "docker";
     case "kubectl_exec": return "kubernetes";
-    case "aws_ssm": return "aws";
+    case "aws_ssm":
+    case "aws_native": return "aws";
     case "forward": return "forward";
     case "edit": return "edit";
   }

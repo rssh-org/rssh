@@ -146,6 +146,7 @@ describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
         };
         ws.deliver({ type: "response", id: request.id, ok: true, result: {
             localPty: true,
+            cloudDiscovery: true,
             fileMultiSelect: serverSupport,
             directoryTransfer: serverSupport,
             nativeClipboard: true,
@@ -155,6 +156,7 @@ describe("window/app plugin compatibility (embedded, off-Tauri)", () => {
         } });
         await expect(result).resolves.toEqual({
             localPty: true,
+            cloudDiscovery: true,
             fileMultiSelect: expected,
             directoryTransfer: expected,
             nativeClipboard: false,

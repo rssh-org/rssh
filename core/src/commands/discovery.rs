@@ -22,12 +22,15 @@ struct CapturedOutput {
     stderr: String,
 }
 
-fn platform_program(platform: DynamicDiscoveryPlatform) -> &'static str {
-    match platform {
+fn platform_program(platform: DynamicDiscoveryPlatform) -> AppResult<&'static str> {
+    Ok(match platform {
         DynamicDiscoveryPlatform::Docker => "docker",
         DynamicDiscoveryPlatform::K8s => "kubectl",
         DynamicDiscoveryPlatform::AwsSsm => "aws",
-    }
+        DynamicDiscoveryPlatform::AwsNative => {
+            return Err(crate::aws::api::failure("aws_native_connector_required"))
+        }
+    })
 }
 
 #[cfg(unix)]
@@ -157,7 +160,7 @@ fn discovery_cli_fallback_dirs() -> Vec<PathBuf> {
 pub(crate) fn resolve_dynamic_discovery_program(
     platform: DynamicDiscoveryPlatform,
 ) -> AppResult<ResolvedDiscoveryProgram> {
-    resolve_discovery_program(platform_program(platform))
+    resolve_discovery_program(platform_program(platform)?)
 }
 
 pub(crate) fn resolve_session_manager_plugin() -> AppResult<ResolvedDiscoveryProgram> {
@@ -188,7 +191,7 @@ async fn run_success(
     args: Vec<String>,
     timeout_secs: u64,
 ) -> AppResult<CapturedOutput> {
-    run_program_success(platform_program(platform), args, timeout_secs).await
+    run_program_success(platform_program(platform)?, args, timeout_secs).await
 }
 
 async fn run_program_success(
@@ -235,7 +238,7 @@ async fn run_program_success(
     Ok(CapturedOutput { stdout, stderr })
 }
 
-pub(crate) fn read_dynamic_discovery_sources_from_db(
+pub fn read_dynamic_discovery_sources_from_db(
     db: &crate::db::Db,
 ) -> AppResult<Vec<DynamicDiscoverySource>> {
     let Some(raw) = crate::db::settings::get(db, SOURCES_SETTING_KEY)? else {
@@ -302,6 +305,9 @@ fn normalize_sources(sources: &mut [DynamicDiscoverySource]) {
             *profile = profile.trim().to_string();
             *region = region.trim().to_string();
         }
+        if let DynamicDiscoveryConfig::AwsNative { region, .. } = &mut source.config {
+            *region = region.trim().to_string();
+        }
     }
 }
 
@@ -317,6 +323,12 @@ fn validate_sources(sources: &[DynamicDiscoverySource]) -> AppResult<()> {
         }
         validate_name(&source.name)?;
         match &source.config {
+            DynamicDiscoveryConfig::AwsNative { region, .. } => {
+                if uuid::Uuid::parse_str(&source.id).is_err() {
+                    return Err(crate::aws::api::failure("aws_source_invalid"));
+                }
+                crate::aws::api::validate_region(region)?;
+            }
             DynamicDiscoveryConfig::Docker { context, shell } => {
                 validate_arg("context", context)?;
                 validate_arg("shell", shell)?;
@@ -369,18 +381,237 @@ pub fn save_dynamic_discovery_sources(
     state: &AppState,
     sources: Vec<DynamicDiscoverySource>,
 ) -> AppResult<()> {
-    save_dynamic_discovery_sources_to_db(&state.db, sources)
+    save_dynamic_discovery_sources_secure(
+        &state.db,
+        state.secret_store.as_ref(),
+        &state.data_dir,
+        sources,
+    )
+}
+
+/// GUI/headless entry point. The cross-process credential lock can be held
+/// across AWS network requests, so waiting for it must never block an executor
+/// worker (the headless host uses a current-thread Tokio runtime).
+pub async fn save_dynamic_discovery_sources_async(
+    state: std::sync::Arc<AppState>,
+    sources: Vec<DynamicDiscoverySource>,
+) -> AppResult<()> {
+    save_sources_transaction(state, sources, None, None).await
+}
+
+#[derive(Deserialize)]
+pub struct AwsSigninCommit {
+    pub source_id: String,
+    pub login_id: String,
+}
+
+/// A form save may commit only the AWS draft owned by its authenticated host.
+/// The draft never crosses IPC; the request carries its opaque ID only.
+pub async fn save_dynamic_discovery_sources_for_owner(
+    state: std::sync::Arc<AppState>,
+    sources: Vec<DynamicDiscoverySource>,
+    owner: crate::state::SessionOwner,
+    auth_commit: Option<AwsSigninCommit>,
+    expected_sources: Option<Vec<DynamicDiscoverySource>>,
+) -> AppResult<()> {
+    save_sources_transaction(
+        state,
+        sources,
+        auth_commit.map(|draft| (owner, draft)),
+        expected_sources,
+    )
+    .await
+}
+
+async fn save_sources_transaction(
+    state: std::sync::Arc<AppState>,
+    mut sources: Vec<DynamicDiscoverySource>,
+    auth_commit: Option<(crate::state::SessionOwner, AwsSigninCommit)>,
+    expected_sources: Option<Vec<DynamicDiscoverySource>>,
+) -> AppResult<()> {
+    // A disconnected IPC caller must not release the gate during asynchronous
+    // session cleanup. The worker owns the whole transaction through commit.
+    tokio::spawn(async move {
+        let source_gate = state.aws_auth.source_gate.clone().write_owned().await;
+        normalize_sources(&mut sources);
+        validate_sources(&sources)?;
+        if let Some((_, draft)) = &auth_commit {
+            if !sources.iter().any(|source| {
+                source.id == draft.source_id
+                    && matches!(source.config, DynamicDiscoveryConfig::AwsNative { .. })
+            }) {
+                return Err(crate::aws::api::failure("aws_source_invalid"));
+            }
+        }
+        let current = read_dynamic_discovery_sources_from_db(&state.db)?;
+        check_expected_sources(&current, expected_sources.as_deref())?;
+        let retained: HashSet<_> = sources
+            .iter()
+            .filter(|source| matches!(source.config, DynamicDiscoveryConfig::AwsNative { .. }))
+            .map(|source| source.id.as_str())
+            .collect();
+        for source in current {
+            if matches!(source.config, DynamicDiscoveryConfig::AwsNative { .. })
+                && !retained.contains(source.id.as_str())
+            {
+                crate::commands::aws_signin::close_source_sessions(&state, &source.id).await?;
+            }
+        }
+        let blocking_state = state.clone();
+        if let Some((owner, draft)) = auth_commit {
+            return state
+                .aws_auth
+                .commit_with(&draft.source_id, &draft.login_id, &owner, move || {
+                    let _source_gate = source_gate;
+                    save_dynamic_discovery_sources_locked(
+                        &blocking_state.db,
+                        blocking_state.secret_store.as_ref(),
+                        &blocking_state.data_dir,
+                        sources,
+                        expected_sources.as_deref(),
+                    )
+                })
+                .await;
+        }
+        tokio::task::spawn_blocking(move || {
+            let _source_gate = source_gate;
+            crate::aws::auth::with_auth_lock(&blocking_state.data_dir, || {
+                save_dynamic_discovery_sources_locked(
+                    &blocking_state.db,
+                    blocking_state.secret_store.as_ref(),
+                    &blocking_state.data_dir,
+                    sources,
+                    expected_sources.as_deref(),
+                )
+            })
+        })
+        .await
+        .map_err(|error| {
+            AppError::other("blocking_join_failed", json!({ "err": error.to_string() }))
+        })?
+    })
+    .await
+    .map_err(|error| AppError::other("task_join_failed", json!({ "err": error.to_string() })))?
+}
+
+/// GUI and CLI share removal semantics: a deleted/native-to-CLI source loses
+/// its device-local grant before the source update commits.
+pub fn save_dynamic_discovery_sources_secure(
+    db: &crate::db::Db,
+    secrets: &dyn crate::secret::SecretStore,
+    data_dir: &Path,
+    mut sources: Vec<DynamicDiscoverySource>,
+) -> AppResult<()> {
+    normalize_sources(&mut sources);
+    validate_sources(&sources)?;
+    crate::aws::auth::with_auth_lock(data_dir, || {
+        save_dynamic_discovery_sources_locked(db, secrets, data_dir, sources, None)
+    })
+}
+
+/// Apply a single CLI operation to the latest sources under the same auth lock
+/// as credential cleanup. Reading before this lock would let an unrelated
+/// concurrent addition be mistaken for a source the caller intended to remove.
+pub fn update_dynamic_discovery_sources_secure<T>(
+    db: &crate::db::Db,
+    secrets: &dyn crate::secret::SecretStore,
+    data_dir: &Path,
+    update: impl FnOnce(&mut Vec<DynamicDiscoverySource>) -> AppResult<T>,
+) -> AppResult<T> {
+    crate::aws::auth::with_auth_lock(data_dir, || {
+        let mut sources = read_dynamic_discovery_sources_from_db(db)?;
+        let result = update(&mut sources)?;
+        normalize_sources(&mut sources);
+        validate_sources(&sources)?;
+        save_dynamic_discovery_sources_locked(db, secrets, data_dir, sources, None)?;
+        Ok(result)
+    })
+}
+
+fn check_expected_sources(
+    current: &[DynamicDiscoverySource],
+    expected: Option<&[DynamicDiscoverySource]>,
+) -> AppResult<()> {
+    if expected.is_some_and(|expected| expected != current) {
+        return Err(AppError::config(
+            "dynamic_discovery_sources_changed",
+            json!({}),
+        ));
+    }
+    Ok(())
+}
+
+/// The auth coordinator already owns the cross-process lock when committing
+/// a login draft together with the form. Do not reacquire it here.
+fn save_dynamic_discovery_sources_locked(
+    db: &crate::db::Db,
+    secrets: &dyn crate::secret::SecretStore,
+    data_dir: &Path,
+    sources: Vec<DynamicDiscoverySource>,
+    expected_sources: Option<&[DynamicDiscoverySource]>,
+) -> AppResult<()> {
+    let current = read_dynamic_discovery_sources_from_db(db)?;
+    // A different process may have saved after the pre-cleanup check. Reject
+    // its stale replacement before touching any unrelated persisted grant.
+    check_expected_sources(&current, expected_sources)?;
+    let retained: HashSet<_> = sources
+        .iter()
+        .filter(|source| matches!(source.config, DynamicDiscoveryConfig::AwsNative { .. }))
+        .map(|source| source.id.as_str())
+        .collect();
+    // Capture every removed grant before mutating any of them. SecretStore is
+    // the only storage boundary, including rollback if the settings write fails.
+    let mut removed = Vec::new();
+    for source in current.iter().filter(|source| {
+        matches!(source.config, DynamicDiscoveryConfig::AwsNative { .. })
+            && !retained.contains(source.id.as_str())
+    }) {
+        let key = crate::aws::auth::credential_key(&source.id);
+        let previous = secrets.get(&key)?.map(zeroize::Zeroizing::new);
+        removed.push((source.id.as_str(), key, previous));
+    }
+    let result = (|| {
+        for (source_id, _, _) in &removed {
+            crate::aws::auth::clear_credentials(secrets, data_dir, source_id)?;
+        }
+        save_dynamic_discovery_sources_to_db(db, sources)
+    })();
+    if let Err(error) = result {
+        let mut rollback_error = None;
+        for (_, key, previous) in removed {
+            let restored = match previous {
+                Some(previous) => secrets.set(&key, &previous),
+                None => secrets.delete(&key),
+            };
+            if let Err(error) = restored {
+                rollback_error.get_or_insert(error);
+            }
+        }
+        // Revisions intentionally stay advanced: a failed save must not revive
+        // authorization attempts that another process was told were cancelled.
+        return Err(rollback_error.unwrap_or(error));
+    }
+    Ok(())
 }
 
 pub async fn dynamic_discovery_tool_status(
     platform: DynamicDiscoveryPlatform,
 ) -> AppResult<DynamicDiscoveryToolStatus> {
+    if platform == DynamicDiscoveryPlatform::AwsNative {
+        return Ok(DynamicDiscoveryToolStatus {
+            platform,
+            available: true,
+            version: None,
+            error: None,
+        });
+    }
     let args = match platform {
         DynamicDiscoveryPlatform::Docker => vec!["--version".to_string()],
         DynamicDiscoveryPlatform::K8s => {
             vec!["version".to_string(), "--client=true".to_string()]
         }
         DynamicDiscoveryPlatform::AwsSsm => vec!["--version".into()],
+        DynamicDiscoveryPlatform::AwsNative => unreachable!("native AWS returned above"),
     };
     let result = async {
         let out = run_success(platform, args, 3).await?;
@@ -428,6 +659,7 @@ pub async fn list_dynamic_discovery_contexts(
         DynamicDiscoveryPlatform::Docker => list_docker_contexts().await,
         DynamicDiscoveryPlatform::K8s => list_k8s_contexts().await,
         DynamicDiscoveryPlatform::AwsSsm => list_aws_profiles().await,
+        DynamicDiscoveryPlatform::AwsNative => Ok(vec![]),
     }
 }
 
@@ -497,16 +729,13 @@ async fn list_aws_profiles() -> AppResult<Vec<DynamicDiscoveryContext>> {
 
 pub async fn discover_dynamic_targets(state: &AppState) -> AppResult<DynamicDiscoverySnapshot> {
     let sources = read_sources(&state)?;
-    discover_sources(sources).await
-}
-
-async fn discover_sources(
-    sources: Vec<DynamicDiscoverySource>,
-) -> AppResult<DynamicDiscoverySnapshot> {
-    Ok(discover_sources_with(
-        sources,
-        |source| async move { discover_source(&source).await },
-    )
+    Ok(discover_sources_with(sources, |source| async move {
+        if matches!(source.config, DynamicDiscoveryConfig::AwsNative { .. }) {
+            crate::aws::discovery::discover(&state.aws_auth, &source).await
+        } else {
+            discover_source(&source).await
+        }
+    })
     .await)
 }
 
@@ -562,6 +791,9 @@ async fn discover_source(
     source: &DynamicDiscoverySource,
 ) -> AppResult<Vec<DynamicDiscoveredTarget>> {
     match &source.config {
+        DynamicDiscoveryConfig::AwsNative { .. } => {
+            Err(crate::aws::api::failure("aws_native_connector_required"))
+        }
         DynamicDiscoveryConfig::Docker { context, shell } => {
             discover_docker(source, context, shell).await
         }
@@ -1029,6 +1261,260 @@ fn parse_ec2_instances(
 mod tests {
     use super::*;
     use crate::models::DynamicDiscoveryConfig;
+
+    #[test]
+    fn locked_source_save_rejects_stale_snapshot_before_deleting_grants() {
+        use crate::secret::{DbStore, SecretStore};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::Db::open(dir.path()).unwrap());
+        let secrets = DbStore::new(db.clone());
+        let current: Vec<_> = ["Original", "Concurrent addition"]
+            .into_iter()
+            .map(|name| DynamicDiscoverySource {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: name.into(),
+                enabled: true,
+                config: DynamicDiscoveryConfig::AwsNative {
+                    region: "us-east-1".into(),
+                    only_ssm_available: false,
+                },
+            })
+            .collect();
+        let expected = vec![current[0].clone()];
+        save_dynamic_discovery_sources_secure(&db, &secrets, dir.path(), current.clone()).unwrap();
+        let keys: Vec<_> = current
+            .iter()
+            .map(|source| crate::aws::auth::credential_key(&source.id))
+            .collect();
+        for key in &keys {
+            secrets.set(key, "saved-grant").unwrap();
+        }
+        // Simulate another process committing between the pre-cleanup check and
+        // acquisition of the auth file lock. This second check must still reject.
+        let error = crate::aws::auth::with_auth_lock(dir.path(), || {
+            save_dynamic_discovery_sources_locked(
+                &db,
+                &secrets,
+                dir.path(),
+                expected.clone(),
+                Some(&expected),
+            )
+        })
+        .unwrap_err();
+        assert_eq!(error.code(), "dynamic_discovery_sources_changed");
+        assert_eq!(
+            read_dynamic_discovery_sources_from_db(&db).unwrap(),
+            current
+        );
+        for key in &keys {
+            assert_eq!(secrets.get(key).unwrap().as_deref(), Some("saved-grant"));
+        }
+        // A fresh snapshot still permits intentional deletion through the same
+        // credential cleanup helper.
+        crate::aws::auth::with_auth_lock(dir.path(), || {
+            save_dynamic_discovery_sources_locked(
+                &db,
+                &secrets,
+                dir.path(),
+                vec![current[1].clone()],
+                Some(&current),
+            )
+        })
+        .unwrap();
+        assert!(secrets.get(&keys[0]).unwrap().is_none());
+        assert_eq!(
+            secrets.get(&keys[1]).unwrap().as_deref(),
+            Some("saved-grant")
+        );
+    }
+
+    #[test]
+    fn source_mutations_hold_auth_lock_and_preserve_concurrent_additions() {
+        use crate::secret::{DbStore, SecretStore};
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::Db::open(dir.path()).unwrap());
+        // Independent connections exercise the same boundary as two processes.
+        let peer_db = Arc::new(crate::db::Db::open(dir.path()).unwrap());
+        let secrets = Arc::new(DbStore::new(db.clone()));
+        let peer_secrets = Arc::new(DbStore::new(peer_db.clone()));
+        let source = |name: &str| DynamicDiscoverySource {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.into(),
+            enabled: true,
+            config: DynamicDiscoveryConfig::AwsNative {
+                region: "us-east-1".into(),
+                only_ssm_available: false,
+            },
+        };
+        let first = source("First");
+        let added = source("Concurrent addition");
+        let first_id = first.id.clone();
+        let added_id = added.id.clone();
+        let added_key = crate::aws::auth::credential_key(&added.id);
+        save_dynamic_discovery_sources_to_db(&db, vec![first]).unwrap();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (updating_tx, updating_rx) = mpsc::channel();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let addition_db = db.clone();
+            let addition_secrets = secrets.clone();
+            let addition_dir = dir.path().to_owned();
+            let addition_key = added_key.clone();
+            let addition = scope.spawn(move || {
+                update_dynamic_discovery_sources_secure(
+                    &addition_db,
+                    addition_secrets.as_ref(),
+                    &addition_dir,
+                    |sources| {
+                        locked_tx.send(()).unwrap();
+                        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        sources.push(added);
+                        addition_secrets.set(&addition_key, "saved-grant")?;
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            });
+            locked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let update_dir = dir.path().to_owned();
+            let update_first_id = first_id.clone();
+            let update_added_id = added_id.clone();
+            let update = scope.spawn(move || {
+                updating_tx.send(()).unwrap();
+                update_dynamic_discovery_sources_secure(
+                    &peer_db,
+                    peer_secrets.as_ref(),
+                    &update_dir,
+                    |sources| {
+                        entered_tx.send(()).unwrap();
+                        let contender = std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(update_dir.join("aws-auth.lock"))
+                            .unwrap();
+                        assert!(
+                            contender.try_lock().is_err(),
+                            "read/mutate must hold the auth lock"
+                        );
+                        assert!(sources.iter().any(|source| source.id == update_added_id));
+                        sources
+                            .iter_mut()
+                            .find(|source| source.id == update_first_id)
+                            .unwrap()
+                            .name = "Updated".into();
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            });
+            updating_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                entered_rx.recv_timeout(Duration::from_millis(50)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            release_tx.send(()).unwrap();
+            addition.join().unwrap();
+            update.join().unwrap();
+        });
+        let saved = read_dynamic_discovery_sources_from_db(&db).unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(
+            saved
+                .iter()
+                .find(|source| source.id == first_id)
+                .unwrap()
+                .name,
+            "Updated"
+        );
+        assert!(saved.iter().any(|source| source.id == added_id));
+        assert_eq!(
+            secrets.get(&added_key).unwrap().as_deref(),
+            Some("saved-grant")
+        );
+    }
+
+    #[test]
+    fn failed_source_removal_restores_all_previous_grants() {
+        use crate::secret::{DbStore, SecretStore};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        struct FailDelete {
+            inner: DbStore,
+            key: Option<String>,
+            failed: AtomicBool,
+        }
+        impl SecretStore for FailDelete {
+            fn get(&self, key: &str) -> AppResult<Option<String>> {
+                self.inner.get(key)
+            }
+            fn set(&self, key: &str, value: &str) -> AppResult<()> {
+                self.inner.set(key, value)
+            }
+            fn delete(&self, key: &str) -> AppResult<()> {
+                if self.key.as_deref() == Some(key) && !self.failed.swap(true, Ordering::SeqCst) {
+                    return Err(crate::aws::api::failure("test_delete_failed"));
+                }
+                self.inner.delete(key)
+            }
+            fn backend_name(&self) -> &'static str {
+                "test"
+            }
+        }
+
+        for fail_delete in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(crate::db::Db::open(dir.path()).unwrap());
+            let sources: Vec<_> = (0..2)
+                .map(|index| DynamicDiscoverySource {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: format!("AWS {index}"),
+                    enabled: true,
+                    config: DynamicDiscoveryConfig::AwsNative {
+                        region: "us-east-1".into(),
+                        only_ssm_available: false,
+                    },
+                })
+                .collect();
+            save_dynamic_discovery_sources_to_db(&db, sources.clone()).unwrap();
+            let keys: Vec<_> = sources
+                .iter()
+                .map(|s| crate::aws::auth::credential_key(&s.id))
+                .collect();
+            let secrets = FailDelete {
+                inner: DbStore::new(db.clone()),
+                key: fail_delete.then(|| keys[1].clone()),
+                failed: AtomicBool::new(false),
+            };
+            for (index, key) in keys.iter().enumerate() {
+                secrets.set(key, &format!("saved-grant-{index}")).unwrap();
+            }
+            if !fail_delete {
+                // Test-only failure injection on the public settings boundary.
+                let connection = rusqlite::Connection::open(dir.path().join("rssh.db")).unwrap();
+                connection.execute_batch("CREATE TRIGGER reject_source_save BEFORE INSERT ON settings WHEN NEW.key = 'dynamic_discovery_sources' BEGIN SELECT RAISE(ABORT, 'test source save failure'); END;").unwrap();
+            }
+            assert!(
+                save_dynamic_discovery_sources_secure(&db, &secrets, dir.path(), vec![]).is_err()
+            );
+            assert_eq!(
+                read_dynamic_discovery_sources_from_db(&db).unwrap().len(),
+                2
+            );
+            for (index, key) in keys.iter().enumerate() {
+                assert_eq!(
+                    secrets.get(key).unwrap().as_deref(),
+                    Some(format!("saved-grant-{index}").as_str())
+                );
+            }
+        }
+    }
 
     #[test]
     fn aws_ssm_source_accepts_default_credentials_and_defaults_online_filter_off() {

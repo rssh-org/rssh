@@ -4,6 +4,9 @@ import DynamicDiscoverySourceForm from "./DynamicDiscoverySourceForm.svelte";
 import { setLocale } from "../i18n/index.svelte.ts";
 import type { DynamicDiscoverySource } from "../stores/app.svelte.ts";
 
+const invokeMock = vi.hoisted(() => vi.fn(async () => ({ authenticated: false })));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+
 let component: ReturnType<typeof mount> | undefined;
 const save = vi.fn();
 const source: DynamicDiscoverySource = {
@@ -20,11 +23,12 @@ async function render(value: DynamicDiscoverySource = source, available = true) 
   component = mount(DynamicDiscoverySourceForm, { target: document.body, props: {
     source: value, contexts: [{ platform: "aws_ssm", name: "production", current: true }],
     statuses: { [value.platform]: { platform: value.platform, available, version: "2", error: null } },
+    availablePlatforms: ["docker", "k8s", "aws_ssm", "aws_native"],
     onRefreshContexts: vi.fn(), onSave: save, onCancel: vi.fn(),
   } });
   await settle();
 }
-beforeEach(() => { setLocale("en"); save.mockReset(); });
+beforeEach(() => { setLocale("en"); save.mockReset(); invokeMock.mockClear(); });
 afterEach(async () => {
   if (component) await unmount(component);
   component = undefined;
@@ -58,6 +62,23 @@ it("prevents saving when the AWS CLI or session-manager-plugin is unavailable", 
   await render(source, false);
   expect(button("Save").disabled).toBe(true);
   expect(document.body.textContent).toContain("session-manager-plugin");
+});
+
+it("saves native AWS sources without a profile, local shell, or sign-in secrets", async () => {
+  const native: DynamicDiscoverySource = {
+    id: "native", name: "Native AWS", enabled: true, platform: "aws_native",
+    region: "us-east-1", only_ssm_available: false,
+  };
+  await render(native, false);
+  expect(button("Save").disabled).toBe(false);
+  expect(document.querySelector('[aria-label="AWS profile"]')).toBeNull();
+  expect(document.body.textContent).toContain("AWS SSM (Native)");
+  expect(document.body.textContent).toContain("AWS SSM (CLI)");
+  expect(document.body.textContent).toContain("No AWS CLI required");
+  input("Only show SSM-available instances").click();
+  await settle();
+  button("Save").click();
+  expect(save).toHaveBeenCalledWith({ ...native, only_ssm_available: true });
 });
 
 it.each(["docker", "k8s"] as const)("preserves the executable Shell setting for %s", async (platform) => {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import type {
     DynamicDiscoveryContext,
     DynamicDiscoverySource,
@@ -7,22 +7,38 @@
     DynamicPlatform,
   } from "../stores/app.svelte.ts";
   import * as app from "../stores/app.svelte.ts";
+  import * as awsAuth from "../stores/aws-auth.svelte.ts";
   import * as discovery from "../stores/discovery.svelte.ts";
   import { toast } from "../stores/toast.svelte.ts";
-  import { t, errMsg } from "../i18n/index.svelte.ts";
+  import { t, errCoded, errMsg } from "../i18n/index.svelte.ts";
   import DynamicDiscoverySourceForm from "./DynamicDiscoverySourceForm.svelte";
   import AppIcon from "./AppIcon.svelte";
   import { dynamicPlatformIconName } from "./app-icon";
+
+  const availablePlatforms = $derived<DynamicPlatform[]>([
+    ...(app.capabilities().localDiscovery ? ["docker", "k8s", "aws_ssm"] as const : []),
+    ...(app.capabilities().cloudDiscovery ? ["aws_native"] as const : []),
+  ]);
 
   let items = $state<DynamicDiscoverySource[]>([]);
   let contexts = $state<DynamicDiscoveryContext[]>([]);
   let statuses = $state<Partial<Record<DynamicPlatform, DynamicDiscoveryToolStatus>>>({});
   let adding = $state<DynamicDiscoverySource | null>(null);
   let addKey = $state(0);
-  let editId = $state<string | null>(null);
+  let editing = $state<DynamicDiscoverySource | null>(null);
+  const editId = $derived(editing?.id ?? null);
+  const editingMissing = $derived(editId !== null && !items.some(source => source.id === editId));
+  // Keep the keyed form mounted if another window deleted its source. Refresh
+  // must not discard unsaved inputs or the source's pending AWS authorization.
+  const visibleItems = $derived(editingMissing && editing ? [...items, editing] : items);
   let savingSources = $state(false);
+  let reloadingSources = $state(false);
+  let sourcesConflict = $state(false);
+  let sourcesReloaded = $state(false);
   let savingRefresh = $state(false);
   let refreshSettingsError = $state("");
+  let sourceSaveError = $state<unknown>(null);
+  let formGeneration = 0;
 
   onMount(() => {
     void refresh();
@@ -32,12 +48,37 @@
     });
   });
 
+  onDestroy(() => {
+    formGeneration += 1;
+    if (adding) discardSignin(adding.id);
+    if (editId) discardSignin(editId);
+  });
+
+  function discardSignin(sourceId: string) {
+    void awsAuth.cancel(sourceId).catch(error => toast.error(errMsg(error)));
+  }
+
   async function refresh() {
     try {
       items = await app.loadDynamicDiscoverySources();
+      return true;
     } catch (e: any) {
-      items = [];
       toast.error(errMsg(e));
+      return false;
+    }
+  }
+
+  async function reloadSources() {
+    if (savingSources || reloadingSources) return;
+    reloadingSources = true;
+    try {
+      if (await refresh()) {
+        sourcesConflict = false;
+        sourceSaveError = null;
+        sourcesReloaded = !!(adding || editing);
+      }
+    } finally {
+      reloadingSources = false;
     }
   }
 
@@ -56,7 +97,7 @@
   }
 
   async function refreshPlatformInfo() {
-    await Promise.all((["docker", "k8s", "aws_ssm"] as const).map(refreshContextInfo));
+    await Promise.all(availablePlatforms.filter(platform => platform !== "aws_native").map(refreshContextInfo));
   }
 
   async function refreshContextInfo(platform: DynamicPlatform) {
@@ -81,12 +122,17 @@
     if (statuses.docker?.available) return "docker";
     if (statuses.k8s?.available) return "k8s";
     if (statuses.aws_ssm?.available) return "aws_ssm";
+    if (availablePlatforms.includes("aws_native")) return "aws_native";
     return "docker";
   }
 
   function blankSource(platform: DynamicPlatform): DynamicDiscoverySource {
+    if (platform === "aws_native") return {
+      id: crypto.randomUUID(), name: t("home.type.aws_native"), enabled: true,
+      platform: "aws_native", region: "", only_ssm_available: false,
+    };
     if (platform === "aws_ssm") return {
-      id: crypto.randomUUID(), name: "AWS SSM", enabled: true,
+      id: crypto.randomUUID(), name: t("home.type.aws_ssm"), enabled: true,
       platform: "aws_ssm", profile: "", region: "", only_ssm_available: false,
     };
     return platform === "docker"
@@ -110,33 +156,55 @@
   }
 
   function startAdd() {
-    editId = null;
+    formGeneration += 1;
+    if (adding) discardSignin(adding.id);
+    if (editId) discardSignin(editId);
+    sourceSaveError = null;
+    sourcesReloaded = false;
+    editing = null;
     addKey += 1;
     adding = blankSource(defaultPlatform());
   }
 
   function startEdit(source: DynamicDiscoverySource) {
+    formGeneration += 1;
+    if (adding) discardSignin(adding.id);
+    if (editId && editId !== source.id) discardSignin(editId);
+    sourceSaveError = null;
+    sourcesReloaded = false;
     adding = null;
-    editId = source.id;
+    editing = { ...source };
   }
 
   function cancelForm() {
+    formGeneration += 1;
+    if (adding) discardSignin(adding.id);
+    if (editId) discardSignin(editId);
+    sourceSaveError = null;
+    sourcesReloaded = false;
     adding = null;
-    editId = null;
+    editing = null;
   }
 
-  async function saveAll(next: DynamicDiscoverySource[]): Promise<boolean> {
-    if (savingSources) return false;
+  async function saveAll(next: DynamicDiscoverySource[], authCommit?: awsAuth.AwsAuthCommit, formAttempt?: number): Promise<boolean> {
+    if (savingSources || reloadingSources || sourcesConflict) return false;
     savingSources = true;
     const previous = items;
     try {
-      await app.saveDynamicDiscoverySources(next);
-      discovery.sourcesChanged(previous, next);
+      await app.saveDynamicDiscoverySources(next, authCommit, previous);
+      if (authCommit) awsAuth.markCommitted(authCommit.source_id, authCommit.login_id);
+      discovery.sourcesChanged(previous, next, authCommit ? [authCommit.source_id] : []);
       items = next;
+      sourcesReloaded = false;
       await refresh();
       return true;
     } catch (e: any) {
-      toast.error(`${t("toast.error.save")}: ${errMsg(e)}`);
+      if (errCoded(e)?.code === "dynamic_discovery_sources_changed") {
+        sourcesConflict = true;
+        sourcesReloaded = false;
+        if (formAttempt === formGeneration) sourceSaveError = null;
+      } else if (formAttempt === undefined) toast.error(`${t("toast.error.save")}: ${errMsg(e)}`);
+      else if (formAttempt === formGeneration) sourceSaveError = e;
       return false;
     } finally {
       savingSources = false;
@@ -144,11 +212,22 @@
   }
 
   async function saveNew(source: DynamicDiscoverySource) {
-    if (await saveAll([...items, source])) adding = null;
+    const attempt = formGeneration;
+    sourceSaveError = null;
+    const commit = source.platform === "aws_native" ? awsAuth.commitRequest(source.id) : undefined;
+    if (await saveAll([...items, source], commit, attempt) && attempt === formGeneration && adding?.id === source.id) {
+      adding = null;
+    }
   }
 
   async function saveEdit(source: DynamicDiscoverySource) {
-    if (await saveAll(items.map((it) => it.id === source.id ? source : it))) editId = null;
+    if (!items.some(item => item.id === source.id)) return;
+    const attempt = formGeneration;
+    sourceSaveError = null;
+    const commit = source.platform === "aws_native" ? awsAuth.commitRequest(source.id) : undefined;
+    if (await saveAll(items.map((it) => it.id === source.id ? source : it), commit, attempt) && attempt === formGeneration && editId === source.id) {
+      editing = null;
+    }
   }
 
   async function toggleEnabled(source: DynamicDiscoverySource, event: Event) {
@@ -159,8 +238,10 @@
   }
 
   async function remove(id: string) {
-    await saveAll(items.filter((it) => it.id !== id));
-    if (editId === id) editId = null;
+    const source = items.find(item => item.id === id);
+    if (!await saveAll(items.filter((it) => it.id !== id))) return;
+    if (editId === id) editing = null;
+    if (source?.platform === "aws_native") discardSignin(id);
   }
 
   async function manualRefresh() {
@@ -203,7 +284,8 @@
 
   function sourceMeta(source: DynamicDiscoverySource): string {
     if (source.platform === "docker") return `Docker · ${source.context}`;
-    if (source.platform === "aws_ssm") return `AWS SSM · ${source.profile || t("dynamic_discovery.aws_default_profile")} · ${source.region}`;
+    if (source.platform === "aws_native") return `${t("home.type.aws_native")} · ${source.region}`;
+    if (source.platform === "aws_ssm") return `${t("home.type.aws_ssm")} · ${source.profile || t("dynamic_discovery.aws_default_profile")} · ${source.region}`;
     return `K8S · ${source.context}${source.namespace ? ` · ${source.namespace}` : ` · ${t("dynamic_discovery.all_namespaces")}`}`;
   }
 </script>
@@ -245,6 +327,18 @@
     {/each}
   </section>
 
+  {#if sourcesConflict}
+    <section class="card source-conflict" aria-label={t("dynamic_discovery.reload_sources")}>
+      <p class="refresh-error" role="alert">{t("error.dynamic_discovery_sources_changed")}</p>
+      <p class="refresh-hint">{t("dynamic_discovery.reload_sources_hint")}</p>
+      <button class="btn btn-sm" onclick={reloadSources} disabled={reloadingSources || savingSources}>
+        {t(reloadingSources ? "dynamic_discovery.refreshing" : "dynamic_discovery.reload_sources")}
+      </button>
+    </section>
+  {:else if sourcesReloaded && !editingMissing}
+    <p class="refresh-hint" role="status">{t("dynamic_discovery.sources_reloaded")}</p>
+  {/if}
+
   {#if adding}
     {#key addKey}
       <fieldset class="source-form" disabled={savingSources}>
@@ -252,24 +346,30 @@
           source={adding}
           {contexts}
           {statuses}
+          {availablePlatforms}
           onRefreshContexts={refreshContextInfo}
           onSave={saveNew}
           onCancel={cancelForm}
+          saveError={sourceSaveError}
+          saveDisabled={sourcesConflict || reloadingSources}
         />
       </fieldset>
     {/key}
   {/if}
 
-  {#each items as source (source.id)}
+  {#each visibleItems as source (source.id)}
     {#if editId === source.id}
       <fieldset class="source-form" disabled={savingSources}>
         <DynamicDiscoverySourceForm
-          {source}
+          source={editing!}
           {contexts}
           {statuses}
+          {availablePlatforms}
           onRefreshContexts={refreshContextInfo}
           onSave={saveEdit}
           onCancel={cancelForm}
+          saveError={editingMissing ? t("dynamic_discovery.edit_source_deleted") : sourceSaveError}
+          saveDisabled={sourcesConflict || reloadingSources || editingMissing}
         />
       </fieldset>
     {:else}
@@ -285,7 +385,7 @@
         </div>
         <div class="item-actions">
           <label class="switch" title={t("dynamic_discovery.enabled")}>
-            <input type="checkbox" checked={source.enabled} disabled={savingSources} onchange={(event) => toggleEnabled(source, event)} />
+            <input type="checkbox" checked={source.enabled} disabled={savingSources || reloadingSources || sourcesConflict} onchange={(event) => toggleEnabled(source, event)} />
             <span class="slider"></span>
           </label>
           <button
@@ -302,7 +402,7 @@
             title={t("common.delete")}
             aria-label={`${t("common.delete")} ${source.name}`}
             onclick={() => remove(source.id)}
-            disabled={savingSources}
+            disabled={savingSources || reloadingSources || sourcesConflict}
           >
             <AppIcon name="trash" size={16} />
           </button>
@@ -320,6 +420,7 @@
   .page { padding: 24px; min-height: 0; }
   .source-form { border: 0; margin: 0; padding: 0; min-inline-size: 0; }
   .refresh-settings { margin-bottom: 16px; }
+  .source-conflict { margin-bottom: 16px; }
   .refresh-heading, .refresh-controls, .refresh-toggle, .refresh-interval { display: flex; align-items: center; gap: 12px; }
   .refresh-heading { justify-content: space-between; }
   .refresh-heading h2 { font-size: 14px; font-weight: 600; margin: 0; }

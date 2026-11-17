@@ -340,7 +340,7 @@ impl AiSessionInfo {
 /// pair — precisely because the kind is closed: the type makes the old
 /// stringly-typed `_ => unknown_target_kind` runtime error (which was duplicated
 /// across session start, rebind, and the headless rebind) impossible to reach.
-/// Wire shape: `{ "kind": "ssh"|"local"|"serial"|"telnet", "id": "<session id>" }`.
+/// Wire shape: `{ "kind": "ssh"|"local"|"serial"|"telnet"|"ssm", "id": "<session id>" }`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "lowercase")]
 pub enum AiTarget {
@@ -353,6 +353,8 @@ pub enum AiTarget {
     /// (`ShellKind::Telnet`: no sentinel, user-driven completion), but the LLM
     /// steering targets network-OS CLIs instead of UART peers.
     Telnet(String),
+    /// Native Session Manager shell, independent of host PTY availability.
+    Ssm(String),
 }
 
 impl AiTarget {
@@ -362,7 +364,8 @@ impl AiTarget {
             AiTarget::Ssh(id)
             | AiTarget::Local(id)
             | AiTarget::Serial(id)
-            | AiTarget::Telnet(id) => id,
+            | AiTarget::Telnet(id)
+            | AiTarget::Ssm(id) => id,
         }
     }
 }
@@ -392,6 +395,7 @@ fn target_environment(
             return Err(AppError::not_found("serial_session_not_found", json!({})))
         }
         AiTarget::Telnet(_) => SessionKind::Telnet,
+        AiTarget::Ssm(_) => SessionKind::Ssm,
     };
     let target = owned_ready_ai_target(state, target.id(), kind, owner)?;
     let (shell, _) = target_shell_default(&target);
@@ -1386,6 +1390,12 @@ pub(crate) fn conversation_target_key(state: &AppState, target: &AiTarget) -> Ap
                     region,
                     instance_id,
                     ..
+                })
+                | Some(crate::models::ConnectorSpec::AwsNative {
+                    account_id,
+                    region,
+                    instance_id,
+                    ..
                 }) => {
                     format!("aws_ssm:{}", json!([account_id, region, instance_id]))
                 }
@@ -1412,6 +1422,28 @@ pub(crate) fn conversation_target_key(state: &AppState, target: &AiTarget) -> Ap
                 .get(id)
                 .ok_or_else(|| AppError::not_found("telnet_session_not_found", json!({})))?;
             format!("telnet:{}", h.peer())
+        }
+        AiTarget::Ssm(id) => {
+            let sessions = locked(&state.ssm_sessions)?;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| AppError::not_found("aws_ssm_not_found", json!({})))?;
+            match handle.connector() {
+                crate::models::ConnectorSpec::AwsNative {
+                    account_id,
+                    region,
+                    instance_id,
+                    ..
+                } => {
+                    format!("aws_ssm:{}", json!([account_id, region, instance_id]))
+                }
+                _ => {
+                    return Err(AppError::config(
+                        "dynamic_discovery_connector_invalid",
+                        json!({}),
+                    ))
+                }
+            }
         }
     })
 }

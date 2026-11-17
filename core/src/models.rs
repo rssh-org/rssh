@@ -387,6 +387,7 @@ pub enum DynamicDiscoveryPlatform {
     #[serde(rename = "k8s")]
     K8s,
     AwsSsm,
+    AwsNative,
 }
 
 fn default_container_shell() -> String {
@@ -416,6 +417,11 @@ pub enum DynamicDiscoveryConfig {
         #[serde(default)]
         only_ssm_available: bool,
     },
+    AwsNative {
+        region: String,
+        #[serde(default)]
+        only_ssm_available: bool,
+    },
 }
 
 impl DynamicDiscoveryConfig {
@@ -424,6 +430,7 @@ impl DynamicDiscoveryConfig {
             Self::Docker { .. } => DynamicDiscoveryPlatform::Docker,
             Self::K8s { .. } => DynamicDiscoveryPlatform::K8s,
             Self::AwsSsm { .. } => DynamicDiscoveryPlatform::AwsSsm,
+            Self::AwsNative { .. } => DynamicDiscoveryPlatform::AwsNative,
         }
     }
 }
@@ -476,6 +483,12 @@ pub enum ConnectorSpec {
     },
     AwsSsm {
         profile: String,
+        region: String,
+        instance_id: String,
+        account_id: String,
+    },
+    AwsNative {
+        source_id: String,
         region: String,
         instance_id: String,
         account_id: String,

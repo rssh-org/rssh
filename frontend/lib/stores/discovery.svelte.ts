@@ -153,14 +153,14 @@ function invalidateSources(changed: Set<string>): void {
 
 /** Called after saving sources. Invalidate every window's cached results without
  * triggering discovery; notifications carry source IDs, never discovered data. */
-export function sourcesChanged(previous: DynamicDiscoverySource[], next: DynamicDiscoverySource[]): void {
+export function sourcesChanged(previous: DynamicDiscoverySource[], next: DynamicDiscoverySource[], changedAuthorizations: string[] = []): void {
   const updated = new Map(next.map((source) => [source.id, source]));
-  const changed = new Set(previous.filter((source) => {
+  const changed = new Set([...changedAuthorizations, ...previous.filter((source) => {
     const replacement = updated.get(source.id);
     return !replacement
       || Object.keys(source).length !== Object.keys(replacement).length
       || Object.entries(source).some(([key, value]) => Reflect.get(replacement, key) !== value);
-  }).map((source) => source.id));
+  }).map((source) => source.id)]);
   if (changed.size === 0 && previous.length === next.length) return;
   // Additions also invalidate in-flight discovery, even without cached IDs to remove.
   invalidateSources(changed);

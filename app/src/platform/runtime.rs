@@ -8,6 +8,7 @@ pub struct RuntimeCapabilities {
     pub local_pty: bool,
     pub serial: bool,
     pub local_discovery: bool,
+    pub cloud_discovery: bool,
     pub ssh_agent: bool,
     pub default_key_files: bool,
     pub cli_install: bool,
@@ -32,6 +33,7 @@ impl RuntimeCapabilities {
             local_pty: cfg!(any(windows, macos, linux)),
             serial: cfg!(any(windows, macos, linux)),
             local_discovery: cfg!(any(windows, macos, linux)),
+            cloud_discovery: true,
             ssh_agent: cfg!(any(windows, macos, linux)),
             default_key_files: cfg!(any(windows, macos, linux)),
             cli_install: cfg!(any(windows, macos, linux)),
@@ -125,6 +127,7 @@ mod tests {
             "localPty",
             "serial",
             "localDiscovery",
+            "cloudDiscovery",
             "sshAgent",
             "defaultKeyFiles",
             "cliInstall",
@@ -143,7 +146,8 @@ mod tests {
         ] {
             assert!(value[key].is_boolean(), "missing boolean capability {key}");
         }
-        assert_eq!(value.as_object().unwrap().len(), 19);
+        assert_eq!(value.as_object().unwrap().len(), 20);
+        assert_eq!(value["cloudDiscovery"], true);
         assert_eq!(value["fileMultiSelect"], true);
         assert_eq!(value["releaseUpdateCheck"], !cfg!(ios));
         assert_eq!(value["systemBack"], cfg!(android));

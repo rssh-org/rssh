@@ -650,6 +650,7 @@
         docker_exec:  { write: "pty_write", resize: "pty_resize", data: "pty:data", close: "pty:close", closeCmd: "pty_close" },
         kubectl_exec: { write: "pty_write", resize: "pty_resize", data: "pty:data", close: "pty:close", closeCmd: "pty_close" },
         aws_ssm:     { write: "pty_write", resize: "pty_resize", data: "pty:data", close: "pty:close", closeCmd: "pty_close" },
+        aws_native:  { write: "aws_ssm_write", resize: "aws_ssm_resize", data: "ssm:data", close: "ssm:close", closeCmd: "aws_ssm_close" },
         serial: { write: "serial_write", resize: null,            data: "serial:data", close: "serial:close", closeCmd: "serial_close" },
         telnet: { write: "telnet_write", resize: "telnet_resize", data: "telnet:data", close: "telnet:close", closeCmd: "telnet_close" },
     };
@@ -1046,6 +1047,11 @@
                     beginHostKeyPrompt(ev.payload.banner, sid);
                 }));
             }
+            if (tabType === "aws_native") {
+                listeners.push(await listen<string>(`ssm:error:${sid}`, (ev) => {
+                    if (acceptsSessionEvent(sid)) toast.error(errMsg(ev.payload));
+                }));
+            }
             if (tabType === "telnet") {
                 listeners.push(await listen<boolean>(`telnet:echo:${sid}`, (ev) => {
                     if (!acceptsSessionEvent(sid)) return;
@@ -1235,9 +1241,17 @@
                 return false;
             }
             initLoginScript();
-        } else if (isLocal || isPtyConnector) {
+        } else if (isLocal || isPtyConnector || tabType === "aws_native") {
             try {
                 const opened = await reservedSessionAttempt.open((reservedId) => {
+                    if (tabType === "aws_native") {
+                        const spec = JSON.parse(meta.connectorSpec || "{}") as Extract<ConnectorSpec, { type: "aws_native" }>;
+                        return invoke<string>("aws_ssm_open", {
+                            sourceId: spec.source_id, region: spec.region,
+                            instanceId: spec.instance_id, accountId: spec.account_id,
+                            cols: terminal.cols, rows: terminal.rows, sessionId: reservedId,
+                        });
+                    }
                     if (isPtyConnector) {
                         const spec = JSON.parse(meta.connectorSpec || "{}") as ConnectorSpec;
                         return invoke<string>("pty_spawn_connector", {
