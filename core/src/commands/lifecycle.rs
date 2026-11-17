@@ -37,6 +37,46 @@ pub fn resolve_session_id(requested: Option<String>) -> AppResult<String> {
     }
 }
 
+/// Observe cleanup completion without starting, retrying or removing resources.
+/// Ownership is checked even for closed tombstones; a caller cannot query a
+/// different host's resources by guessing their identities.
+pub fn session_cleanup_status(
+    owner: SessionOwner,
+    state: &AppState,
+    session_ids: Vec<String>,
+) -> AppResult<Vec<String>> {
+    const MAX_IDS: usize = 256;
+    if session_ids.len() > MAX_IDS {
+        return Err(AppError::config(
+            "session_cleanup_batch_too_large",
+            serde_json::json!({"max": MAX_IDS}),
+        ));
+    }
+    let mut unique = HashSet::new();
+    let mut ids = Vec::with_capacity(session_ids.len());
+    for id in session_ids {
+        let id = resolve_session_id(Some(id))?;
+        if unique.insert(id.clone()) {
+            ids.push(id);
+        }
+    }
+    let registry = locked(&state.lifecycle_sessions)?;
+    let mut completed = Vec::new();
+    for id in ids {
+        match registry.get(&id) {
+            Some(record) if record.owner != owner => {
+                return Err(AppError::config(
+                    "session_owner_mismatch",
+                    serde_json::json!({"id": id}),
+                ));
+            }
+            Some(record) if record.phase() != SessionPhase::Closed => {}
+            _ => completed.push(id),
+        }
+    }
+    Ok(completed)
+}
+
 pub struct ResourceReservation<'a> {
     state: &'a AppState,
     session_id: String,
@@ -1633,6 +1673,117 @@ mod tests {
                 .code(),
             "session_id_invalid"
         );
+    }
+
+    #[tokio::test]
+    async fn cleanup_status_observes_finished_cleanup_without_starting_or_retrying_it() {
+        use std::sync::atomic::Ordering;
+
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        let probe = Arc::new(AtomicCleanupProbe::default());
+        let cleanup = ResourceCleanup::ready(CleanupHandle::new(probe.clone()));
+        let pending = uuid::Uuid::new_v4().to_string();
+        let ready = uuid::Uuid::new_v4().to_string();
+        let closing = uuid::Uuid::new_v4().to_string();
+        let closed = uuid::Uuid::new_v4().to_string();
+        let missing = uuid::Uuid::new_v4().to_string();
+        let foreign = uuid::Uuid::new_v4().to_string();
+        {
+            let mut registry = state.lifecycle_sessions.lock().unwrap();
+            for (id, resource) in [
+                (&pending, ResourceState::Pending(None)),
+                (&ready, ResourceState::Ready),
+                (&closing, ResourceState::Closing(cleanup.clone())),
+                (&closed, ResourceState::Closed),
+            ] {
+                registry.insert(
+                    id.clone(),
+                    SessionRecord {
+                        nonce: uuid::Uuid::new_v4(),
+                        kind: SessionKind::Ssm,
+                        owner: owner.clone(),
+                        state: resource,
+                        parent: None,
+                        discovery_source_id: None,
+                    },
+                );
+            }
+            registry.insert(
+                foreign.clone(),
+                SessionRecord {
+                    nonce: uuid::Uuid::new_v4(),
+                    kind: SessionKind::Ssm,
+                    owner: SessionOwner::Window("other".into()),
+                    state: ResourceState::Closed,
+                    parent: None,
+                    discovery_source_id: None,
+                },
+            );
+        }
+        let ids = vec![
+            pending.clone(),
+            ready.clone(),
+            closing.clone(),
+            closed.clone(),
+            missing.clone(),
+            closed.clone(),
+        ];
+        for _ in 0..2 {
+            assert_eq!(
+                session_cleanup_status(owner.clone(), &state, ids.clone()).unwrap(),
+                vec![closed.clone(), missing.clone()]
+            );
+            assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(
+            session_cleanup_status(owner.clone(), &state, vec![missing.clone(), foreign])
+                .unwrap_err()
+                .code(),
+            "session_owner_mismatch"
+        );
+        cleanup.finish().await.unwrap();
+        assert_eq!(
+            session_cleanup_status(owner, &state, ids).unwrap(),
+            vec![closing.clone(), closed, missing]
+        );
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+        let registry = state.lifecycle_sessions.lock().unwrap();
+        assert_eq!(registry.len(), 5);
+        assert!(matches!(
+            registry[&closing].state,
+            ResourceState::Closing(_)
+        ));
+        assert_eq!(registry[&pending].phase(), SessionPhase::Pending);
+        assert_eq!(registry[&ready].phase(), SessionPhase::Ready);
+    }
+
+    #[test]
+    fn cleanup_status_rejects_noncanonical_ids_and_excessive_batches() {
+        let state = empty_state();
+        let owner = SessionOwner::Window("main".into());
+        for id in ["not-a-uuid", "550E8400E29B41D4A716446655440000"] {
+            assert_eq!(
+                session_cleanup_status(owner.clone(), &state, vec![id.into()])
+                    .unwrap_err()
+                    .code(),
+                "session_id_invalid"
+            );
+        }
+        assert_eq!(
+            session_cleanup_status(
+                owner.clone(),
+                &state,
+                vec![uuid::Uuid::new_v4().to_string(); 257]
+            )
+            .unwrap_err()
+            .code(),
+            "session_cleanup_batch_too_large"
+        );
+        assert!(session_cleanup_status(owner, &state, vec![])
+            .unwrap()
+            .is_empty());
+        assert!(state.lifecycle_sessions.lock().unwrap().is_empty());
     }
 
     #[test]

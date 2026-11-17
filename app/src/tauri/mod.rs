@@ -306,6 +306,7 @@ pub fn run_with(
             commands::session::ssh_host_key_cancel,
             // session lifecycle
             commands::lifecycle::reconcile_sessions,
+            commands::lifecycle::session_cleanup_status,
             // Native AWS: available without a local shell on every host.
             commands::aws::aws_signin_status,
             commands::aws::aws_signin_start,

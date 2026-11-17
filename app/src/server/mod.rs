@@ -869,6 +869,11 @@ async fn dispatch_async(
                 .unwrap_or_default();
             ok(crate::commands::lifecycle::reconcile_sessions_impl(state, owner, active_ids).await)
         }
+        "session_cleanup_status" => ok(crate::commands::lifecycle::session_cleanup_status(
+            owner.clone(),
+            state,
+            arg(&args, "sessionIds")?,
+        )),
 
         // ---- serial console ----
         "serial_get_capabilities" => Ok(json!(crate::commands::serial::serial_get_capabilities(
@@ -2053,6 +2058,111 @@ mod tests {
             data_dir: dir.path().into(),
         };
         (Arc::new(state), dir)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_cleanup_status_is_owner_scoped_and_never_initiates_close() {
+        use crate::commands::lifecycle;
+        use rssh_core::resource::{Cleanup, CleanupFuture, CleanupHandle};
+        use rssh_core::state::{SessionKind, SessionPhase};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct Probe {
+            calls: AtomicUsize,
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        impl Cleanup for Probe {
+            fn close(&self) -> CleanupFuture<'_> {
+                Box::pin(async move {
+                    self.calls.fetch_add(1, Ordering::SeqCst);
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    Ok(())
+                })
+            }
+        }
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let other = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let id = uuid::Uuid::new_v4().to_string();
+        let missing = uuid::Uuid::new_v4().to_string();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let reservation =
+            lifecycle::reserve_resource(&state, &id, SessionKind::Ssm, owner.clone()).unwrap();
+        let operation = reservation.pending_operation().unwrap();
+        let probe = Arc::new(Probe::default());
+        operation
+            .retain_cleanup(CleanupHandle::new(probe.clone()))
+            .unwrap();
+        let args = json!({"sessionIds":[id,missing]});
+        assert_eq!(
+            dispatch_async(&state, &owner, "session_cleanup_status", args.clone(), &tx)
+                .await
+                .unwrap(),
+            json!([missing])
+        );
+        assert_eq!(
+            state.lifecycle_sessions.lock().unwrap()[&id].phase(),
+            SessionPhase::Pending
+        );
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), operation.cancelled())
+                .await
+                .is_err()
+        );
+        let mut operation = Some(operation);
+        for phase in [
+            SessionPhase::Pending,
+            SessionPhase::Closing,
+            SessionPhase::Closed,
+        ] {
+            assert_eq!(state.lifecycle_sessions.lock().unwrap()[&id].phase(), phase);
+            let foreign =
+                dispatch_async(&state, &other, "session_cleanup_status", args.clone(), &tx)
+                    .await
+                    .unwrap_err();
+            assert!(foreign.as_str().unwrap().contains("session_owner_mismatch"));
+            match phase {
+                SessionPhase::Pending => {
+                    lifecycle::close_resource(&state, &id, SessionKind::Ssm, &owner).unwrap();
+                    // An interrupted opener transfers its retained cleanup to
+                    // the registry; the query itself must never start it.
+                    drop(operation.take());
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        probe.entered.notified(),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        dispatch_async(&state, &owner, "session_cleanup_status", args.clone(), &tx)
+                            .await
+                            .unwrap(),
+                        json!([missing])
+                    );
+                    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+                }
+                SessionPhase::Closing => {
+                    probe.release.notify_one();
+                    lifecycle::close_resource_and_wait(&state, &id, SessionKind::Ssm, &owner)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        dispatch_async(&state, &owner, "session_cleanup_status", args.clone(), &tx)
+                            .await
+                            .unwrap(),
+                        json!([id, missing])
+                    );
+                    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(state.lifecycle_sessions.lock().unwrap().len(), 1);
+        drop(reservation);
     }
 
     #[tokio::test(flavor = "current_thread")]

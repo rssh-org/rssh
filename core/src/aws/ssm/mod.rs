@@ -209,15 +209,7 @@ impl Service for AwsService {
         let credentials = self
             .credentials
             .cleanup_fallback(self.credentials().await)?;
-        api::json_request(
-            &credentials,
-            &self.region,
-            "ssm",
-            "AmazonSSM.TerminateSession",
-            &json!({"SessionId": id}),
-        )
-        .await?;
-        Ok(())
+        api::terminate_session(&credentials, &self.region, id).await
     }
 
     async fn data_key(
@@ -557,6 +549,7 @@ struct Protocol {
     handshake_complete: bool,
     session_type_set: bool,
     paused: bool,
+    remote_ended: bool,
 }
 
 impl Protocol {
@@ -787,7 +780,15 @@ async fn run_actor(
             }
         }
         match result {
-            Ok(true) => break,
+            Ok(true) => {
+                // Only a channel_closed naming this exact remote session proves
+                // it ended. Legacy notifications without an ID still close the
+                // stream, but cleanup must confirm termination through the API.
+                if protocol.remote_ended {
+                    *control.terminated.lock().await = true;
+                }
+                break;
+            }
             Ok(false) => {}
             Err(error)
                 if error.code() == "aws_ssm_connect_failed" && protocol.handshake_complete =>
@@ -826,7 +827,7 @@ async fn run_actor(
             Err(error) => return Err(error),
         }
     }
-    // The lifecycle cleanup owner calls TerminateSession after the actor exits.
+    // Lifecycle cleanup terminates after exit unless AWS already confirmed it.
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.close(None)).await;
     Ok(())
 }
@@ -866,6 +867,7 @@ async fn process_frame(
             {
                 return Err(protocol_error("channel close session mismatch"));
             }
+            protocol.remote_ended = closed["SessionId"].as_str() == Some(remote_id);
             return Ok(true);
         }
         "output_stream_data" => {}

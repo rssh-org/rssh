@@ -291,16 +291,29 @@ pub async fn json_request(
     target: &str,
     body: &Value,
 ) -> AppResult<Value> {
+    let url = endpoint(region, service)?;
+    json_request_at(credentials, region, service, &url, target, body).await
+}
+
+async fn json_request_at(
+    credentials: &AwsCredentials,
+    region: &str,
+    service: &str,
+    url: &str,
+    target: &str,
+    body: &Value,
+) -> AppResult<Value> {
     let body = serde_json::to_vec(body).map_err(|_| failure("aws_auth_request_failed"))?;
     let action = target.rsplit('.').next().unwrap_or("");
     // StartSession has no idempotency key: a retry could leak a second session.
     let retryable = action.starts_with("Describe")
         || action.starts_with("Get")
         || matches!(action, "ResumeSession" | "TerminateSession");
-    let bytes = request(
+    let bytes = request_at(
         credentials,
         region,
         service,
+        url,
         vec![
             ("content-type".into(), "application/x-amz-json-1.1".into()),
             ("x-amz-target".into(), target.into()),
@@ -313,6 +326,76 @@ pub async fn json_request(
         return Ok(json!({}));
     }
     serde_json::from_slice(&bytes).map_err(|_| invalid_response("service_response_json"))
+}
+
+/// A session may already have ended remotely by the time local cleanup runs.
+/// Only an explicit missing-session error or verified terminal history makes a
+/// failed termination idempotently successful; generic validation errors do not.
+pub(crate) async fn terminate_session(
+    credentials: &AwsCredentials,
+    region: &str,
+    id: &str,
+) -> AppResult<()> {
+    let url = endpoint(region, "ssm")?;
+    terminate_session_at(credentials, region, &url, id).await
+}
+
+async fn terminate_session_at(
+    credentials: &AwsCredentials,
+    region: &str,
+    url: &str,
+    id: &str,
+) -> AppResult<()> {
+    let original = match json_request_at(
+        credentials,
+        region,
+        "ssm",
+        url,
+        "AmazonSSM.TerminateSession",
+        &json!({"SessionId":id}),
+    )
+    .await
+    {
+        Ok(_) => return Ok(()),
+        Err(error) => error,
+    };
+    let AppError::Other(details) = &original else {
+        return Err(original);
+    };
+    if details.code != "aws_api_failed" || details.params["service"] != "ssm" {
+        return Err(original);
+    }
+    let status = details.params["status"].as_u64();
+    let code = details.params["code"].as_str();
+    if code == Some("DoesNotExistException") && matches!(status, Some(400 | 404)) {
+        return Ok(());
+    }
+    if status != Some(400) || code != Some("ValidationException") {
+        return Err(original);
+    }
+    // This optional confirmation must not turn DescribeSessions into a new
+    // required permission or replace the original failure with a lookup error.
+    let history = json_request_at(
+        credentials,
+        region,
+        "ssm",
+        url,
+        "AmazonSSM.DescribeSessions",
+        &json!({"State":"History","Filters":[{"key":"SessionId","value":id}]}),
+    )
+    .await;
+    if history.ok().is_some_and(|history| {
+        history["Sessions"].as_array().is_some_and(|sessions| {
+            sessions.iter().any(|session| {
+                session["SessionId"].as_str() == Some(id)
+                    && session["Status"].as_str() == Some("Terminated")
+            })
+        })
+    }) {
+        Ok(())
+    } else {
+        Err(original)
+    }
 }
 
 pub(crate) async fn query_request(
@@ -567,6 +650,207 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code(), "aws_api_failed");
         throttled.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn terminate_accepts_success_or_explicit_missing_session_without_history() {
+        for (status, response) in [
+            (200, json!({"SessionId":"remote-session"})),
+            (
+                400,
+                json!({"__type":"com.amazonaws.ssm#DoesNotExistException"}),
+            ),
+            (404, json!({"__type":"DoesNotExistException"})),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let terminate = server
+                .mock("POST", "/")
+                .match_header("x-amz-target", "AmazonSSM.TerminateSession")
+                .match_body(mockito::Matcher::Json(
+                    json!({"SessionId":"remote-session"}),
+                ))
+                .with_status(status)
+                .with_body(response.to_string())
+                .expect(1)
+                .create_async()
+                .await;
+            let history = server
+                .mock("POST", "/")
+                .match_header("x-amz-target", "AmazonSSM.DescribeSessions")
+                .expect(0)
+                .create_async()
+                .await;
+            terminate_session_at(
+                &test_credentials(),
+                "us-east-1",
+                &server.url(),
+                "remote-session",
+            )
+            .await
+            .unwrap();
+            terminate.assert_async().await;
+            history.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn terminate_validation_error_requires_matching_terminated_history() {
+        let mut server = mockito::Server::new_async().await;
+        let terminate = server
+            .mock("POST", "/")
+            .match_header("x-amz-target", "AmazonSSM.TerminateSession")
+            .match_body(mockito::Matcher::Json(
+                json!({"SessionId":"remote-session"}),
+            ))
+            .with_status(400)
+            .with_body(r#"{"__type":"com.amazonaws.ssm#ValidationException"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let history = server
+            .mock("POST", "/")
+            .match_header("x-amz-target", "AmazonSSM.DescribeSessions")
+            .match_header("x-amz-security-token", "test-session-token")
+            .match_body(mockito::Matcher::Json(json!({
+                "State":"History",
+                "Filters":[{"key":"SessionId","value":"remote-session"}],
+            })))
+            .with_status(200)
+            .with_body(
+                json!({"Sessions":[{"SessionId":"remote-session","Status":"Terminated"}]})
+                    .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        terminate_session_at(
+            &test_credentials(),
+            "us-east-1",
+            &server.url(),
+            "remote-session",
+        )
+        .await
+        .unwrap();
+        terminate.assert_async().await;
+        history.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn terminate_keeps_original_validation_error_without_terminal_evidence() {
+        let mut histories = vec![
+            (200, json!({"Sessions":[]}).to_string()),
+            (200, json!({}).to_string()),
+            (200, "not-json".to_owned()),
+            (
+                200,
+                json!({"Sessions":[{"SessionId":"another-session","Status":"Terminated"}]})
+                    .to_string(),
+            ),
+            (
+                200,
+                json!({"Sessions":[{"Status":"Terminated"}]}).to_string(),
+            ),
+            (403, json!({"__type":"AccessDeniedException"}).to_string()),
+            (400, json!({"__type":"InvalidFilterKey"}).to_string()),
+        ];
+        histories.extend(
+            [
+                "Connected",
+                "Connecting",
+                "Disconnected",
+                "Terminating",
+                "Failed",
+            ]
+            .map(|status| {
+                (
+                    200,
+                    json!({"Sessions":[{"SessionId":"remote-session","Status":status}]})
+                        .to_string(),
+                )
+            }),
+        );
+        for (status, response) in histories {
+            let mut server = mockito::Server::new_async().await;
+            let terminate = server
+                .mock("POST", "/")
+                .match_header("x-amz-target", "AmazonSSM.TerminateSession")
+                .match_body(mockito::Matcher::Json(
+                    json!({"SessionId":"remote-session"}),
+                ))
+                .with_status(400)
+                .with_body(r#"{"__type":"ValidationException","Message":"secret-must-not-escape"}"#)
+                .expect(1)
+                .create_async()
+                .await;
+            let history = server
+                .mock("POST", "/")
+                .match_header("x-amz-target", "AmazonSSM.DescribeSessions")
+                .match_body(mockito::Matcher::Json(json!({
+                    "State":"History",
+                    "Filters":[{"key":"SessionId","value":"remote-session"}],
+                })))
+                .with_status(status)
+                .with_body(response)
+                .expect(1)
+                .create_async()
+                .await;
+            let error = terminate_session_at(
+                &test_credentials(),
+                "us-east-1",
+                &server.url(),
+                "remote-session",
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                service_error("ssm", 400, br#"{"__type":"ValidationException"}"#).to_string()
+            );
+            terminate.assert_async().await;
+            history.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn terminate_does_not_reclassify_other_errors_or_require_history_permission() {
+        for (status, code) in [
+            (400, "AccessDeniedException"),
+            (400, "ValidationError"),
+            (400, "ResourceNotFoundException"),
+            (403, "ValidationException"),
+            (403, "DoesNotExistException"),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let response = json!({"__type":code}).to_string();
+            let terminate = server
+                .mock("POST", "/")
+                .match_header("x-amz-target", "AmazonSSM.TerminateSession")
+                .with_status(status)
+                .with_body(&response)
+                .expect(1)
+                .create_async()
+                .await;
+            let history = server
+                .mock("POST", "/")
+                .match_header("x-amz-target", "AmazonSSM.DescribeSessions")
+                .expect(0)
+                .create_async()
+                .await;
+            let error = terminate_session_at(
+                &test_credentials(),
+                "us-east-1",
+                &server.url(),
+                "remote-session",
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                service_error("ssm", status.try_into().unwrap(), response.as_bytes()).to_string()
+            );
+            terminate.assert_async().await;
+            history.assert_async().await;
+        }
     }
 
     #[test]

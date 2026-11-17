@@ -348,6 +348,112 @@ async fn websocket_shell_orders_output_preserves_bytes_and_terminates_once() {
 }
 
 #[tokio::test]
+async fn confirmed_remote_close_completes_cleanup_without_terminating_again() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let service = Arc::new(MockService::new(format!(
+        "ws://{}",
+        listener.local_addr().unwrap()
+    )));
+    // A repeated termination would fail, as can happen after AWS has already
+    // closed the session. Its authenticated notification is sufficient.
+    service.fail_terminate.store(1, Ordering::SeqCst);
+    let (end_session, ended) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut socket = accept(&listener, "start-token").await;
+        handshake(&mut socket, false).await;
+        ended.await.unwrap();
+        let mut frame = Frame::input(
+            0,
+            0,
+            serde_json::to_vec(&json!({"SessionId":"aws-session"})).unwrap(),
+        );
+        frame.message_type = "channel_closed".into();
+        send(&mut socket, Message::Binary(frame.encode().unwrap().into()))
+            .await
+            .unwrap();
+        while let Some(Ok(message)) = socket.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    });
+    let (sink, mut events) = event_sink();
+    let handle = opened(service.clone(), sink).await;
+    end_session.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match events.recv().await.unwrap() {
+                SsmOut::Close => break,
+                SsmOut::Error(error) => panic!("unexpected close error: {error}"),
+                SsmOut::Data(_) => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    handle.control.close().await.unwrap();
+    handle.control.close().await.unwrap();
+    assert_eq!(service.terminates.load(Ordering::SeqCst), 0);
+    assert!(handle.write(b"closed").is_err());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn unbound_remote_close_cannot_bypass_termination() {
+    for (payload, rejected) in [
+        (json!({}), false),
+        (json!({"SessionId":"another-session"}), true),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let service = Arc::new(MockService::new(format!(
+            "ws://{}",
+            listener.local_addr().unwrap()
+        )));
+        let (end_session, ended) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut socket = accept(&listener, "start-token").await;
+            handshake(&mut socket, false).await;
+            ended.await.unwrap();
+            let mut frame = Frame::input(0, 0, serde_json::to_vec(&payload).unwrap());
+            frame.message_type = "channel_closed".into();
+            send(&mut socket, Message::Binary(frame.encode().unwrap().into()))
+                .await
+                .unwrap();
+            while let Some(Ok(message)) = socket.next().await {
+                if matches!(message, Message::Close(_)) {
+                    break;
+                }
+            }
+        });
+        let (sink, mut events) = event_sink();
+        let handle = opened(service.clone(), sink).await;
+        end_session.send(()).unwrap();
+        let failure = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    SsmOut::Error(error) => break Some(error),
+                    SsmOut::Close => break None,
+                    SsmOut::Data(_) => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        if rejected {
+            assert_eq!(failure.unwrap().code(), "aws_ssm_protocol_error");
+        } else {
+            assert!(
+                failure.is_none(),
+                "legacy close without an ID must still end the stream"
+            );
+        }
+        handle.control.close().await.unwrap();
+        assert_eq!(service.terminates.load(Ordering::SeqCst), 1);
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn retransmission_reuses_frame_identity_and_ack_cannot_remove_another_frame() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());

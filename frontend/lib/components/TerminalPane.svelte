@@ -1082,7 +1082,7 @@
         // a replacement pane has a new tab ID. Other transports stay tab-local.
         cleanup: untrack(() => sessionCleanupScope(
             tabType === "serial" ? `serial:${meta.port}` : `tab:${tabId}`,
-            meta.host || meta.port || tabId,
+            app.tabs().find(tab => tab.id === tabId)?.label || meta.host || meta.port || tabId,
         )),
         makeId: () => crypto.randomUUID(),
         wireEvents: createSessionEventSubscription,
