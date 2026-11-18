@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { truncateCommand, formatBytes } from "./format.ts";
+import { commandOutput, truncateCommand, formatBytes } from "./format.ts";
 
 describe("truncateCommand", () => {
   it("leaves short commands untouched", () => {
@@ -26,4 +26,11 @@ describe("formatBytes", () => {
     expect(formatBytes(52_428_800)).toBe("50.0 MB");
     expect(formatBytes(1_610_612_736)).toBe("1.5 GB");
   });
+});
+
+it("localizes a transport failure while preserving the same bytes as successful shell output", () => {
+  const wire = '__rssh_err__|{"code":"session_not_found","params":{"id":"original-target"}}';
+  expect(commandOutput(wire, -1)).not.toContain("__rssh_err__");
+  expect(commandOutput(wire, 0)).toBe(wire);
+  expect(commandOutput("partial shell output", -1)).toBe("partial shell output");
 });

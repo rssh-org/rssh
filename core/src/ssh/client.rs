@@ -11,6 +11,7 @@ use tokio::time::{timeout, Duration};
 
 use crate::error::{locked, AppError, AppResult};
 use crate::models::{Credential, Profile, TerminalEncoding};
+use crate::terminal::capture::OutputTap;
 use crate::terminal::recorder::Recorder;
 
 use super::encoding::{encode_input, OutputDecoder};
@@ -829,14 +830,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gbk.cast");
         let mut recorder = Some(Recorder::new(path.clone(), 80, 24).unwrap());
+        let output = OutputTap::default();
+        let mut capture = output.start("").unwrap();
         let mut decoder =
             super::super::encoding::OutputDecoder::new(crate::models::TerminalEncoding::Gbk);
         for bytes in [&b"\x1b[32m\xd6"[..], &b"\xd0\xce\xc4\x1b[0m"[..]] {
             let decoded = decoder.decode(bytes, false);
-            publish_output(&app, "ssh:data:test", &mut recorder, &decoded);
+            publish_output(&app, "ssh:data:test", &output, &mut recorder, &decoded);
         }
         let remaining = decoder.decode(&[], true);
-        publish_output(&app, "ssh:data:test", &mut recorder, &remaining);
+        publish_output(&app, "ssh:data:test", &output, &mut recorder, &remaining);
         recorder.take().unwrap().finish().unwrap();
 
         let mut emitted = Vec::new();
@@ -845,6 +848,7 @@ mod tests {
             emitted.extend(STANDARD.decode(payload.as_str().unwrap()).unwrap());
         }
         let expected = "\x1b[32m中文\x1b[0m";
+        assert_eq!(capture.submit().unwrap().output, "中文");
         assert_eq!(emitted, expected.as_bytes());
         let cast = std::fs::read_to_string(path).unwrap();
         let recorded: String = cast
@@ -932,6 +936,7 @@ pub enum SessionCmd {
 
 #[derive(Clone)]
 pub struct SessionHandle {
+    pub(crate) output: OutputTap,
     tx: mpsc::UnboundedSender<SessionCmd>,
     ssh_handle: SshHandle,
     terminal_encoding: TerminalEncoding,
@@ -1170,18 +1175,19 @@ pub async fn connect(params: ConnectParams) -> AppResult<ConnectResult> {
 
     let recorder = recording_path.and_then(|p| Recorder::new(p, cols, rows).ok());
 
-    let data_event = format!("ssh:data:{session_id}");
-    let close_event = format!("ssh:close:{session_id}");
+    let reader_session_id = session_id.clone();
+    let output = OutputTap::default();
+    let reader_output = output.clone();
     let terminal_encoding = profile.terminal_encoding;
     tokio::spawn(async move {
         session_task(
-            data_event,
-            close_event,
+            reader_session_id,
             channel,
             rx,
             app,
             recorder,
             terminal_encoding,
+            reader_output,
         )
         .await;
     });
@@ -1189,6 +1195,7 @@ pub async fn connect(params: ConnectParams) -> AppResult<ConnectResult> {
     Ok(ConnectResult {
         session_id,
         handle: SessionHandle {
+            output,
             tx,
             ssh_handle,
             terminal_encoding,
@@ -1207,14 +1214,16 @@ enum Event {
 }
 
 async fn session_task(
-    data_event: String,
-    close_event: String,
+    session_id: String,
     mut channel: russh::Channel<client::Msg>,
     mut rx: mpsc::UnboundedReceiver<SessionCmd>,
     app: crate::emitter::Host,
     mut recorder: Option<Recorder>,
     terminal_encoding: TerminalEncoding,
+    output: OutputTap,
 ) {
+    let data_event = format!("ssh:data:{session_id}");
+    let close_event = format!("ssh:close:{session_id}");
     let mut stdout = OutputDecoder::new(terminal_encoding);
     let mut stderr = OutputDecoder::new(terminal_encoding);
     loop {
@@ -1226,11 +1235,11 @@ async fn session_task(
         match event {
             Event::Ssh(Some(ChannelMsg::Data { data })) => {
                 let data = stdout.decode(&data, false);
-                publish_output(&app, &data_event, &mut recorder, &data);
+                publish_output(&app, &data_event, &output, &mut recorder, &data);
             }
             Event::Ssh(Some(ChannelMsg::ExtendedData { data, .. })) => {
                 let data = stderr.decode(&data, false);
-                publish_output(&app, &data_event, &mut recorder, &data);
+                publish_output(&app, &data_event, &output, &mut recorder, &data);
             }
             Event::Ssh(Some(ChannelMsg::Eof | ChannelMsg::Close)) | Event::Ssh(None) => {
                 break;
@@ -1250,17 +1259,19 @@ async fn session_task(
     }
     for mut decoder in [stdout, stderr] {
         let remaining = decoder.decode(&[], true);
-        publish_output(&app, &data_event, &mut recorder, &remaining);
+        publish_output(&app, &data_event, &output, &mut recorder, &remaining);
     }
     if let Some(rec) = recorder {
         let _ = rec.finish();
     }
+    output.close();
     let _ = app.emit(&close_event, ());
 }
 
 fn publish_output(
     app: &crate::emitter::Host,
     data_event: &str,
+    output: &OutputTap,
     recorder: &mut Option<Recorder>,
     data: &[u8],
 ) {
@@ -1270,5 +1281,7 @@ fn publish_output(
     if let Some(rec) = recorder {
         let _ = rec.record(data);
     }
-    let _ = app.emit_bytes(data_event, data);
+    output.publish_ref(data, || {
+        let _ = app.emit_bytes(data_event, data);
+    });
 }

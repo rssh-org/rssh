@@ -353,6 +353,8 @@ fn terminal(
     let sink: rssh_core::emitter::Sink =
         Arc::new(move |event, payload| events.send((event.to_owned(), payload)).is_ok());
     let host = rssh_core::emitter::Host::new(fixture.state.clone(), sink.clone());
+    let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
+    rssh_core::db::settings::set(&fixture.state.db, "local_shell", shell).unwrap();
     let id = rssh_core::commands::pty::pty_spawn(
         host.clone(),
         fixture.owner.clone(),
@@ -387,7 +389,7 @@ async fn next_event(
         }
     })
     .await
-    .unwrap()
+    .unwrap_or_else(|_| panic!("timed out waiting for {prefix}"))
 }
 
 async fn open_terminal(
@@ -401,7 +403,8 @@ async fn open_terminal(
     let result = tokio::spawn(async move { read_result(request.send().await.unwrap()).await });
     let requested = next_event(events, "agent:session_requested:").await;
     let request_id = requested["id"].as_str().unwrap();
-    let info = agent::accept_session(&fixture.state, host, &fixture.owner, request_id, None)
+    let shell = cfg!(windows).then_some(rssh_core::ai::shell::ShellKind::Cmd);
+    let info = agent::accept_session(&fixture.state, host, &fixture.owner, request_id, shell)
         .await
         .unwrap();
     assert!(
@@ -424,6 +427,59 @@ async fn open_terminal(
     info
 }
 
+// Observe the same per-session wire stream as TerminalPane.
+async fn wait_for_display(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
+    terminal_id: &str,
+    expected: &str,
+) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let event = format!("pty:data:{terminal_id}");
+    let mut bytes = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            let (name, payload) = events.recv().await.unwrap();
+            if name != event {
+                continue;
+            }
+            bytes.extend(STANDARD.decode(payload.as_str().unwrap()).unwrap());
+            if String::from_utf8_lossy(&bytes).contains(expected) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "missing {expected:?} in {:?}",
+            String::from_utf8_lossy(&bytes)
+        )
+    });
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+async fn approve(
+    fixture: &Fixture,
+    info: &rssh_core::ai::commands::AiSessionInfo,
+    terminal_id: &str,
+    card: &Value,
+) -> rssh_core::ai::session::AiTerminalMutation {
+    rssh_core::ai::commands::ai_terminal_command(
+        fixture.owner.clone(),
+        &fixture.state,
+        info.tab_id.clone(),
+        info.instance_id.clone(),
+        card["id"].as_str().unwrap().into(),
+        terminal_id.into(),
+        rssh_core::ai::session::TerminalCommandAction::Approve {
+            bracketed_paste: false,
+        },
+    )
+    .await
+    .unwrap()
+    .expect("command completion is replayable")
+}
+
 #[tokio::test]
 async fn command_call_uses_the_ai_conversation_after_session_acceptance() {
     let fixture = Fixture::new().await;
@@ -431,39 +487,81 @@ async fn command_call_uses_the_ai_conversation_after_session_acceptance() {
     let session = fixture.initialize().await;
     let info = open_terminal(&fixture, &session, &id, host, &mut events).await;
     assert_eq!(info.source, rssh_core::ai::session::SessionSource::Mcp);
-    assert_eq!(info.shell, rssh_core::ai::shell::ShellKind::Posix);
-    let updated = rssh_core::ai::commands::ai_session_set_shell(
-        fixture.owner.clone(),
-        &fixture.state,
-        info.tab_id.clone(),
-        Some(info.instance_id.clone()),
-        rssh_core::ai::shell::ShellKind::Powershell,
-    )
-    .await
-    .unwrap();
-    assert_eq!(updated.shell, rssh_core::ai::shell::ShellKind::Powershell);
-    let request = fixture.request(json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params":{"name":"run_command", "arguments":{"session_id":id,"cmd":"echo hello","explain":"Inspect terminal","side_effect":"read-only"}}}), Some(&session));
+    // Prepare state in the existing interactive shell. The command reads a
+    // file through a relative path and a variable that only this shell knows.
+    let dir = fixture._dir.path();
+    std::fs::write(dir.join("source.txt"), "stream-visible\r\n").unwrap();
+    let path = dir.display().to_string();
+    std::fs::write(dir.join("checkpoint.txt"), "shell-checkpoint\r\n").unwrap();
+    let (setup, command, checkpoint) = if cfg!(windows) {
+        (
+            format!(r#"cd /d "{path}" && set "RSSH_FILE=source.txt" && type checkpoint.txt"#),
+            "type %RSSH_FILE% & set /p reply= & echo done",
+            "type checkpoint.txt",
+        )
+    } else {
+        (
+            format!(
+                "cd '{}' && export RSSH_FILE=source.txt && cat checkpoint.txt",
+                path.replace('\'', "'\\''")
+            ),
+            "cat \"$RSSH_FILE\"; read -r reply; echo done",
+            "cat checkpoint.txt",
+        )
+    };
+    let write = |line: &str| {
+        rssh_core::commands::pty::pty_write(
+            &fixture.state,
+            id.clone(),
+            format!("{line}\r").into_bytes(),
+        )
+        .unwrap();
+    };
+    write(&setup);
+    wait_for_display(&mut events, &id, "shell-checkpoint").await;
+    let request = fixture.request(json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params":{"name":"run_command", "arguments":{"session_id":id,"cmd":command,"explain":"Inspect terminal","side_effect":"read-only"}}}), Some(&session));
     let result = tokio::spawn(async move { read_result(request.send().await.unwrap()).await });
     let proposal = next_event(&mut events, "ai:command_proposed:").await;
-    assert!(proposal["execution"]["full_cmd"]
-        .as_str()
-        .unwrap()
-        .contains("$LASTEXITCODE"));
-    rssh_core::ai::commands::ai_command_result_impl(
-        &fixture.state,
-        "tab-test",
-        &fixture.owner,
-        proposal["id"].as_str().unwrap().into(),
-        0,
-        "hello\n".into(),
-        false,
-        false,
-        Some(&info.instance_id),
-    )
-    .await
-    .unwrap();
+    assert!(!result.is_finished());
+
+    // Lose the first reply after its write. A second approval joins the
+    // committed execution even while the shell is still waiting for input.
+    let mut approval = Box::pin(approve(&fixture, &info, &id, &proposal));
+    let display = tokio::select! {
+        _ = &mut approval => panic!("shell is still waiting for input"),
+        display = wait_for_display(&mut events, &id, "stream-visible") => display,
+    };
+    assert!(display.contains("RSSH_FILE"), "{display:?}"); // the command echo
+    assert!(!result.is_finished());
+    drop(approval);
+    let mut retry = Box::pin(approve(&fixture, &info, &id, &proposal));
+    tokio::select! {
+        _ = &mut retry => panic!("a duplicate approval must await the original result"),
+        _ = tokio::task::yield_now() => {}
+    }
+    write("ack");
+    let completion = retry.await;
+    let replay = approve(&fixture, &info, &id, &proposal).await;
+    assert_eq!(completion.payload, replay.payload);
+    write(checkpoint);
+    let after = wait_for_display(&mut events, &id, "shell-checkpoint").await;
+    assert_eq!(display.matches("stream-visible").count(), 1);
+    assert!(
+        !after.contains("stream-visible"),
+        "replayed command: {after}"
+    );
     let response = result.await.unwrap();
-    assert_eq!(response["result"]["structuredContent"]["output"], "hello\n");
+    let output = response["result"]["structuredContent"]["output"]
+        .as_str()
+        .unwrap();
+    assert!(
+        output.contains("stream-visible") && output.ends_with("done"),
+        "{output:?}"
+    );
+    assert!(
+        !output.contains("RSSH_FILE") && !output.contains("__rssh_done_"),
+        "{output:?}"
+    );
     assert_eq!(response["result"]["structuredContent"]["exit_code"], 0);
     assert_eq!(response["result"]["isError"], false);
 }
@@ -560,21 +658,9 @@ async fn mcp_cancellation_rejects_the_shared_ai_command_card() {
     let result = tokio::spawn(async move { read_result(request.send().await.unwrap()).await });
     let next = next_event(&mut events, "ai:command_proposed:").await;
     assert_ne!(next["id"], proposal["id"]);
-    rssh_core::ai::commands::ai_command_result_impl(
-        &fixture.state,
-        "tab-cancel",
-        &fixture.owner,
-        next["id"].as_str().unwrap().into(),
-        0,
-        "next\n".into(),
-        false,
-        false,
-        Some(&info.instance_id),
-    )
-    .await
-    .unwrap();
+    approve(&fixture, &info, &id, &next).await;
     let response = result.await.unwrap();
-    assert_eq!(response["result"]["structuredContent"]["output"], "next\n");
+    assert_eq!(response["result"]["structuredContent"]["output"], "next");
     assert_eq!(response["result"]["isError"], false);
 }
 

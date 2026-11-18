@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onDestroy, onMount } from "svelte";
     import * as ai from "./store.svelte.ts";
+    import { commandOutput } from "./format.ts";
     import { commandApprovals, isAutoApprovalAllowed } from "./command-approval.ts";
     import type { SessionInstanceRef } from "./session-identity.ts";
     import { t, errMsg } from "../i18n/index.svelte.ts";
@@ -64,8 +65,7 @@
         // rebuild. Reflect the running state
         // so the card shows Terminate/Submit instead of a stale Approve button
         // (clicking which would be a no-op now that executeCommand guards on the
-        // running map, but a dead button is confusing). The original execution
-        // still owns the listener/timer and delivers the result.
+        // running map, but a dead button is confusing).
         if (isPending) {
             syncExecutionStatus();
         }
@@ -143,9 +143,9 @@
         executing = true;
         transportRunning = !retryingResultDelivery;
         try {
-            const liveTargetSessionId = targetSessionId;
+            const liveTargetSessionId = cmd.target_session_id ?? targetSessionId;
             if (!liveTargetSessionId) throw new Error(t("common.disconnected"));
-            await ai.executeCommand(session, cmd.id, cmd.execution, targetKind, liveTargetSessionId);
+            await ai.executeCommand(session, cmd.id, liveTargetSessionId);
         } catch (e) {
             console.error("[ai] execute failed:", e);
             syncExecutionStatus();
@@ -287,7 +287,7 @@
                 {#if result.early_terminated}<span class="warn">{t("ai.cmd.warn.early_terminated")}</span>{/if}
                 {#if result.truncated_bytes > 0}<span class="warn">{t("ai.cmd.warn.truncated", { bytes: result.truncated_bytes })}</span>{/if}
             </div>
-            <pre class="output">{result.output || t("ai.cmd.empty_output")}</pre>
+            <pre class="output">{commandOutput(result.output, result.exit_code) || t("ai.cmd.empty_output")}</pre>
         </div>
     {/if}
 </div>

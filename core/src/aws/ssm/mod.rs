@@ -25,6 +25,7 @@ use crate::aws::{
 use crate::error::{locked, AppError, AppResult};
 use crate::models::ConnectorSpec;
 use crate::resource::{Cleanup, CleanupFuture, CleanupHandle, OpenedResource, PendingOperation};
+use crate::terminal::capture::OutputTap;
 use codec::*;
 use crypto::Encryption;
 
@@ -349,6 +350,7 @@ impl Cleanup for Control {
 
 #[derive(Clone)]
 pub struct SsmHandle {
+    pub(crate) capture: OutputTap,
     control: Arc<Control>,
     input: mpsc::Sender<Input>,
     output: broadcast::Sender<Vec<u8>>,
@@ -474,7 +476,18 @@ async fn open_with_service(
     // This precedes spawning or StartSession. Dropping the opening future
     // leaves the registry owning the actor and its eventual AWS session ID.
     operation.retain_cleanup(CleanupHandle::new(control.clone()))?;
+    let capture = OutputTap::default();
+    let reader_capture = capture.clone();
+    let sink: SsmSink = Arc::new(move |id, event| match event {
+        SsmOut::Data(data) => reader_capture.publish(data, |bytes| sink(id, SsmOut::Data(bytes))),
+        SsmOut::Close => {
+            reader_capture.close();
+            sink(id, event);
+        }
+        SsmOut::Error(_) => sink(id, event),
+    });
     let handle = SsmHandle {
+        capture,
         control: control.clone(),
         input,
         output: output.clone(),

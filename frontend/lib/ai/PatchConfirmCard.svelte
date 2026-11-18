@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onDestroy, onMount } from "svelte";
     import * as ai from "./store.svelte.ts";
+    import { commandOutput } from "./format.ts";
     import { commandApprovals, isAutoApprovalAllowed } from "./command-approval.ts";
     import type { SessionInstanceRef } from "./session-identity.ts";
     import { t, errMsg } from "../i18n/index.svelte.ts";
@@ -22,12 +23,6 @@
         return t(STEP_KEY[step] ?? "ai.patch.tag");
     }
 
-    // Dedicated PTY execution card for patch_file (cp / modify / diff / mv).
-    // Independent data model (PatchProposal) but reuses the shared PTY runner:
-    // approve hands proposal.execution to executeCommand, which is the whole
-    // point of the PtyExecution envelope split. Terminate / submit / result-
-    // delivery-retry mirror CommandConfirmDialog because a patch step is a real
-    // PTY command, not an ack-only tool.
     let { tabId, instanceId, targetKind, targetSessionId, proposal, result, rejected, active } = $props<{
         tabId: string;
         instanceId: string;
@@ -139,9 +134,9 @@
         executing = true;
         transportRunning = !retryingResultDelivery;
         try {
-            const liveTargetSessionId = targetSessionId;
+            const liveTargetSessionId = proposal.target_session_id ?? targetSessionId;
             if (!liveTargetSessionId) throw new Error(t("common.disconnected"));
-            await ai.executeCommand(session, proposal.id, proposal.execution, targetKind, liveTargetSessionId);
+            await ai.executeCommand(session, proposal.id, liveTargetSessionId);
         } catch (e) {
             console.error("[ai] patch execute failed:", e);
             syncExecutionStatus();
@@ -281,7 +276,7 @@
                 {#if result.early_terminated}<span class="warn">{t("ai.cmd.warn.early_terminated")}</span>{/if}
                 {#if result.truncated_bytes > 0}<span class="warn">{t("ai.cmd.warn.truncated", { bytes: result.truncated_bytes })}</span>{/if}
             </div>
-            <pre class="output">{result.output || t("ai.cmd.empty_output")}</pre>
+            <pre class="output">{commandOutput(result.output, result.exit_code) || t("ai.cmd.empty_output")}</pre>
         </div>
     {/if}
 </div>

@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onDestroy, onMount } from "svelte";
     import * as ai from "./store.svelte.ts";
+    import { commandOutput } from "./format.ts";
     import { commandApprovals, isAutoApprovalAllowed } from "./command-approval.ts";
     import type { SessionInstanceRef } from "./session-identity.ts";
     import { t, errMsg } from "../i18n/index.svelte.ts";
@@ -8,11 +9,6 @@
     import type { AiTargetKind, CommandResult, MatchProposal } from "./types.ts";
     import { isRawDeviceKind } from "./types.ts";
 
-    // Dedicated PTY execution card for match_file (read-only search). Like
-    // PatchConfirmCard it reuses the shared runner: approve hands
-    // proposal.execution to executeCommand. Read-only and low-risk, so it has
-    // its own auto-approval toggle (auto_match_file) and is the only tool that
-    // reasonably defaults to auto-run.
     let { tabId, instanceId, targetKind, targetSessionId, proposal, result, rejected, active } = $props<{
         tabId: string;
         instanceId: string;
@@ -108,9 +104,9 @@
         executing = true;
         transportRunning = !retryingResultDelivery;
         try {
-            const liveTargetSessionId = targetSessionId;
+            const liveTargetSessionId = proposal.target_session_id ?? targetSessionId;
             if (!liveTargetSessionId) throw new Error(t("common.disconnected"));
-            await ai.executeCommand(session, proposal.id, proposal.execution, targetKind, liveTargetSessionId);
+            await ai.executeCommand(session, proposal.id, liveTargetSessionId);
         } catch (e) {
             console.error("[ai] match execute failed:", e);
             syncExecutionStatus();
@@ -233,7 +229,7 @@
                 {#if result.early_terminated}<span class="warn">{t("ai.cmd.warn.early_terminated")}</span>{/if}
                 {#if result.truncated_bytes > 0}<span class="warn">{t("ai.cmd.warn.truncated", { bytes: result.truncated_bytes })}</span>{/if}
             </div>
-            <pre class="output">{result.output || t("ai.cmd.empty_output")}</pre>
+            <pre class="output">{commandOutput(result.output, result.exit_code) || t("ai.cmd.empty_output")}</pre>
         </div>
     {/if}
 </div>

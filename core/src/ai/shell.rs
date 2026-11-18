@@ -58,12 +58,7 @@ impl ShellKind {
     /// Generate a fresh sentinel marker (UUID-simple) and the full command
     /// line to paste into the user's terminal. Returns `(marker, full_cmd)`.
     ///
-    /// Why this pair must be atomic: marker is what the front-end greps
-    /// for in PTY output; full_cmd is what carries the marker into shell
-    /// output. If a caller generated a marker but forgot to use it when
-    /// building full_cmd (or vice versa), the front-end would silently
-    /// timeout instead of seeing a sentinel. Returning both from one
-    /// function makes that bug unreachable.
+    /// The transport collector watches for the same marker the shell emits.
     pub fn sentinel_command(self, cmd: &str) -> (String, String) {
         // Raw devices (serial/telnet) have no shell: no `;`/`echo`/`$?` to carry
         // a marker. Paste the raw command; completion comes from the user
@@ -77,10 +72,7 @@ impl ShellKind {
         (marker, full)
     }
 
-    /// Build the line we paste into the user's terminal: their command +
-    /// a marker echo line that carries the exit code. The front-end
-    /// `findSentinel` regex `<marker>:(-?\d+)` matches the marker
-    /// regardless of surrounding quotes.
+    /// Append the shell-specific marker and exit-code expression to the command.
     ///
     /// Most callers want `sentinel_command()` (which also generates the
     /// marker UUID). This raw form exists for tests that need a fixed
@@ -99,7 +91,7 @@ impl ShellKind {
             // `$LASTEXITCODE` is set ONLY by *native* (external) programs; after
             // a pure cmdlet (Get-X / Set-X) it is left untouched, and on a fresh session it is
             // `$null`. `$null` interpolates to empty, so the naive
-            // `marker:$LASTEXITCODE` yields `marker:` (no digit) → the front-end
+            // `marker:$LASTEXITCODE` yields `marker:` (no digit) → the collector
             // sentinel regex `:(-?\d+)` never matches → the command false-times-out
             // after 60s even though it succeeded.
             //
@@ -390,7 +382,7 @@ mod tests {
     #[test]
     fn format_sentinel_powershell_guards_null_lastexitcode() {
         // Regression: a pure cmdlet (Get-Process) leaves $LASTEXITCODE at $null,
-        // which interpolates to an empty exit-code field — the front-end sentinel
+        // which interpolates to an empty exit-code field — the collector sentinel
         // regex `:(-?\d+)` then never matches and the command false-times-out after
         // 60s. The template must (a) reset $LASTEXITCODE so a prior native command's
         // code can't leak into a later cmdlet, (b) snapshot the cmdlet success flag
@@ -550,7 +542,7 @@ mod tests {
     #[test]
     fn sentinel_command_marker_appears_in_full_cmd() {
         // The marker must show up verbatim inside full_cmd, otherwise the
-        // front-end can never match the sentinel. This is the invariant
+        // collector can never match the sentinel. This is the invariant
         // that makes the (marker, full_cmd) pair "atomic".
         let (m, full) = ShellKind::Cmd.sentinel_command("ipconfig");
         assert!(full.contains(&m), "marker {m:?} missing from full {full:?}");

@@ -1350,6 +1350,16 @@ async fn dispatch_async(
             args.get("instanceId").and_then(Value::as_str),
         )
         .await),
+        "ai_terminal_command" => ok(crate::ai::commands::ai_terminal_command(
+            owner.clone(),
+            state,
+            arg(&args, "tabId")?,
+            arg(&args, "instanceId")?,
+            arg(&args, "toolCallId")?,
+            arg(&args, "targetSessionId")?,
+            arg(&args, "action")?,
+        )
+        .await),
         "ai_command_result" => ok(crate::ai::commands::ai_command_result_impl(
             state,
             &arg::<String>(&args, "tabId")?,

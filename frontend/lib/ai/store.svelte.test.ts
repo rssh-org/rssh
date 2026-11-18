@@ -2230,7 +2230,7 @@ describe("tab lifecycle", () => {
     const reportGate = new Promise<void>((resolve) => { resolveReport = resolve; });
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "ai_session_start") return { ...info, target_id: "raw-target" };
-      if (command === "ai_command_result") return reportGate;
+      if (command === "ai_terminal_command") return reportGate;
       return null;
     });
     await ai.startSession({ ...args, targetKind: "telnet", targetId: "raw-target", lease: ai.captureSessionLease("tab-a") });
@@ -2251,7 +2251,7 @@ describe("tab lifecycle", () => {
     };
     proposedListener?.({ payload: proposed });
     const session = { tabId: "tab-a", instanceId: "instance-a" };
-    const executing = ai.executeCommand(session, proposed.id, proposed.execution, "telnet", "raw-target");
+    const executing = ai.executeCommand(session, proposed.id, "raw-target");
     await vi.waitFor(() => expect(ai.isCommandRunning(session, "command-ack-race")).toBe(true));
     const submitting = ai.submitCommand(session, "command-ack-race");
     await vi.waitFor(() => expect(ai.commandExecutionStatus(session, "command-ack-race"))
@@ -2276,125 +2276,27 @@ describe("tab lifecycle", () => {
     expect(ai.commandExecutionStatus(session, "command-ack-race")).toBeNull();
   });
 
-  it("redelivers an internal command's recorded result without synthesizing a second payload", async () => {
+  it("retries an internal probe by its original ID after a lost acknowledgement", async () => {
     vi.resetModules();
     const ai = await import("./store.svelte.ts");
     await registerIdleTerminals("tab-a");
     ai.activateTab("tab-a");
-    ai.openPanel("tab-a");
-    const rawInfo = { ...info, target_id: "raw-target" };
-    let reportAttempts = 0;
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "ai_session_start") return rawInfo;
-      if (command === "ai_command_result") {
-        reportAttempts += 1;
-        if (reportAttempts === 1) throw new Error("result delivery unavailable");
-      }
-      return null;
-    });
-    const lease = ai.captureSessionLease("tab-a");
-    await ai.startSession({
-      ...args,
-      targetKind: "telnet",
-      targetId: "raw-target",
-      lease,
-    });
-    const internalListener = listenMock.mock.calls.find(
-      ([event]) => event === "ai:internal_command:tab-a",
-    )?.[1];
-    internalListener?.({
-      payload: {
-        id: "probe-command",
-        tool_call_id: "probe-tool",
-        cmd: "show capabilities",
-        full_cmd: "show capabilities",
-        sentinel: "unused-for-raw-device",
-      },
-    });
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
-      "telnet_write_line",
-      { sessionId: "raw-target", text: "show capabilities" },
-    ));
-    const session = { tabId: "tab-a", instanceId: "instance-a" };
-
-    await expect(ai.submitCommand(session, "probe-command"))
-      .rejects.toThrow("result delivery unavailable");
-    await vi.waitFor(() => expect(invokeMock.mock.calls.filter(
-      ([command]) => command === "ai_command_result",
-    )).toHaveLength(2));
-    await vi.waitFor(() => expect(ai.commandExecutionStatus(session, "probe-command"))
-      .toBeNull());
-
-    expect(invokeMock.mock.calls.filter(
-      ([command]) => command === "telnet_write_line",
-    )).toHaveLength(1);
-    const reports = invokeMock.mock.calls
-      .filter(([command]) => command === "ai_command_result")
-      .map(([, call]) => call);
-    expect(reports).toHaveLength(2);
-    expect(reports[1]).toEqual(reports[0]);
-    expect(reports[0]).toEqual(expect.objectContaining({
-      tabId: "tab-a",
-      instanceId: "instance-a",
-      toolCallId: "probe-command",
-      exitCode: 0,
-      earlyTerminated: false,
-    }));
-  });
-
-  it("synthesizes an internal failure only when command transport setup never started", async () => {
-    vi.resetModules();
-    const ai = await import("./store.svelte.ts");
-    await registerIdleTerminals("tab-a");
-    ai.activateTab("tab-a");
-    ai.openPanel("tab-a");
-    const rawInfo = { ...info, target_id: "raw-target" };
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "ai_session_start") return rawInfo;
-      return null;
-    });
-    listenMock.mockImplementation(async (event: string) => {
-      if (event === "telnet:data:raw-target") throw new Error("listen unavailable");
-      return unlistenMock;
-    });
-    await ai.startSession({
-      ...args,
-      targetKind: "telnet",
-      targetId: "raw-target",
-      lease: ai.captureSessionLease("tab-a"),
-    });
-    const internalListener = listenMock.mock.calls.find(
-      ([event]) => event === "ai:internal_command:tab-a",
-    )?.[1];
-
-    internalListener?.({
-      payload: {
-        id: "probe-setup",
-        tool_call_id: "tool-setup",
-        cmd: "show capabilities",
-        full_cmd: "show capabilities",
-        sentinel: "unused-for-raw-device",
-      },
-    });
-
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
-      "ai_command_result",
-      expect.objectContaining({
-        tabId: "tab-a",
-        instanceId: "instance-a",
-        toolCallId: "probe-setup",
-        exitCode: -1,
-        output: "listen unavailable",
-      }),
-    ));
-    expect(invokeMock.mock.calls.some(
-      ([command]) => command === "telnet_write_line",
-    )).toBe(false);
+    invokeMock.mockResolvedValueOnce(info);
+    await ai.startSession({ ...args, lease: ai.captureSessionLease("tab-a") });
+    invokeMock.mockClear();
+    invokeMock.mockRejectedValueOnce(new Error("response lost"));
+    const probe = listenMock.mock.calls.find(([event]) => event === "ai:internal_command:tab-a")![1];
+    probe({ payload: { id: "probe" } });
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    expect(invokeMock.mock.calls[0]).toEqual(["ai_terminal_command", {
+      tabId: "tab-a", instanceId: info.instance_id, targetSessionId: info.target_id,
+      toolCallId: "probe", action: { kind: "approve", bracketedPaste: false },
+    }]);
+    expect(invokeMock.mock.calls[1]).toEqual(invokeMock.mock.calls[0]);
   });
 });
 
 describe("executeCommand", () => {
-  const guardedExecution = { full_cmd: "echo test", sentinel: "sentinel", timeout_s: 30 };
   const guardedSession = { tabId: "guarded-tab", instanceId: "guarded-instance" };
 
   async function startExecutionSession(
@@ -2412,492 +2314,146 @@ describe("executeCommand", () => {
     }, "request");
     const proposed = listenMock.mock.calls.find(([event]) => event === `ai:command_proposed:${session.tabId}`)![1];
     const rejected = listenMock.mock.calls.find(([event]) => event === `ai:command_rejected:${session.tabId}`)![1];
+    const assistantStart = listenMock.mock.calls.find(([event]) => event === `ai:assistant_message_start:${session.tabId}`)![1];
     invokeMock.mockClear();
     listenMock.mockClear();
-    return { proposed, rejected };
+    return { proposed, rejected, assistantStart };
   }
 
-  it.each(["missing", "closed", "replaced"])("refuses a %s terminal before writing", async (change) => {
-    vi.resetModules();
-    const ai = await import("./store.svelte.ts");
-    await startExecutionSession(ai);
-    const screen = await import("../terminal/alternate-screen.ts");
-    if (change !== "missing") {
-      screen.registerAlternateScreenProvider(guardedSession.tabId, () => false);
-      listenMock.mockImplementationOnce(async () => {
-        if (change === "closed") screen.unregisterAlternateScreenProvider(guardedSession.tabId);
-        else screen.registerAlternateScreenProvider(guardedSession.tabId, () => false);
-        return unlistenMock;
-      });
-    }
-    await ai.executeCommand(guardedSession, "stale", guardedExecution, "local", "target");
-    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_command_result"]);
-    expect(invokeMock).toHaveBeenCalledWith("ai_command_result", expect.objectContaining({
-      output: expect.stringContaining("closed or replaced"), exitCode: -1,
-    }));
-  });
-
-  it("backend rejection cancels pending setup without a late write or a second result", async () => {
-    vi.resetModules();
-    const ai = await import("./store.svelte.ts");
-    const { proposed, rejected } = await startExecutionSession(ai);
-    await registerIdleTerminals(guardedSession.tabId);
-    proposed({ payload: { id: "cancel", kind: "run_command", cmd: "echo test", execution: guardedExecution } });
-    let registered!: (unlisten: () => void) => void;
-    listenMock.mockImplementationOnce(() => new Promise(resolve => { registered = resolve; }));
-    const running = ai.executeCommand(guardedSession, "cancel", guardedExecution, "local", "target");
-    rejected({ payload: { id: "cancel", reason: "cancelled" } });
-    registered(unlistenMock);
-    await running;
-    expect(unlistenMock).toHaveBeenCalledOnce();
-    expect(invokeMock).not.toHaveBeenCalled();
-    expect(ai.commandExecutionStatus(guardedSession, "cancel")).toBeNull();
-  });
-
-  it.each(["local", "serial", "telnet", "rebound"] as const)(
-    "backend rejection settles %s execution and only interrupts the original shell", async (target) => {
-      vi.resetModules();
-      const ai = await import("./store.svelte.ts");
-      const { proposed, rejected } = await startExecutionSession(ai);
-      await registerIdleTerminals(guardedSession.tabId);
-      proposed({ payload: { id: "cancel", kind: "run_command", cmd: "echo test", execution: guardedExecution } });
-      const kind = target === "rebound" ? "local" : target;
-      const running = ai.executeCommand(guardedSession, "cancel", guardedExecution, kind, "target");
-      await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledOnce());
-      if (target === "rebound") {
-        await ai.rebindTarget(guardedSession.tabId, "local", "replacement", ai.captureSessionLease(guardedSession.tabId));
-      }
-      invokeMock.mockClear();
-      rejected({ payload: { id: "cancel", reason: "cancelled" } });
-      await running;
-      expect(ai.commandExecutionStatus(guardedSession, "cancel")).toBeNull();
-      expect(invokeMock.mock.calls).toEqual(target === "local" ? [["pty_write", { sessionId: "target", data: [3] }]] : []);
-      expect(ai.chatItems(guardedSession.tabId)).toEqual([expect.objectContaining({ rejected: { reason: "cancelled" } })]);
-    },
-  );
-
-  it.each(["sentinel", "timeout"])("retries a failed %s result without writing or leaking a rejection", async (completion) => {
+  it("sends only the card identity and parsed terminal mode on approval", async () => {
     vi.resetModules();
     const ai = await import("./store.svelte.ts");
     await startExecutionSession(ai);
     await registerIdleTerminals(guardedSession.tabId);
-    invokeMock.mockImplementation(async command => {
-      if (command === "ai_command_result") throw new Error("ack unavailable");
-      return null;
-    });
-    const running = ai.executeCommand(guardedSession, "result", guardedExecution, "local", "target");
-    const failure = expect(running).rejects.toThrow("ack unavailable");
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("pty_write", expect.anything()));
-    const output = listenMock.mock.calls.find(([event]) => event === "pty:data:target")![1];
-    output({ payload: Buffer.from(`echo test\r\nhello\r\n${completion === "sentinel" ? "sentinel:0\r\n" : ""}`).toString("base64") });
-    if (completion === "timeout") await vi.advanceTimersByTimeAsync(30000);
-    await failure;
-    expect(ai.commandExecutionStatus(guardedSession, "result")).toBe("delivery_failed");
-    invokeMock.mockResolvedValue(null);
-    await ai.executeCommand(guardedSession, "result", guardedExecution, "local", "target");
-    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["pty_write", "ai_command_result", "ai_command_result"]);
-    expect(invokeMock.mock.calls[2][1]).toEqual(invokeMock.mock.calls[1][1]);
-    expect(invokeMock.mock.calls[2][1]).toEqual(expect.objectContaining({ output: "hello", timedOut: completion === "timeout" }));
-  });
-
-  it("rechecks the actor target after the output listener is installed", async () => {
-    vi.resetModules();
-    const ai = await import("./store.svelte.ts");
-    await startExecutionSession(ai);
-    await registerIdleTerminals(guardedSession.tabId);
-    listenMock.mockImplementationOnce(async () => {
-      await ai.rebindTarget(guardedSession.tabId, "local", "replacement", ai.captureSessionLease(guardedSession.tabId));
-      return unlistenMock;
-    });
-    await ai.executeCommand(guardedSession, "old-target", guardedExecution, "local", "target");
-    expect(invokeMock).not.toHaveBeenCalledWith("pty_write", expect.anything());
-    expect(invokeMock).toHaveBeenCalledWith("ai_command_result", expect.objectContaining({
-      output: expect.stringContaining("closed or replaced"), exitCode: -1,
-    }));
-  });
-
-  it.each(["ssh", "local", "serial", "telnet"] as const)(
-    "returns an LLM-visible error without writing to an alternate-screen %s terminal", async (kind) => {
-      vi.resetModules();
-      const ai = await import("./store.svelte.ts");
-      await startExecutionSession(ai);
-      const screen = await import("../terminal/alternate-screen.ts");
-      screen.registerAlternateScreenProvider(guardedSession.tabId, () => true);
-
-      await ai.executeCommand(guardedSession, "blocked", guardedExecution, kind, "target");
-      expect(unlistenMock).toHaveBeenCalledOnce();
-      expect(invokeMock.mock.calls).toEqual([["ai_command_result", {
-        ...guardedSession, toolCallId: "blocked", exitCode: -1,
-        output: expect.stringContaining("alternate screen mode"),
-        timedOut: false, earlyTerminated: false,
-      }]]);
-      expect(ai.commandExecutionStatus(guardedSession, "blocked")).toBe("delivered");
-      expect(vi.getTimerCount()).toBe(0);
-    },
-  );
-
-  it("checks alternate screen after asynchronous listener registration", async () => {
-    vi.resetModules();
-    const ai = await import("./store.svelte.ts");
-    await startExecutionSession(ai);
-    const screen = await import("../terminal/alternate-screen.ts");
-    let alternate = false;
-    screen.registerAlternateScreenProvider(guardedSession.tabId, () => alternate);
-    listenMock.mockImplementation(async () => {
-      alternate = true;
-      return unlistenMock;
-    });
-
-    await ai.executeCommand(guardedSession, "race", guardedExecution, "ssh", "target");
-    expect(unlistenMock).toHaveBeenCalledOnce();
-    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_command_result"]);
+    const { registerBracketedPasteProvider } = await import("../terminal/bracketed-paste.ts");
+    registerBracketedPasteProvider(guardedSession.tabId, () => true);
+    const approve = () => ai.executeCommand(guardedSession, "step", "target");
+    await Promise.all([approve(), approve()]);
+    await approve();
+    expect(invokeMock.mock.calls).toEqual([["ai_terminal_command", {
+      ...guardedSession, toolCallId: "step", targetSessionId: "target",
+      action: { kind: "approve", bracketedPaste: true },
+    }]]);
+    expect(listenMock).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("retries refusal delivery without executing even after returning to the normal screen", async () => {
+  it.each(["missing", "replaced", "rebound"] as const)("blocks approval for a %s terminal", async change => {
     vi.resetModules();
     const ai = await import("./store.svelte.ts");
     await startExecutionSession(ai);
     const screen = await import("../terminal/alternate-screen.ts");
-    let alternate = true;
-    screen.registerAlternateScreenProvider(guardedSession.tabId, () => alternate);
-    invokeMock.mockRejectedValueOnce(new Error("delivery failed"));
-    await expect(ai.executeCommand(guardedSession, "retry", guardedExecution, "local", "target"))
-      .rejects.toThrow("delivery failed");
-    expect(ai.commandExecutionStatus(guardedSession, "retry")).toBe("delivery_failed");
-    alternate = false;
-    listenMock.mockClear();
-
-    await ai.executeCommand(guardedSession, "retry", guardedExecution, "local", "target");
-    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_command_result", "ai_command_result"]);
-    expect(invokeMock.mock.calls[1][1]).toEqual(invokeMock.mock.calls[0][1]);
-    expect(listenMock).not.toHaveBeenCalled();
-  });
-
-  it("allows a new command after leaving alternate screen and ignores other tabs", async () => {
-    vi.resetModules();
-    const ai = await import("./store.svelte.ts");
-    await startExecutionSession(ai);
-    const screen = await import("../terminal/alternate-screen.ts");
-    let alternate = true;
-    screen.registerAlternateScreenProvider("another-tab", () => true);
-    screen.registerAlternateScreenProvider(guardedSession.tabId, () => alternate);
-    await ai.executeCommand(guardedSession, "old", guardedExecution, "telnet", "target");
-    alternate = false;
-    const running = ai.executeCommand(guardedSession, "new", guardedExecution, "telnet", "target");
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("telnet_write_line", {
-      sessionId: "target", text: "echo test",
-    }));
-    await ai.submitCommand(guardedSession, "new");
-    await running;
-  });
-
-  it.each([true, false])("checks run_command arrival without waiting for approval (alternate=%s)", async (alternate) => {
-    vi.resetModules();
-    const ai = await import("./store.svelte.ts");
-    const screen = await import("../terminal/alternate-screen.ts");
-    ai.activateTab(guardedSession.tabId);
-    screen.registerAlternateScreenProvider(guardedSession.tabId, () => alternate);
-    invokeMock.mockImplementation(async (cmd) => cmd === "ai_session_start" ? {
-      tab_id: guardedSession.tabId, instance_id: guardedSession.instanceId,
-      target_id: "target", skill: "general", model: "model", provider: "openai", conversation_id: "conversation",
-    } : null);
-    await ai.startSession({ tabId: guardedSession.tabId, targetKind: "ssh", targetId: "target",
-      skill: "general", provider: "openai", model: "model", lease: ai.captureSessionLease(guardedSession.tabId) });
-    const proposed = listenMock.mock.calls.find(([event]) => event === "ai:command_proposed:guarded-tab")![1];
-    invokeMock.mockClear();
-    proposed({ payload: { id: "arrival", kind: "run_command", cmd: "echo test", execution: guardedExecution } });
-    if (alternate) {
-      await vi.waitFor(() => expect(ai.commandExecutionStatus(guardedSession, "arrival")).toBe("delivered"));
-      expect(invokeMock.mock.calls).toEqual([["ai_command_result", expect.objectContaining({
-        ...guardedSession, toolCallId: "arrival", exitCode: -1,
-        output: expect.stringContaining("Command was not executed"),
-      })]]);
-    } else {
-      expect(invokeMock).not.toHaveBeenCalled();
-      expect(ai.pendingCommand(guardedSession.tabId)?.id).toBe("arrival");
+    let drain!: (ready: boolean) => void;
+    if (change !== "missing") {
+      screen.registerAlternateScreenProvider(guardedSession.tabId, () => false, {
+        flush: () => new Promise(resolve => { drain = resolve; }), pendingBytes: () => 0,
+      });
     }
-  });
-
-  it.each([
-    ["serial" as const, "serial_write"],
-    ["telnet" as const, "telnet_write"],
-  ])("does not inject Ctrl+C into a %s device during panel close", async (kind, writeCommand) => {
-    vi.resetModules();
-    const ai = await import("./store.svelte.ts");
-    await registerIdleTerminals("tab-a");
-    ai.activateTab("tab-a");
-    ai.openPanel("tab-a");
-    const sessionInfo = {
-      tab_id: "tab-a",
-      instance_id: "instance-a",
-      target_id: "raw-target",
-      skill: "general",
-      model: "gpt-test",
-      provider: "openai" as const,
-      conversation_id: "conversation-a",
-    };
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "ai_session_start") return sessionInfo;
-      return null;
-    });
-    const lease = ai.captureSessionLease("tab-a");
-    await ai.startSession({
-      tabId: "tab-a",
-      targetKind: kind,
-      targetId: "raw-target",
-      skill: "general",
-      provider: "openai",
-      model: "gpt-test",
-      lease,
-    });
-    const session = { tabId: "tab-a", instanceId: "instance-a" };
-    const proposed = {
-      id: "cmd-close",
-      tool_call_id: "tool-close",
-      cmd: "show version",
-      explain: "",
-      side_effect: "none",
-      execution: { full_cmd: "show version", sentinel: "unused-for-raw-device", timeout_s: 30 },
-    };
-    const running = ai.executeCommand(session, proposed.id, proposed.execution, kind, "raw-target");
-    await vi.waitFor(() => expect(ai.isCommandRunning(session, "cmd-close")).toBe(true));
-
-    await ai.closePanel("tab-a");
-    await running;
-
-    expect(invokeMock).not.toHaveBeenCalledWith(writeCommand, {
-      sessionId: "raw-target",
-      data: [3],
-    });
-    expect(invokeMock).toHaveBeenCalledWith("ai_command_result", expect.objectContaining({
-      tabId: "tab-a",
-      instanceId: "instance-a",
-      toolCallId: "cmd-close",
-      earlyTerminated: true,
+    const pending = ai.executeCommand(guardedSession, "cmd", "target");
+    if (change === "replaced") await registerIdleTerminals(guardedSession.tabId);
+    if (change === "rebound") {
+      await ai.rebindTarget(guardedSession.tabId, "local", "new", ai.captureSessionLease(guardedSession.tabId));
+    }
+    drain?.(true);
+    await pending;
+    expect(invokeMock).toHaveBeenLastCalledWith("ai_terminal_command", expect.objectContaining({
+      targetSessionId: "target", action: { kind: "blocked", reason: expect.stringContaining("closed or replaced") },
     }));
-    const resultIndex = invokeMock.mock.calls.findIndex(
-      ([command]) => command === "ai_command_result",
-    );
-    const prepareIndex = invokeMock.mock.calls.findIndex(
-      ([command]) => command === "ai_session_prepare_stop",
-    );
-    expect(resultIndex).toBeLessThan(prepareIndex);
   });
 
-  it("retries failed result delivery without replaying the transport", async () => {
+  it("keeps a refused approval refused when retrying after an IPC failure", async () => {
     vi.resetModules();
     const ai = await import("./store.svelte.ts");
-    await registerIdleTerminals("tab-1");
-    await startExecutionSession(ai, { tabId: "tab-1", instanceId: "instance-1" }, "target-1");
-    let reportAttempts = 0;
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "ai_command_result") {
-        reportAttempts += 1;
-        if (reportAttempts === 1) throw new Error("result store unavailable");
-      }
-      return null;
-    });
-    const session = { tabId: "tab-1", instanceId: "instance-1" };
-    const proposed = {
-      id: "cmd-once",
-      tool_call_id: "tool-once",
-      cmd: "dangerous command",
-      explain: "",
-      side_effect: "destructive",
-      execution: { full_cmd: "dangerous command", sentinel: "unused-for-telnet", timeout_s: 30 },
-    };
-
-    const running = ai.executeCommand(session, proposed.id, proposed.execution, "telnet", "target-1");
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
-      "telnet_write_line",
-      { sessionId: "target-1", text: "dangerous command" },
-    ));
-    const submitting = ai.submitCommand(session, "cmd-once");
-    await expect(running).rejects.toThrow("result store unavailable");
-    await expect(submitting).rejects.toThrow("result store unavailable");
-    expect(ai.commandExecutionStatus(session, "cmd-once")).toBe("delivery_failed");
-
-    await ai.executeCommand(session, proposed.id, proposed.execution, "telnet", "target-1");
-
-    expect(invokeMock.mock.calls.filter(
-      ([command]) => command === "telnet_write_line",
-    )).toHaveLength(1);
-    expect(invokeMock.mock.calls.filter(
-      ([command]) => command === "ai_command_result",
-    )).toHaveLength(2);
-    expect(ai.commandExecutionStatus(session, "cmd-once")).toBe("delivered");
+    await startExecutionSession(ai);
+    const screen = await import("../terminal/alternate-screen.ts");
+    let alternate = true;
+    screen.registerAlternateScreenProvider(guardedSession.tabId, () => alternate);
+    invokeMock.mockRejectedValueOnce(new Error("lost response"));
+    const approve = () => ai.executeCommand(guardedSession, "cmd", "target");
+    await expect(approve()).rejects.toThrow("lost response");
+    alternate = false;
+    await approve();
+    expect(invokeMock.mock.calls).toHaveLength(2);
+    expect(invokeMock.mock.calls[1]).toEqual(invokeMock.mock.calls[0]);
+    expect(invokeMock.mock.calls[1][1]).toMatchObject({ action: { kind: "blocked" } });
   });
 
-  it("uses each sequential card id as its sole backend correlation", async () => {
+  it.each(["stop", "submit"] as const)("sends %s for the original card and target", async kind => {
     vi.resetModules();
     const ai = await import("./store.svelte.ts");
-    await registerIdleTerminals("tab-1");
-    await startExecutionSession(ai, { tabId: "tab-1", instanceId: "instance-1" }, "target-1");
-    const session = { tabId: "tab-1", instanceId: "instance-1" };
-    const proposed = (id: string) => ({
-      id,
-      tool_call_id: "patch-tool",
-      cmd: id,
-      explain: "",
-      side_effect: "",
-      execution: { full_cmd: id, sentinel: "unused-for-telnet", timeout_s: 30 },
-    });
-
-    const first = ai.executeCommand(session, proposed("patch-cp").id, proposed("patch-cp").execution, "telnet", "target-1");
-    await vi.waitFor(() => expect(ai.isCommandRunning(session, "patch-cp")).toBe(true));
-    await ai.submitCommand(session, "patch-cp");
-    await first;
-    expect(ai.commandExecutionStatus(session, "patch-cp")).toBe("delivered");
-
-    // The first card deliberately remains in the delivered registry: its
-    // command_completed callback has not run yet. A later card from the same
-    // patch_file tool call must still own a fresh transport slot.
-    const second = ai.executeCommand(session, proposed("patch-modify").id, proposed("patch-modify").execution, "telnet", "target-1");
-    await vi.waitFor(() => expect(ai.isCommandRunning(session, "patch-modify")).toBe(true));
-    await ai.submitCommand(session, "patch-modify");
-    await second;
-
-    expect(invokeMock.mock.calls.filter(
-      ([command]) => command === "telnet_write_line",
-    )).toHaveLength(2);
-    const reports = invokeMock.mock.calls
-      .filter(([command]) => command === "ai_command_result")
-      .map(([, args]) => args);
-    expect(reports).toEqual([
-      expect.objectContaining({
-        toolCallId: "patch-cp",
-      }),
-      expect.objectContaining({
-        toolCallId: "patch-modify",
-      }),
-    ]);
-    expect(reports.every((report) => !("commandId" in (report as object)))).toBe(true);
+    await startExecutionSession(ai);
+    await registerIdleTerminals(guardedSession.tabId);
+    let complete!: () => void;
+    invokeMock.mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve; }));
+    const run = ai.executeCommand(guardedSession, "cmd", "target");
+    expect(ai.isCommandRunning(guardedSession, "cmd")).toBe(true);
+    const action = kind === "stop" ? ai.terminateCommand : ai.submitCommand;
+    await action(guardedSession, "cmd");
+    complete();
+    await run;
+    expect(invokeMock.mock.calls).toHaveLength(2);
+    expect(invokeMock.mock.calls[1]).toEqual(["ai_terminal_command", {
+      ...guardedSession, toolCallId: "cmd", targetSessionId: "target", action: { kind },
+    }]);
   });
 
-  it("keeps identical tool call ids isolated by session instance", async () => {
+  it.each(["blocked", "approve"] as const)("closes after a lost %s acknowledgement without granting a new approval", async kind => {
     vi.resetModules();
     const ai = await import("./store.svelte.ts");
-    await registerIdleTerminals("tab-a", "tab-b");
-    await startExecutionSession(ai, { tabId: "tab-a", instanceId: "instance-a" }, "target-a");
-    await startExecutionSession(ai, { tabId: "tab-b", instanceId: "instance-b" }, "target-b");
-    const proposed = {
-      id: "cmd-shared",
-      tool_call_id: "call-0",
-      cmd: "show version",
-      explain: "",
-      side_effect: "none",
-      execution: { full_cmd: "show version", sentinel: "unused-for-raw-devices", timeout_s: 30 },
-    };
-    const sessionA = { tabId: "tab-a", instanceId: "instance-a" };
-    const sessionB = { tabId: "tab-b", instanceId: "instance-b" };
-
-    const runningA = ai.executeCommand(sessionA, proposed.id, proposed.execution, "telnet", "target-a");
-    await vi.waitFor(() => expect(ai.isCommandRunning(sessionA, "cmd-shared")).toBe(true));
-
-    expect(ai.isCommandRunning(sessionB, "cmd-shared")).toBe(false);
-    const runningB = ai.executeCommand(sessionB, proposed.id, proposed.execution, "telnet", "target-b");
-    await vi.waitFor(() => expect(ai.isCommandRunning(sessionB, "cmd-shared")).toBe(true));
-
-    await ai.submitCommand(sessionB, "cmd-shared");
-    await runningB;
-    expect(ai.isCommandRunning(sessionA, "cmd-shared")).toBe(true);
-    expect(ai.isCommandRunning(sessionB, "cmd-shared")).toBe(false);
-
-    await ai.submitCommand(sessionA, "cmd-shared");
-    await runningA;
+    await startExecutionSession(ai);
+    const screen = await import("../terminal/alternate-screen.ts");
+    screen.registerAlternateScreenProvider(guardedSession.tabId, () => kind === "blocked");
+    invokeMock.mockRejectedValueOnce(new Error("ack lost"));
+    await expect(ai.executeCommand(guardedSession, "cmd", "target")).rejects.toThrow("ack lost");
+    await ai.stopSession(guardedSession.tabId);
+    const actions = invokeMock.mock.calls.filter(([name]) => name === "ai_terminal_command")
+      .map(([, args]) => (args as { action: { kind: string } }).action.kind);
+    expect(actions).toEqual([kind, kind === "blocked" ? "blocked" : "stop"]);
   });
 
-  it("does not write a command when termination wins the listener-registration race", async () => {
+  it("ignores a previous actor's proposal delivered to a replacement listener", async () => {
     vi.resetModules();
     const ai = await import("./store.svelte.ts");
-    await registerIdleTerminals("tab-1");
-    await startExecutionSession(ai, { tabId: "tab-1", instanceId: "instance-1" }, "session-1");
-    const proposed = {
-      id: "cmd-race",
-      tool_call_id: "tool-race",
-      cmd: "echo unsafe",
-      explain: "",
-      side_effect: "none",
-      execution: { full_cmd: "echo unsafe; printf sentinel", sentinel: "sentinel", timeout_s: 30 },
-    };
+    const { proposed } = await startExecutionSession(ai);
+    proposed({ payload: {
+      id: "old", cmd: "pwd", kind: "run_command", instance_id: "retired-actor",
+      target_session_id: "target", context_epoch: 0, execution: { timeout_s: 60 },
+    } });
+    expect(ai.chatItems(guardedSession.tabId)).toHaveLength(0);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
 
-    const lateUnlisten = vi.fn();
-    let resolveListen!: (value: () => void) => void;
-    listenMock.mockImplementationOnce(() => new Promise<() => void>((resolve) => {
-      resolveListen = resolve;
+  it("applies the actor acknowledgement if the completion event was lost", async () => {
+    vi.resetModules();
+    const ai = await import("./store.svelte.ts");
+    const { proposed, assistantStart } = await startExecutionSession(ai);
+    await registerIdleTerminals(guardedSession.tabId);
+    proposed({ payload: { id: "card", kind: "run_command", cmd: "pwd", execution: { timeout_s: 60 } } });
+    const payload = { id: "card", exit_code: 0, output: "/workspace", timed_out: false,
+      duration_ms: 5, original_bytes: 10, truncated_bytes: 0, context_epoch: 0 };
+    assistantStart({ payload: { id: "next-reply", context_epoch: 0 } });
+    invokeMock.mockResolvedValueOnce({ kind: "command_completed", payload });
+    await ai.executeCommand(guardedSession, "card", "target");
+    expect(ai.chatItems(guardedSession.tabId)).toContainEqual(expect.objectContaining({
+      kind: "command", result: expect.objectContaining({ output: "/workspace" }),
     }));
-
-    const session = { tabId: "tab-1", instanceId: "instance-1" };
-    const running = ai.executeCommand(session, proposed.id, proposed.execution, "local", "session-1");
-    await vi.waitFor(() => expect(ai.isCommandRunning(session, "cmd-race")).toBe(true));
-    await ai.terminateCommand(session, "cmd-race");
-    resolveListen(lateUnlisten);
-    await running;
-
-    const fullCommandData = Array.from(new TextEncoder().encode(`${proposed.execution.full_cmd}\r`));
-    expect(lateUnlisten).toHaveBeenCalledOnce();
-    expect(invokeMock).not.toHaveBeenCalledWith("pty_write", {
-      sessionId: "session-1",
-      data: fullCommandData,
-    });
-    expect(ai.isCommandRunning(session, "cmd-race")).toBe(false);
+    expect(ai.isStreaming(guardedSession.tabId)).toBe(true);
+    expect(ai.commandExecutionStatus(guardedSession, "card")).toBeNull();
   });
 
-  it("lets the Telnet backend append the profile's configured newline", async () => {
+  it("drops an approval when rejection arrives during terminal flush", async () => {
     vi.resetModules();
     const ai = await import("./store.svelte.ts");
-    await registerIdleTerminals("tab-1");
-    await startExecutionSession(ai, { tabId: "tab-1", instanceId: "instance-1" }, "session-1");
-    const proposed = {
-      id: "cmd-1",
-      tool_call_id: "tool-1",
-      cmd: "show version",
-      explain: "",
-      side_effect: "none",
-      execution: { full_cmd: "show version", sentinel: "unused-for-telnet", timeout_s: 30 },
-    };
-
-    const session = { tabId: "tab-1", instanceId: "instance-1" };
-    const running = ai.executeCommand(session, proposed.id, proposed.execution, "telnet", "session-1");
-    await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("telnet_write_line", {
-        sessionId: "session-1",
-        text: "show version",
-      });
+    const { proposed, rejected } = await startExecutionSession(ai);
+    const screen = await import("../terminal/alternate-screen.ts");
+    screen.registerAlternateScreenProvider(guardedSession.tabId, () => false, {
+      flush: () => new Promise(() => {}), pendingBytes: () => 1,
     });
-    await ai.submitCommand(session, "cmd-1");
-    await running;
-  });
-
-  it("wraps the paste in bracketed-paste markers when the shell enabled DECSET 2004", async () => {
-    vi.resetModules();
-    const ai = await import("./store.svelte.ts");
-    await registerIdleTerminals("tab-1");
-    await startExecutionSession(ai, { tabId: "tab-1", instanceId: "instance-1" }, "session-1");
-    // Register a live provider on the SAME module instance store.svelte.ts
-    // imports (resetModules re-imported both).
-    const { registerBracketedPasteProvider } = await import("../terminal/bracketed-paste.ts");
-    registerBracketedPasteProvider("tab-1", () => true);
-
-    const proposed = {
-      id: "cmd-bp",
-      tool_call_id: "t",
-      cmd: "ls -la",
-      explain: "",
-      side_effect: "",
-      execution: { full_cmd: "ls -la", sentinel: "unused-for-telnet", timeout_s: 30 },
-    };
-    const session = { tabId: "tab-1", instanceId: "instance-1" };
-    const running = ai.executeCommand(session, proposed.id, proposed.execution, "telnet", "session-1");
-    await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("telnet_write_line", {
-        sessionId: "session-1",
-        text: "\x1b[200~ls -la\x1b[201~",
-      });
-    });
-    await ai.submitCommand(session, "cmd-bp");
-    await running;
+    proposed({ payload: { id: "card", kind: "run_command", cmd: "pwd", execution: { timeout_s: 60 } } });
+    const run = ai.executeCommand(guardedSession, "card", "target");
+    rejected({ payload: { id: "card", reason: "withdrawn" } });
+    await run;
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 
@@ -3007,30 +2563,20 @@ describe("external MCP conversation shutdown", () => {
     expect(order.indexOf("ai_conversation_save_timeline")).toBeLessThan(order.indexOf("ai_session_stop"));
   });
 
-  it("interrupts an active internal probe without reporting a result to the stopped actor", async () => {
+  it("discards a pending probe acknowledgement when its MCP actor ends", async () => {
     const ai = await start();
     await registerIdleTerminals(tabId);
-    listener("internal_command")({ payload: {
-      id: "download-probe", full_cmd: "python3 --version", sentinel: "probe-sentinel",
-    } });
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("pty_write", expect.objectContaining({
-      sessionId: info.target_id,
-    })));
+    let complete!: () => void;
+    invokeMock.mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve; }));
+    listener("internal_command")({ payload: { id: "download-probe" } });
     const session = { tabId, instanceId: info.instance_id };
     expect(ai.isCommandRunning(session, "download-probe")).toBe(true);
-
     listener("session_ended")({ payload: {} });
-    expect(ai.sessionForTab(tabId)).toBeUndefined();
-    expect(ai.commandExecutionStatus(session, "download-probe")).toBeNull();
+    complete();
     await ai.stopSession(tabId);
-    await vi.advanceTimersByTimeAsync(61_000);
-
-    const interrupts = invokeMock.mock.calls.filter(([command, value]) =>
-      command === "pty_write" && JSON.stringify((value as { data?: number[] }).data) === "[3]");
-    expect(interrupts).toHaveLength(1);
-    expect(invokeMock.mock.calls.some(([command]) => command === "ai_command_result")).toBe(false);
     expect(ai.commandExecutionStatus(session, "download-probe")).toBeNull();
     expect(ai.sessionForTab(tabId)).toBeUndefined();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "ai_terminal_command")).toHaveLength(1);
   });
 
   it("ignores a queued old ended callback after a replacement MCP instance starts", async () => {

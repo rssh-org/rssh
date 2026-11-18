@@ -7,6 +7,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 
 use crate::error::{locked, AppError, AppResult};
 use crate::models::ConnectorSpec;
+use crate::terminal::capture::OutputTap;
 
 /// PTY output destined for the host. The Tauri command turns these into
 /// `app.emit("pty:data:<id>")` / `pty:close:<id>`; the headless ws server
@@ -46,17 +47,28 @@ impl Drop for ChildReaper {
 /// `_reaper` 跟着 PtyHandle 走，最后一份 clone 消失时回收子进程。
 #[derive(Clone)]
 pub struct PtyHandle {
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    pub(crate) writer: PtyWriter,
+    pub(crate) output: OutputTap,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     connector: Option<Arc<ConnectorSpec>>,
     _reaper: Arc<ChildReaper>,
 }
 
-impl PtyHandle {
-    pub fn write(&self, data: &[u8]) -> AppResult<()> {
-        locked(&self.writer)?.write_all(data).map_err(|e| {
+// A single blocked write must not keep the child reaper alive during close.
+#[derive(Clone)]
+pub(crate) struct PtyWriter(Arc<Mutex<Box<dyn Write + Send>>>);
+
+impl PtyWriter {
+    pub(crate) fn write(&self, data: &[u8]) -> AppResult<()> {
+        locked(&self.0)?.write_all(data).map_err(|e| {
             AppError::pty("pty_op_failed", serde_json::json!({ "err": e.to_string() }))
         })
+    }
+}
+
+impl PtyHandle {
+    pub fn write(&self, data: &[u8]) -> AppResult<()> {
+        self.writer.write(data)
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> AppResult<()> {
@@ -401,8 +413,10 @@ fn spawn_builder(
         .take_writer()
         .map_err(|e| AppError::pty("pty_op_failed", serde_json::json!({ "err": e.to_string() })))?;
 
+    let output = OutputTap::default();
     let handle = PtyHandle {
-        writer: Arc::new(Mutex::new(writer)),
+        writer: PtyWriter(Arc::new(Mutex::new(writer))),
+        output: output.clone(),
         master: Arc::new(Mutex::new(pair.master)),
         connector: None,
         _reaper: Arc::new(ChildReaper {
@@ -418,9 +432,12 @@ fn spawn_builder(
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(n) => sink(&pty_id, PtyOut::Data(buf[..n].to_vec())),
+                Ok(n) => output.publish_ref(&buf[..n], || {
+                    sink(&pty_id, PtyOut::Data(buf[..n].to_vec()));
+                }),
             }
         }
+        output.close();
         sink(&pty_id, PtyOut::Close);
     });
 

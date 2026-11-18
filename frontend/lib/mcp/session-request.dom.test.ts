@@ -43,8 +43,6 @@ afterEach(async () => {
 });
 
 it.each(["local", "docker_exec", "kubectl_exec", "aws_ssm", "aws_native"] as const)("authorizes the requested %s split pane and uses its transport", async (type) => {
-  const writeCommand = type === "aws_native" ? "aws_ssm_write" : "pty_write";
-  const dataEvent = type === "aws_native" ? "ssm:data" : "pty:data";
   terminal.kind = type === "aws_native" ? "ssm" : "local";
   app.addTab({ id: "local:workspace", type: "local", label: "Workspace" });
   app.addPane("local:workspace", "right", { id: terminal.tab_id, type, label: "Target" });
@@ -75,7 +73,7 @@ it.each(["local", "docker_exec", "kubectl_exec", "aws_ssm", "aws_native"] as con
     expect(consent?.closest("[inert]")).toBeNull();
   });
   expect(f.invoke).not.toHaveBeenCalledWith("mcp_accept_session", expect.anything());
-  expect(f.invoke).not.toHaveBeenCalledWith(writeCommand, expect.anything());
+  expect(f.invoke).not.toHaveBeenCalledWith("ai_terminal_command", expect.anything());
   expect(f.invoke).not.toHaveBeenCalledWith("mcp_start");
 
   const accept = [...document.querySelectorAll<HTMLButtonElement>(".mcp-request button")]
@@ -88,11 +86,9 @@ it.each(["local", "docker_exec", "kubectl_exec", "aws_ssm", "aws_native"] as con
   } });
   await settle();
   document.querySelector<HTMLButtonElement>(".cmd-card .btn-approve")!.click();
-  await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith(writeCommand, {
-    sessionId: terminal.session_id, data: Array.from(new TextEncoder().encode("pwd\r")),
+  await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith("ai_terminal_command", {
+    tabId: terminal.tab_id, instanceId: actor.instance_id, targetSessionId: terminal.session_id,
+    toolCallId: "command", action: { kind: "approve", bracketedPaste: false },
   }));
-  f.listeners.get(`${dataEvent}:${terminal.session_id}`)!({ payload: btoa("pwd\r\n/container\r\ndone:0\r\n") });
-  await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith("ai_command_result", expect.objectContaining({
-    tabId: terminal.tab_id, instanceId: actor.instance_id, output: "/container", exitCode: 0,
-  })));
+
 });

@@ -172,6 +172,10 @@ async fn injected_serial_uses_shared_commands_and_owner_scoped_cleanup() {
         host.state().serial_sessions.lock().unwrap()[&id].port_name(),
         "injected-port"
     );
+    let command = lifecycle::owned_command_target(&host, &owner, &id).unwrap();
+    assert!(command.is_raw());
+    command.write_line("A").await.unwrap();
+    command.interrupt().await.unwrap();
     commands::serial_write(host.state(), id.clone(), vec![4, 5])
         .await
         .unwrap();
@@ -186,7 +190,13 @@ async fn injected_serial_uses_shared_commands_and_owner_scoped_cleanup() {
         .unwrap();
     assert_eq!(
         *probe.events.lock().unwrap(),
-        vec!["write:[4, 5]", "dtr:true", "rts:false", "break"]
+        vec![
+            "write:[65, 13]",
+            "write:[4, 5]",
+            "dtr:true",
+            "rts:false",
+            "break"
+        ]
     );
     assert!(commands::serial_close(
         SessionOwner::Window("other".into()),

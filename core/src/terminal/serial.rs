@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::error::{AppError, AppResult};
+use crate::terminal::capture::OutputTap;
 
 /// Options implemented by this host's serial service. An empty rate list means
 /// the native driver accepts a custom baud rate and validates it when opening.
@@ -114,31 +115,37 @@ pub trait SerialConnection: Send + Sync {
 }
 
 #[derive(Clone)]
-pub struct SerialHandle(Arc<dyn SerialConnection>);
+pub struct SerialHandle {
+    connection: Arc<dyn SerialConnection>,
+    pub(crate) output: OutputTap,
+}
 
 impl SerialHandle {
     pub fn new(connection: impl SerialConnection + 'static) -> Self {
-        Self(Arc::new(connection))
+        Self {
+            connection: Arc::new(connection),
+            output: Default::default(),
+        }
     }
 
     pub async fn write(&self, data: &[u8]) -> AppResult<()> {
-        self.0.write(data).await
+        self.connection.write(data).await
     }
 
     pub async fn set_dtr(&self, level: bool) -> AppResult<()> {
-        self.0.set_dtr(level).await
+        self.connection.set_dtr(level).await
     }
 
     pub async fn set_rts(&self, level: bool) -> AppResult<()> {
-        self.0.set_rts(level).await
+        self.connection.set_rts(level).await
     }
 
     pub async fn send_break(&self) -> AppResult<()> {
-        self.0.send_break().await
+        self.connection.send_break().await
     }
 
     pub fn port_name(&self) -> &str {
-        self.0.port_name()
+        self.connection.port_name()
     }
 }
 
@@ -187,9 +194,24 @@ pub async fn open_resource(
     // This task owns the reservation until native open and cleanup finish,
     // including when its caller disappears while a blocking driver is opening.
     tokio::spawn(async move {
+        let output = OutputTap::default();
+        let reader_output = output.clone();
+        let sink: SerialSink = Arc::new(move |id, event| match event {
+            SerialOut::Data(data) => {
+                reader_output.publish(data, |bytes| sink(id, SerialOut::Data(bytes)))
+            }
+            SerialOut::Close => {
+                reader_output.close();
+                sink(id, event);
+            }
+        });
         let result = backend
             .open(session_id, &port, config, sink, &operation)
-            .await;
+            .await
+            .map(|(id, mut handle)| {
+                handle.output = output;
+                (id, handle)
+            });
         operation.finish_open(result).await
     })
     .await
@@ -204,7 +226,7 @@ pub async fn open_resource(
 /// Some native backends require an acknowledged release before a port can be
 /// reopened. Others retain their existing last-handle-drop cleanup behavior.
 pub(crate) fn cleanup(handle: &SerialHandle) -> Option<crate::resource::CleanupHandle> {
-    handle.0.cleanup()
+    handle.connection.cleanup()
 }
 
 #[cfg(test)]

@@ -22,7 +22,7 @@
     import { onMount, onDestroy, untrack } from "svelte";
 
     // tabId 是 AI 会话身份（切 tab / 重连不丢；显式关闭面板时结束）。
-    // targetId 是当前 SSH/PTY session_id —— 给 executeCommand 路由 ssh_write/pty_write 用。
+    // targetId 是当前 SSH/PTY session_id —— 用于核对命令卡片批准时绑定的连接。
     // 重连后 targetId 会换（前端 prop 自动跟随），tabId 不变。
     let { tabId, targetKind, targetId, active } = $props<{
         tabId: string;

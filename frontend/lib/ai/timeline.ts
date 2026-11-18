@@ -145,10 +145,11 @@ export function restoreTimeline(json: string, staleCommandReason: string): ChatI
  * prepare-stop returns them only after the actor drains. Event callbacks may
  * therefore arrive before or after the invoke reply without changing the
  * persisted result. Every mutation is keyed by message/card/activity id and
- * idempotent. */
+ * idempotent. A live acknowledgement can arrive during a later assistant turn. */
 export function applyTerminalMutations(
   source: ChatItem[],
   mutations: readonly AiTerminalMutation[],
+  actorState: "drained" | "live" = "drained",
 ): ChatItem[] {
   let items = source;
   for (const mutation of mutations) {
@@ -370,6 +371,7 @@ export function applyTerminalMutations(
       },
     });
   }
+  if (actorState === "live") return items;
   // prepare-stop has drained the actor: no stream can still produce deltas.
   // If the actor panicked before recording its terminal event, persist the
   // partial bubble as cancelled instead of resurrecting a permanent cursor.

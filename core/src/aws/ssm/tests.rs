@@ -321,10 +321,12 @@ async fn websocket_shell_orders_output_preserves_bytes_and_terminates_once() {
     });
     let (sink, mut events) = event_sink();
     let handle = opened(service.clone(), sink).await;
+    let mut capture = handle.capture.start("").unwrap();
     handle.write(&[0, 0x1b, b'[', b'A', 0xff]).unwrap();
     assert_eq!(next_data(&mut events).await, b"first");
     assert_eq!(next_data(&mut events).await, b"second");
     duplicate_acknowledged.await.unwrap();
+    assert_eq!(capture.submit().unwrap().output, "firstsecond");
     handle.control.close().await.unwrap();
     handle.control.close().await.unwrap();
     assert_eq!(service.starts.load(Ordering::SeqCst), 1);
