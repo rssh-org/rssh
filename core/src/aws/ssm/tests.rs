@@ -12,9 +12,6 @@ struct MockService {
     fail_terminate: AtomicUsize,
     start_entered: Notify,
     start_release: Option<Notify>,
-    terminate_entered: Notify,
-    terminate_release: Option<Notify>,
-    credential_observer: Option<(Arc<dyn crate::secret::SecretStore>, String)>,
     data_key_challenges: Mutex<Vec<Option<String>>>,
 }
 
@@ -29,9 +26,6 @@ impl MockService {
             fail_terminate: AtomicUsize::new(0),
             start_entered: Notify::new(),
             start_release: None,
-            terminate_entered: Notify::new(),
-            terminate_release: None,
-            credential_observer: None,
             data_key_challenges: Mutex::new(Vec::new()),
         }
     }
@@ -68,22 +62,6 @@ impl Service for MockService {
     async fn terminate(&self, id: &str) -> AppResult<()> {
         assert_eq!(id, "aws-session");
         self.terminates.fetch_add(1, Ordering::SeqCst);
-        if let Some((store, key)) = &self.credential_observer {
-            assert!(
-                store.get(key)?.is_some(),
-                "source grant was deleted before TerminateSession"
-            );
-        }
-        self.terminate_entered.notify_one();
-        if let Some(release) = &self.terminate_release {
-            release.notified().await;
-        }
-        if let Some((store, key)) = &self.credential_observer {
-            assert!(
-                store.get(key)?.is_some(),
-                "source grant was deleted while TerminateSession was in flight"
-            );
-        }
         if self
             .fail_terminate
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
@@ -520,14 +498,6 @@ async fn lifecycle_reconcile_terminates_ssm_and_enforces_write_owner() {
     let id = uuid::Uuid::new_v4().to_string();
     let reservation =
         lifecycle::reserve_resource(state, &id, SessionKind::Ssm, owner.clone()).unwrap();
-    reservation.bind_discovery_source("test-source").unwrap();
-    assert_eq!(
-        state.lifecycle_sessions.lock().unwrap()[&id]
-            .discovery_source_id
-            .as_deref(),
-        Some("test-source")
-    );
-    assert!(reservation.bind_discovery_source("another-source").is_err());
     let operation = reservation.pending_operation().unwrap();
     let (sink, _events) = event_sink();
     let opened = open_with_service(
@@ -1043,124 +1013,56 @@ fn isolated_state(dir: &std::path::Path) -> Arc<crate::state::AppState> {
     )
 }
 
-async fn wait_registered(state: &crate::state::AppState, id: &str) {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if state.lifecycle_sessions.lock().unwrap().contains_key(id) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("session reservation did not appear");
+#[derive(Clone, Copy)]
+enum SourceChange {
+    Disable,
+    Logout,
+    Remove,
 }
 
-fn spawn_native_open(
-    state: Arc<crate::state::AppState>,
-    owner: crate::state::SessionOwner,
-    source: String,
-    id: String,
-) -> tokio::task::JoinHandle<AppResult<String>> {
-    tokio::spawn(async move {
-        let host = crate::emitter::Host::new(state.clone(), Arc::new(|_, _| true));
-        crate::commands::aws_ssm::aws_ssm_open(
-            host,
-            owner,
-            &state,
-            source,
-            "us-east-1".into(),
-            "i-0123456789abcdef0".into(),
-            "123456789012".into(),
-            80,
-            24,
-            Some(id),
-        )
-        .await
-    })
-}
-
-#[tokio::test]
-async fn source_closer_cancels_pending_open_waiting_for_source_read_gate() {
-    use crate::commands::{aws_signin, lifecycle};
-    use crate::state::{SessionKind, SessionOwner, SessionPhase};
-
-    let dir = tempfile::tempdir().unwrap();
-    let state = isolated_state(dir.path());
-    let source = uuid::Uuid::new_v4().to_string();
-    let id = uuid::Uuid::new_v4().to_string();
-    let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
-    let source_write = state.aws_auth.source_gate.clone().write_owned().await;
-    let opener = spawn_native_open(state.clone(), owner.clone(), source.clone(), id.clone());
-    wait_registered(&state, &id).await;
-    assert_eq!(
-        state.lifecycle_sessions.lock().unwrap()[&id].phase(),
-        SessionPhase::Pending
-    );
-    let other_id = uuid::Uuid::new_v4().to_string();
-    let other = lifecycle::reserve_resource(&state, &other_id, SessionKind::Ssm, owner).unwrap();
-    other.bind_discovery_source("unrelated-source").unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(3),
-        aws_signin::close_source_sessions(&state, &source),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let error = opener.await.unwrap().unwrap_err();
-    assert_eq!(error.code(), "aws_ssm_open_cancelled");
-    assert_eq!(
-        state.lifecycle_sessions.lock().unwrap()[&id].phase(),
-        SessionPhase::Closed
-    );
-    assert_eq!(
-        state.lifecycle_sessions.lock().unwrap()[&other_id].phase(),
-        SessionPhase::Pending
-    );
-    assert!(state.ssm_sessions.lock().unwrap().is_empty());
-    drop(source_write);
-    drop(other);
-}
-
-async fn assert_source_mutation_serializes_open_and_cleanup(delete_source: bool) {
-    use crate::commands::{aws_signin, discovery, lifecycle};
+async fn assert_source_change_keeps_connected_shell(change: SourceChange) {
+    use crate::commands::{aws_signin, aws_ssm, discovery, lifecycle};
     use crate::models::{DynamicDiscoveryConfig, DynamicDiscoverySource};
-    use crate::state::{SessionKind, SessionOwner, SessionPhase};
+    use crate::state::{SessionKind, SessionOwner};
 
     let dir = tempfile::tempdir().unwrap();
     let state = isolated_state(dir.path());
-    let source = uuid::Uuid::new_v4().to_string();
-    discovery::save_dynamic_discovery_sources_async(
-        state.clone(),
-        vec![DynamicDiscoverySource {
-            id: source.clone(),
-            name: "SSM fixture".into(),
-            enabled: true,
-            config: DynamicDiscoveryConfig::AwsNative {
-                region: "us-east-1".into(),
-                only_ssm_available: false,
-            },
-        }],
-    )
-    .await
-    .unwrap();
+    let connector = connector();
+    let ConnectorSpec::AwsNative {
+        source_id: source, ..
+    } = connector.clone()
+    else {
+        unreachable!()
+    };
+    let mut config = DynamicDiscoverySource {
+        id: source.clone(),
+        name: "SSM fixture".into(),
+        enabled: true,
+        config: DynamicDiscoveryConfig::AwsNative {
+            region: "us-east-1".into(),
+            only_ssm_available: false,
+        },
+    };
+    discovery::save_dynamic_discovery_sources_async(state.clone(), vec![config.clone()])
+        .await
+        .unwrap();
     let credential_key = crate::aws::auth::credential_key(&source);
-    // This marker can never authorize a real AWS request. It lets the test
-    // observe exactly when the real logout/source-delete command removes data.
     state
         .secret_store
         .set(&credential_key, "fixture grant")
         .unwrap();
+
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let service = Arc::new(MockService {
-        start_release: Some(Notify::new()),
-        terminate_release: Some(Notify::new()),
-        credential_observer: Some((state.secret_store.clone(), credential_key.clone())),
-        ..MockService::new(format!("ws://{}", listener.local_addr().unwrap()))
-    });
+    let service = Arc::new(MockService::new(format!(
+        "ws://{}",
+        listener.local_addr().unwrap()
+    )));
     let server = tokio::spawn(async move {
         let mut socket = accept(&listener, "start-token").await;
         handshake(&mut socket, false).await;
+        let input = read_frame(&mut socket).await;
+        ack_input(&mut socket, &input).await;
+        output_frame(&mut socket, 2, OUTPUT, input.payload).await;
         while let Some(message) = socket.next().await {
             if matches!(message, Ok(Message::Close(_))) {
                 break;
@@ -1169,133 +1071,99 @@ async fn assert_source_mutation_serializes_open_and_cleanup(delete_source: bool)
     });
     let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
     let id = uuid::Uuid::new_v4().to_string();
-    let opening_state = state.clone();
-    let opening_source = source.clone();
-    let opening_id = id.clone();
-    let opening_service = service.clone();
-    let opening_owner = owner.clone();
-    let opener = tokio::spawn(async move {
-        let reservation = lifecycle::reserve_resource(
-            &opening_state,
-            &opening_id,
-            SessionKind::Ssm,
-            opening_owner,
-        )
-        .unwrap();
-        reservation.bind_discovery_source(&opening_source).unwrap();
-        let operation = reservation.pending_operation().unwrap();
-        let _source_read = opening_state.aws_auth.source_gate.read().await;
-        let (sink, _events) = event_sink();
-        let opened = open_with_service(
-            opening_service,
-            opening_id,
-            connector(),
-            80,
-            24,
-            sink,
-            operation,
-        )
-        .await
-        .unwrap();
-        opened
-            .activate(|id, handle| {
-                reservation.activate_returned(id, lifecycle::ReadySession::Ssm(handle))
-            })
-            .await
-            .unwrap();
-    });
-    service.start_entered.notified().await;
-    let mutation_state = state.clone();
-    let mutation_source = source.clone();
-    let mutation = tokio::spawn(async move {
-        if delete_source {
-            discovery::save_dynamic_discovery_sources_async(mutation_state, vec![]).await
-        } else {
-            aws_signin::aws_signin_logout(mutation_state, mutation_source).await
-        }
-    });
-    // Tokio's fair RwLock rejects a new reader once the writer is queued.
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while state.aws_auth.source_gate.try_read().is_ok() {
-            tokio::task::yield_now().await;
-        }
-    })
+    let reservation =
+        lifecycle::reserve_resource(&state, &id, SessionKind::Ssm, owner.clone()).unwrap();
+    let (sink, mut events) = event_sink();
+    open_with_service(
+        service.clone(),
+        id.clone(),
+        connector,
+        80,
+        24,
+        sink,
+        reservation.pending_operation().unwrap(),
+    )
+    .await
+    .unwrap()
+    .activate(|id, handle| reservation.activate_returned(id, lifecycle::ReadySession::Ssm(handle)))
     .await
     .unwrap();
-    assert!(
-        !mutation.is_finished(),
-        "logout/delete must wait for the opener's read lease"
-    );
-    assert_eq!(service.terminates.load(Ordering::SeqCst), 0);
-    let waiting_id = uuid::Uuid::new_v4().to_string();
-    let waiting = spawn_native_open(
-        state.clone(),
-        owner.clone(),
-        source.clone(),
-        waiting_id.clone(),
-    );
-    wait_registered(&state, &waiting_id).await;
-    service.start_release.as_ref().unwrap().notify_one();
-    opener.await.unwrap();
-    tokio::time::timeout(Duration::from_secs(3), service.terminate_entered.notified())
-        .await
-        .unwrap();
-    assert!(state.secret_store.get(&credential_key).unwrap().is_some());
-    assert!(
-        !mutation.is_finished(),
-        "grant deletion must wait for remote termination"
-    );
-    assert!(!discovery::list_dynamic_discovery_sources(&state)
-        .unwrap()
-        .is_empty());
-    // Register one more opener *after* close_source_sessions took its snapshot.
-    // It must stay behind the writer, then fail auth after deletion, never open
-    // a new remote session in the gap between cleanup and credential removal.
-    let late_id = uuid::Uuid::new_v4().to_string();
-    let late = spawn_native_open(state.clone(), owner, source, late_id.clone());
-    wait_registered(&state, &late_id).await;
-    assert!(!late.is_finished());
-    assert_eq!(
-        state.lifecycle_sessions.lock().unwrap()[&late_id].phase(),
-        SessionPhase::Pending
-    );
-    service.terminate_release.as_ref().unwrap().notify_one();
-    tokio::time::timeout(Duration::from_secs(3), mutation)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(state.secret_store.get(&credential_key).unwrap().is_none());
-    assert_eq!(
-        waiting.await.unwrap().unwrap_err().code(),
-        "aws_ssm_open_cancelled"
-    );
-    assert_eq!(
-        late.await.unwrap().unwrap_err().code(),
-        "aws_login_required"
-    );
-    assert_eq!(service.starts.load(Ordering::SeqCst), 1);
-    assert_eq!(service.terminates.load(Ordering::SeqCst), 1);
-    assert!(state.ssm_sessions.lock().unwrap().is_empty());
-    assert_eq!(
-        state.lifecycle_sessions.lock().unwrap()[&id].phase(),
-        SessionPhase::Closed
-    );
+
+    match change {
+        SourceChange::Disable => {
+            config.enabled = false;
+            discovery::save_dynamic_discovery_sources_async(state.clone(), vec![config])
+                .await
+                .unwrap();
+            let snapshot = discovery::discover_dynamic_targets(&state).await.unwrap();
+            assert!(snapshot.targets.is_empty() && snapshot.errors.is_empty());
+            assert_eq!(
+                state.secret_store.get(&credential_key).unwrap().as_deref(),
+                Some("fixture grant")
+            );
+        }
+        SourceChange::Remove => {
+            discovery::save_dynamic_discovery_sources_async(state.clone(), vec![])
+                .await
+                .unwrap();
+        }
+        SourceChange::Logout => {
+            aws_signin::aws_signin_logout(&state, source.clone())
+                .await
+                .unwrap();
+        }
+    }
     assert_eq!(
         discovery::list_dynamic_discovery_sources(&state)
             .unwrap()
             .is_empty(),
-        delete_source
+        matches!(change, SourceChange::Remove)
     );
+    if !matches!(change, SourceChange::Disable) {
+        assert!(state.secret_store.get(&credential_key).unwrap().is_none());
+        let host = crate::emitter::Host::new(state.clone(), Arc::new(|_, _| true));
+        let err = aws_ssm::aws_ssm_open(
+            host,
+            owner.clone(),
+            &state,
+            source,
+            "us-east-1".into(),
+            "i-0123456789abcdef0".into(),
+            "123456789012".into(),
+            80,
+            24,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), "aws_login_required");
+    }
+
+    aws_ssm::aws_ssm_write(
+        owner.clone(),
+        &state,
+        id.clone(),
+        b"still connected".to_vec(),
+    )
+    .unwrap();
+    assert_eq!(next_data(&mut events).await, b"still connected");
+    assert_eq!(service.terminates.load(Ordering::SeqCst), 0);
+    aws_ssm::aws_ssm_close(owner, &state, id).await.unwrap();
+    assert_eq!(service.terminates.load(Ordering::SeqCst), 1);
     server.await.unwrap();
 }
 
 #[tokio::test]
-async fn source_logout_waits_for_open_then_terminates_before_grant_deletion() {
-    assert_source_mutation_serializes_open_and_cleanup(false).await;
+async fn logout_forgets_credentials_but_keeps_connected_shell() {
+    assert_source_change_keeps_connected_shell(SourceChange::Logout).await;
 }
 
 #[tokio::test]
-async fn source_deletion_waits_for_open_then_terminates_before_grant_deletion() {
-    assert_source_mutation_serializes_open_and_cleanup(true).await;
+async fn source_deletion_forgets_credentials_but_keeps_connected_shell() {
+    assert_source_change_keeps_connected_shell(SourceChange::Remove).await;
+}
+
+#[tokio::test]
+async fn disabling_source_skips_discovery_but_keeps_connected_shell() {
+    assert_source_change_keeps_connected_shell(SourceChange::Disable).await;
 }

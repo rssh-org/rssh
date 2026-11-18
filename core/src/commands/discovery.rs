@@ -429,69 +429,47 @@ async fn save_sources_transaction(
     auth_commit: Option<(crate::state::SessionOwner, AwsSigninCommit)>,
     expected_sources: Option<Vec<DynamicDiscoverySource>>,
 ) -> AppResult<()> {
-    // A disconnected IPC caller must not release the gate during asynchronous
-    // session cleanup. The worker owns the whole transaction through commit.
-    tokio::spawn(async move {
-        let source_gate = state.aws_auth.source_gate.clone().write_owned().await;
-        normalize_sources(&mut sources);
-        validate_sources(&sources)?;
-        if let Some((_, draft)) = &auth_commit {
-            if !sources.iter().any(|source| {
-                source.id == draft.source_id
-                    && matches!(source.config, DynamicDiscoveryConfig::AwsNative { .. })
-            }) {
-                return Err(crate::aws::api::failure("aws_source_invalid"));
-            }
+    normalize_sources(&mut sources);
+    validate_sources(&sources)?;
+    if let Some((_, draft)) = &auth_commit {
+        if !sources.iter().any(|source| {
+            source.id == draft.source_id
+                && matches!(source.config, DynamicDiscoveryConfig::AwsNative { .. })
+        }) {
+            return Err(crate::aws::api::failure("aws_source_invalid"));
         }
-        let current = read_dynamic_discovery_sources_from_db(&state.db)?;
-        check_expected_sources(&current, expected_sources.as_deref())?;
-        let retained: HashSet<_> = sources
-            .iter()
-            .filter(|source| matches!(source.config, DynamicDiscoveryConfig::AwsNative { .. }))
-            .map(|source| source.id.as_str())
-            .collect();
-        for source in current {
-            if matches!(source.config, DynamicDiscoveryConfig::AwsNative { .. })
-                && !retained.contains(source.id.as_str())
-            {
-                crate::commands::aws_signin::close_source_sessions(&state, &source.id).await?;
-            }
+        if let Some(expected) = &expected_sources {
+            // Reject a stale form before attempting to commit its credentials.
+            check_expected_sources(
+                &read_dynamic_discovery_sources_from_db(&state.db)?,
+                Some(expected),
+            )?;
         }
-        let blocking_state = state.clone();
-        if let Some((owner, draft)) = auth_commit {
-            return state
-                .aws_auth
-                .commit_with(&draft.source_id, &draft.login_id, &owner, move || {
-                    let _source_gate = source_gate;
-                    save_dynamic_discovery_sources_locked(
-                        &blocking_state.db,
-                        blocking_state.secret_store.as_ref(),
-                        &blocking_state.data_dir,
-                        sources,
-                        expected_sources.as_deref(),
-                    )
-                })
-                .await;
-        }
-        tokio::task::spawn_blocking(move || {
-            let _source_gate = source_gate;
-            crate::aws::auth::with_auth_lock(&blocking_state.data_dir, || {
-                save_dynamic_discovery_sources_locked(
-                    &blocking_state.db,
-                    blocking_state.secret_store.as_ref(),
-                    &blocking_state.data_dir,
-                    sources,
-                    expected_sources.as_deref(),
-                )
-            })
-        })
+    }
+
+    let auth = state.aws_auth.clone();
+    let data_dir = state.data_dir.clone();
+    // Discovery changes affect future launches. Existing sessions have their
+    // own lifecycle and do not participate in this configuration transaction.
+    let save = move || {
+        save_dynamic_discovery_sources_locked(
+            &state.db,
+            state.secret_store.as_ref(),
+            &state.data_dir,
+            sources,
+            expected_sources.as_deref(),
+        )
+    };
+    if let Some((owner, draft)) = auth_commit {
+        return auth
+            .commit_with(&draft.source_id, &draft.login_id, &owner, save)
+            .await;
+    }
+    tokio::task::spawn_blocking(move || crate::aws::auth::with_auth_lock(&data_dir, save))
         .await
         .map_err(|error| {
             AppError::other("blocking_join_failed", json!({ "err": error.to_string() }))
         })?
-    })
-    .await
-    .map_err(|error| AppError::other("task_join_failed", json!({ "err": error.to_string() })))?
 }
 
 /// GUI and CLI share removal semantics: a deleted/native-to-CLI source loses
@@ -551,8 +529,7 @@ fn save_dynamic_discovery_sources_locked(
     expected_sources: Option<&[DynamicDiscoverySource]>,
 ) -> AppResult<()> {
     let current = read_dynamic_discovery_sources_from_db(db)?;
-    // A different process may have saved after the pre-cleanup check. Reject
-    // its stale replacement before touching any unrelated persisted grant.
+    // Check under the auth lock before touching any unrelated persisted grant.
     check_expected_sources(&current, expected_sources)?;
     let retained: HashSet<_> = sources
         .iter()
@@ -1291,8 +1268,7 @@ mod tests {
         for key in &keys {
             secrets.set(key, "saved-grant").unwrap();
         }
-        // Simulate another process committing between the pre-cleanup check and
-        // acquisition of the auth file lock. This second check must still reject.
+        // Another process may have committed after this form loaded its sources.
         let error = crate::aws::auth::with_auth_lock(dir.path(), || {
             save_dynamic_discovery_sources_locked(
                 &db,

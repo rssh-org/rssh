@@ -55,7 +55,7 @@ pub async fn aws_signin_logout(
     state: State<'_, Arc<AppState>>,
     source_id: String,
 ) -> AppResult<()> {
-    aws_signin::aws_signin_logout(state.inner().clone(), source_id).await
+    aws_signin::aws_signin_logout(state.inner(), source_id).await
 }
 
 #[tauri::command]

@@ -771,7 +771,7 @@ async fn dispatch_async(
         )
         .await),
         "aws_signin_logout" => ok(crate::commands::aws_signin::aws_signin_logout(
-            state.clone(),
+            state,
             arg(&args, "sourceId")?,
         )
         .await),
@@ -2334,10 +2334,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn discovery_save_rejects_stale_snapshot_before_session_or_grant_cleanup() {
-        use crate::commands::lifecycle;
-        use rssh_core::state::{SessionKind, SessionPhase};
-
+    async fn discovery_save_rejects_stale_snapshot_before_grant_cleanup() {
         let (state, _dir) = test_state();
         let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -2369,11 +2366,6 @@ mod tests {
         let source_id = added["id"].as_str().unwrap();
         let key = rssh_core::aws::auth::credential_key(source_id);
         state.secret_store.set(&key, "saved-grant").unwrap();
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let pending =
-            lifecycle::reserve_resource(&state, &session_id, SessionKind::Ssm, owner.clone())
-                .unwrap();
-        pending.bind_discovery_source(source_id).unwrap();
         for auth_commit in [
             Value::Null,
             json!({"source_id":first["id"],"login_id":uuid::Uuid::new_v4().to_string()}),
@@ -2395,10 +2387,6 @@ mod tests {
             let error: Value = serde_json::from_str(wire).unwrap();
             assert_eq!(error["code"], "dynamic_discovery_sources_changed");
             assert_eq!(
-                state.lifecycle_sessions.lock().unwrap()[&session_id].phase(),
-                SessionPhase::Pending
-            );
-            assert_eq!(
                 state.secret_store.get(&key).unwrap().as_deref(),
                 Some("saved-grant")
             );
@@ -2406,7 +2394,6 @@ mod tests {
             assert_eq!(saved.len(), 2);
             assert!(saved.iter().any(|source| source.id == source_id));
         }
-        drop(pending);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2528,91 +2515,6 @@ mod tests {
                 .unwrap()
                 .len(),
             1
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn discovery_save_keeps_source_gate_when_caller_is_cancelled_during_cleanup() {
-        let (state, _dir) = test_state();
-        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let source_id = uuid::Uuid::new_v4().to_string();
-        let sources = json!([{
-            "id": source_id, "name": "Native AWS", "enabled": false,
-            "platform": "aws_native", "region": "us-east-1",
-            "only_ssm_available": false
-        }]);
-        dispatch_async(
-            &state,
-            &owner,
-            "save_dynamic_discovery_sources",
-            json!({ "sources": sources }),
-            &tx,
-        )
-        .await
-        .unwrap();
-
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let reservation = crate::commands::lifecycle::reserve_resource(
-            &state,
-            &session_id,
-            SessionKind::Ssm,
-            owner.clone(),
-        )
-        .unwrap();
-        reservation.bind_discovery_source(&source_id).unwrap();
-        let operation = reservation.pending_operation().unwrap();
-        let caller = tokio::spawn({
-            let state = state.clone();
-            let owner = owner.clone();
-            let tx = tx.clone();
-            async move {
-                dispatch_async(
-                    &state,
-                    &owner,
-                    "save_dynamic_discovery_sources",
-                    json!({ "sources": [] }),
-                    &tx,
-                )
-                .await
-            }
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(1), operation.cancelled())
-            .await
-            .unwrap();
-        caller.abort();
-        assert!(caller.await.unwrap_err().is_cancelled());
-
-        // Retaining the source needs no session cleanup. It can only be held
-        // back by the first transaction's source gate after its caller exits.
-        let mut following_save = tokio::spawn({
-            let state = state.clone();
-            async move {
-                dispatch_async(
-                    &state,
-                    &owner,
-                    "save_dynamic_discovery_sources",
-                    json!({ "sources": sources }),
-                    &tx,
-                )
-                .await
-            }
-        });
-        let early_result =
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut following_save).await;
-        operation.complete(Ok(()));
-        assert!(
-            early_result.is_err(),
-            "cancelling the source-save caller released the gate before cleanup completed"
-        );
-        tokio::time::timeout(std::time::Duration::from_secs(1), following_save)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            crate::commands::discovery::list_dynamic_discovery_sources(&state).unwrap()[0].id,
-            source_id
         );
     }
 

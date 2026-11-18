@@ -639,37 +639,6 @@ impl ResourceReservation<'_> {
         &self.session_id
     }
 
-    pub fn bind_discovery_source(&self, source_id: &str) -> AppResult<()> {
-        let mut registry = locked(&self.state.lifecycle_sessions)?;
-        let record = registry.get_mut(&self.session_id).ok_or_else(|| {
-            AppError::not_found(
-                "session_reservation_lost",
-                serde_json::json!({"id":self.session_id}),
-            )
-        })?;
-        if record.nonce != self.nonce
-            || record.kind != self.kind
-            || record.phase() != SessionPhase::Pending
-        {
-            return Err(AppError::not_found(
-                "session_reservation_lost",
-                serde_json::json!({"id":self.session_id}),
-            ));
-        }
-        if record
-            .discovery_source_id
-            .as_deref()
-            .is_some_and(|source| source != source_id)
-        {
-            return Err(AppError::config(
-                "session_registry_inconsistent",
-                serde_json::json!({"id":self.session_id}),
-            ));
-        }
-        record.discovery_source_id = Some(source_id.to_owned());
-        Ok(())
-    }
-
     /// Register cancellation before beginning an asynchronous native open. The
     /// same registry lock orders registration against close and activation.
     pub fn pending_operation(&self) -> AppResult<PendingOperation> {
@@ -870,7 +839,6 @@ pub fn reserve_resource<'a>(
             owner,
             state: ResourceState::Pending(None),
             parent: None,
-            discovery_source_id: None,
         },
     );
     drop(registry);
@@ -945,7 +913,6 @@ pub fn reserve_sftp_child<'a>(
             owner,
             state: ResourceState::Pending(None),
             parent: Some(parent_id.to_owned()),
-            discovery_source_id: None,
         },
     );
     drop(registry);
@@ -1705,7 +1672,6 @@ mod tests {
                         owner: owner.clone(),
                         state: resource,
                         parent: None,
-                        discovery_source_id: None,
                     },
                 );
             }
@@ -1717,7 +1683,6 @@ mod tests {
                     owner: SessionOwner::Window("other".into()),
                     state: ResourceState::Closed,
                     parent: None,
-                    discovery_source_id: None,
                 },
             );
         }
@@ -3131,7 +3096,6 @@ mod tests {
                 owner: other.clone(),
                 state: ResourceState::Ready,
                 parent: None,
-                discovery_source_id: None,
             },
         );
         let target_error = crate::ai::commands::ai_session_rebind_target_impl(

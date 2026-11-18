@@ -229,9 +229,6 @@ type CancelKey = (String, String, String);
 
 #[derive(Clone)]
 pub struct AwsAuth {
-    /// Session opens share this gate; source removal/logout takes it exclusively
-    /// so a new remote session cannot appear between cleanup and grant deletion.
-    pub(crate) source_gate: Arc<tokio::sync::RwLock<()>>,
     secrets: Arc<dyn SecretStore>,
     data_dir: PathBuf,
     http: reqwest::Client,
@@ -247,7 +244,6 @@ pub struct AwsAuth {
 impl AwsAuth {
     pub fn new(secrets: Arc<dyn SecretStore>, data_dir: PathBuf) -> AppResult<Self> {
         Ok(Self {
-            source_gate: Arc::new(tokio::sync::RwLock::new(())),
             secrets,
             data_dir,
             http: api::client()?,

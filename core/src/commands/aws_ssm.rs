@@ -34,20 +34,7 @@ pub async fn aws_ssm_open(
     let id = super::lifecycle::resolve_session_id(session_id)?;
     let reservation =
         super::lifecycle::reserve_resource(state, &id, SessionKind::Ssm, owner.clone())?;
-    reservation.bind_discovery_source(&source_id)?;
     let operation = reservation.pending_operation()?;
-    // Logout/deletion owns the write side. Register first, then wait for this
-    // gate cancellably: a source closer can otherwise deadlock waiting for an
-    // opener which is itself waiting for the closer's write lock.
-    let _source_gate = tokio::select! {
-        biased;
-        _ = operation.cancelled() => {
-            // No external operation has been dispatched or retained yet.
-            operation.complete(Ok(()));
-            return Err(AppError::other("aws_ssm_open_cancelled", serde_json::json!({})));
-        }
-        guard = state.aws_auth.source_gate.read() => guard,
-    };
     let sink: SsmSink = Arc::new(move |id, event| match event {
         SsmOut::Data(bytes) => {
             if host.emit_bytes(&format!("ssm:data:{id}"), &bytes).is_err() {

@@ -57,9 +57,6 @@ pub struct SessionRecord {
     pub owner: SessionOwner,
     pub(crate) state: ResourceState,
     pub parent: Option<String>,
-    /// Source ownership is reserved before cloud API effects so source logout
-    /// can close both in-flight opens and active cloud sessions.
-    pub discovery_source_id: Option<String>,
 }
 
 impl SessionRecord {

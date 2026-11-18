@@ -1486,7 +1486,6 @@ mod tests {
                     owner: fixture.owner.clone(),
                     state: phase,
                     parent: None,
-                    discovery_source_id: None,
                 },
             );
         }
