@@ -843,6 +843,59 @@ async fn disconnect_resumes_existing_shell_with_fresh_token_and_sequences() {
 }
 
 #[tokio::test]
+async fn unacknowledged_input_exhausts_one_resend_budget_across_live_connections() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let service = Arc::new(MockService::new(format!(
+        "ws://{}",
+        listener.local_addr().unwrap()
+    )));
+    let server = tokio::spawn(async move {
+        let mut socket = accept(&listener, "start-token").await;
+        handshake(&mut socket, false).await;
+        let input = read_frame(&mut socket).await;
+        assert_eq!(input.payload, b"echo once\r");
+
+        // Spend one retry on the original socket and the rest replaying the
+        // same frame after network changes. No connection acknowledges it.
+        for attempt in 0..MAX_RESENDS {
+            if attempt > 0 {
+                socket.close(None).await.unwrap();
+                socket = accept(&listener, &format!("resume-token-{}", attempt - 1)).await;
+            }
+            socket.send(Message::Pong(Vec::new().into())).await.unwrap();
+            let replay = read_frame(&mut socket).await;
+            assert_eq!(replay.id, input.id);
+            assert_eq!(replay.sequence, input.sequence);
+            assert_eq!(replay.payload, input.payload);
+        }
+        // Keep the final socket alive so only the missing ACK can close it.
+        while let Some(message) = socket.next().await {
+            match message {
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Ping(bytes)) => socket.send(Message::Pong(bytes)).await.unwrap(),
+                other => panic!("unexpected message after the last allowed resend: {other:?}"),
+            }
+        }
+    });
+    let (sink, mut events) = event_sink();
+    let handle = opened(service.clone(), sink).await;
+    handle.write(b"echo once\r").unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        server.await.unwrap();
+        assert!(matches!(events.recv().await, Some(SsmOut::Close)));
+    })
+    .await
+    .expect("input was never acknowledged, but the client kept retrying");
+    assert_eq!(
+        service.resumes.load(Ordering::SeqCst),
+        (MAX_RESENDS - 1) as usize
+    );
+    assert!(handle.write(b"closed").is_err());
+    handle.control.close().await.unwrap();
+    assert_eq!(service.terminates.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn cancelled_opener_retains_late_start_response_until_termination() {
     let service = Arc::new(MockService {
         start_release: Some(Notify::new()),

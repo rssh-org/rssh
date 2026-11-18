@@ -538,11 +538,34 @@ impl Drop for ActorExit {
     }
 }
 
+enum ChannelStep {
+    Continue,
+    Close,
+}
+
 struct Unacknowledged {
     id: uuid::Uuid,
     bytes: Vec<u8>,
     last_sent: Option<Instant>,
-    retries: u32,
+    send_attempts: u32,
+}
+
+impl Unacknowledged {
+    fn can_send(&self) -> bool {
+        self.send_attempts < 1 + MAX_RESENDS
+    }
+
+    async fn send(&mut self, socket: &mut Socket) -> AppResult<ChannelStep> {
+        if !self.can_send() {
+            return Ok(ChannelStep::Close);
+        }
+        // A failed socket write may already have delivered the frame. Count the
+        // attempt before writing, including when replaying it on a new socket.
+        self.send_attempts += 1;
+        send(socket, Message::Binary(self.bytes.clone().into())).await?;
+        self.last_sent = Some(Instant::now());
+        Ok(ChannelStep::Continue)
+    }
 }
 
 #[derive(Default)]
@@ -581,7 +604,7 @@ impl Protocol {
                 id: frame.id,
                 bytes,
                 last_sent: None,
-                retries: 0,
+                send_attempts: 0,
             },
         );
         self.sequence = self
@@ -611,37 +634,31 @@ impl Protocol {
         Ok(())
     }
 
-    async fn flush(&mut self, socket: &mut Socket) -> AppResult<()> {
+    async fn flush(&mut self, socket: &mut Socket) -> AppResult<ChannelStep> {
         if self.paused {
-            return Ok(());
+            return Ok(ChannelStep::Continue);
         }
-        for pending in self.outgoing.values_mut() {
-            if pending.last_sent.is_none() {
-                send(socket, Message::Binary(pending.bytes.clone().into())).await?;
-                pending.last_sent = Some(Instant::now());
+        for pending in self.outgoing.values_mut().filter(|p| p.last_sent.is_none()) {
+            if let ChannelStep::Close = pending.send(socket).await? {
+                return Ok(ChannelStep::Close);
             }
         }
-        Ok(())
+        Ok(ChannelStep::Continue)
     }
 
-    async fn retransmit(&mut self, socket: &mut Socket) -> AppResult<()> {
+    async fn retransmit(&mut self, socket: &mut Socket) -> AppResult<ChannelStep> {
         if self.paused {
-            return Ok(());
+            return Ok(ChannelStep::Continue);
         }
         if let Some(pending) = self.outgoing.values_mut().next() {
             if pending
                 .last_sent
                 .is_some_and(|sent| sent.elapsed() >= RETRANSMIT_AFTER)
             {
-                if pending.retries >= MAX_RESENDS {
-                    return Err(error("aws_ssm_connect_failed"));
-                }
-                send(socket, Message::Binary(pending.bytes.clone().into())).await?;
-                pending.last_sent = Some(Instant::now());
-                pending.retries += 1;
+                return pending.send(socket).await;
             }
         }
-        Ok(())
+        Ok(ChannelStep::Continue)
     }
 }
 
@@ -718,19 +735,16 @@ async fn run_actor(
         // Fair polling keeps a continuously ready output stream from starving
         // terminal input and retransmission timers. Cancellation is checked
         // before each iteration as well as while waiting below.
-        let mut result: AppResult<bool> = tokio::select! {
+        let mut result: AppResult<ChannelStep> = tokio::select! {
             _ = cancelled.changed() => break,
             message = socket.next() => match message {
                 Some(Ok(Message::Binary(bytes))) => {
                     received = Instant::now();
                     peer_responded = true;
-                    match process_frame(&mut protocol, &mut socket, &bytes, control.service.as_ref(), &info.id, target, id, sink, &output).await {
-                        Ok(closed) => Ok(closed),
-                        Err(error) => Err(error),
-                    }
+                    process_frame(&mut protocol, &mut socket, &bytes, control.service.as_ref(), &info.id, target, id, sink, &output).await
                 },
-                Some(Ok(Message::Ping(bytes))) => { received = Instant::now(); peer_responded = true; send(&mut socket, Message::Pong(bytes)).await.map(|_| false) },
-                Some(Ok(Message::Pong(_))) => { received = Instant::now(); peer_responded = true; Ok(false) },
+                Some(Ok(Message::Ping(bytes))) => { received = Instant::now(); peer_responded = true; send(&mut socket, Message::Pong(bytes)).await.map(|_| ChannelStep::Continue) },
+                Some(Ok(Message::Pong(_))) => { received = Instant::now(); peer_responded = true; Ok(ChannelStep::Continue) },
                 Some(Ok(Message::Text(bytes))) => {
                     // Some services send control frames using a text WebSocket
                     // opcode. The protocol remains the same binary envelope.
@@ -738,7 +752,7 @@ async fn run_actor(
                     peer_responded = true;
                     process_frame(&mut protocol, &mut socket, bytes.as_bytes(), control.service.as_ref(), &info.id, target, id, sink, &output).await
                 },
-                Some(Ok(Message::Frame(_))) => Ok(false),
+                Some(Ok(Message::Frame(_))) => Ok(ChannelStep::Continue),
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => Err(error("aws_ssm_connect_failed")),
             },
             command = input.recv(), if protocol.handshake_complete && protocol.queued_bytes() < MAX_QUEUED_BYTES - MAX_WRITE - 8192 => {
@@ -749,7 +763,7 @@ async fn run_actor(
                     Some(Input::Resize(cols, rows)) => protocol.queue(SIZE, serde_json::to_vec(&json!({"cols":cols,"rows":rows})).unwrap())?,
                     None => break,
                 }
-                protocol.flush(&mut socket).await.map(|_| false)
+                Ok(ChannelStep::Continue)
             },
             _ = tick.tick() => {
                 if !protocol.handshake_complete && opened.elapsed() >= HANDSHAKE_TIMEOUT {
@@ -758,8 +772,8 @@ async fn run_actor(
                 if received.elapsed() >= SILENCE_TIMEOUT { Err(error("aws_ssm_connect_failed")) }
                 else if pinged.elapsed() >= PING_INTERVAL {
                     pinged = Instant::now();
-                    send(&mut socket, Message::Ping(b"keepalive".to_vec().into())).await.map(|_| false)
-                } else { protocol.retransmit(&mut socket).await.map(|_| false) }
+                    send(&mut socket, Message::Ping(b"keepalive".to_vec().into())).await.map(|_| ChannelStep::Continue)
+                } else { protocol.retransmit(&mut socket).await }
             },
         };
         if result.is_ok() && peer_responded {
@@ -767,7 +781,7 @@ async fn run_actor(
             // lifetime number of network transitions.
             retries = 0;
         }
-        if matches!(result, Ok(false)) {
+        if matches!(result, Ok(ChannelStep::Continue)) {
             if protocol.handshake_complete && !initial_size_queued {
                 protocol.queue(
                     SIZE,
@@ -777,8 +791,8 @@ async fn run_actor(
             }
             // All writes, including handshake responses and initial resize,
             // pass through the same reconnect path as socket read failures.
-            result = protocol.flush(&mut socket).await.map(|_| false);
-            if result.is_ok() && protocol.handshake_complete {
+            result = protocol.flush(&mut socket).await;
+            if matches!(result, Ok(ChannelStep::Continue)) && protocol.handshake_complete {
                 if let Some(ready) = ready.take() {
                     if ready.send(Ok(())).is_err() {
                         break;
@@ -787,7 +801,7 @@ async fn run_actor(
             }
         }
         match result {
-            Ok(true) => {
+            Ok(ChannelStep::Close) => {
                 // Only a channel_closed naming this exact remote session proves
                 // it ended. Legacy notifications without an ID still close the
                 // stream, but cleanup must confirm termination through the API.
@@ -796,10 +810,13 @@ async fn run_actor(
                 }
                 break;
             }
-            Ok(false) => {}
+            Ok(ChannelStep::Continue) => {}
             Err(error)
                 if error.code() == "aws_ssm_connect_failed" && protocol.handshake_complete =>
             {
+                if protocol.outgoing.values().any(|frame| !frame.can_send()) {
+                    break;
+                }
                 // Sequence numbers, encrypted frames and keys remain unchanged.
                 // Replay unacknowledged frames only after ResumeSession supplies
                 // a fresh token; never silently start a second remote shell.
@@ -831,7 +848,6 @@ async fn run_actor(
                 protocol.paused = false;
                 for pending in protocol.outgoing.values_mut() {
                     pending.last_sent = None;
-                    pending.retries = 0;
                 }
             }
             Err(error) => return Err(error),
@@ -853,20 +869,20 @@ async fn process_frame(
     id: &str,
     sink: &SsmSink,
     output: &broadcast::Sender<Vec<u8>>,
-) -> AppResult<bool> {
+) -> AppResult<ChannelStep> {
     let frame = Frame::decode(bytes)?;
     match frame.message_type.as_str() {
         "acknowledge" => {
             protocol.acknowledge(&frame)?;
-            return Ok(false);
+            return Ok(ChannelStep::Continue);
         }
         "start_publication" => {
             protocol.paused = false;
-            return Ok(false);
+            return Ok(ChannelStep::Continue);
         }
         "pause_publication" => {
             protocol.paused = true;
-            return Ok(false);
+            return Ok(ChannelStep::Continue);
         }
         "channel_closed" => {
             let closed: Value = serde_json::from_slice(&frame.payload)
@@ -878,7 +894,7 @@ async fn process_frame(
                 return Err(protocol_error("channel close session mismatch"));
             }
             protocol.remote_ended = closed["SessionId"].as_str() == Some(remote_id);
-            return Ok(true);
+            return Ok(ChannelStep::Close);
         }
         "output_stream_data" => {}
         _ => return Err(protocol_error("unsupported message type")),
@@ -902,7 +918,7 @@ async fn process_frame(
         let ack = frame.acknowledgement().encode()?;
         protocol.incoming.entry(frame.sequence).or_insert(frame);
         send(socket, Message::Binary(ack.into())).await?;
-        return Ok(false);
+        return Ok(ChannelStep::Continue);
     }
     send(
         socket,
@@ -910,7 +926,7 @@ async fn process_frame(
     )
     .await?;
     if frame.sequence < protocol.expected {
-        return Ok(false);
+        return Ok(ChannelStep::Continue);
     }
     let mut next = Some(frame);
     while let Some(frame) = next {
@@ -924,7 +940,7 @@ async fn process_frame(
             .ok_or_else(|| protocol_error("output sequence exhausted"))?;
         next = protocol.incoming.remove(&protocol.expected);
     }
-    Ok(false)
+    Ok(ChannelStep::Continue)
 }
 
 #[allow(clippy::too_many_arguments)]
