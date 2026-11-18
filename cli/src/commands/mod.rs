@@ -1,4 +1,5 @@
 pub mod add;
+pub mod aws;
 pub mod completions;
 pub mod config;
 pub mod edit;

@@ -185,13 +185,13 @@ it("shows the startup error when the IPC connection closes before opening", asyn
   expect(shellMounted).not.toHaveBeenCalled();
 });
 
-it.each(["__rssh_clone", "__rssh_ai_handoff"])("starts and stops this window's discovery schedule after %s startup", async (handoff) => {
+it.each(["__rssh_clone", "__rssh_ai_handoff"].flatMap(handoff => [false, true].map(cloudOnly => ({ handoff, cloudOnly }))))("starts and stops discovery after $handoff startup (cloud-only=$cloudOnly)", async ({ handoff, cloudOnly }) => {
   (window as unknown as Record<string, unknown>)[handoff] = "{}";
   const socket = await start();
   socket.open();
   replyToSettings(socket);
   socket.reply(socket.requests.find((request) => request.cmd === "get_runtime_capabilities")!, {
-    ...capabilities, localDiscovery: true, releaseUpdateCheck: true, cliInstall: true,
+    ...capabilities, localDiscovery: !cloudOnly, cloudDiscovery: cloudOnly, releaseUpdateCheck: true, cliInstall: true,
   });
   await vi.waitFor(() => {
     flushSync();

@@ -16,6 +16,7 @@
   import { t } from "../../i18n/index.svelte.ts";
   import NextButton from "./NextButton.svelte";
   import AppIcon from "../AppIcon.svelte";
+  import { capabilities } from "../../stores/runtime.svelte.ts";
 
   let { onNext }: { onNext: () => void } = $props();
 
@@ -28,7 +29,8 @@
   let captionShown = $state(false);
   let ready = $state(false);
 
-  const CMD = "docker exec -it api-1 sh";
+  const cloudOnly = capabilities().cloudDiscovery && !capabilities().localDiscovery;
+  const CMD = cloudOnly ? "whoami" : "docker exec -it api-1 sh";
   let typed = $state("");
 
   // The rolled pod: old ReplicaSet pod fades out, the new one takes its slot.
@@ -88,13 +90,15 @@
       <!-- Persisted sources. This row is ALL the config dynamic discovery has. -->
       <div class="sources" class:shown={sourcesShown} class:scanning>
         <div class="source">
-          <AppIcon name="docker" size={13} />
-          <span class="src-text">docker · dev-remote</span>
+          <AppIcon name={cloudOnly ? "aws" : "docker"} size={13} />
+          <span class="src-text">{cloudOnly ? "AWS · us-east-1" : "docker · dev-remote"}</span>
         </div>
+        {#if !cloudOnly}
         <div class="source">
           <AppIcon name="kubernetes" size={13} />
           <span class="src-text">kubectl · staging/api</span>
         </div>
+        {/if}
       </div>
 
       <!-- Live Home: static profiles stay put; discovered sections appear. -->
@@ -111,17 +115,17 @@
 
         {#if dockerShown}
           <div class="hsection grow">
-            <div class="hlabel">{t("home.type.docker")}</div>
+            <div class="hlabel">{t(cloudOnly ? "home.type.aws_native" : "home.type.docker")}</div>
             <div class="hcards">
-              <div class="tcard pop d1" class:flash={opened}><span class="ticon docker"><AppIcon name="docker" size={15} /></span>
-                <span class="tbody"><span class="tname">api-1</span><span class="tsub">nginx:1.27 · Up 2h</span></span></div>
-              <div class="tcard pop d2"><span class="ticon docker"><AppIcon name="docker" size={15} /></span>
-                <span class="tbody"><span class="tname">worker-7</span><span class="tsub">worker:2.4 · Up 26h</span></span></div>
+              <div class="tcard pop d1" class:flash={opened}><span class="ticon docker"><AppIcon name={cloudOnly ? "aws" : "docker"} size={15} /></span>
+                <span class="tbody"><span class="tname">api-1</span><span class="tsub">{cloudOnly ? "EC2 · running · us-east-1" : "nginx:1.27 · Up 2h"}</span></span></div>
+              <div class="tcard pop d2"><span class="ticon docker"><AppIcon name={cloudOnly ? "aws" : "docker"} size={15} /></span>
+                <span class="tbody"><span class="tname">worker-7</span><span class="tsub">{cloudOnly ? "EC2 · running · us-east-1" : "worker:2.4 · Up 26h"}</span></span></div>
             </div>
           </div>
         {/if}
 
-        {#if k8sShown}
+        {#if k8sShown && !cloudOnly}
           <div class="hsection grow">
             <div class="hlabel">{t("home.type.kubernetes")}</div>
             <div class="hcards">
@@ -143,6 +147,7 @@
         <div class="term-strip">
           <div class="tln"><span class="ps1">$</span> {typed}{#if typed.length < CMD.length}<span class="caret">▍</span>{/if}</div>
           {#if typed === CMD}
+            {#if cloudOnly}<div class="tln">ssm-user</div>{/if}
             <div class="tln"><span class="root">#</span> <span class="caret">▍</span></div>
           {/if}
         </div>

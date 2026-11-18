@@ -18,6 +18,7 @@ use crate::terminal::telnet::TelnetHandle;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionKind {
     Ssh,
+    Ssm,
     #[cfg(any(windows, macos, linux, ohos))]
     Pty,
     #[cfg(any(windows, macos, linux, ohos))]
@@ -110,10 +111,13 @@ pub struct AppState {
     pub db: Arc<Db>,
     pub secret_store: Arc<dyn SecretStore>,
     pub codex_auth: Arc<crate::ai::codex_auth::CodexAuth>,
+    pub aws_auth: Arc<crate::aws::auth::AwsAuth>,
     /// Single source of truth for connection identity, ownership and lifecycle.
     /// Typed handle maps below contain Ready handles only.
     pub lifecycle_sessions: Mutex<HashMap<String, SessionRecord>>,
     pub sessions: Mutex<HashMap<String, SessionHandle>>,
+    /// Native AWS Session Manager transport has no local PTY dependency.
+    pub ssm_sessions: Mutex<HashMap<String, crate::aws::ssm::SsmHandle>>,
     #[cfg(any(windows, macos, linux, ohos))]
     pub pty_sessions: Mutex<HashMap<String, PtyHandle>>,
     #[cfg(any(windows, macos, linux, ohos))]
@@ -171,6 +175,10 @@ impl AppState {
             log::warn!("migration failed (will retry on next startup): {error}");
         }
         Ok(Self {
+            aws_auth: Arc::new(crate::aws::auth::AwsAuth::new(
+                secrets.store.clone(),
+                data_dir.clone(),
+            )?),
             codex_auth: Arc::new(crate::ai::codex_auth::CodexAuth::new(
                 db.clone(),
                 secrets.store.clone(),
@@ -180,6 +188,7 @@ impl AppState {
             secret_store: secrets.store,
             lifecycle_sessions: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            ssm_sessions: Mutex::new(HashMap::new()),
             #[cfg(any(windows, macos, linux, ohos))]
             pty_sessions: Mutex::new(HashMap::new()),
             #[cfg(any(windows, macos, linux, ohos))]

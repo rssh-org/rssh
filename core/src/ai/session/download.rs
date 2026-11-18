@@ -50,6 +50,9 @@ pub(super) fn connector_for_target(
     state: &crate::state::AppState,
     target_id: &str,
 ) -> AppResult<Option<ConnectorSpec>> {
+    if let Some(handle) = crate::error::locked(&state.ssm_sessions)?.get(target_id) {
+        return Ok(Some(handle.connector().clone()));
+    }
     #[cfg(any(windows, macos, linux, ohos))]
     {
         let sessions = crate::error::locked(&state.pty_sessions)?;
@@ -124,7 +127,7 @@ fn connector_command(
             args.push("--".into());
             (DynamicDiscoveryPlatform::K8s, args, shell)
         }
-        ConnectorSpec::AwsSsm { .. } => {
+        ConnectorSpec::AwsSsm { .. } | ConnectorSpec::AwsNative { .. } => {
             return Err(AppError::other(
                 "dynamic_discovery_aws_ssm_download_unsupported",
                 json!({}),

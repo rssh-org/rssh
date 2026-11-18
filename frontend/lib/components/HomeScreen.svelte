@@ -121,6 +121,7 @@
         return { icon: dynamicPlatformIconName("docker"), iconClass: "docker" };
       case "kubectl_exec":
         return { icon: dynamicPlatformIconName("k8s"), iconClass: "k8s" };
+      case "aws_native":
       case "aws_ssm":
         return { icon: dynamicPlatformIconName("aws_ssm"), iconClass: "" };
     }
@@ -194,6 +195,7 @@
       case "docker_exec": return t("home.type.docker");
       case "kubectl_exec": return t("home.type.kubernetes");
       case "aws_ssm": return t("home.type.aws_ssm");
+      case "aws_native": return t("home.type.aws_native");
     }
   }
 

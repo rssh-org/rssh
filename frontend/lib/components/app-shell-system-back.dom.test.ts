@@ -21,10 +21,10 @@ vi.mock("../stores/runtime.svelte.ts", async (importOriginal) => ({
 }));
 
 const capability = fromStore(writable<RuntimeCapabilities>({
-  localPty: false, serial: false, localDiscovery: false, sshAgent: false,
+  localPty: false, serial: false, localDiscovery: false, cloudDiscovery: false, sshAgent: false,
   defaultKeyFiles: false, cliInstall: false, multiWindow: false, windowControls: false,
   windowPin: false, fileMultiSelect: false, directoryTransfer: false, plugins: false,
-  nativeClipboard: false, releaseUpdateCheck: false, systemBack: false, statusBarHidden: false, terminalKeybar: false,
+  nativeClipboard: false, releaseUpdateCheck: false, systemBack: false, statusBarHidden: false, terminalKeybar: false, mcpServer: false,
 }));
 const eventName = "navigation:back:settings-window";
 const callbacks = new Map<string, (event: { payload: null }) => void>();

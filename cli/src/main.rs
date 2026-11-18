@@ -40,6 +40,11 @@ struct Cli {
 enum Cmd {
     /// Print the CLI version
     Version,
+    /// Manage native AWS discovery sources and browser sign-in (no AWS CLI)
+    Aws {
+        #[command(subcommand)]
+        action: commands::aws::AwsCmd,
+    },
     /// Manage SSH profiles
     Profile {
         #[command(subcommand)]
@@ -293,6 +298,7 @@ fn main() {
     let result = match cli.command {
         None => commands::ls::cmd_list_profiles(&conn, None),
         Some(Cmd::Version) => unreachable!("handled before database initialization"),
+        Some(Cmd::Aws { action }) => commands::aws::run(&conn, action),
         Some(Cmd::Profile { action }) => match action {
             ProfileCmd::List { query } => commands::ls::cmd_list_profiles(&conn, query.as_deref()),
             ProfileCmd::Open { name } => commands::open::cmd_open_profile(&conn, &name),

@@ -31,7 +31,7 @@
   type Scene = "intro" | "ai" | "blocks" | "discovery" | "sync" | "cli" | "cta";
   const FEATURE_SCENES: Scene[] = [
     "ai", "blocks",
-    ...(capabilities().localDiscovery ? ["discovery" as const] : []),
+    ...((capabilities().localDiscovery || capabilities().cloudDiscovery) ? ["discovery" as const] : []),
     "sync",
     ...(capabilities().cliInstall ? ["cli" as const] : []),
   ];

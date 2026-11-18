@@ -1,3 +1,5 @@
+pub mod aws_signin;
+pub mod aws_ssm;
 pub mod command_block;
 pub mod discovery;
 pub mod forward;

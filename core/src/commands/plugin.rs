@@ -942,6 +942,10 @@ mod tests {
         let secret_store: std::sync::Arc<dyn crate::secret::SecretStore> =
             std::sync::Arc::new(crate::secret::DbStore::new(db.clone()));
         AppState {
+            aws_auth: std::sync::Arc::new(
+                crate::aws::auth::AwsAuth::new(secret_store.clone(), std::path::PathBuf::new())
+                    .unwrap(),
+            ),
             codex_auth: std::sync::Arc::new(
                 crate::ai::codex_auth::CodexAuth::new(
                     db.clone(),
@@ -961,6 +965,7 @@ mod tests {
             #[cfg(any(windows, macos, linux, ohos))]
             serial_backend: crate::terminal::serial::native_backend().unwrap(),
             telnet_sessions: Default::default(),
+            ssm_sessions: Default::default(),
             sftp_sessions: Default::default(),
             transfer_cancels: Default::default(),
             active_forwards: Default::default(),

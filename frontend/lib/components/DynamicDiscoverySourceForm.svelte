@@ -5,7 +5,9 @@
     DynamicDiscoveryToolStatus,
     DynamicPlatform,
   } from "../stores/app.svelte.ts";
-  import { t } from "../i18n/index.svelte.ts";
+  import { t, errMsg } from "../i18n/index.svelte.ts";
+  import AwsSignin from "./AwsSignin.svelte";
+  import * as awsAuth from "../stores/aws-auth.svelte.ts";
   import SearchSelect from "./SearchSelect.svelte";
   import AppIcon from "./AppIcon.svelte";
   import { dynamicPlatformIconName } from "./app-icon";
@@ -14,16 +16,22 @@
     source,
     contexts,
     statuses,
+    availablePlatforms,
     onRefreshContexts,
     onSave,
     onCancel,
+    saveError = null,
+    saveDisabled = false,
   }: {
     source: DynamicDiscoverySource;
     contexts: DynamicDiscoveryContext[];
     statuses: Partial<Record<DynamicPlatform, DynamicDiscoveryToolStatus>>;
+    availablePlatforms: DynamicPlatform[];
     onRefreshContexts: (platform: DynamicPlatform) => void | Promise<void>;
     onSave: (source: DynamicDiscoverySource) => void;
     onCancel: () => void;
+    saveError?: unknown;
+    saveDisabled?: boolean;
   } = $props();
 
   let formId = $state("");
@@ -43,11 +51,11 @@
     formPlatform = s.platform;
     formName = s.name ?? "";
     formEnabled = s.enabled ?? true;
-    formContext = s.platform === "aws_ssm" ? s.profile : s.context;
-    formShell = s.platform === "aws_ssm" ? "sh" : (s.shell || "sh");
+    formContext = s.platform === "aws_ssm" ? s.profile : s.platform === "aws_native" ? "" : s.context;
+    formShell = s.platform === "aws_ssm" || s.platform === "aws_native" ? "sh" : (s.shell || "sh");
     formNamespace = s.platform === "k8s" ? (s.namespace ?? "") : "";
-    formRegion = s.platform === "aws_ssm" ? s.region : "";
-    formOnlySsmAvailable = s.platform === "aws_ssm" && s.only_ssm_available;
+    formRegion = s.platform === "aws_ssm" || s.platform === "aws_native" ? s.region : "";
+    formOnlySsmAvailable = (s.platform === "aws_ssm" || s.platform === "aws_native") && s.only_ssm_available;
   }
 
   $effect(() => {
@@ -56,11 +64,12 @@
     loadFromSource(source);
   });
 
-  const cliOptions: { platform: DynamicPlatform; label: string; command: string }[] = [
+  const cliOptions = $derived<({ platform: DynamicPlatform; label: string; command: string })[]>([
     { platform: "docker", label: "Docker CLI", command: "docker" },
     { platform: "k8s", label: "kubectl CLI", command: "kubectl" },
-    { platform: "aws_ssm", label: "AWS SSM", command: "AWS CLI v2 + session-manager-plugin" },
-  ];
+    { platform: "aws_ssm", label: t("home.type.aws_ssm"), command: "AWS CLI v2 + session-manager-plugin" },
+    { platform: "aws_native", label: t("home.type.aws_native"), command: t("dynamic_discovery.aws_native_hint") },
+  ]);
 
   const contextSelectId = $derived(`dynamic-context-select-${formId || "new"}`);
   const contextOptions = $derived(
@@ -73,13 +82,19 @@
     })),
   );
   const formError = $derived(
-    !cliReady(formPlatform)
+    !availablePlatforms.includes(formPlatform)
+      ? t("dynamic_discovery.error.platform_unavailable")
+      : !cliReady(formPlatform)
       ? t("common.loading")
       : !cliAvailable(formPlatform)
       ? t("dynamic_discovery.error.cli_unavailable", { cli: cliCommand(formPlatform) })
       : !formName.trim()
       ? t("dynamic_discovery.error.name_required")
-      : formPlatform === "aws_ssm"
+      : formPlatform === "aws_native" && awsAuth.challenge(formId)
+      ? t("dynamic_discovery.aws_finish_signin")
+      : formPlatform === "aws_native" && awsAuth.busy(formId)
+      ? t("common.loading")
+      : (formPlatform === "aws_ssm" || formPlatform === "aws_native")
         ? (!formRegion.trim() ? t("dynamic_discovery.error.region_required") : "")
         : !formContext.trim()
         ? t("dynamic_discovery.error.context_required")
@@ -87,9 +102,17 @@
           ? t("dynamic_discovery.error.shell_required")
           : "",
   );
+  const displayError = $derived(
+    formPlatform === "aws_native" && awsAuth.error(formId)
+      ? errMsg(awsAuth.error(formId))
+      : saveError ? errMsg(saveError) : formError,
+  );
 
   const finalSource = $derived<DynamicDiscoverySource>(
-    formPlatform === "aws_ssm"
+    formPlatform === "aws_native"
+      ? { id: formId, name: formName.trim(), enabled: formEnabled, platform: "aws_native",
+          region: formRegion.trim(), only_ssm_available: formOnlySsmAvailable }
+      : formPlatform === "aws_ssm"
       ? {
           id: formId,
           name: formName.trim(),
@@ -121,17 +144,17 @@
 
   $effect(() => {
     const options = contextOptions;
-    if (formPlatform !== "aws_ssm" && !formContext.trim() && options.length > 0) {
+    if (formPlatform !== "aws_ssm" && formPlatform !== "aws_native" && !formContext.trim() && options.length > 0) {
       formContext = defaultContext(formPlatform);
     }
   });
 
   function cliAvailable(platform: DynamicPlatform): boolean {
-    return statuses[platform]?.available === true;
+    return availablePlatforms.includes(platform) && (platform === "aws_native" || statuses[platform]?.available === true);
   }
 
   function cliReady(platform: DynamicPlatform): boolean {
-    return !!statuses[platform];
+    return platform === "aws_native" || !!statuses[platform];
   }
 
   function cliCommand(platform: DynamicPlatform): string {
@@ -152,7 +175,7 @@
   }
 
   function defaultName(platform: DynamicPlatform): string {
-    return platform === "aws_ssm" ? "AWS SSM" : platform === "docker" ? "Docker" : "K8S";
+    return platform === "aws_native" ? t("home.type.aws_native") : platform === "aws_ssm" ? t("home.type.aws_ssm") : platform === "docker" ? "Docker" : "K8S";
   }
 
   function choosePlatform(platform: DynamicPlatform) {
@@ -177,7 +200,7 @@
   }
 
   function handleSave() {
-    if (formError) return;
+    if (formError || saveDisabled) return;
     onSave(finalSource);
   }
 
@@ -189,7 +212,7 @@
 <div class="card inline-form">
   <div class="form-head">
     <div class="cli-grid" aria-label={t("dynamic_discovery.cli")} role="group">
-      {#each cliOptions as cli (cli.platform)}
+      {#each cliOptions.filter(option => availablePlatforms.includes(option.platform)) as cli (cli.platform)}
         {@const available = cliAvailable(cli.platform)}
         <button
           type="button"
@@ -203,7 +226,7 @@
           <span class="cli-icon"><AppIcon name={dynamicPlatformIconName(cli.platform)} size={17} /></span>
           <span class="cli-text">
             <span class="cli-title">{cli.label}</span>
-            <span class="cli-sub">{cli.command} · {cliStatus(cli.platform)}</span>
+            <span class="cli-sub">{cli.command}{#if cli.platform !== "aws_native"} · {cliStatus(cli.platform)}{/if}</span>
           </span>
         </button>
       {/each}
@@ -219,6 +242,7 @@
     <input type="text" bind:value={formName} placeholder={t("dynamic_discovery.name_placeholder")} onkeydown={handleKeydown} />
   </label>
 
+  {#if formPlatform !== "aws_native"}
   <div class="field">
     <label class="label-text" for={contextSelectId}>{t(formPlatform === "aws_ssm" ? "dynamic_discovery.aws_profile" : "dynamic_discovery.context")}</label>
     <div class="context-row">
@@ -243,6 +267,8 @@
     </div>
   </div>
 
+  {/if}
+
   {#if formPlatform === "k8s"}
     <label class="field">
       <span class="label-text">{t("dynamic_discovery.namespace")}</span>
@@ -250,7 +276,7 @@
     </label>
   {/if}
 
-  {#if formPlatform === "aws_ssm"}
+  {#if formPlatform === "aws_ssm" || formPlatform === "aws_native"}
     <label class="field">
       <span class="label-text">{t("dynamic_discovery.aws_region")}</span>
       <input type="text" bind:value={formRegion} placeholder="us-east-1" onkeydown={handleKeydown} />
@@ -270,13 +296,17 @@
     </label>
   {/if}
 
+  {#if formPlatform === "aws_native" && availablePlatforms.includes("aws_native")}
+    <AwsSignin sourceId={formId} region={formRegion} />
+  {/if}
+
   <div class="form-actions">
-    <button class="btn btn-accent btn-sm" onclick={handleSave} disabled={!!formError}>{t("common.save")}</button>
+    <button class="btn btn-accent btn-sm" onclick={handleSave} disabled={!!formError || saveDisabled}>{t("common.save")}</button>
     <button class="btn btn-sm" onclick={onCancel}>{t("common.cancel")}</button>
   </div>
 
-  {#if formError}
-    <div class="form-error">{formError}</div>
+  {#if displayError}
+    <div class="form-error" role="alert">{displayError}</div>
   {/if}
 </div>
 
@@ -400,8 +430,9 @@
   }
   .form-error {
     font-size: 12px;
-    color: var(--error, #ff6b6b);
-    background: rgba(255, 107, 107, 0.08);
+    color: var(--error);
+    background: color-mix(in srgb, var(--error) 8%, transparent);
+    overflow-wrap: anywhere;
     padding: 6px 10px;
     border-radius: 4px;
   }

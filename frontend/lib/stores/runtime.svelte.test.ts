@@ -13,6 +13,7 @@ const desktop = {
   localPty: true,
   serial: true,
   localDiscovery: true,
+  cloudDiscovery: true,
   sshAgent: true,
   defaultKeyFiles: true,
   cliInstall: true,
@@ -51,6 +52,16 @@ describe("runtime capabilities", () => {
     expect(runtime.terminalPolicy()).toEqual(desktop.terminalPolicy);
     expect(runtime.capabilities()).not.toHaveProperty("terminalPolicy");
     expect(runtime.capabilities().nativeClipboard).toBe(true);
+    expect(runtime.capabilities().cloudDiscovery).toBe(true);
+  });
+
+  it("allows cloud discovery without granting local process capabilities", async () => {
+    const runtime = await import("./runtime.svelte.ts");
+    invokeMock.mockResolvedValue({ ...desktop, localDiscovery: false, localPty: false });
+    await runtime.load();
+    expect(runtime.capabilities().cloudDiscovery).toBe(true);
+    expect(runtime.capabilities().localDiscovery).toBe(false);
+    expect(runtime.capabilities().localPty).toBe(false);
   });
 
   it("uses the backend's resource limits without inferring a device from input or width", async () => {

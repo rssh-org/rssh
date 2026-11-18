@@ -28,6 +28,9 @@ pub(crate) mod test_support {
         let secret_store: Arc<dyn crate::secret::SecretStore> =
             Arc::new(crate::secret::DbStore::new(db.clone()));
         let state = Arc::new(AppState {
+            aws_auth: Arc::new(
+                crate::aws::auth::AwsAuth::new(secret_store.clone(), PathBuf::new()).unwrap(),
+            ),
             codex_auth: Arc::new(
                 crate::ai::codex_auth::CodexAuth::new(
                     db.clone(),
@@ -47,6 +50,7 @@ pub(crate) mod test_support {
             #[cfg(any(windows, macos, linux, ohos))]
             serial_backend: crate::terminal::serial::native_backend().unwrap(),
             telnet_sessions: Mutex::new(HashMap::new()),
+            ssm_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
             transfer_cancels: Mutex::new(HashMap::new()),
             active_forwards: Mutex::new(HashMap::new()),

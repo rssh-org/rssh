@@ -76,6 +76,23 @@ describe("sidebar layout preferences", () => {
 });
 
 describe("recent Home connections", () => {
+  it("opens native AWS targets with the SSM AI transport and ephemeral discovery identity", async () => {
+    const app = await loadAppModule();
+    const spec = { type: "aws_native" as const, source_id: "native-source", region: "us-east-1", instance_id: "i-0123456789abcdef0", account_id: "123456789012" };
+    app.connectDynamicTarget({
+      id: "aws_native:123456789012:us-east-1:i-0123456789abcdef0", source_id: spec.source_id,
+      source_name: "AWS Native", platform: "aws_native", name: "Production EC2", sub: "us-east-1", connector_spec: spec,
+    });
+    const tab = app.activeTab()!;
+    expect(tab.type).toBe("aws_native");
+    expect(tab.id).toMatch(/^aws_native:/);
+    expect(JSON.parse(tab.meta!.connectorSpec)).toEqual(spec);
+    expect(app.isAiCapableTabType(tab.type)).toBe(true);
+    expect(app.aiTargetKind("aws_native")).toBe("ssm");
+    expect(app.recentHomeItemIds()).toEqual(["dynamic:native-source:aws_native:123456789012:us-east-1:i-0123456789abcdef0"]);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
   it("opens AWS SSM targets as ephemeral PTY terminals with recent-history and AI support", async () => {
     const app = await loadAppModule();
     const spec = { type: "aws_ssm" as const, profile: "production", region: "us-east-1", instance_id: "i-0123456789abcdef0", account_id: "123456789012" };

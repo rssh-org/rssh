@@ -55,6 +55,15 @@ export function createSessionCleanupRegistry(changed: () => void = () => {}) {
       const entry = entries.get(sessionId);
       if (entry) await run(entry);
     },
+    confirmClosed(sessionIds: readonly string[]): void {
+      let removed = false;
+      for (const sessionId of sessionIds) {
+        // A stale status response must not interfere with a foreground close.
+        if (entries.get(sessionId)?.status.kind !== "failed") continue;
+        removed = entries.delete(sessionId) || removed;
+      }
+      if (removed) changed();
+    },
     forScope(scope: string, label: string): SessionCleanupScope {
       return {
         requestClose(sessionId, close) {

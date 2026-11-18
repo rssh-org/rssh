@@ -7,9 +7,10 @@ import * as discovery from "../stores/discovery.svelte.ts";
 import { setLocale, t } from "../i18n/index.svelte.ts";
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const capabilities = vi.hoisted(() => ({ localDiscovery: true, cloudDiscovery: false, localPty: true, serial: false }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("../stores/runtime.svelte.ts", () => ({
-  capabilities: () => ({ localDiscovery: true, localPty: true, serial: false }),
+  capabilities: () => capabilities,
 }));
 
 const components: ReturnType<typeof mount>[] = [];
@@ -31,6 +32,8 @@ function render(component: typeof DynamicDiscoverySettings | typeof HomeScreen) 
 }
 
 beforeEach(async () => {
+  capabilities.localDiscovery = true;
+  capabilities.cloudDiscovery = false;
   setLocale("en");
   app.closeSettings();
   app.setActiveWorkspace("home");
@@ -54,6 +57,25 @@ afterEach(async () => {
 });
 
 describe("shared discovery refresh controls", () => {
+  it("offers native AWS on cloud-only mobile hosts without probing desktop CLIs", async () => {
+    capabilities.localDiscovery = false;
+    capabilities.cloudDiscovery = true;
+    invokeMock.mockImplementation(async command => {
+      if (command === "aws_signin_status") return { authenticated: false };
+      if (command === "get_setting") return JSON.stringify({ auto_refresh: false, interval_seconds: 60 });
+      return [];
+    });
+    const settings = render(DynamicDiscoverySettings);
+    await settle();
+    settings.querySelector<HTMLButtonElement>('.toolbar button')!.click();
+    await settle();
+    expect(settings.textContent).toContain("AWS SSM (Native)");
+    expect(settings.textContent).toContain("Sign in to AWS");
+    expect(settings.textContent).not.toContain("Docker CLI");
+    expect(settings.textContent).not.toContain("session-manager-plugin");
+    expect(invokeMock.mock.calls.some(([command]) => command === "dynamic_discovery_tool_status" || command === "list_dynamic_discovery_contexts")).toBe(false);
+  });
+
   it("places manual and automatic controls below New source and publishes manual results to Home", async () => {
     const home = render(HomeScreen);
     const settings = render(DynamicDiscoverySettings);

@@ -14,6 +14,7 @@ export interface RuntimeCapabilities {
   localPty: boolean;
   serial: boolean;
   localDiscovery: boolean;
+  cloudDiscovery: boolean;
   sshAgent: boolean;
   defaultKeyFiles: boolean;
   cliInstall: boolean;
@@ -39,6 +40,7 @@ let _capabilities = $state<Readonly<RuntimeCapabilities>>({
   localPty: false,
   serial: false,
   localDiscovery: false,
+  cloudDiscovery: false,
   sshAgent: false,
   defaultKeyFiles: false,
   cliInstall: false,
@@ -78,7 +80,7 @@ function requestCapabilities(): Promise<void> {
   pending ??= invoke<RuntimeResponse>("get_runtime_capabilities")
     .then(({ terminalPolicy, ...capabilities }) => {
       if (!terminalPolicy) throw new Error("Host did not provide a terminal runtime policy");
-      _capabilities = capabilities;
+      _capabilities = { ...capabilities, cloudDiscovery: capabilities.cloudDiscovery === true };
       _terminalPolicy = terminalPolicy;
       _loaded = true;
     })

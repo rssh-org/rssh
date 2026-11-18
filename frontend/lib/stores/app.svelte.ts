@@ -16,6 +16,7 @@ import {
 } from "../terminal/limits.ts";
 import type { ViewportSnapshot } from "../terminal/viewport-snapshot.ts";
 import { toast } from "./toast.svelte.ts";
+import type { AwsAuthCommit } from "./aws-auth.svelte.ts";
 
 export type { CommandBlockSplitMode } from "../terminal/command-blocks.ts";
 import { addSplit, collectLeafIds, leaf, normalizeRatio, removeLeaf, replaceLeaf } from "../terminal/layout.ts";
@@ -30,13 +31,13 @@ export { capabilities };
 /* ═══════════════════════════════════════════════════════
    Types
    ═══════════════════════════════════════════════════════ */
-export type TabType = "home" | "ssh" | "local" | "serial" | "telnet" | "docker_exec" | "kubectl_exec" | "aws_ssm" | "forward" | "edit";
+export type TabType = "home" | "ssh" | "local" | "serial" | "telnet" | "docker_exec" | "kubectl_exec" | "aws_ssm" | "aws_native" | "forward" | "edit";
 /** Tab types that render a TerminalPane (byte-stream terminals). */
 export type TerminalTabType = Exclude<TabType, "home" | "forward" | "edit">;
 export type TerminalConnectionStatus = "connecting" | "connected" | "disconnected";
 export function isTerminalTabType(type: TabType): type is TerminalTabType {
   return type === "ssh" || type === "local" || type === "serial" || type === "telnet"
-    || type === "docker_exec" || type === "kubectl_exec" || type === "aws_ssm";
+    || type === "docker_exec" || type === "kubectl_exec" || type === "aws_ssm" || type === "aws_native";
 }
 export type AiCapableTabType = TerminalTabType;
 export function isAiCapableTabType(type: TabType): type is AiCapableTabType {
@@ -44,6 +45,7 @@ export function isAiCapableTabType(type: TabType): type is AiCapableTabType {
 }
 /** Connector tabs use their existing PTY, including the remote shell. */
 export function aiTargetKind(type: AiCapableTabType): AiTargetKind {
+  if (type === "aws_native") return "ssm";
   return type === "docker_exec" || type === "kubectl_exec" || type === "aws_ssm" ? "local" : type;
 }
 export interface Tab {
@@ -140,15 +142,17 @@ export interface TelnetProfile {
   save_script_to_remote?: boolean;
   group_id: string | null;
 }
-export type DynamicPlatform = "docker" | "k8s" | "aws_ssm";
+export type DynamicPlatform = "docker" | "k8s" | "aws_ssm" | "aws_native";
 export type ConnectorSpec =
   | { type: "docker_exec"; context: string; container_id: string; container_name: string; shell: string }
   | { type: "kubectl_exec"; context: string; namespace: string; pod: string; container: string | null; shell: string }
-  | { type: "aws_ssm"; profile: string; region: string; instance_id: string; account_id: string };
+  | { type: "aws_ssm"; profile: string; region: string; instance_id: string; account_id: string }
+  | { type: "aws_native"; source_id: string; region: string; instance_id: string; account_id: string };
 export type DynamicDiscoverySource =
   | { id: string; name: string; enabled: boolean; platform: "docker"; context: string; shell: string }
   | { id: string; name: string; enabled: boolean; platform: "k8s"; context: string; namespace: string | null; shell: string }
-  | { id: string; name: string; enabled: boolean; platform: "aws_ssm"; profile: string; region: string; only_ssm_available: boolean };
+  | { id: string; name: string; enabled: boolean; platform: "aws_ssm"; profile: string; region: string; only_ssm_available: boolean }
+  | { id: string; name: string; enabled: boolean; platform: "aws_native"; region: string; only_ssm_available: boolean };
 export interface DynamicDiscoveryContext {
   platform: DynamicPlatform;
   name: string;
@@ -580,6 +584,7 @@ function homeItemIdForTab(tab: Tab): string | null {
     case "docker_exec":
     case "kubectl_exec":
     case "aws_ssm":
+    case "aws_native":
       return meta?.sourceId && meta.dynamicTargetId
         ? `dynamic:${meta.sourceId}:${meta.dynamicTargetId}`
         : null;
@@ -992,6 +997,8 @@ function connectorTabType(spec: ConnectorSpec): Extract<TerminalTabType, Connect
       return "kubectl_exec";
     case "aws_ssm":
       return "aws_ssm";
+    case "aws_native":
+      return "aws_native";
   }
 
   const _exhaustive: never = spec;
@@ -1438,8 +1445,12 @@ export async function loadTelnetProfiles(): Promise<TelnetProfile[]> {
 export async function loadDynamicDiscoverySources(): Promise<DynamicDiscoverySource[]> {
   return invoke<DynamicDiscoverySource[]>("list_dynamic_discovery_sources");
 }
-export async function saveDynamicDiscoverySources(sources: DynamicDiscoverySource[]): Promise<void> {
-  await invoke("save_dynamic_discovery_sources", { sources });
+export async function saveDynamicDiscoverySources(sources: DynamicDiscoverySource[], authCommit?: AwsAuthCommit, expectedSources?: DynamicDiscoverySource[]): Promise<void> {
+  await invoke("save_dynamic_discovery_sources", {
+    sources,
+    ...(authCommit ? { authCommit } : {}),
+    ...(expectedSources ? { expectedSources } : {}),
+  });
 }
 export async function dynamicDiscoveryToolStatus(platform: DynamicPlatform): Promise<DynamicDiscoveryToolStatus> {
   return invoke<DynamicDiscoveryToolStatus>("dynamic_discovery_tool_status", { platform });

@@ -7,7 +7,8 @@ export type HomeItemKind =
   | "telnet"
   | "docker_exec"
   | "kubectl_exec"
-  | "aws_ssm";
+  | "aws_ssm"
+  | "aws_native";
 
 export interface HomeLayoutItem {
   id: string;
@@ -57,6 +58,7 @@ const HOME_KIND_ORDER: readonly HomeItemKind[] = [
   "docker_exec",
   "kubectl_exec",
   "aws_ssm",
+  "aws_native",
 ];
 
 function defaultHomeViewPreferences(): HomeViewPreferences {

@@ -6,6 +6,7 @@ import * as layout from "../stores/layout.svelte.ts";
 import * as runtime from "../stores/runtime.svelte.ts";
 import { setLocale, t } from "../i18n/index.svelte.ts";
 import { installInputTracking } from "../input.ts";
+import { toasts, dismiss } from "../stores/toast.svelte.ts";
 
 const mocks = vi.hoisted(() => {
   const disposable = () => ({ dispose() {} });
@@ -47,6 +48,7 @@ const mocks = vi.hoisted(() => {
     onRender = disposable;
     onCursorMove = disposable;
     onLineFeed = disposable;
+    registerMarker() { return undefined; }
     loadAddon() {}
     attachCustomKeyEventHandler() {}
     getSelection() { return ""; }
@@ -137,6 +139,35 @@ afterEach(async () => {
   for (const tab of app.workspaceTabs()) app.closeTab(tab.id);
   await settle();
   document.body.innerHTML = "";
+  for (const item of toasts()) dismiss(item.id);
+});
+
+it("opens native AWS without a local PTY and routes input, output, errors, and close by session", async () => {
+  const previous = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (command, args) => command === "aws_ssm_open" ? args.sessionId : previous(command, args));
+  const nativeId = "aws_native:session";
+  const spec = { type: "aws_native", source_id: "native-source", region: "us-east-1", instance_id: "i-0123456789abcdef0", account_id: "123456789012" };
+  app.addTab({ id: nativeId, type: "aws_native", label: "Native EC2", meta: { connectorSpec: JSON.stringify(spec) } });
+  await vi.waitFor(() => expect(app.terminalConnectionStatus(nativeId)).toBe("connected"));
+  const sessionId = app.sessionIdForTab(nativeId)!;
+  expect(mocks.invoke).toHaveBeenCalledWith("aws_ssm_open", {
+    sourceId: spec.source_id, region: spec.region, instanceId: spec.instance_id,
+    accountId: spec.account_id, cols: 80, rows: 24, sessionId,
+  });
+  expect(mocks.invoke.mock.calls.some(([command]) => command.startsWith("pty_"))).toBe(false);
+  const terminal = mocks.Terminal.instances.find(instance => instance.output.closest(".pane")?.getAttribute("data-tab-id") === nativeId)
+    ?? mocks.Terminal.instances[mocks.Terminal.instances.length - 1]!;
+  terminal.input("pwd\r");
+  expect(mocks.invoke).toHaveBeenCalledWith("aws_ssm_write", { sessionId, data: Array.from(new TextEncoder().encode("pwd\r")) });
+  const receive = (name: string, payload?: unknown) => mocks.listen.mock.calls.find(([event]) => event === `${name}:${sessionId}`)![1]({ payload });
+  receive("ssm:data", btoa("/home/ssm-user\r\n"));
+  await vi.waitFor(() => expect(terminal.output.textContent).toContain("/home/ssm-user"));
+  receive("ssm:error", '__rssh_err__|{"code":"aws_ssm_connect_failed","params":{}}');
+  expect(toasts().some(item => item.message.startsWith("Could not connect to the SSM session"))).toBe(true);
+  receive("ssm:close");
+  await vi.waitFor(() => expect(app.terminalConnectionStatus(nativeId)).toBe("disconnected"));
+  expect(mocks.invoke).toHaveBeenCalledWith("aws_ssm_close", { sessionId });
+  expect(mocks.invoke.mock.calls.some(([command]) => command.startsWith("pty_"))).toBe(false);
 });
 
 describe("native terminal selection handle context menus", () => {

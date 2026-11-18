@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod aws;
 #[cfg(any(windows, macos, linux))]
 pub mod cli;
 pub mod clipboard;

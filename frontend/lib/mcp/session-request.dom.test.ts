@@ -42,7 +42,10 @@ afterEach(async () => {
   document.body.innerHTML = "";
 });
 
-it.each(["local", "docker_exec", "kubectl_exec", "aws_ssm"] as const)("authorizes the requested %s split pane and runs commands in that PTY", async (type) => {
+it.each(["local", "docker_exec", "kubectl_exec", "aws_ssm", "aws_native"] as const)("authorizes the requested %s split pane and uses its transport", async (type) => {
+  const writeCommand = type === "aws_native" ? "aws_ssm_write" : "pty_write";
+  const dataEvent = type === "aws_native" ? "ssm:data" : "pty:data";
+  terminal.kind = type === "aws_native" ? "ssm" : "local";
   app.addTab({ id: "local:workspace", type: "local", label: "Workspace" });
   app.addPane("local:workspace", "right", { id: terminal.tab_id, type, label: "Target" });
   app.registerSession({ tabId: terminal.tab_id, sessionId: terminal.session_id, type });
@@ -57,7 +60,7 @@ it.each(["local", "docker_exec", "kubectl_exec", "aws_ssm"] as const)("authorize
 
   f.listeners.get("agent:session_requested:transport")!({ payload: {
     id: "request", session_id: terminal.session_id, tab_id: terminal.tab_id, nonce: terminal.nonce,
-    kind: "local", title: "Investigate the selected terminal",
+    kind: terminal.kind, title: "Investigate the selected terminal",
   } });
   await settle();
 
@@ -72,7 +75,7 @@ it.each(["local", "docker_exec", "kubectl_exec", "aws_ssm"] as const)("authorize
     expect(consent?.closest("[inert]")).toBeNull();
   });
   expect(f.invoke).not.toHaveBeenCalledWith("mcp_accept_session", expect.anything());
-  expect(f.invoke).not.toHaveBeenCalledWith("pty_write", expect.anything());
+  expect(f.invoke).not.toHaveBeenCalledWith(writeCommand, expect.anything());
   expect(f.invoke).not.toHaveBeenCalledWith("mcp_start");
 
   const accept = [...document.querySelectorAll<HTMLButtonElement>(".mcp-request button")]
@@ -85,10 +88,10 @@ it.each(["local", "docker_exec", "kubectl_exec", "aws_ssm"] as const)("authorize
   } });
   await settle();
   document.querySelector<HTMLButtonElement>(".cmd-card .btn-approve")!.click();
-  await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith("pty_write", {
+  await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith(writeCommand, {
     sessionId: terminal.session_id, data: Array.from(new TextEncoder().encode("pwd\r")),
   }));
-  f.listeners.get(`pty:data:${terminal.session_id}`)!({ payload: btoa("pwd\r\n/container\r\ndone:0\r\n") });
+  f.listeners.get(`${dataEvent}:${terminal.session_id}`)!({ payload: btoa("pwd\r\n/container\r\ndone:0\r\n") });
   await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith("ai_command_result", expect.objectContaining({
     tabId: terminal.tab_id, instanceId: actor.instance_id, output: "/container", exitCode: 0,
   })));

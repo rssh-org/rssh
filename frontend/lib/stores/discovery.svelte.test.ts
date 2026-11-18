@@ -50,6 +50,35 @@ afterEach(() => {
 });
 
 describe("dynamic discovery refresh", () => {
+  it("drops signed-out EC2 results from both windows even if a pre-logout refresh finishes later", async () => {
+    const { otherWindow } = await connectOtherWindow();
+    const auth = await import("./aws-auth.svelte.ts");
+    const cached = {
+      targets: ["aws", "keep"].map(id => ({ id, source_id: id })),
+      errors: [{ source_id: "aws", message: "old account failure" }],
+    };
+    invokeMock.mockResolvedValueOnce({ authenticated: true, account_id: "123456789012" });
+    await auth.load("aws");
+    for (const store of [discovery, otherWindow]) {
+      invokeMock.mockResolvedValueOnce(cached);
+      await store.refresh();
+    }
+    let finish!: (value: typeof cached) => void;
+    invokeMock.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const stale = discovery.refresh();
+    await auth.logout("aws");
+    expect(invokeMock).toHaveBeenLastCalledWith("aws_signin_logout", { sourceId: "aws" });
+    expect(auth.status("aws")).toEqual({ authenticated: false });
+    finish(cached);
+    await stale;
+    for (const store of [discovery, otherWindow]) {
+      expect(store.targets()).toEqual([cached.targets[1]]);
+      expect(store.errors()).toEqual([]);
+    }
+    expect(sourceNotifications()).toHaveLength(1);
+    expect(discoverCalls()).toHaveLength(3);
+  });
+
   it.each(["delete", "disable", "edit"] as const)("invalidates another window's %s source with auto refresh off and preserves unrelated results", async (operation) => {
     const { otherWindow } = await connectOtherWindow();
     const keep = { ...source, id: "keep" };
@@ -410,6 +439,21 @@ describe("dynamic discovery refresh", () => {
 
     expect(discovery.targets()).toEqual([cached.targets[0]]);
     expect(discovery.errors()).toEqual([cached.errors[0]]);
+    expect(discoverCalls()).toHaveLength(1);
+  });
+
+  it("invalidates a reauthorized source even when its discovery configuration is unchanged", async () => {
+    const keep = { ...source, id: "keep" };
+    const sources = [source, keep];
+    const cached = {
+      targets: sources.map(({ id }) => ({ id, source_id: id })),
+      errors: sources.map(({ id }) => ({ source_id: id, message: "old account failure" })),
+    };
+    invokeMock.mockResolvedValueOnce(cached);
+    await discovery.refresh();
+    discovery.sourcesChanged(sources, sources, [source.id]);
+    expect(discovery.targets()).toEqual([cached.targets[1]]);
+    expect(discovery.errors()).toEqual([cached.errors[1]]);
     expect(discoverCalls()).toHaveLength(1);
   });
 

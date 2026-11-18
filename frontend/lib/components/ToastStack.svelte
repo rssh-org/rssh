@@ -1,7 +1,10 @@
 <script lang="ts">
+    import { onMount } from "svelte";
     import { toasts, dismiss } from "../stores/toast.svelte.ts";
-    import { failedSessionCleanups, retrySessionCleanup } from "../stores/session-cleanup.svelte.ts";
+    import { sessionCleanupNotices, retrySessionCleanup, hiddenSessionCleanupCount, hideSessionCleanup, showSessionCleanupNotices, observeSessionCleanupStatus } from "../stores/session-cleanup.svelte.ts";
     import { errMsg, t } from "../i18n/index.svelte.ts";
+
+    onMount(observeSessionCleanupStatus);
 </script>
 
 <div class="toast-stack">
@@ -10,15 +13,22 @@
             {item.message}
         </button>
     {/each}
-    {#each failedSessionCleanups() as item (item.sessionId)}
+    {#each sessionCleanupNotices() as item (item.sessionId)}
         <div class="toast toast-error cleanup-notice surface-raised">
             <div role="alert">
                 <strong>{t("session.cleanup_failed")}: {item.label}</strong>
                 <p>{errMsg(item.error)}</p>
             </div>
             <button class="btn" onclick={() => void retrySessionCleanup(item.sessionId)}>{t("common.retry")}</button>
+            <button class="btn btn-icon" aria-label={t("session.cleanup_hide")} title={t("session.cleanup_hide")}
+                onclick={() => hideSessionCleanup(item.sessionId)}>×</button>
         </div>
     {/each}
+    {#if hiddenSessionCleanupCount() > 0}
+        <button class="toast toast-error surface-raised" onclick={showSessionCleanupNotices}>
+            {t("session.cleanup_pending", { count: hiddenSessionCleanupCount() })}
+        </button>
+    {/if}
 </div>
 
 <style>
@@ -51,7 +61,7 @@
         word-break: break-word;
         flex-shrink: 0;
     }
-    .cleanup-notice { display: flex; align-items: center; gap: 12px; cursor: default; }
+    .cleanup-notice { display: flex; align-items: center; gap: 8px; cursor: default; }
     .cleanup-notice > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
     .cleanup-notice p { margin: 4px 0 0; color: var(--text-sub); }
     .cleanup-notice button { flex-shrink: 0; }

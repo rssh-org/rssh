@@ -33,6 +33,10 @@ pub fn pty_spawn(
 
 fn connector_command(spec: ConnectorSpec) -> AppResult<(DynamicDiscoveryPlatform, Vec<String>)> {
     match spec {
+        ConnectorSpec::AwsNative { .. } => Err(AppError::config(
+            "aws_native_connector_required",
+            serde_json::json!({}),
+        )),
         ConnectorSpec::DockerExec {
             context,
             container_id,

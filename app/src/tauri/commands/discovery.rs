@@ -17,13 +17,21 @@ pub fn list_dynamic_discovery_sources(
 }
 
 #[tauri::command]
-pub fn save_dynamic_discovery_sources(
+pub async fn save_dynamic_discovery_sources(
+    window: tauri::Window,
     state: State<'_, Arc<AppState>>,
     sources: Vec<DynamicDiscoverySource>,
+    auth_commit: Option<rssh_core::commands::discovery::AwsSigninCommit>,
+    expected_sources: Option<Vec<DynamicDiscoverySource>>,
 ) -> AppResult<()> {
-    let runtime = tauri::async_runtime::handle();
-    let _guard = runtime.inner().enter();
-    rssh_core::commands::discovery::save_dynamic_discovery_sources(state.inner().as_ref(), sources)
+    rssh_core::commands::discovery::save_dynamic_discovery_sources_for_owner(
+        state.inner().clone(),
+        sources,
+        rssh_core::state::SessionOwner::Window(window.label().to_owned()),
+        auth_commit,
+        expected_sources,
+    )
+    .await
 }
 
 #[tauri::command]
