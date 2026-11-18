@@ -41,7 +41,7 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(90);
 const PING_INTERVAL: Duration = Duration::from_secs(15);
 const SILENCE_TIMEOUT: Duration = Duration::from_secs(60);
 const RETRANSMIT_AFTER: Duration = Duration::from_secs(2);
-const MAX_RESENDS: u32 = 8;
+const MAX_RESENDS: u32 = 3;
 const MAX_RECONNECTS: u32 = 3;
 
 pub enum SsmOut {
