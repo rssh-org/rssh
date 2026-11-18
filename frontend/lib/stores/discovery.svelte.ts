@@ -143,7 +143,7 @@ export function refresh(): Promise<DynamicDiscoverySnapshot> {
   return promise;
 }
 
-function invalidateSources(changed: Set<string>): void {
+function invalidateSources(changed: ReadonlySet<string>): void {
   generation += 1;
   _snapshot = {
     targets: _snapshot.targets.filter((target) => !changed.has(target.source_id)),
@@ -163,6 +163,11 @@ export function sourcesChanged(previous: DynamicDiscoverySource[], next: Dynamic
   }).map((source) => source.id)]);
   if (changed.size === 0 && previous.length === next.length) return;
   // Additions also invalidate in-flight discovery, even without cached IDs to remove.
+  invalidateSourceResults(changed);
+}
+
+/** Drop results locally and notify other windows when source config or credentials change. */
+export function invalidateSourceResults(changed: ReadonlySet<string>): void {
   invalidateSources(changed);
   try {
     localStorage.setItem(SOURCES_CHANGED_KEY, JSON.stringify({ ids: [...changed], nonce: crypto.randomUUID() }));

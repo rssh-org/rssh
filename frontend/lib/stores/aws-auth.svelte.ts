@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { invalidateSourceResults } from "./discovery.svelte.ts";
 
 export interface AwsSigninStatus {
   authenticated: boolean;
@@ -136,6 +137,7 @@ export async function logout(sourceId: string): Promise<void> {
   update(sourceId, { busy: true, error: null });
   try {
     await invoke("aws_signin_logout", { sourceId });
+    invalidateSourceResults(new Set([sourceId]));
     if (current(sourceId, generation)) update(sourceId, { status: signedOut });
   } catch (error) {
     if (current(sourceId, generation)) update(sourceId, { error });

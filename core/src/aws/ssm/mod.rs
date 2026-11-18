@@ -74,7 +74,8 @@ struct SessionInfo {
 }
 
 impl SessionInfo {
-    fn from_response(value: Value, existing_id: Option<&str>) -> AppResult<Self> {
+    fn from_response(value: Value, previous: Option<&Self>) -> AppResult<Self> {
+        let existing_id = previous.map(|info| info.id.as_str());
         let id = value["SessionId"]
             .as_str()
             .or(existing_id)
@@ -87,7 +88,13 @@ impl SessionInfo {
             id: id.to_owned(),
             // Preserve a returned ID even if the other fields are malformed:
             // cleanup must still terminate that newly created AWS session.
-            stream_url: value["StreamUrl"].as_str().unwrap_or_default().to_owned(),
+            // ResumeSession may return only a fresh token for the last endpoint.
+            stream_url: match value.get("StreamUrl") {
+                None | Some(Value::Null) => {
+                    previous.map(|i| i.stream_url.clone()).unwrap_or_default()
+                }
+                Some(url) => url.as_str().unwrap_or_default().to_owned(),
+            },
             token: value["TokenValue"].as_str().unwrap_or_default().to_owned(),
         })
     }
@@ -111,7 +118,7 @@ struct DataKey {
 #[async_trait::async_trait]
 trait Service: Send + Sync {
     async fn start(&self, target: &str) -> AppResult<SessionInfo>;
-    async fn resume(&self, id: &str) -> AppResult<SessionInfo>;
+    async fn resume(&self, previous: &SessionInfo) -> AppResult<SessionInfo>;
     async fn terminate(&self, id: &str) -> AppResult<()>;
     async fn data_key(
         &self,
@@ -196,11 +203,11 @@ impl Service for AwsService {
         SessionInfo::from_response(response, None)
     }
 
-    async fn resume(&self, id: &str) -> AppResult<SessionInfo> {
+    async fn resume(&self, previous: &SessionInfo) -> AppResult<SessionInfo> {
         let response = self
-            .request("AmazonSSM.ResumeSession", json!({"SessionId": id}))
+            .request("AmazonSSM.ResumeSession", json!({"SessionId": previous.id}))
             .await?;
-        SessionInfo::from_response(response, Some(id))
+        SessionInfo::from_response(response, Some(previous))
     }
 
     async fn terminate(&self, id: &str) -> AppResult<()> {
@@ -685,7 +692,7 @@ async fn run_actor(
 ) -> AppResult<()> {
     // Deliberately do not cancel an in-flight StartSession request: its response
     // is needed to terminate a session created after the UI was cancelled.
-    let info = control.service.start(target).await?;
+    let mut info = control.service.start(target).await?;
     *locked(&control.remote_id)? = Some(info.id.clone());
     if *cancelled.borrow() {
         return Ok(());
@@ -803,12 +810,15 @@ async fn run_actor(
                     retries += 1;
                     let attempt = async {
                         tokio::time::sleep(Duration::from_millis(500 * (1 << (retries - 1)))).await;
-                        let resumed = control.service.resume(&info.id).await?;
-                        connect(control.service.as_ref(), &resumed, &client_id).await
+                        let resumed = control.service.resume(&info).await?;
+                        let socket =
+                            connect(control.service.as_ref(), &resumed, &client_id).await?;
+                        Ok((socket, resumed))
                     };
                     match tokio::select! { _ = cancelled.changed() => return Ok(()), result = attempt => result }
                     {
-                        Ok(reconnected) => {
+                        Ok((reconnected, resumed)) => {
+                            info = resumed;
                             socket = reconnected;
                             break;
                         }

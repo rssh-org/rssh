@@ -5,6 +5,7 @@ use tokio::sync::Notify;
 
 struct MockService {
     url: String,
+    first_resume_url: Option<String>,
     starts: AtomicUsize,
     resumes: AtomicUsize,
     terminates: AtomicUsize,
@@ -21,6 +22,7 @@ impl MockService {
     fn new(url: String) -> Self {
         Self {
             url,
+            first_resume_url: None,
             starts: AtomicUsize::new(0),
             resumes: AtomicUsize::new(0),
             terminates: AtomicUsize::new(0),
@@ -52,10 +54,16 @@ impl Service for MockService {
         }
         Ok(self.info("start-token"))
     }
-    async fn resume(&self, id: &str) -> AppResult<SessionInfo> {
-        assert_eq!(id, "aws-session");
-        self.resumes.fetch_add(1, Ordering::SeqCst);
-        Ok(self.info("resume-token"))
+    async fn resume(&self, previous: &SessionInfo) -> AppResult<SessionInfo> {
+        assert_eq!(previous.id, "aws-session");
+        let n = self.resumes.fetch_add(1, Ordering::SeqCst);
+        let mut response = json!({"TokenValue": format!("resume-token-{n}")});
+        if n == 0 {
+            if let Some(url) = &self.first_resume_url {
+                response["StreamUrl"] = json!(url);
+            }
+        }
+        SessionInfo::from_response(response, Some(previous))
     }
     async fn terminate(&self, id: &str) -> AppResult<()> {
         assert_eq!(id, "aws-session");
@@ -791,10 +799,11 @@ async fn output_burst_does_not_starve_terminal_input() {
 #[tokio::test]
 async fn disconnect_resumes_existing_shell_with_fresh_token_and_sequences() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let service = Arc::new(MockService::new(format!(
-        "ws://{}",
-        listener.local_addr().unwrap()
-    )));
+    let rotated = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let service = Arc::new(MockService {
+        first_resume_url: Some(format!("ws://{}", rotated.local_addr().unwrap())),
+        ..MockService::new(format!("ws://{}", listener.local_addr().unwrap()))
+    });
     let server = tokio::spawn(async move {
         let mut socket = accept(&listener, "start-token").await;
         handshake(&mut socket, false).await;
@@ -802,7 +811,14 @@ async fn disconnect_resumes_existing_shell_with_fresh_token_and_sequences() {
         // Deliberately lose the ACK and socket. The exact encrypted/binary
         // envelope, including UUID and sequence, must be replayed on resume.
         drop(socket);
-        let mut resumed = accept(&listener, "resume-token").await;
+        drop(listener);
+        let mut resumed = accept(&rotated, "resume-token-0").await;
+        let replay = read_frame(&mut resumed).await;
+        assert_eq!(replay.id, input.id);
+        drop(resumed);
+        // The second ResumeSession omits StreamUrl. Its new token must be
+        // presented at the rotated endpoint, not the original StartSession URL.
+        let mut resumed = accept(&rotated, "resume-token-1").await;
         let replay = read_frame(&mut resumed).await;
         assert_eq!(replay.sequence, input.sequence);
         assert_eq!(replay.id, input.id);
@@ -821,7 +837,7 @@ async fn disconnect_resumes_existing_shell_with_fresh_token_and_sequences() {
     handle.write(b"echo resumed\r").unwrap();
     assert_eq!(next_data(&mut events).await, b"resumed");
     assert_eq!(service.starts.load(Ordering::SeqCst), 1);
-    assert_eq!(service.resumes.load(Ordering::SeqCst), 1);
+    assert_eq!(service.resumes.load(Ordering::SeqCst), 2);
     handle.control.close().await.unwrap();
     server.await.unwrap();
 }

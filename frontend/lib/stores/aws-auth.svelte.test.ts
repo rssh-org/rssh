@@ -108,11 +108,13 @@ it("retains the attempt on a failed code exchange and reports the localized wire
   expect(auth.busy("source")).toBe(false);
 });
 
-it("logs out through the backend and removes its public account identity", async () => {
+it("keeps the saved account identity when backend logout fails", async () => {
   const auth = await import("./aws-auth.svelte.ts");
-  invoke.mockResolvedValueOnce({ authenticated: true, account_id: "123456789012" });
+  const saved = { authenticated: true, account_id: "123456789012" };
+  invoke.mockResolvedValueOnce(saved);
   await auth.load("source");
-  await auth.logout("source");
+  invoke.mockRejectedValueOnce(new Error("logout failed"));
+  await expect(auth.logout("source")).rejects.toThrow("logout failed");
   expect(invoke).toHaveBeenLastCalledWith("aws_signin_logout", { sourceId: "source" });
-  expect(auth.status("source")).toEqual({ authenticated: false });
+  expect(auth.status("source")).toEqual(saved);
 });
