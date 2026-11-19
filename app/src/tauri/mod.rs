@@ -441,6 +441,7 @@ pub fn run_with(
             commands::ai::ai_session_set_shell,
             commands::ai::ai_cancel_stream,
             commands::ai::ai_user_message,
+            commands::ai::ai_terminal_command,
             commands::ai::ai_command_result,
             commands::ai::ai_command_reject,
             commands::ai::ai_audit_save,

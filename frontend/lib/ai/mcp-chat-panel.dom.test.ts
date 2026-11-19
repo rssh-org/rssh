@@ -241,17 +241,14 @@ describe("MCP inside the AI conversation", () => {
 
     if (!autoRunCommand) {
       expect(document.querySelector('.cmd-card .btn-approve')?.textContent).toContain("Run in terminal");
-      expect(f.invoke).not.toHaveBeenCalledWith("pty_write", expect.anything());
+      expect(f.invoke).not.toHaveBeenCalledWith("ai_terminal_command", expect.anything());
       return;
     }
-    await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith("pty_write", {
-      sessionId: "transport", data: Array.from(new TextEncoder().encode("pwd\r")),
+    await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith("ai_terminal_command", {
+      tabId: "tab", instanceId: "actor", targetSessionId: "transport", toolCallId: "danger-command",
+      action: { kind: "approve", bracketedPaste: false },
     }));
-    f.listeners.get("pty:data:transport")!({ payload: btoa("pwd\r\n/workspace\r\ndone:0\r\n") });
-    await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith("ai_command_result", expect.objectContaining({
-      tabId: "tab", instanceId: "actor", toolCallId: "danger-command", output: "/workspace", exitCode: 0,
-    })));
-    expect(f.invoke.mock.calls.filter(([command]) => command === "pty_write")).toHaveLength(1);
+    expect(f.invoke.mock.calls.filter(([command]) => command === "ai_terminal_command")).toHaveLength(1);
   });
 
   it.each([false, true])("uses the existing download approval and result flow for MCP (auto_download_file=%s)", async (autoDownloadFile) => {

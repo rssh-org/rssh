@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::error::{locked, AppError, AppResult};
+use crate::terminal::capture::OutputTap;
 
 /// Telnet output destined for the host. Mirrors `serial::SerialOut` — its own
 /// type for the same reason: unrelated transports shouldn't couple just to
@@ -384,6 +385,7 @@ impl Drop for CloseGuard {
 /// serial it HAS resize: NAWS reports rows/cols to the server.
 #[derive(Clone)]
 pub struct TelnetHandle {
+    pub(crate) output: OutputTap,
     writer: Arc<Mutex<TcpStream>>,
     /// Shared with the reader thread, which feeds inbound bytes through it.
     neg: Arc<Mutex<Negotiator>>,
@@ -534,7 +536,9 @@ pub fn open(
     let _ = negotiator.set_size(cols, rows);
 
     let id = session_id;
+    let output = OutputTap::default();
     let handle = TelnetHandle {
+        output: output.clone(),
         writer: Arc::new(Mutex::new(stream)),
         neg: Arc::new(Mutex::new(negotiator)),
         _guard: Arc::new(CloseGuard { closed }),
@@ -586,7 +590,7 @@ pub fn open(
                         }
                     }
                     if !data.is_empty() {
-                        sink(&sid, TelnetOut::Data(data));
+                        output.publish(data, |data| sink(&sid, TelnetOut::Data(data)));
                     }
                 }
                 Err(ref e)
@@ -605,8 +609,9 @@ pub fn open(
             .map(|mut negotiator| negotiator.finish_inbound())
             .unwrap_or_default();
         if !trailing.is_empty() {
-            sink(&sid, TelnetOut::Data(trailing));
+            output.publish(trailing, |data| sink(&sid, TelnetOut::Data(data)));
         }
+        output.close();
         sink(&sid, TelnetOut::Close);
     });
 
@@ -1001,29 +1006,52 @@ mod tests {
         assert_eq!(err.code(), "telnet_open_failed");
     }
 
-    #[test]
-    fn write_line_uses_profile_input_newline() {
+    #[tokio::test]
+    async fn command_target_preserves_profile_newline_and_manual_completion_without_etx() {
+        use crate::commands::{lifecycle::owned_command_target, telnet::telnet_open};
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            read_exact_timeout(&mut stream, 5)
+            assert_eq!(read_exact_timeout(&mut stream, 5), b"show\n");
+            stream.write_all(b"device reply\r\n").unwrap();
+            // Neither a manual finish nor a cancellation may inject ETX.
+            assert_eq!(read_exact_timeout(&mut stream, 5), b"next\n");
         });
-        let sink: TelnetSink = Arc::new(|_id, _out| {});
-        let (_id, handle) = super::open(
-            uuid::Uuid::new_v4().to_string(),
-            "127.0.0.1",
+        let (host, mut events) = crate::ssh::test_support::headless_host();
+        let owner = crate::state::SessionOwner::Window("main".into());
+        let id = telnet_open(
+            host.clone(),
+            owner.clone(),
+            host.state(),
+            "127.0.0.1".into(),
             port,
             80,
             24,
-            "lf",
-            sink,
+            Some("lf".into()),
+            None,
         )
+        .await
         .unwrap();
-
-        handle.write_line("show").unwrap();
-
-        assert_eq!(server.join().unwrap(), b"show\n");
+        let target = owned_command_target(&host, &owner, &id).unwrap();
+        assert!(target.is_raw());
+        let mut capture = target.output.start("").unwrap();
+        target.write_line("show").await.unwrap();
+        let mut visible = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            while !visible.ends_with(b"\n") {
+                let (event, payload) = events.recv().await.unwrap();
+                assert_eq!(event, format!("telnet:data:{id}"));
+                visible.extend(STANDARD.decode(payload.as_str().unwrap()).unwrap());
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(capture.submit().unwrap().output, "device reply");
+        target.interrupt().await.unwrap();
+        target.write_line("next").await.unwrap();
+        server.join().unwrap();
     }
 
     #[test]

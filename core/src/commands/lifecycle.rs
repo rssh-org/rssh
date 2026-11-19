@@ -1,5 +1,8 @@
 //! Session 生命周期管理：前端 reconcile + 窗口销毁清理。
 
+mod command_target;
+pub(crate) use command_target::{owned_command_target, CommandTarget};
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -607,6 +610,19 @@ impl ReadySession {
         }
     }
 
+    fn close_command_output(&self) {
+        match self {
+            Self::Ssh(handle) => handle.output.close(),
+            Self::Ssm(handle) => handle.capture.close(),
+            #[cfg(any(windows, macos, linux, ohos))]
+            Self::Pty(handle) => handle.output.close(),
+            #[cfg(any(windows, macos, linux, ohos))]
+            Self::Serial(handle) => handle.output.close(),
+            Self::Telnet(handle) => handle.output.close(),
+            _ => {}
+        }
+    }
+
     fn cleanup(&self) -> Option<CleanupHandle> {
         match self {
             Self::Ssm(handle) => Some(handle.cleanup()),
@@ -1161,6 +1177,7 @@ fn begin_resource_close(
                     serde_json::json!({"id": session_id}),
                 )
             })?;
+            handle.close_command_output();
             match handle.cleanup() {
                 Some(cleanup) => Some(ResourceCleanup::ready(cleanup)),
                 None => {
@@ -2566,6 +2583,7 @@ mod tests {
                 actor_task: None,
                 actor_done_rx,
                 terminal_mutations: Arc::new(Mutex::new(Vec::new())),
+                terminal_commands: Default::default(),
                 conversation_id: conversation_id.to_owned(),
                 target_key: "local".to_owned(),
             },
@@ -2634,6 +2652,7 @@ mod tests {
                 actor_task: Some(actor_task),
                 actor_done_rx,
                 terminal_mutations: Arc::new(Mutex::new(Vec::new())),
+                terminal_commands: Default::default(),
                 conversation_id: conversation_id.to_owned(),
                 target_key: "local".to_owned(),
             },
@@ -3422,6 +3441,32 @@ mod tests {
         )));
     }
 
+    // These actor-drain tests inject a completed transport outcome. The wire
+    // command accepts UI decisions only; production output comes from the tap.
+    async fn deliver_transport_result(
+        state: &AppState,
+        owner: &SessionOwner,
+        command_id: String,
+        output: &str,
+    ) -> AppResult<()> {
+        let (ack, processed) = tokio::sync::oneshot::channel();
+        crate::ai::commands::ai_send_action(
+            state,
+            "tab",
+            owner,
+            None,
+            crate::ai::session::UserAction::CommandResult {
+                command_id,
+                output: output.to_owned(),
+                exit_code: 0,
+                timed_out: false,
+                early_terminated: false,
+                ack: Some(ack),
+            },
+        )?;
+        processed.await.unwrap()
+    }
+
     #[tokio::test]
     async fn command_result_ack_follows_terminal_mutation_processing() {
         let state = Arc::new(empty_state());
@@ -3446,19 +3491,9 @@ mod tests {
         .await
         .expect("actor never reached the approval wait");
 
-        crate::ai::commands::ai_command_result_impl(
-            &state,
-            "tab",
-            &owner,
-            command_id,
-            0,
-            "processed output".into(),
-            false,
-            false,
-            None,
-        )
-        .await
-        .unwrap();
+        deliver_transport_result(&state, &owner, command_id, "processed output")
+            .await
+            .unwrap();
 
         let terminal = state
             .ai_sessions
@@ -3501,19 +3536,9 @@ mod tests {
         })
         .await
         .expect("actor never proposed the capability probe");
-        crate::ai::commands::ai_command_result_impl(
-            &state,
-            "tab",
-            &owner,
-            probe_id,
-            0,
-            "py3=1 perl=0 diff=1".into(),
-            false,
-            false,
-            None,
-        )
-        .await
-        .unwrap();
+        deliver_transport_result(&state, &owner, probe_id, "py3=1 perl=0 diff=1")
+            .await
+            .unwrap();
 
         let card_id = tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
@@ -3525,33 +3550,14 @@ mod tests {
         })
         .await
         .expect("actor never proposed the file operation");
-        let stale_error = crate::ai::commands::ai_command_result_impl(
-            &state,
-            "tab",
-            &owner,
-            "previous-step-card".into(),
-            0,
-            "stale output".into(),
-            false,
-            false,
-            None,
-        )
-        .await
-        .unwrap_err();
+        let stale_error =
+            deliver_transport_result(&state, &owner, "previous-step-card".into(), "stale output")
+                .await
+                .unwrap_err();
         assert_eq!(stale_error.code(), "ai_tool_call_not_pending");
-        crate::ai::commands::ai_command_result_impl(
-            &state,
-            "tab",
-            &owner,
-            card_id.clone(),
-            0,
-            "invalid marker payload".into(),
-            false,
-            false,
-            None,
-        )
-        .await
-        .unwrap();
+        deliver_transport_result(&state, &owner, card_id.clone(), "invalid marker payload")
+            .await
+            .unwrap();
 
         // This is the old cancellation window: close immediately after the
         // invoke ack. The ack now proves run_file_op already recorded its

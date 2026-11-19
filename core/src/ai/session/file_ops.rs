@@ -122,10 +122,8 @@ fn extract_json_payload(pty_output: &str) -> Option<&str> {
 ///
 /// 启动包装器先解码 Base64 参数，脚本拿到的 sys.argv[2] 是原始 UTF-8 字符串。
 ///
-/// **远端 cap = 50 matches**：count 仍记真实总命中数，但 matches 数组只装前 50 个 +
-/// `truncated` 标识。理由：后端只在解析后才截断，但前端 PTY 流要在 sentinel 出现前
-/// 把全部 output buffer 住 —— 短 find（如 "a"）配大文件 (`/var/log/*`) 可产 MB 级 JSON，
-/// 在 backend 拿到 payload 前先把前端 UI OOM。在远端就 cap 才彻底安全。
+/// 统计全部命中，只传前 50 条详情及 truncated 标志。这样短搜索词在大文件上
+/// 也不会生成超过终端采集上限的 JSON。
 const PYTHON_MATCH_SCRIPT: &str = r#"import sys,json
 M="__RSSH_JSON__"
 def o(x):sys.stdout.write(M+"\n"+json.dumps(x,ensure_ascii=True)+"\n"+M+"\n")
@@ -533,18 +531,24 @@ impl Actor {
         self.audit_push(AuditKind::Note {
             message: "file_ops: probing remote capabilities (python3 / perl / diff)".into(),
         });
+        let mut proposal =
+            self.terminal_commands
+                .propose(&cmd_id, &self.cfg.target_id, &self.app)?;
         self.emit(
             "internal_command",
             json!({
                 "id": cmd_id,
                 "tool_call_id": cmd_id,
                 "cmd": cmd,
+                "target_session_id": self.cfg.target_id,
                 "full_cmd": full_cmd,
                 "sentinel": sentinel,
             }),
         );
 
-        let (outcome, ack) = self.wait_command_outcome(&cmd_id).await?;
+        let (outcome, ack) = self
+            .wait_terminal_outcome(&cmd_id, &mut proposal, &full_cmd, &sentinel, 60)
+            .await?;
         let output = match outcome {
             CommandOutcome::Result {
                 exit_code,
@@ -641,6 +645,7 @@ impl Actor {
         payload.insert("id".into(), json!(cmd_id));
         payload.insert("tool_call_id".into(), json!(cmd_id));
         payload.insert("cmd".into(), json!(cmd));
+        payload.insert("target_session_id".into(), json!(self.cfg.target_id));
         payload.insert(
             "execution".into(),
             json!({
@@ -649,12 +654,17 @@ impl Actor {
                 "timeout_s": timeout_s,
             }),
         );
+        let mut proposal =
+            self.terminal_commands
+                .propose(&cmd_id, &self.cfg.target_id, &self.app)?;
         self.emit(
             &format!("{event}_proposed"),
             serde_json::Value::Object(payload),
         );
 
-        let (outcome, ack) = self.wait_command_outcome(&cmd_id).await?;
+        let (outcome, ack) = self
+            .wait_terminal_outcome(&cmd_id, &mut proposal, &full_cmd, &sentinel, timeout_s)
+            .await?;
         match outcome {
             CommandOutcome::Rejected { reason } => {
                 self.record_rejection(&cmd_id, &reason);

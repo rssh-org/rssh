@@ -176,6 +176,28 @@ pub async fn ai_user_message(
 }
 
 #[tauri::command]
+pub async fn ai_terminal_command(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    instance_id: String,
+    tool_call_id: String,
+    target_session_id: String,
+    action: session::TerminalCommandAction,
+) -> AppResult<Option<session::AiTerminalMutation>> {
+    rssh_core::ai::commands::ai_terminal_command(
+        rssh_core::state::SessionOwner::Window(window.label().to_owned()),
+        state.inner().as_ref(),
+        tab_id,
+        instance_id,
+        tool_call_id,
+        target_session_id,
+        action,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn ai_command_result(
     window: tauri::Window,
     state: State<'_, Arc<AppState>>,

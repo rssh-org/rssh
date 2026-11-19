@@ -3,6 +3,13 @@
  * tokens.ts (which is strictly token-count formatting for the toolbar).
  */
 
+import { errMsg } from "../i18n/index.svelte.ts";
+
+/** Setup and transport failures carry a localized backend error in the result. */
+export function commandOutput(output: string, exitCode: number): string {
+  return exitCode === -1 ? errMsg(output) : output;
+}
+
 /** Max chars of a command shown inline before we ellipsize. Commands the AI
  *  proposes (and rssh blocks) can be very long; the panel only needs the gist. */
 const CMD_DISPLAY_MAX = 120;

@@ -145,6 +145,7 @@ export type PatchStep = "cp" | "modify" | "diff" | "mv";
 
 export interface PatchProposal {
   id: string;
+  target_session_id?: string;
   step: PatchStep;
   /** Shell command to run (shown for trust). */
   cmd: string;
@@ -167,6 +168,7 @@ export interface PatchProposal {
  *  CommandResult (the raw search output). */
 export interface MatchProposal {
   id: string;
+  target_session_id?: string;
   /** Shell command to run (shown for trust). */
   cmd: string;
   /** File to search. */
@@ -250,11 +252,8 @@ export type ChatItem =
   | { kind: "error"; text: string; at: number }
   | { kind: "note"; text: string; at: number };
 
-/** PTY execution envelope — the "how to run it" half of a proposal, shared by
- *  every tool whose approval pastes a command into the terminal (run_command /
- *  match_file / patch×4). Split out from each tool's domain fields so
- *  `executeCommand` takes just (cardId, execution) and is reused across proposal
- *  types instead of depending on any one of them. */
+/** Metadata shared by terminal proposal cards and saved timelines. Core owns
+ * the executable command. Approval sends only the card and transport identity. */
 export interface PtyExecution {
   /** 实际要粘贴到终端的命令（含 sentinel + exit code 回显），由后端拼装。 */
   full_cmd: string;
@@ -265,6 +264,7 @@ export interface PtyExecution {
 
 export interface CommandProposed {
   id: string;
+  target_session_id?: string;
   /** Compatibility wire alias. New backends set this to the per-card `id`; the
    * provider's tool-call id remains backend-internal. */
   tool_call_id: string;

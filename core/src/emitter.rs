@@ -61,6 +61,10 @@ impl Host {
         self.emit(event, b64_payload(bytes))
     }
 
+    pub(crate) fn weak_state(&self) -> std::sync::Weak<AppState> {
+        Arc::downgrade(&self.state)
+    }
+
     pub fn state(&self) -> &AppState {
         &self.state
     }

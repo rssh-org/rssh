@@ -12,8 +12,6 @@ import { saveTextFile, fileStamp } from "../save-file.ts";
 import { createSidePanelState } from "../stores/panel-state.svelte.ts";
 import { toast } from "../stores/toast.svelte.ts";
 import { t, errMsg, locale as currentLocale } from "../i18n/index.svelte.ts";
-import { extractOutput, findSentinel } from "./pty-output.ts";
-import { decodeStreamChunk } from "../terminal/stream-decode.ts";
 import { truncateCommand } from "./format.ts";
 import {
   applyTerminalMutations,
@@ -33,7 +31,6 @@ import type {
   CategoryGroup,
   CommandResult,
   ConversationMeta,
-  PtyExecution,
   AiProviderRecord,
   LlmProtocol,
   ModelInfo,
@@ -59,14 +56,6 @@ const ALTERNATE_SCREEN_ERROR = "Command was not executed: the target terminal is
   + "the normal command prompt before retrying. Do not send shell commands or exit keystrokes to that application.";
 
 const TERMINAL_UNAVAILABLE_ERROR = "Command was not executed: the target terminal was closed or replaced, or access was revoked.";
-
-/** DECSET 2004 bracketed-paste markers. When the target shell has enabled
- *  bracketed paste, a paste is wrapped so zsh/bash/PowerShell treat it as one
- *  atomic insert instead of parsing it char-by-char through the line editor —
- *  which is what mangles long pasted commands (file_ops' ansi_c_quoted python)
- *  and leaves the card stuck in "Executing". */
-const PASTE_START = "\x1b[200~";
-const PASTE_END = "\x1b[201~";
 
 // ─── Position ────────────────────────────────────────────────────
 // 只支持 left/right。移动端用户横屏即可用——左右布局就够了，没必要再开上下分支。
@@ -104,14 +93,6 @@ let _keyboardLockedByTab = $state<Record<string, boolean>>({});
  */
 let _tokensByTab = $state<Record<string, TokenUsage>>({});
 let _settings = $state<AiSettings | null>(null);
-/**
- * tab_id → 终端类型映射。internal_command 自动执行时需要知道走 ssh_write
- * 还是 pty_write —— ChatPanel 把 targetKind 作为 prop 传给 dialog，但 store
- * 在 attachListeners 里要独立处理 internal_command 事件，所以单独缓存。
- *
- * 按 tab_id 索引（不按 target_id）——重连后 target_id 变了 kind 不变，
- * 用 tab_id 才能保证 internal_command 路由不丢。
- */
 const _targetKindByTab: Record<string, AiTargetKind> = {};
 
 type ContextEpochState = Readonly<{
@@ -176,13 +157,6 @@ class SessionClosedError extends Error {
   constructor(tab_id: string) {
     super(`AI session closed for tab: ${tab_id}`);
     this.name = "SessionClosedError";
-  }
-}
-
-class CommandSetupError extends Error {
-  constructor(readonly cause: unknown) {
-    super(errMsg(cause));
-    this.name = "CommandSetupError";
   }
 }
 
@@ -548,15 +522,22 @@ function contextEpochFromPayload(payload: unknown): number | null | undefined {
     : null;
 }
 
-function stripContextEpoch<T extends object>(payload: T): T {
-  if (!("context_epoch" in payload)) return payload;
-  const copy = { ...payload } as T & { context_epoch?: unknown };
+function stripEventScope<T extends object>(payload: T): T {
+  if (!("context_epoch" in payload) && !("instance_id" in payload)) return payload;
+  const copy = { ...payload } as T & { context_epoch?: unknown; instance_id?: unknown };
   delete copy.context_epoch;
+  delete copy.instance_id;
   return copy;
 }
 
-function acceptsContextEvent(session: SessionInstanceRef, payload: unknown): boolean {
+function belongsToSession(session: SessionInstanceRef, payload: unknown): boolean {
   if (_sessionByTab[session.tabId]?.instance_id !== session.instanceId) return false;
+  return !(payload && typeof payload === "object" && "instance_id" in payload)
+    || payload.instance_id === session.instanceId;
+}
+
+function acceptsContextEvent(session: SessionInstanceRef, payload: unknown): boolean {
+  if (!belongsToSession(session, payload)) return false;
   const eventEpoch = contextEpochFromPayload(payload);
   // Compatibility with older backends that emitted no context_epoch field.
   if (eventEpoch === undefined) return true;
@@ -570,7 +551,7 @@ function dispatchContextEvent(
   payload: unknown,
   apply: () => void,
 ): void {
-  if (_sessionByTab[session.tabId]?.instance_id !== session.instanceId) return;
+  if (!belongsToSession(session, payload)) return;
   const eventEpoch = contextEpochFromPayload(payload);
   if (eventEpoch === undefined) {
     // Compatibility with older backends. Without an epoch there is no safe way
@@ -928,11 +909,17 @@ async function stopSessionNow(tab_id: string): Promise<void> {
   // that outcome before asking it to shut down; raw devices abort without any
   // transport write, while shell transports retain their explicit Ctrl+C path.
   const executionEntries = Array.from(_commandExecutions.entries()).filter(
-    ([, execution]) => execution.tabId === tab_id
-      && (!session || execution.instanceId === session.instance_id),
+    ([, execution]) => execution.session.tabId === tab_id
+      && (!session || execution.session.instanceId === session.instance_id),
   );
   const executionResults = await Promise.allSettled(
-    executionEntries.map(([, execution]) => execution.teardown()),
+    executionEntries.map(([, entry]) => {
+      if (commandExecutionStatus(entry.session, entry.commandId) === "delivery_failed"
+        && entry.action.kind !== "approve") {
+        return sendCommandAction(entry, { ...entry.action });
+      }
+      return terminateCommand(entry.session, entry.commandId);
+    }),
   );
   for (const [key, execution] of executionEntries) {
     removeCommandExecution(key, execution);
@@ -1200,8 +1187,7 @@ export async function rebindTarget(
     conversationId,
   });
   assertTabLive(tab_id, generation);
-  // 同步前端 cache：AiSessionInfo.target_id 也要换，否则下次 sendMessage 走的
-  // executeCommand 还会用旧 target_session_id 给 ssh_write —— 拿不到新 PTY。
+  // 下一张命令卡的终端状态检查使用重连后的 session ID。
   const info = _sessionByTab[tab_id];
   if (
     !info
@@ -1229,475 +1215,158 @@ export function isStreaming(tab_id: string): boolean {
   return last.kind === "assistant" && last.streaming === true;
 }
 
-/**
- * Bounded PTY buffer for one in-flight command.
- *
- * Why this exists: `buffer += chunk` is unbounded. Commands like `yes`,
- * `tail -f /var/log/...`, or `cat /dev/urandom | base64` can pump tens
- * of MB into the buffer before the sentinel ever appears (timeout path),
- * which freezes the renderer when `findSentinel` runs a regex over the
- * whole string on every chunk.
- *
- * Strategy: keep a fixed-size HEAD as the real output, a sliding TAIL
- * window where the sentinel must appear once the command exits. Once
- * HEAD is full, new chunks only update TAIL. `view()` is what
- * `findSentinel`/`extractOutput` see — it concatenates HEAD + TAIL,
- * dropping the middle segment for over-cap runs.
- *
- * The sentinel is `__rssh_done_<uuid_simple>:<exit_code>` — ~60 bytes.
- * TAIL = 4 KB gives a wide margin so a chunk-aligned sentinel can't be
- * lost across the head/tail seam.
- */
-const HEAD_CAP = 512 * 1024;
-const TAIL_WIN = 4 * 1024;
+/** The actor owns the command, transport and result. This entry only tracks
+ * the UI request until the actor acknowledges it or emits the final event. */
+type CommandAction =
+  | { kind: "approve"; bracketedPaste: boolean }
+  | { kind: "blocked"; reason: string }
+  | { kind: "stop" | "submit" };
 
-class CappedBuffer {
-  private head = "";
-  private tail = "";
+export type CommandExecutionStatus = "running" | "reporting" | "delivery_failed" | "delivered";
 
-  append(chunk: string) {
-    const room = HEAD_CAP - this.head.length;
-    if (room > 0) {
-      if (chunk.length <= room) {
-        this.head += chunk;
-      } else {
-        this.head += chunk.substring(0, room);
-      }
-    }
-    // Always update tail so the sentinel detection window slides forward.
-    // While head is still filling, tail mirrors head's recent suffix;
-    // after head is sealed, only tail moves.
-    this.tail = (this.tail + chunk).slice(-TAIL_WIN);
-  }
-
-  /** Concatenated view used by findSentinel / extractOutput. */
-  view(): string {
-    // While head still has room, the tail is a suffix of the head — no
-    // concat needed (avoids duplicating recent bytes in the matcher).
-    if (this.head.length < HEAD_CAP) return this.head;
-    return this.head + this.tail;
-  }
-}
-
-export type CommandExecutionStatus =
-  | "running"
-  | "reporting"
-  | "delivery_failed"
-  | "delivered";
-
-type CommandResultReport = {
-  tabId: string;
-  instanceId: string;
-  toolCallId: string;
-  exitCode: number;
-  output: string;
-  timedOut: boolean;
-  earlyTerminated: boolean;
-};
-
-/** Per-command-card transport + result-delivery state. The entry outlives the PTY
- * run when result delivery fails, because an executed command must never become
- * executable again merely because its acknowledgement could not be stored. */
 type Execution = {
-  key: string;
+  session: SessionInstanceRef;
   commandId: string;
-  tabId: string;
-  instanceId: string;
-  targetSessionId: string;
-  targetKind: AiTargetKind;
-  buffer: CappedBuffer;
-  status: CommandExecutionStatus;
-  result: CommandResultReport | null;
-  delivery: Promise<void> | null;
-  done: Promise<void>;
-  userInterrupted: boolean;
-  unlisten: UnlistenFn | null;
-  timer: number | null;
-  terminate: () => Promise<void>;
-  /** Raw devices (serial/telnet) only: user says "done" — report the buffer
-   *  as a clean result. */
-  submit: () => Promise<void>;
-  deliver: () => Promise<void>;
-  teardown: () => Promise<void>;
-  cancel: () => void;
-  dispose: () => void;
+  targetId: string;
+  terminalCurrent: () => boolean;
+  action: CommandAction;
+  pending?: Promise<void>;
+  cancelPreflight?: () => void;
 };
 
-/**
- * Indexed by actor instance + command card id. One provider tool call can emit
- * several sequential cards, so the card id is the only execution correlation.
- * Map keeps transport commitment and result delivery in one exact identity;
- * entries are cleared only by backend completion/rejection or session teardown.
- */
-const _commandExecutions: Map<string, Execution> = new Map();
+const _commandExecutions = new Map<string, Execution>();
 let _commandExecutionStatusByKey = $state<Record<string, CommandExecutionStatus>>({});
 
-function setCommandExecutionStatus(
-  execution: Execution,
-  status: CommandExecutionStatus,
-): void {
-  execution.status = status;
-  // A processing ack can resolve after the matching command_completed event
-  // already removed this execution. Keep the detached object coherent for its
-  // awaiting caller, but never resurrect an orphaned reactive status entry.
-  if (_commandExecutions.get(execution.key) === execution) {
-    _commandExecutionStatusByKey[execution.key] = status;
-  }
+export function commandExecutionStatus(session: SessionInstanceRef, id: string): CommandExecutionStatus | null {
+  return _commandExecutionStatusByKey[sessionCommandKey(session, id)] ?? null;
 }
 
-function removeCommandExecution(key: string, expected?: Execution): void {
-  const execution = _commandExecutions.get(key);
-  if (!execution || (expected && execution !== expected)) return;
-  execution.dispose();
+export function isCommandRunning(session: SessionInstanceRef, id: string): boolean {
+  return commandExecutionStatus(session, id) === "running";
+}
+
+function removeCommandExecution(key: string, expected: Execution): void {
+  if (_commandExecutions.get(key) !== expected) return;
   _commandExecutions.delete(key);
   delete _commandExecutionStatusByKey[key];
+  expected.cancelPreflight?.();
 }
 
-export function isCommandRunning(session: SessionInstanceRef, command_id: string): boolean {
-  return commandExecutionStatus(session, command_id) === "running";
-}
-
-export function commandExecutionStatus(
-  session: SessionInstanceRef,
-  command_id: string,
-): CommandExecutionStatus | null {
-  return _commandExecutionStatusByKey[sessionCommandKey(session, command_id)] ?? null;
-}
-
-function clearCommandExecution(session: SessionInstanceRef, command_id: string): void {
-  const key = sessionCommandKey(session, command_id);
-  removeCommandExecution(key);
-}
-
-/** A rejected command must stop setup/collection without reporting to the actor again. */
-function cancelCommandExecution(session: SessionInstanceRef, command_id: string): void {
-  const key = sessionCommandKey(session, command_id);
-  const execution = _commandExecutions.get(key);
-  if (!execution) return;
-  execution.cancel();
-  removeCommandExecution(key, execution);
+function clearCommandExecution(session: SessionInstanceRef, id: string): void {
+  const key = sessionCommandKey(session, id);
+  const entry = _commandExecutions.get(key);
+  if (entry) removeCommandExecution(key, entry);
 }
 
 function clearCommandExecutionsForSession(session: SessionInstanceRef): void {
-  for (const [key, execution] of _commandExecutions) {
-    if (execution.tabId !== session.tabId || execution.instanceId !== session.instanceId) continue;
-    removeCommandExecution(key, execution);
+  for (const [key, entry] of _commandExecutions) {
+    if (entry.session.tabId === session.tabId && entry.session.instanceId === session.instanceId) {
+      removeCommandExecution(key, entry);
+    }
   }
 }
 
-/**
- * Execute an AI-proposed PTY command: paste `execution.full_cmd` (with
- * sentinel + exit-code echo) into the active terminal, watch the PTY stream
- * for the sentinel, then report output + exit code to the backend. All
- * front-end; the backend's ai module never executes commands itself.
- *
- * Takes the execution envelope directly (not a CommandProposed) so every PTY
- * tool — run_command / match_file / patch×4 — reuses this same runner by
- * handing its own `execution` field. `cardId` is the per-card id shared with
- * the proposal/result events.
- */
-export async function executeCommand(
-  session: SessionInstanceRef,
-  cardId: string,
-  execution: PtyExecution,
-  target_kind: AiTargetKind,
-  target_session_id: string,
-): Promise<void> {
-  return executePtyCommand(session, cardId, execution, target_kind, target_session_id);
+function sendCommandAction(entry: Execution, action: CommandAction): Promise<void> {
+  const { session, commandId, targetId } = entry;
+  const key = sessionCommandKey(session, commandId);
+  // Invalidate an earlier approval that may still be draining xterm. An IPC
+  // request already in flight is independently deduplicated by the actor.
+  entry.cancelPreflight?.();
+  entry.cancelPreflight = undefined;
+  entry.action = action;
+  _commandExecutionStatusByKey[key] = action.kind === "approve" ? "running" : "reporting";
+  const current = () => _commandExecutions.get(key) === entry && entry.action === action;
+  const operation = async () => {
+    if (action.kind === "approve") {
+      const paneCurrent = () => entry.terminalCurrent()
+        && _sessionByTab[session.tabId]?.instance_id === session.instanceId
+        && _sessionByTab[session.tabId]?.target_id === targetId;
+      const flush = flushTerminalOutput(session.tabId, () => current() && paneCurrent());
+      let ready = true;
+      if (flush) {
+        const cancelled = new Promise<boolean>(resolve => { entry.cancelPreflight = () => resolve(false); });
+        ready = await Promise.race([flush, cancelled]);
+      }
+      if (!current()) return;
+      entry.cancelPreflight = undefined;
+      if (!ready || !paneCurrent()) {
+        action = { kind: "blocked", reason: TERMINAL_UNAVAILABLE_ERROR };
+      } else if (alternateScreenActive(session.tabId)) {
+        action = { kind: "blocked", reason: ALTERNATE_SCREEN_ERROR };
+      } else {
+        action = { kind: "approve", bracketedPaste: bracketedPasteEnabled(session.tabId) };
+      }
+      entry.action = action;
+    }
+    const mutation = await invoke<AiTerminalMutation | null>("ai_terminal_command", {
+      tabId: session.tabId, instanceId: session.instanceId, toolCallId: commandId,
+      targetSessionId: targetId, action,
+    });
+    if (mutation && current()) {
+      dispatchContextEvent(session, mutation.payload, () => {
+        if (!current() || !acceptsContextEvent(session, mutation.payload)) return;
+        const items = _chatByTab[session.tabId];
+        if (items) _chatByTab[session.tabId] = applyTerminalMutations(items, [mutation], "live");
+        if (_pendingByTab[session.tabId]?.id === commandId) {
+          _pendingByTab[session.tabId] = null;
+          _keyboardLockedByTab[session.tabId] = false;
+        }
+        commandApprovals.clear(session, commandId);
+        clearCommandExecution(session, commandId);
+        schedulePersist(session.tabId);
+      });
+    }
+  };
+  const pending = operation().then(() => {
+    if (current()) _commandExecutionStatusByKey[key] = "delivered";
+  }, error => {
+    if (!current()) return;
+    _commandExecutionStatusByKey[key] = "delivery_failed";
+    throw error;
+  });
+  entry.pending = pending;
+  return pending;
 }
 
-async function executePtyCommand(
-  session: SessionInstanceRef,
-  cardId: string,
-  execution: PtyExecution,
-  target_kind: AiTargetKind,
-  target_session_id: string,
+/** Approve the exact backend proposal after xterm has parsed its pending output. */
+export function executeCommand(
+  session: SessionInstanceRef, commandId: string, targetId: string,
   blockedReason?: string,
 ): Promise<void> {
-  // Re-entrancy guard: a command card must never be pasted twice. A
-  // CommandConfirmDialog remount can lose its local `executing` flag and fire
-  // approve() again; without this, the command
-  // (possibly rm/reboot) would be pasted a second time and the first exec's
-  // listener + timer would leak when `_commandExecutions.set` below overwrites
-  // the entry. The map is the single source of truth for "in flight" — honor it.
-  // Once transport has run, a retry can only redeliver its recorded result.
-  const executionKey = sessionCommandKey(session, cardId);
-  const existing = _commandExecutions.get(executionKey);
+  const key = sessionCommandKey(session, commandId);
+  const existing = _commandExecutions.get(key);
   if (existing) {
-    switch (existing.status) {
-      case "running": return existing.done;
-      case "reporting": return existing.delivery ?? existing.done;
-      case "delivery_failed": return existing.deliver();
-      case "delivered": return;
+    // Retry the same decision. In particular a failed refusal or stop cannot
+    // turn into an approval when the card remounts.
+    if (commandExecutionStatus(session, commandId) === "delivery_failed") {
+      return sendCommandAction(existing, { ...existing.action });
     }
+    return existing.pending ?? Promise.resolve();
   }
-
-  // Capture before awaiting listener registration: a replacement pane/actor or
-  // a rejected card must never authorize a late command write.
-  const terminalCurrent = captureTerminalGuard(session.tabId);
-  const targetCurrent = () => {
-    const current = _sessionByTab[session.tabId];
-    // stopSession clears UI state before terminating the original transport.
-    return terminalCurrent() && (!current
-      || (current.instance_id === session.instanceId && current.target_id === target_session_id));
+  const action: CommandAction = blockedReason
+    ? { kind: "blocked", reason: blockedReason }
+    : { kind: "approve", bracketedPaste: false };
+  const entry: Execution = {
+    session, commandId, targetId, action, terminalCurrent: captureTerminalGuard(session.tabId),
   };
-  const isCurrent = () => {
-    const current = _sessionByTab[session.tabId];
-    if (!targetCurrent() || current?.instance_id !== session.instanceId) return false;
-    const item = _chatByTab[session.tabId]?.find(item =>
-      (item.kind === "command" && item.cmd.id === cardId)
-      || ((item.kind === "patch" || item.kind === "match") && item.proposal.id === cardId));
-    // Internal probes have no card; they still require the exact actor/target.
-    return !item || (!("result" in item && item.result) && !("rejected" in item && item.rejected));
-  };
-
-  // Transport per kind. Record<AiTargetKind, …> so adding a kind is a compile
-  // error here until routed — no silent fall-through to the wrong write command.
-  const TRANSPORT: Record<AiTargetKind, { write: string; data: string }> = {
-    ssh:    { write: "ssh_write",    data: "ssh:data" },
-    local:  { write: "pty_write",    data: "pty:data" },
-    serial: { write: "serial_write", data: "serial:data" },
-    telnet: { write: "telnet_write", data: "telnet:data" },
-    ssm:    { write: "aws_ssm_write", data: "ssm:data" },
-  };
-  const writeCmd = TRANSPORT[target_kind].write;
-  const dataEvent = `${TRANSPORT[target_kind].data}:${target_session_id}`;
-  // A raw device may not echo the command back (depends on the device /
-  // local-echo / telnet ECHO negotiation), so dropping the first line would
-  // silently eat real output. Keep the whole buffer for raw devices; an
-  // echoed-command line is harmless noise the LLM ignores.
-  const dropEcho = !isRawDeviceKind(target_kind);
-
-  // Returned Promise resolves only when finish() actually runs, so the
-  // UI's "executing" state can cover the whole execution window — not
-  // just up to the `invoke(writeCmd)` round-trip.
-  let resolveDone!: () => void;
-  let rejectDone!: (error: unknown) => void;
-  const done = new Promise<void>((resolve, reject) => {
-    resolveDone = resolve;
-    rejectDone = reject;
-  });
-  let finish!: (output: string, exit_code: number, timed_out: boolean) => Promise<void>;
-  let deliver!: () => Promise<void>;
-  let transportStarted = false;
-
-  function interruptShell() {
-    if (transportStarted && targetCurrent() && !isRawDeviceKind(target_kind)) {
-      void invoke(writeCmd, { sessionId: target_session_id, data: [3] })
-        .catch((err) => console.warn("[ai] terminate Ctrl+C failed:", err));
-    }
-  }
-
-  const exec: Execution = {
-    key: executionKey,
-    commandId: cardId,
-    tabId: session.tabId,
-    instanceId: session.instanceId,
-    targetSessionId: target_session_id,
-    targetKind: target_kind,
-    buffer: new CappedBuffer(),
-    status: "running",
-    result: null,
-    delivery: null,
-    done,
-    userInterrupted: false,
-    unlisten: null,
-    timer: null,
-    terminate: async () => {
-      if (exec.status !== "running") return exec.teardown();
-      exec.userInterrupted = true;
-      // A serial/telnet peer is not a shell. Injecting ETX while closing the UI
-      // can reboot or reconfigure a bare device; raw teardown only detaches and
-      // reports interruption. Shell transports retain the explicit Ctrl+C path.
-      interruptShell();
-      await finish(extractOutput(exec.buffer.view(), undefined, dropEcho), -1, false);
-    },
-    submit: async () => {
-      if (exec.status !== "running") return;
-      // Raw-device completion: the user watched the device and says "done".
-      // Report the accumulated output as a NORMAL result — no Ctrl+C (nothing
-      // to interrupt), not flagged early-terminated, exit 0 as the placeholder
-      // (no exit code exists; the LLM is told via prompt to judge by output).
-      await finish(extractOutput(exec.buffer.view(), undefined, dropEcho), 0, false);
-    },
-    deliver: () => deliver(),
-    teardown: () => {
-      switch (exec.status) {
-        case "running": return exec.terminate();
-        case "reporting": return exec.delivery ?? exec.done;
-        case "delivery_failed": return exec.deliver();
-        case "delivered": return Promise.resolve();
-      }
-    },
-    cancel: () => {
-      if (exec.status === "running") interruptShell();
-      setCommandExecutionStatus(exec, "delivered");
-      exec.dispose();
-      resolveDone();
-    },
-    dispose: () => {
-      if (exec.unlisten) {
-        exec.unlisten();
-        exec.unlisten = null;
-      }
-      if (exec.timer != null) {
-        clearTimeout(exec.timer);
-        exec.timer = null;
-      }
-    },
-  };
-
-  // Reserve the in-flight slot synchronously, BEFORE any await. The guard at the
-  // top of this function only holds if check-and-reserve is atomic. This set used
-  // to live after `await listen()` below, leaving a window where a second call
-  // (dialog remount re-firing approve, a double-click) passed the guard before
-  // this ran and pasted the command — possibly rm/reboot — twice. There is no
-  // await between the guard and here, so the reservation closes that window.
-  _commandExecutions.set(executionKey, exec);
-  _commandExecutionStatusByKey[executionKey] = "running";
-
-  deliver = () => {
-    if (!exec.result || exec.status === "delivered") return Promise.resolve();
-    if (exec.delivery) return exec.delivery;
-    setCommandExecutionStatus(exec, "reporting");
-    const operation = invoke("ai_command_result", exec.result)
-      .then(() => {
-        setCommandExecutionStatus(exec, "delivered");
-      })
-      .catch((error) => {
-        setCommandExecutionStatus(exec, "delivery_failed");
-        console.error("[ai] ai_command_result failed:", error);
-        throw error;
-      });
-    const tracked = operation.finally(() => {
-      if (exec.delivery === tracked) exec.delivery = null;
-    });
-    exec.delivery = tracked;
-    return tracked;
-  };
-
-  // Keep callback failures on the caller's promise instead of creating an
-  // unobserved rejection when a sentinel/timer completes the command.
-  finish = (output: string, exit_code: number, timed_out: boolean) => {
-    if (exec.status !== "running") return exec.done;
-    exec.dispose();
-    exec.result = {
-      tabId: session.tabId,
-      instanceId: session.instanceId,
-      toolCallId: exec.commandId,
-      exitCode: exit_code,
-      output,
-      timedOut: timed_out,
-      earlyTerminated: exec.userInterrupted,
-    };
-    void deliver().then(resolveDone, rejectDone);
-    return exec.done;
-  };
-
-  // A refusal is a recorded result, so retries never start transport later.
-  if (blockedReason) return finish(blockedReason, -1, false);
-  if (!isCurrent()) return finish(TERMINAL_UNAVAILABLE_ERROR, -1, false);
-
-  try {
-    const unlisten = await listen<string>(dataEvent, (e) => {
-      if (exec.status !== "running") return;
-      const chunk = new TextDecoder("utf-8", { fatal: false }).decode(decodeStreamChunk(e.payload));
-      exec.buffer.append(chunk);
-      // Raw devices (serial/telnet) have no sentinel — just accumulate.
-      // Completion comes from the user (submit) or the safety timeout below.
-      if (isRawDeviceKind(target_kind)) return;
-      const hit = findSentinel(exec.buffer.view(), execution.sentinel);
-      if (hit) void finish(hit.output, hit.exitCode, false);
-    });
-    // close/terminate may have won while listen() was registering. Never paste
-    // after that point, and do not leak the listener that arrived too late.
-    if (exec.status !== "running") {
-      unlisten();
-      return done;
-    }
-    exec.unlisten = unlisten;
-  } catch (e) {
-    if (exec.status !== "running") return done;
-    // listen() failed to register: release the slot reserved above so this
-    // command card isn't wedged "in flight" forever.
-    removeCommandExecution(executionKey, exec);
-    throw new CommandSetupError(e);
-  }
-
-  // listen() can resolve before xterm parses queued output (in headless it is
-  // local bookkeeping). Drain received output before authorizing the write.
-  const pendingOutput = flushTerminalOutput(session.tabId, () => exec.status === "running" && isCurrent());
-  if (pendingOutput) {
-    // Cancel/close must settle the command even if parsing is still pending.
-    const ready = await Promise.race([pendingOutput, done.then(() => false)]);
-    if (exec.status !== "running") return done;
-    if (!ready) {
-      return finish(TERMINAL_UNAVAILABLE_ERROR, -1, false);
-    }
-  }
-  if (!isCurrent()) return finish(TERMINAL_UNAVAILABLE_ERROR, -1, false);
-  if (alternateScreenActive(session.tabId)) {
-    return finish(ALTERNATE_SCREEN_ERROR, -1, false);
-  }
-
-  // \r (not \n) is the cross-platform PTY/serial Enter byte: ConPTY/PowerShell
-  // only accepts \r; Unix cooked PTY translates \r → \n via ICRNL. Telnet is
-  // different: its handle owns the profile's line discipline, so delegate line
-  // termination to telnet_write_line instead of duplicating a CRLF default here.
-  // If invoke throws (session already closed), listener + execution are
-  // already registered → must funnel through finish() to clean up, else
-  // isCommandRunning() stays true forever.
-  try {
-    // Wrap in bracketed-paste markers when the target shell enabled DECSET
-    // 2004 — same as the terminal's manual paste. The submit `\r` stays
-    // OUTSIDE the markers so the shell runs the pasted line (inside the
-    // markers it'd be part of the paste buffer and never execute).
-    const bp = bracketedPasteEnabled(session.tabId);
-    const body = bp ? `${PASTE_START}${execution.full_cmd}${PASTE_END}` : execution.full_cmd;
-    transportStarted = true;
-    if (target_kind === "telnet") {
-      await invoke("telnet_write_line", { sessionId: target_session_id, text: body });
-    } else {
-      const data = Array.from(new TextEncoder().encode(body + "\r"));
-      await invoke(writeCmd, { sessionId: target_session_id, data });
-    }
-  } catch (e) {
-    if (exec.status !== "running") return done;
-    await finish(`failed to write command: ${errMsg(e)}`, -1, false);
-    throw e;
-  }
-
-  // terminate can also win while the transport write itself is in flight.
-  // finish() already cleaned the listener/map; do not resurrect a timeout.
-  if (exec.status !== "running") return done;
-  exec.timer = window.setTimeout(() => {
-    void finish(extractOutput(exec.buffer.view(), undefined, dropEcho), -1, true);
-  }, Math.max(1000, execution.timeout_s * 1000)) as unknown as number;
-
-  return done;
+  _commandExecutions.set(key, entry);
+  return sendCommandAction(entry, action);
 }
 
-/** Early-terminate one command card: Ctrl+C to target shell + finish(). */
-export async function terminateCommand(
-  session: SessionInstanceRef,
-  command_id: string,
-): Promise<void> {
-  const exec = _commandExecutions.get(sessionCommandKey(session, command_id));
-  if (exec) await exec.terminate();
+function finishCommand(session: SessionInstanceRef, id: string, kind: "stop" | "submit"): Promise<void> {
+  const entry = _commandExecutions.get(sessionCommandKey(session, id));
+  if (!entry) return Promise.resolve();
+  const status = commandExecutionStatus(session, id);
+  if (status === "delivered" || status === "reporting") return entry.pending ?? Promise.resolve();
+  return sendCommandAction(entry, { kind });
 }
 
-/**
- * Raw-device completion by command card id: the user signals the command is done,
- * so report the accumulated output as a clean result (no Ctrl+C, not early-
- * terminated). On serial/telnet the card shows "submit output"; on ssh/local
- * the equivalent slot is "interrupt" (terminate).
- */
-export async function submitCommand(
-  session: SessionInstanceRef,
-  command_id: string,
-): Promise<void> {
-  const exec = _commandExecutions.get(sessionCommandKey(session, command_id));
-  if (exec) await exec.submit();
+export function terminateCommand(session: SessionInstanceRef, id: string): Promise<void> {
+  return finishCommand(session, id, "stop");
+}
+
+export function submitCommand(session: SessionInstanceRef, id: string): Promise<void> {
+  return finishCommand(session, id, "submit");
 }
 
 export async function rejectCommand(
@@ -1981,7 +1650,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
       // 迟到事件重新写入 chat/pending/keyboard 状态。context epoch gate
       // separately rejects callbacks queued before a successful context clear.
       if (!isTabLive(tab, generation)) return;
-      if (_sessionByTab[tab]?.instance_id !== session.instanceId) return;
+      if (!belongsToSession(session, payload.payload)) return;
       beforeContextGate?.(payload);
       dispatchContextEvent(session, payload.payload, () => {
         if (
@@ -2070,7 +1739,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
   });
 
   await addListener<CommandProposed>(`ai:command_proposed:${tab}`, (e) => {
-    const proposed = stripContextEpoch(e.payload);
+    const proposed = stripEventScope(e.payload);
     // Authorization belongs to command arrival, not component mount. The chat
     // list is unmounted while AuditPanel is visible; reading live settings when
     // it later remounts would let a subsequent enable retro-authorize this cmd.
@@ -2081,9 +1750,8 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
     );
     _pendingByTab[tab] = proposed;
     pushChat(tab, { kind: "command", cmd: proposed, at: Date.now() });
-    const kind = _targetKindByTab[tab];
-    const targetId = _sessionByTab[tab]?.target_id;
-    if (proposed.kind === "run_command" && kind && targetId) {
+    const targetId = proposed.target_session_id ?? _sessionByTab[tab]?.target_id;
+    if (proposed.kind === "run_command" && targetId) {
       void (async () => {
         const output = flushTerminalOutput(tab, () =>
           isTabLive(tab, generation) && _pendingByTab[tab]?.id === proposed.id);
@@ -2095,13 +1763,13 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
           || !acceptsContextEvent(session, e.payload)
           || !alternateScreenActive(tab)) return;
         commandApprovals.markAttempted(session, proposed.id);
-        await executePtyCommand(session, proposed.id, proposed.execution, kind, targetId, ALTERNATE_SCREEN_ERROR);
+        await executeCommand(session, proposed.id, targetId, ALTERNATE_SCREEN_ERROR);
       })().catch((error) => console.error("[ai] alternate-screen refusal delivery failed:", error));
     }
   });
 
   await addListener<WebToolProposal>(`ai:web_tool_proposed:${tab}`, (e) => {
-    const proposal = stripContextEpoch(e.payload);
+    const proposal = stripEventScope(e.payload);
     commandApprovals.snapshotEligibility(
       { tabId: tab, instanceId: info.instance_id },
       proposal.id,
@@ -2111,7 +1779,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
   });
 
   await addListener<DownloadProposal>(`ai:download_proposed:${tab}`, (e) => {
-    const proposal = stripContextEpoch(e.payload);
+    const proposal = stripEventScope(e.payload);
     commandApprovals.snapshotEligibility(
       { tabId: tab, instanceId: info.instance_id },
       proposal.id,
@@ -2121,7 +1789,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
   });
 
   await addListener<AnalyzeProposal>(`ai:analyze_proposed:${tab}`, (e) => {
-    const proposal = stripContextEpoch(e.payload);
+    const proposal = stripEventScope(e.payload);
     commandApprovals.snapshotEligibility(
       { tabId: tab, instanceId: info.instance_id },
       proposal.id,
@@ -2131,7 +1799,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
   });
 
   await addListener<PatchProposal>(`ai:patch_proposed:${tab}`, (e) => {
-    const proposal = stripContextEpoch(e.payload);
+    const proposal = stripEventScope(e.payload);
     // Per-step auto-approval: patch_cp / patch_modify / patch_diff / patch_mv
     // each map to their own settings.auto_patch_<step> toggle.
     commandApprovals.snapshotEligibility(
@@ -2143,7 +1811,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
   });
 
   await addListener<MatchProposal>(`ai:match_proposed:${tab}`, (e) => {
-    const proposal = stripContextEpoch(e.payload);
+    const proposal = stripEventScope(e.payload);
     commandApprovals.snapshotEligibility(
       { tabId: tab, instanceId: info.instance_id },
       proposal.id,
@@ -2152,100 +1820,24 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
     pushChat(tab, { kind: "match", proposal, at: Date.now() });
   });
 
-  // internal_command：当前只用于 file_ops 工具的远端能力探测（一行只读 echo "py3=... perl=... diff=..."）。
-  // 不弹审批、不入 chat 时间线，直接粘到 PTY 跑——用户在终端历史里看到探测命令滚过，
-  // 透明但不打断流程。后续若加其他 read-only 内部命令也走这条路径。
-  await addListener<{
-    id: string;
-    tool_call_id: string;
-    cmd: string;
-    full_cmd: string;
-    sentinel: string;
-  }>(`ai:internal_command:${tab}`, async (e) => {
-    const kind = _targetKindByTab[tab];
-    // 每次都从 _sessionByTab 读最新 target_id —— 重连后这个值会被 rebindTarget 更新，
-    // 闭包里不能缓存（缓存的话 internal_command 在重连后会粘到旧 SSH 会话）。
-    const currentInfo = _sessionByTab[tab];
-    if (!currentInfo) {
-      // The panel was closed after this callback was queued. There is no safe
-      // actor identity left to report to, and tab-only routing could hit the
-      // replacement session, so let teardown cancel the old actor.
-      return;
-    }
-    const session = { tabId: tab, instanceId: currentInfo.instance_id };
-    if (!kind) {
-      // fail-closed：必须给后端回一个 result，否则 wait_command_outcome 永远阻塞，
-      // session actor 卡在 file_ops handler 里 await 不出来，整个 AI 会话挂死。
-      const msg = `internal_command without target binding for tab ${tab}`;
-      console.error("[ai]", msg);
-      try {
-        await invoke("ai_command_result", {
-          tabId: tab,
-          instanceId: currentInfo.instance_id,
-          toolCallId: e.payload.id,
-          exitCode: -1,
-          output: msg,
-          timedOut: false,
-          earlyTerminated: false,
-        });
-      } catch (err) {
-        console.error("[ai] failed to report internal_command target miss:", err);
-      }
-      return;
-    }
+  // Capability probes use the same xterm checks as visible cards. The actor
+  // acknowledges completion after consuming the result, including for probes.
+  await addListener<{ id: string; target_session_id?: string }>(`ai:internal_command:${tab}`, async (e) => {
+    const id = e.payload.id;
+    const targetId = e.payload.target_session_id ?? _sessionByTab[tab]?.target_id;
+    if (!targetId) return;
     try {
-      await executeCommand(
-        session,
-        e.payload.id,
-        { full_cmd: e.payload.full_cmd, sentinel: e.payload.sentinel, timeout_s: 60 },
-        kind,
-        currentInfo.target_id,
-      );
-      // Internal probes have no command card and therefore no matching
-      // command_completed event to own registry cleanup. ai_command_result is a
-      // processing ack, so success is the exact point at which replay is no
-      // longer possible and the buffer can be released.
-      clearCommandExecution(session, e.payload.id);
-    } catch (err) {
-      console.error("[ai] internal_command exec failed:", err);
-      const execution = _commandExecutions.get(
-        sessionCommandKey(session, e.payload.id),
-      );
-      if (!(err instanceof CommandSetupError)) {
-        // Transport already committed. A write failure is reported through
-        // finish(), and a result-delivery failure retains that exact payload in
-        // the Execution. Never replace it with a second synthetic failure: the
-        // actor could consume the wrong result and a later teardown retry would
-        // enqueue a stale duplicate. Retry only the recorded report.
-        if (execution?.status === "delivery_failed") {
-          try {
-            await execution.deliver();
-            clearCommandExecution(session, e.payload.id);
-          } catch (reportErr) {
-            console.error("[ai] failed to redeliver internal_command result:", reportErr);
-          }
-        } else if (execution?.status === "delivered") {
-          clearCommandExecution(session, e.payload.id);
-        }
+      await executeCommand(session, id, targetId);
+    } catch {
+      // A lost response can be retried by card ID without replaying the command.
+      try {
+        await executeCommand(session, id, targetId);
+      } catch (error) {
+        console.error("[ai] internal command acknowledgement failed:", error);
         return;
       }
-      // listen() can fail before transport starts and before an Execution has a
-      // report to retry. Only that setup-failure path synthesizes a result;
-      // otherwise wait_command_outcome would remain blocked forever.
-      try {
-        await invoke("ai_command_result", {
-          tabId: tab,
-          instanceId: currentInfo.instance_id,
-          toolCallId: e.payload.id,
-          exitCode: -1,
-          output: errMsg(err),
-          timedOut: false,
-          earlyTerminated: false,
-        });
-      } catch (reportErr) {
-        console.error("[ai] failed to report internal_command exec failure:", reportErr);
-      }
     }
+    clearCommandExecution(session, id);
   });
 
   await addListener<{ id: string; lock_keyboard: boolean }>(`ai:command_executing:${tab}`, (e) => {
@@ -2253,8 +1845,10 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
   });
 
   await addListener<CommandResult & { lock_keyboard: boolean }>(`ai:command_completed:${tab}`, (e) => {
-    _keyboardLockedByTab[tab] = !!e.payload.lock_keyboard;
-    _pendingByTab[tab] = null;
+    if (!_pendingByTab[tab] || _pendingByTab[tab]?.id === e.payload.id) {
+      _keyboardLockedByTab[tab] = !!e.payload.lock_keyboard;
+      _pendingByTab[tab] = null;
+    }
     // 给最近一条对应 id 的 command 项填上 result
     const arr = _chatByTab[tab] ?? [];
     for (let i = arr.length - 1; i >= 0; i--) {
@@ -2268,7 +1862,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
           { tabId: tab, instanceId: info.instance_id },
           e.payload.id,
         );
-        const replaced: ChatItem = { ...item, result: stripContextEpoch(e.payload) };
+        const replaced: ChatItem = { ...item, result: stripEventScope(e.payload) };
         _chatByTab[tab] = [...arr.slice(0, i), replaced, ...arr.slice(i + 1)];
         schedulePersist(tab);
         break;
@@ -2277,7 +1871,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
   });
 
   await addListener<WebToolResult>(`ai:web_tool_completed:${tab}`, (e) => {
-    const result = stripContextEpoch(e.payload);
+    const result = stripEventScope(e.payload);
     const arr = _chatByTab[tab] ?? [];
     for (let i = arr.length - 1; i >= 0; i--) {
       const item = arr[i];
@@ -2295,7 +1889,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
   });
 
   await addListener<DownloadResult>(`ai:download_completed:${tab}`, (e) => {
-    const result = stripContextEpoch(e.payload);
+    const result = stripEventScope(e.payload);
     const arr = _chatByTab[tab] ?? [];
     for (let i = arr.length - 1; i >= 0; i--) {
       const item = arr[i];
@@ -2313,7 +1907,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
   });
 
   await addListener<AnalyzeResult>(`ai:analyze_completed:${tab}`, (e) => {
-    const result = stripContextEpoch(e.payload);
+    const result = stripEventScope(e.payload);
     const arr = _chatByTab[tab] ?? [];
     for (let i = arr.length - 1; i >= 0; i--) {
       const item = arr[i];
@@ -2334,7 +1928,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
   // patch cards reuse executeCommand (hence clearCommandExecution), so the
   // registry cleanup mirrors the command path.
   await addListener<CommandResult>(`ai:patch_completed:${tab}`, (e) => {
-    const result = stripContextEpoch(e.payload);
+    const result = stripEventScope(e.payload);
     const arr = _chatByTab[tab] ?? [];
     for (let i = arr.length - 1; i >= 0; i--) {
       const item = arr[i];
@@ -2357,7 +1951,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
 
   // match_completed: same PTY result shape; match cards reuse executeCommand.
   await addListener<CommandResult>(`ai:match_completed:${tab}`, (e) => {
-    const result = stripContextEpoch(e.payload);
+    const result = stripEventScope(e.payload);
     const arr = _chatByTab[tab] ?? [];
     for (let i = arr.length - 1; i >= 0; i--) {
       const item = arr[i];
@@ -2383,14 +1977,14 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
   // 这个，前端清 pending + 标记 ChatItem.rejected。所有按 id 匹配的卡片
   // （command / web_tool / download / analyze / patch / match）共用这条 reject 路径。
   await addListener<{ id: string; reason: string }>(`ai:command_rejected:${tab}`, (e) => {
-    _pendingByTab[tab] = null;
+    if (_pendingByTab[tab]?.id === e.payload.id) _pendingByTab[tab] = null;
     const arr = _chatByTab[tab] ?? [];
     for (let i = arr.length - 1; i >= 0; i--) {
       const item = arr[i];
       if (item.kind !== "command" && item.kind !== "web_tool" && item.kind !== "download" && item.kind !== "analyze" && item.kind !== "patch" && item.kind !== "match") continue;
       const itemId = item.kind === "command" ? item.cmd.id : item.proposal.id;
       if (itemId === e.payload.id) {
-        cancelCommandExecution(
+        clearCommandExecution(
           { tabId: tab, instanceId: info.instance_id },
           e.payload.id,
         );
@@ -2428,11 +2022,7 @@ async function attachListeners(info: AiSessionInfo, generation: number) {
       // External MCP stop only revokes access and signals the actor. Reuse the
       // normal teardown to drain terminal execution, save the final timeline,
       // and release this exact instance's backend conversation lease.
-      for (const execution of _commandExecutions.values()) {
-        if (execution.tabId === tab && execution.instanceId === info.instance_id) {
-          cancelCommandExecution(session, execution.commandId);
-        }
-      }
+      clearCommandExecutionsForSession(session);
       void endConversation(tab).catch(error => toast.error(errMsg(error)));
     }
   });

@@ -994,23 +994,68 @@ pub async fn ai_command_result_impl(
     tab_id: &str,
     expected_owner: &crate::state::SessionOwner,
     tool_call_id: String,
-    exit_code: i32,
-    output: String,
-    timed_out: bool,
-    early_terminated: bool,
+    _exit_code: i32,
+    _output: String,
+    _timed_out: bool,
+    _early_terminated: bool,
     expected_instance_id: Option<&str>,
 ) -> AppResult<()> {
+    // Older tool cards use this wire contract for affirmative approval.
+    // A terminal card accepts only its own core executor's output.
     ai_send_processed_action(state, tab_id, expected_owner, expected_instance_id, |ack| {
-        UserAction::CommandResult {
+        UserAction::ApproveTool {
             command_id: tool_call_id,
-            exit_code,
-            output,
-            timed_out,
-            early_terminated,
             ack: Some(ack),
         }
     })
     .await
+}
+
+pub async fn ai_terminal_command(
+    owner: crate::state::SessionOwner,
+    state: &AppState,
+    tab_id: String,
+    instance_id: String,
+    tool_call_id: String,
+    target_session_id: String,
+    action: session::TerminalCommandAction,
+) -> AppResult<Option<session::AiTerminalMutation>> {
+    let (receipt, mutations) =
+        with_owned_ready_ai_session(state, &tab_id, &owner, Some(&instance_id), |session| {
+            ensure_ai_running(session)?;
+            if session.target_id != target_session_id {
+                return Err(ai_session_not_found());
+            }
+            if matches!(action, session::TerminalCommandAction::Submit)
+                && !session.shell.borrow().is_raw_device()
+            {
+                return Err(AppError::other("ai_shell_invalid", json!({})));
+            }
+            let receipt = session.terminal_commands.request(
+                &tool_call_id,
+                &target_session_id,
+                &owner,
+                action,
+            )?;
+            Ok((receipt, session.terminal_mutations.clone()))
+        })?;
+    if let Some(mut receipt) = receipt {
+        receipt
+            .wait_for(|finished| *finished)
+            .await
+            .map_err(|_| AppError::other("ai_session_stopped", json!({})))?;
+    }
+    let mutation = locked(&mutations)?
+        .iter()
+        .rev()
+        .find(|item| {
+            matches!(
+                item.kind.as_str(),
+                "command_completed" | "command_rejected" | "patch_completed" | "match_completed"
+            ) && item.payload["id"].as_str() == Some(&tool_call_id)
+        })
+        .cloned();
+    Ok(mutation)
 }
 
 pub async fn ai_command_reject_impl(
@@ -1262,6 +1307,7 @@ pub fn ai_session_rebind_target_impl(
                     json!({ "expected": s.target_key, "actual": new_target_key }),
                 ));
             }
+            s.terminal_commands.rebind(&target_id)?;
             s.action_tx
                 .send(UserAction::RebindTarget {
                     target_id: target_id.clone(),

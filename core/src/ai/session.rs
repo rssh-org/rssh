@@ -1,12 +1,6 @@
-//! AI 排障会话 actor。
-//!
-//! 重设计（2026-04-26）：命令不在后端执行。后端职责：
-//! 1. 收 LLM / MCP 工具调用 → 生成 sentinel uuid → emit 给前端
-//! 2. 前端把 `cmd; echo "<sentinel>:$?"` 粘到 active terminal 自动回车
-//! 3. 前端监听 PTY 数据流找 sentinel → 提取 output + exit code → invoke ai_command_result
-//! 4. 后端收 result → 脱敏 + 截断 + 入审计 → 返回给 LLM / MCP 调用方
-//!
-//! 这样命令在用户的交互终端里完整可见，没有任何后端注入或 byte 监控。
+//! AI conversation actor. The frontend approves the pending card and reports
+//! terminal modes. Core writes the approved command to its existing shell,
+//! collects the transport's output and records the redacted result.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -32,6 +26,11 @@ use super::web_search::WebSearchResponse;
 
 mod download;
 mod file_ops;
+mod terminal_command;
+
+pub use terminal_command::TerminalCommandAction;
+pub(crate) use terminal_command::TerminalCommands;
+use terminal_command::TerminalProposal;
 
 use file_ops::RemoteCapabilities;
 
@@ -87,7 +86,7 @@ pub struct DownloadFileResult {
     pub message: String,
 }
 
-/// 工具命令在前端 PTY 跑完后的两种结果。file_ops 子模块的 `run_file_op` 也用它。
+/// 工具命令完成或拒绝后的结果。file_ops 子模块的 `run_file_op` 也用它。
 #[derive(Debug)]
 pub(in crate::ai::session) enum CommandOutcome {
     Result {
@@ -191,7 +190,13 @@ pub enum UserAction {
         reason: String,
         ack: Option<oneshot::Sender<AppResult<()>>>,
     },
-    /// 前端把命令在终端里跑完后回报结果。output 是脱敏前的原始文本。
+    /// Approval for tools that perform their own work (download, web and analysis).
+    ApproveTool {
+        command_id: String,
+        ack: Option<oneshot::Sender<AppResult<()>>>,
+    },
+    /// A test driver can supply a synthetic outcome directly to the actor.
+    #[cfg(test)]
     CommandResult {
         command_id: String,
         exit_code: i32,
@@ -249,6 +254,8 @@ impl std::fmt::Debug for UserAction {
             UserAction::RejectCommand { command_id, .. } => {
                 write!(f, "RejectCommand({command_id})")
             }
+            UserAction::ApproveTool { command_id, .. } => write!(f, "ApproveTool({command_id})"),
+            #[cfg(test)]
             UserAction::CommandResult {
                 command_id,
                 exit_code,
@@ -287,6 +294,7 @@ pub struct DiagnoseSession {
     pub source: SessionSource,
     pub shell: watch::Receiver<super::shell::ShellKind>,
     pub action_tx: mpsc::UnboundedSender<UserAction>,
+    pub(crate) terminal_commands: TerminalCommands,
     pub audit: Arc<Mutex<AuditLog>>,
     /// 流式响应的取消句柄。actor 在 chat() 前把 Notify 装进 slot，chat 完成/取消后清空。
     /// commands 层从 slot 取 Notify 调 notify_one() —— 没在 chat 时 slot 为 None，发了也无副作用。
@@ -417,11 +425,12 @@ impl PendingSession {
     pub fn launch(self, instance_id: uuid::Uuid) -> DiagnoseSession {
         let PendingSession {
             mut session,
-            actor,
+            mut actor,
             shutdown_rx,
             actor_done_tx,
         } = self;
         session.instance_id = instance_id;
+        actor.instance_id = instance_id;
         session.actor_task = Some(tokio::spawn(async move {
             actor.run(shutdown_rx).await;
             actor_done_tx.send_replace(true);
@@ -443,6 +452,7 @@ impl PendingSession {
 pub fn start(mut cfg: SessionConfig, app: crate::emitter::Host) -> AppResult<PendingSession> {
     let (action_tx, action_rx) = mpsc::unbounded_channel();
     let initial_audit = std::mem::take(&mut cfg.initial_audit);
+    let terminal_commands = TerminalCommands::default();
     let audit = Arc::new(Mutex::new(initial_audit));
     if let Ok(mut g) = audit.lock() {
         g.push(AuditKind::SessionStarted {
@@ -468,6 +478,7 @@ pub fn start(mut cfg: SessionConfig, app: crate::emitter::Host) -> AppResult<Pen
         source: cfg.driver.source(),
         shell,
         action_tx,
+        terminal_commands: terminal_commands.clone(),
         audit: audit.clone(),
         cancel_slot: cancel_slot.clone(),
         shutdown_tx,
@@ -480,9 +491,11 @@ pub fn start(mut cfg: SessionConfig, app: crate::emitter::Host) -> AppResult<Pen
 
     let initial_history = std::mem::take(&mut cfg.initial_history);
     let actor = Actor {
+        instance_id: uuid::Uuid::nil(),
         cfg,
         history: initial_history,
         action_rx,
+        terminal_commands,
         audit,
         app,
         cancel_slot,
@@ -501,12 +514,14 @@ pub fn start(mut cfg: SessionConfig, app: crate::emitter::Host) -> AppResult<Pen
 }
 
 pub(in crate::ai::session) struct Actor {
+    instance_id: uuid::Uuid,
     /// pub(in crate::ai::session) 给 `file_ops` 子模块的 `impl Actor` 访问 cfg.redact_rules / cfg.max_output_bytes
     pub(in crate::ai::session) cfg: SessionConfig,
     shell_tx: watch::Sender<super::shell::ShellKind>,
     /// pub(in crate::ai::session) 给 file_ops handlers push ToolResult
     pub(in crate::ai::session) history: Vec<ChatMessage>,
     action_rx: mpsc::UnboundedReceiver<UserAction>,
+    terminal_commands: TerminalCommands,
     audit: Arc<Mutex<AuditLog>>,
     app: crate::emitter::Host,
     cancel_slot: Arc<Mutex<Option<Arc<Notify>>>>,
@@ -666,9 +681,11 @@ impl Actor {
                     ack,
                 } => self.rollback_context(user_message_index, &expected_user_messages, ack),
                 // RebindTarget 由 recv_action 透明吞掉，这里不会落到。
+                #[cfg(test)]
                 UserAction::CommandResult {
                     command_id, ack, ..
-                }
+                } => Self::reject_tool_action(ack, &command_id),
+                UserAction::ApproveTool { command_id, ack }
                 | UserAction::RejectCommand {
                     command_id, ack, ..
                 } => {
@@ -728,9 +745,11 @@ impl Actor {
                     expected_user_messages,
                     ack,
                 }) => self.rollback_context(user_message_index, &expected_user_messages, ack),
+                #[cfg(test)]
                 Ok(UserAction::CommandResult {
                     command_id, ack, ..
-                })
+                }) => Self::reject_tool_action(ack, &command_id),
+                Ok(UserAction::ApproveTool { command_id, ack })
                 | Ok(UserAction::RejectCommand {
                     command_id, ack, ..
                 }) => Self::reject_tool_action(ack, &command_id),
@@ -978,6 +997,7 @@ impl Actor {
             let tab_id = self.cfg.tab_id.clone();
             let sink_msg_id = msg_id.clone();
             let context_epoch = self.context_epoch;
+            let instance_id = self.instance_id;
             // captured：sink 边 emit 边累积文本副本。取消时 chat() future 被 drop，
             // 内部的 text_out 跟着没了，但 captured 还在——拿它写一条 partial assistant
             // 进 history，否则下次发消息时 LLM 看到 [user, user] 序列会报 400（Anthropic 严格）。
@@ -992,6 +1012,7 @@ impl Actor {
                         &format!("ai:assistant_delta:{tab_id}"),
                         json!({
                             "id": sink_msg_id,
+                            "instance_id": instance_id,
                             "text": t,
                             "context_epoch": context_epoch,
                         }),
@@ -1396,16 +1417,35 @@ impl Actor {
         ))
     }
 
-    /// 等待前端汇报命令结果或拒绝。
-    ///
-    /// 命令的 emit 由调用方做（不同工具走不同事件：`internal_command` 不弹审批，
-    /// `command_proposed` 弹审批）。本函数只负责等结果回报。
-    ///
-    /// `pub(in crate::ai::session)` 给 `file_ops` 子模块的 `ensure_remote_caps` / `run_file_op` 共用。
-    /// `execute_run_command` 用自己的 loop（要做不同的 audit/emit）—— 没复用这里。
-    pub(in crate::ai::session) async fn wait_command_outcome(
+    async fn wait_command_outcome(
         &mut self,
         card_id: &str,
+    ) -> AppResult<(CommandOutcome, Option<oneshot::Sender<AppResult<()>>>)> {
+        self.wait_card_action(card_id, true).await
+    }
+
+    async fn wait_terminal_outcome(
+        &mut self,
+        card_id: &str,
+        proposal: &mut TerminalProposal,
+        full_command: &str,
+        sentinel: &str,
+        timeout_s: u32,
+    ) -> AppResult<(CommandOutcome, Option<oneshot::Sender<AppResult<()>>>)> {
+        let host = self.app.clone();
+        let result = tokio::select! {
+            biased;
+            action = self.wait_card_action(card_id, false) => action,
+            outcome = proposal.execute(&host, full_command, sentinel, timeout_s) => Ok((outcome, None)),
+        };
+        proposal.processed = result.is_ok();
+        result
+    }
+
+    async fn wait_card_action(
+        &mut self,
+        card_id: &str,
+        allow_tool_approval: bool,
     ) -> AppResult<(CommandOutcome, Option<oneshot::Sender<AppResult<()>>>)> {
         loop {
             let action = match self.recv_action().await {
@@ -1413,6 +1453,20 @@ impl Actor {
                 None => return Err(AppError::other("session_channel_closed", json!({}))),
             };
             match action {
+                UserAction::ApproveTool { command_id, ack }
+                    if allow_tool_approval && command_id == card_id =>
+                {
+                    return Ok((
+                        CommandOutcome::Result {
+                            exit_code: 0,
+                            output: String::new(),
+                            timed_out: false,
+                            early_terminated: false,
+                        },
+                        ack,
+                    ))
+                }
+                #[cfg(test)]
                 UserAction::CommandResult {
                     command_id: received_id,
                     exit_code,
@@ -1438,10 +1492,13 @@ impl Actor {
                 } if received_id == card_id => {
                     return Ok((CommandOutcome::Rejected { reason }, ack));
                 }
+                #[cfg(test)]
                 UserAction::CommandResult {
+                    command_id, ack, ..
+                } => Self::reject_tool_action(ack, &command_id),
+                UserAction::ApproveTool {
                     command_id: received_id,
                     ack,
-                    ..
                 }
                 | UserAction::RejectCommand {
                     command_id: received_id,
@@ -2027,6 +2084,9 @@ impl Actor {
         // 不拆分 approve/run 两段——审计要看完整决策时序，单一数即可。
         let started_at = std::time::Instant::now();
 
+        let mut proposal =
+            self.terminal_commands
+                .propose(&cmd_id, &self.cfg.target_id, &self.app)?;
         self.emit(
             "command_proposed",
             json!({
@@ -2036,6 +2096,7 @@ impl Actor {
                 "explain": input.explain,
                 "side_effect": input.side_effect,
                 "kind": "run_command",
+                "target_session_id": self.cfg.target_id,
                 "execution": {
                     "full_cmd": full_cmd,
                     "sentinel": sentinel,
@@ -2044,153 +2105,69 @@ impl Actor {
             }),
         );
 
-        loop {
-            let action = match self.recv_action().await {
-                Some(a) => a,
-                None => return Err(AppError::other("session_channel_closed", json!({}))),
-            };
-            match action {
-                UserAction::RejectCommand {
-                    command_id,
-                    reason,
-                    ack,
-                } if command_id == cmd_id => {
-                    self.record_rejection(&cmd_id, &reason);
-                    Self::complete_action(ack, Ok(()));
-                    return Ok(RunCommandResult {
-                        id: cmd_id,
-                        exit_code: None,
-                        output: String::new(),
-                        timed_out: false,
-                        early_terminated: false,
-                        rejected: Some(sanitize::redact(&reason, &self.cfg.redact_rules)),
-                        original_bytes: 0,
-                        truncated_bytes: 0,
-                    });
-                }
-                UserAction::CommandResult {
-                    command_id,
+        let (outcome, ack) = self
+            .wait_terminal_outcome(&cmd_id, &mut proposal, &full_cmd, &sentinel, timeout_s)
+            .await?;
+        match outcome {
+            CommandOutcome::Rejected { reason } => {
+                self.record_rejection(&cmd_id, &reason);
+                Self::complete_action(ack, Ok(()));
+                return Ok(RunCommandResult {
+                    id: cmd_id,
+                    exit_code: None,
+                    output: String::new(),
+                    timed_out: false,
+                    early_terminated: false,
+                    rejected: Some(sanitize::redact(&reason, &self.cfg.redact_rules)),
+                    original_bytes: 0,
+                    truncated_bytes: 0,
+                });
+            }
+            CommandOutcome::Result {
+                output,
+                exit_code,
+                timed_out,
+                early_terminated,
+            } => {
+                let redacted = sanitize::redact(&output, &self.cfg.redact_rules);
+                let trunc = sanitize::truncate(&redacted, self.cfg.max_output_bytes);
+
+                self.emit(
+                    "command_completed",
+                    json!({
+                        "id": cmd_id,
+                        "exit_code": exit_code,
+                        "timed_out": timed_out,
+                        "early_terminated": early_terminated,
+                        "output": trunc.text,
+                        "original_bytes": trunc.original_bytes,
+                        "truncated_bytes": trunc.truncated_bytes,
+                        "duration_ms": started_at.elapsed().as_millis() as u64,
+                    }),
+                );
+
+                self.audit_push(AuditKind::CommandExecuted {
+                    id: cmd_id.clone(),
                     exit_code,
-                    output,
+                    output_redacted: trunc.text.clone(),
+                    original_bytes: trunc.original_bytes,
+                    truncated_bytes: trunc.truncated_bytes,
+                    duration_ms: started_at.elapsed().as_millis() as u64,
+                });
+                // Processing ack: the canonical terminal mutation and
+                // audit entry exist before the invoke resolves.
+                Self::complete_action(ack, Ok(()));
+
+                return Ok(RunCommandResult {
+                    id: cmd_id,
+                    exit_code: Some(exit_code),
+                    output: trunc.text,
                     timed_out,
                     early_terminated,
-                    ack,
-                } if command_id == cmd_id => {
-                    let redacted = sanitize::redact(&output, &self.cfg.redact_rules);
-                    let trunc = sanitize::truncate(&redacted, self.cfg.max_output_bytes);
-
-                    self.emit(
-                        "command_completed",
-                        json!({
-                            "id": cmd_id,
-                            "exit_code": exit_code,
-                            "timed_out": timed_out,
-                            "early_terminated": early_terminated,
-                            "output": trunc.text,
-                            "original_bytes": trunc.original_bytes,
-                            "truncated_bytes": trunc.truncated_bytes,
-                            "duration_ms": started_at.elapsed().as_millis() as u64,
-                        }),
-                    );
-
-                    self.audit_push(AuditKind::CommandExecuted {
-                        id: cmd_id.clone(),
-                        exit_code,
-                        output_redacted: trunc.text.clone(),
-                        original_bytes: trunc.original_bytes,
-                        truncated_bytes: trunc.truncated_bytes,
-                        duration_ms: started_at.elapsed().as_millis() as u64,
-                    });
-                    // Processing ack: the canonical terminal mutation and
-                    // audit entry exist before the invoke resolves.
-                    Self::complete_action(ack, Ok(()));
-
-                    return Ok(RunCommandResult {
-                        id: cmd_id,
-                        exit_code: Some(exit_code),
-                        output: trunc.text,
-                        timed_out,
-                        early_terminated,
-                        rejected: None,
-                        original_bytes: trunc.original_bytes,
-                        truncated_bytes: trunc.truncated_bytes,
-                    });
-                }
-                UserAction::CommandResult {
-                    command_id, ack, ..
-                }
-                | UserAction::RejectCommand {
-                    command_id, ack, ..
-                } => {
-                    Self::reject_tool_action(ack, &command_id);
-                    continue;
-                }
-                // 命令审批期间不能接受新消息：tool_use 必须有对应 tool_result 才能再开下一轮 user。
-                // 之前 _ => continue 把 Message 默默吞掉——用户敲完字消息消失，没有任何反馈。
-                // 现在显式 audit + emit ai:error，让用户知道"先决定命令再发消息"。
-                UserAction::SetShell { ack, .. } => {
-                    let _ = ack.send(Err(AppError::other("ai_shell_change_busy", json!({}))));
-                }
-                UserAction::Message { text, ack } => {
-                    // 不要把用户原文裸塞进 audit——可能含 secret/PII（用户复制粘贴
-                    // 时随手带的）。audit log 可能离开本机（用户分享给开发者排错），
-                    // 走跟 history/command_output 同一套 redact 规则，至少把已知模式
-                    // 的敏感串脱掉。
-                    let redacted = sanitize::redact(&text, &self.cfg.redact_rules);
-                    self.audit_push(AuditKind::Note {
-                        message: format!(
-                            "user message dropped during command approval (pending tool_call {}): {redacted}",
-                            cmd_id
-                        ),
-                    });
-                    self.emit(
-                        "error",
-                        json!({
-                            "message": "Cannot send a new message while a command is pending approval. Approve or reject the command first.",
-                        }),
-                    );
-                    Self::reject_pending_action(ack, "message", &cmd_id);
-                    continue;
-                }
-                UserAction::ClearContext { ack } => {
-                    // 命令审批期间 history 含未配对的 tool_use，清空会让下一轮 400。
-                    // 拒绝并提示——同 Message 处理模式，给反馈而非静默丢弃。
-                    self.audit_push(AuditKind::Note {
-                        message: format!(
-                            "clear context dropped during command approval (pending tool_call {})",
-                            cmd_id
-                        ),
-                    });
-                    self.emit(
-                        "error",
-                        json!({
-                            "message": "Cannot clear context while a command is pending approval. Approve or reject the command first.",
-                        }),
-                    );
-                    Self::reject_pending_action(ack, "clear_context", &cmd_id);
-                    continue;
-                }
-                UserAction::ExternalTool { reply, .. } => {
-                    let _ = reply.send(Err(AppError::other("ai_command_busy", json!({}))));
-                }
-                UserAction::RollbackContext { ack, .. } => {
-                    self.audit_push(AuditKind::Note {
-                        message: format!(
-                            "context rollback dropped during command approval (pending tool_call {})",
-                            cmd_id
-                        ),
-                    });
-                    self.emit(
-                        "error",
-                        json!({
-                            "message": "Cannot roll back context while a command is pending approval. Approve or reject the command first.",
-                        }),
-                    );
-                    Self::reject_pending_action(ack, "rollback_context", &cmd_id);
-                    continue;
-                }
-                // 落到这里的只剩 stale RejectCommand/CommandResult（id 不匹配），静默丢即可。
-                _ => continue,
+                    rejected: None,
+                    original_bytes: trunc.original_bytes,
+                    truncated_bytes: trunc.truncated_bytes,
+                });
             }
         }
     }
@@ -2307,10 +2284,12 @@ impl Actor {
         match payload.as_object_mut() {
             Some(object) => {
                 object.insert("context_epoch".into(), json!(self.context_epoch));
+                object.insert("instance_id".into(), json!(self.instance_id));
             }
             None => {
                 payload = json!({
                     "value": payload,
+                    "instance_id": self.instance_id,
                     "context_epoch": self.context_epoch,
                 });
             }

@@ -2,7 +2,7 @@
     import { onMount } from "svelte";
     import * as ai from "./store.svelte.ts";
     import { t, errMsg } from "../i18n/index.svelte.ts";
-    import { truncateCommand, formatBytes } from "./format.ts";
+    import { commandOutput, truncateCommand, formatBytes } from "./format.ts";
     import type { AuditEntry, AuditLog } from "./types.ts";
     import type { SessionInstanceRef } from "./session-identity.ts";
     import { toast } from "../stores/toast.svelte.ts";
@@ -118,7 +118,7 @@
                     {#if entry.kind.type === "command_executed"}
                         <details class="dropdown">
                             <summary>{t("ai.audit.toggle.output", { bytes: entry.kind.original_bytes })}</summary>
-                            <pre>{entry.kind.output_redacted}</pre>
+                            <pre>{commandOutput(entry.kind.output_redacted, entry.kind.exit_code)}</pre>
                         </details>
                     {:else if entry.kind.type === "command_proposed"}
                         <div class="cmd-detail">

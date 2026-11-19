@@ -72,7 +72,7 @@ pub fn redact(text: &str, rules: &[RedactRule]) -> String {
 
 /// 对一条 ChatMessage 的所有自由文本字段过 redact。
 /// `tool_calls` 不动 —— 它们是 LLM 从已脱敏 history 生成的，本就不含真敏感数据；
-/// 改写它会破坏前端粘贴执行的 cmd 字面（用户终端会 echo `<REDACTED:...>`）。
+/// 改写它会破坏交互终端实际执行的 cmd 字面（用户终端会 echo `<REDACTED:...>`）。
 pub fn redact_message(msg: &ChatMessage, rules: &[RedactRule]) -> ChatMessage {
     match msg {
         ChatMessage::User { content } => ChatMessage::User {
@@ -1154,7 +1154,7 @@ mod tests {
     }
 
     /// LLM 工具调用的 input 是 LLM 从已脱敏 history 生成的；改写它会破坏
-    /// 前端粘进终端的 cmd 字面。redact_message 必须保留 tool_calls 不变。
+    /// 在终端执行的 cmd 字面。redact_message 必须保留 tool_calls 不变。
     #[test]
     fn redact_message_preserves_tool_calls() {
         let rules = default_rules();

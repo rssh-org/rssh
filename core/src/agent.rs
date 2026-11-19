@@ -992,6 +992,8 @@ mod tests {
             let target = host.clone();
             let sink: Sink = Arc::new(move |event, payload| target.emit(event, payload).is_ok());
             let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+            let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
+            crate::db::settings::set(&host.state().db, "local_shell", shell).unwrap();
             let id = crate::commands::pty::pty_spawn(
                 host.clone(),
                 owner.clone(),
@@ -1058,7 +1060,8 @@ mod tests {
                 request = self.event("agent:session_requested:") => request,
             };
             let id = request["id"].as_str().unwrap();
-            let info = accept_session(host.state(), host.clone(), &owner, id, None)
+            let shell = cfg!(windows).then_some(ShellKind::Cmd);
+            let info = accept_session(host.state(), host.clone(), &owner, id, shell)
                 .await
                 .unwrap();
             assert!(
@@ -1248,7 +1251,15 @@ mod tests {
         let opened = fixture.open().await;
         let host = fixture.host.clone();
         let owner = fixture.owner.clone();
-        let input = fixture.input();
+        let mut input = fixture.input();
+        // Build the value in the shell so the redaction assertion examines
+        // actual output independently of the command recorded in the audit.
+        input.cmd = if cfg!(windows) {
+            "echo private^-value&&echo sample"
+        } else {
+            "printf 'private-%s\\n' value && echo sample"
+        }
+        .into();
         let running = run_mcp_command(host.state(), &owner, "test-token", input.clone());
         tokio::pin!(running);
         let proposal = tokio::select! { _ = &mut running => panic!("must wait for shared AI approval"), proposal = fixture.event("ai:command_proposed:") => proposal };
@@ -1273,21 +1284,21 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(busy_download.code(), "agent_session_busy");
-        commands::ai_command_result_impl(
+        commands::ai_terminal_command(
+            owner.clone(),
             host.state(),
-            &fixture.info.tab_id,
-            &owner,
+            fixture.info.tab_id.clone(),
+            opened.instance_id.clone(),
             command_id.into(),
-            0,
-            "private-value\nsample\n".into(),
-            false,
-            false,
-            Some(&opened.instance_id),
+            fixture.info.session_id.clone(),
+            crate::ai::session::TerminalCommandAction::Approve {
+                bracketed_paste: false,
+            },
         )
         .await
         .unwrap();
         let result = running.await.unwrap();
-        assert_eq!(result.command.output, "[hidden]\nsample\n");
+        assert_eq!(result.command.output, "[hidden]\nsample");
         assert!(locked(&host.state().agent_bridge.inner)
             .unwrap()
             .commands

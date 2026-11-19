@@ -1,3 +1,4 @@
+pub mod capture;
 #[cfg(any(windows, macos, linux, ohos))]
 pub mod pty;
 pub mod recorder;

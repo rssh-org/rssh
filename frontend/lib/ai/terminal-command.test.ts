@@ -55,11 +55,11 @@ it.each([47, 1047, 1049])("waits for queued DECSET %s before writing a command",
   const f = await terminalFixture();
   f.feeder.push("previous output\r\n");
   f.feeder.push(`\x1b[?${mode}h`);
-  const running = f.ai.executeCommand(session, "enter", execution, "local", "target");
+  const running = f.ai.executeCommand(session, "enter", "target");
   try {
     await vi.waitFor(() => expect(f.terminal.buffer.active.type).toBe("alternate"));
-    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_command_result"]);
-    expect(invokeMock).toHaveBeenCalledWith("ai_command_result", expect.objectContaining({ exitCode: -1 }));
+    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_terminal_command"]);
+    expect(invokeMock).toHaveBeenCalledWith("ai_terminal_command", expect.objectContaining({ action: { kind: "blocked", reason: expect.stringContaining("alternate screen") } }));
   } finally {
     await f.ai.submitCommand(session, "enter");
     await running;
@@ -71,9 +71,9 @@ it("waits for queued DECRST before allowing a command at the restored prompt", a
   const f = await terminalFixture();
   await f.write("\x1b[?1049hVim");
   f.feeder.push("\x1b[?1049luser@host:~$ ");
-  const running = f.ai.executeCommand(session, "exit", execution, "local", "target");
+  const running = f.ai.executeCommand(session, "exit", "target");
   try {
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("pty_write", expect.anything()));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("ai_terminal_command", expect.objectContaining({ action: { kind: "approve", bracketedPaste: false } })));
     expect(invokeMock).not.toHaveBeenCalledWith("ai_command_result", expect.anything());
   } finally {
     await f.ai.submitCommand(session, "exit");
@@ -90,14 +90,15 @@ it("cancels while output is parsing without sending shell input or Ctrl+C", asyn
   const pending = new Promise<boolean>(resolve => { drained = resolve; });
   const flush = vi.fn(() => pending);
   screen.registerAlternateScreenProvider(session.tabId, () => false, { flush, pendingBytes: () => 1 });
-  const running = ai.executeCommand(session, "cancel", execution, "ssh", "target");
+  const running = ai.executeCommand(session, "cancel", "target");
   await vi.waitFor(() => expect(flush).toHaveBeenCalled());
   await ai.terminateCommand(session, "cancel");
   await running;
-  expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_command_result"]);
+  expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_terminal_command"]);
+  expect(invokeMock.mock.calls[0][1]).toMatchObject({ action: { kind: "stop" } });
   drained(true);
   await Promise.resolve();
-  expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_command_result"]);
+  expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_terminal_command"]);
   screen.unregisterAlternateScreenProvider(session.tabId);
 });
 
@@ -109,9 +110,9 @@ it("refuses a proposal after queued output is parsed without mounting an approva
   f.feeder.push("\x1b[?1049h");
   try {
     proposed({ payload: { id: "arrival", kind: "run_command", cmd: "echo test", execution } });
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("ai_command_result",
-      expect.objectContaining({ toolCallId: "arrival", exitCode: -1 })));
-    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_command_result"]);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("ai_terminal_command",
+      expect.objectContaining({ toolCallId: "arrival", action: { kind: "blocked", reason: expect.stringContaining("alternate screen") } })));
+    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toEqual(["ai_terminal_command"]);
   } finally {
     await f.ai.stopSession(session.tabId);
     f.dispose();
