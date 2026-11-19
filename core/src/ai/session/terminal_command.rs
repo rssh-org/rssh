@@ -361,6 +361,7 @@ mod tests {
     use crate::ai::session::{ExternalToolInput, ExternalToolResult};
     use crate::ai::tools::RunCommandInput;
     use crate::commands::{lifecycle, telnet};
+    use base64::{engine::general_purpose::STANDARD, Engine};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
@@ -496,12 +497,21 @@ mod tests {
             } else {
                 let primary = action(id, &session.instance_id, &owner, approve());
                 let retry = action(id, &session.instance_id, &owner, approve());
+                let expected = format!("device online ({id})");
                 let drive_device = async {
                     let mut written = [0; 7];
                     device.read_exact(&mut written).await.unwrap();
                     assert_eq!(&written, b"status\n");
-                    device.write_all(b"device online\r\n").await.unwrap();
-                    while events.recv().await.unwrap().0 != format!("telnet:data:{target}") {}
+                    let reply = format!("{expected}\r\n");
+                    device.write_all(reply.as_bytes()).await.unwrap();
+                    let channel = format!("telnet:data:{target}");
+                    let mut displayed = Vec::new();
+                    while !displayed.ends_with(reply.as_bytes()) {
+                        let (event, payload) = events.recv().await.unwrap();
+                        if event == channel {
+                            displayed.extend(STANDARD.decode(payload.as_str().unwrap()).unwrap());
+                        }
+                    }
                     action(id, &session.instance_id, &owner, finish)
                         .await
                         .unwrap()
@@ -510,7 +520,7 @@ mod tests {
                 let (receipt, second, completion) = tokio::join!(primary, retry, drive_device);
                 assert_eq!(receipt.unwrap().unwrap().payload, completion.payload);
                 assert_eq!(second.unwrap().unwrap().payload, completion.payload);
-                assert_eq!(completion.payload["output"], "device online");
+                assert_eq!(completion.payload["output"], expected);
                 assert_eq!(completion.payload["early_terminated"], id == "stop");
                 let after = action(id, &session.instance_id, &owner, approve())
                     .await

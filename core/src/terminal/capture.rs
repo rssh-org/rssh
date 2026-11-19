@@ -59,26 +59,25 @@ impl OutputTap {
         self.0.lock().expect("terminal tap lock").active.upgrade()
     }
 
-    /// Enqueue this terminal chunk for display before its marker can release
-    /// an awaiting command. Take the subscription at arrival so a command
-    /// approved during display cannot observe a chunk from before its write.
-    pub fn publish_ref(&self, bytes: &[u8], display: impl FnOnce()) {
-        let active = self.active();
-        display();
-        if let Some(active) = active {
-            active.feed(bytes);
+    fn publish_chunk<B: AsRef<[u8]>>(&self, bytes: B, display: impl FnOnce(B)) {
+        // Submit/Stop can arrive as soon as display enqueues the event.
+        // Record its bytes first, but deliver a shell exit after the event.
+        let exited = self.active().and_then(|active| {
+            let code = active.feed(bytes.as_ref())?;
+            Some((active, code))
+        });
+        display(bytes);
+        if let Some((active, code)) = exited {
+            active.finish(Completion::Exit(code));
         }
     }
 
-    /// Some native sinks consume the buffer. Keep a copy only during capture.
+    pub fn publish_ref(&self, bytes: &[u8], display: impl FnOnce()) {
+        self.publish_chunk(bytes, |_| display());
+    }
+
     pub fn publish(&self, bytes: Vec<u8>, display: impl FnOnce(Vec<u8>)) {
-        if let Some(active) = self.active() {
-            let observed = bytes.clone();
-            display(bytes);
-            active.feed(&observed);
-        } else {
-            display(bytes);
-        }
+        self.publish_chunk(bytes, display);
     }
 
     #[cfg(test)]
@@ -160,17 +159,14 @@ impl CommandCapture {
 struct ActiveCapture(Mutex<Option<Collecting>>);
 
 impl ActiveCapture {
-    fn feed(&self, bytes: &[u8]) {
+    fn feed(&self, bytes: &[u8]) -> Option<i32> {
         let mut slot = self.0.lock().expect("active capture lock");
-        let Some(run) = slot.as_mut() else { return };
+        let run = slot.as_mut()?;
         if let Some(marker) = &mut run.marker {
-            if let Some(code) = marker.feed(&mut run.output, bytes) {
-                slot.take()
-                    .expect("active capture")
-                    .complete(Completion::Exit(code));
-            }
+            marker.feed(&mut run.output, bytes)
         } else {
             run.output.append(bytes);
+            None
         }
     }
 
@@ -274,6 +270,7 @@ struct Marker {
     overlap: usize,
     pending: Vec<u8>,
     skipping_echo: bool,
+    matched_exit: bool,
 }
 
 impl Marker {
@@ -295,10 +292,16 @@ impl Marker {
             overlap: ((sentinel.len() + 1) * 3).max(sentinel.len() + 12),
             pending: Vec::new(),
             skipping_echo: false,
+            matched_exit: false,
         }
     }
 
     fn feed(&mut self, output: &mut BoundedOutput, bytes: &[u8]) -> Option<i32> {
+        // Ignore later frames while the display sink enqueues the exit frame.
+        // The capture itself stays available for a timeout or explicit stop.
+        if self.matched_exit {
+            return None;
+        }
         // A transport (in particular a native adapter) can deliver a frame
         // larger than the capture limit. Bound scratch space independently.
         bytes
@@ -334,6 +337,7 @@ impl Marker {
                 {
                     output.append(&self.pending[from..matched.start()]);
                     self.pending.clear();
+                    self.matched_exit = true;
                     return Some(code);
                 }
                 // Preserve malformed output and keep looking for the real marker.
@@ -382,12 +386,49 @@ mod tests {
         });
         let mut capture = subscribed_during_display.unwrap();
         tap.publish_ref(&bytes, || {
+            tap.feed(b"late frame");
             assert!(matches!(
                 capture.rx.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
             ));
         });
         assert_eq!(capture.wait(deadline()).await.output, "visible");
+    }
+
+    #[test]
+    fn finishing_from_display_includes_the_visible_chunk() {
+        let tap = OutputTap::default();
+        let mut raw = tap.start("").unwrap();
+        tap.publish(b"device online\r\n".to_vec(), |_| {
+            assert_eq!(raw.submit().unwrap().output, "device online");
+        });
+        drop(raw);
+
+        let mut shell = tap.start(MARKER).unwrap();
+        tap.publish_ref(b"still running\r\n", || {
+            assert_eq!(shell.interrupt().unwrap().output, "still running");
+        });
+    }
+
+    #[tokio::test]
+    async fn a_blocked_display_cannot_extend_the_capture_deadline() {
+        let tap = OutputTap::default();
+        let mut capture = tap.start(MARKER).unwrap();
+        let (entered, displaying) = oneshot::channel();
+        let (resume, blocked) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            tap.publish_ref(format!("visible{MARKER}:0\r\n").as_bytes(), || {
+                entered.send(()).unwrap();
+                let _ = blocked.recv_timeout(Duration::from_secs(5));
+            });
+        });
+        displaying.await.unwrap();
+        let result = tokio::time::timeout_at(deadline(), capture.wait(Instant::now())).await;
+        let _ = resume.send(());
+        reader.join().unwrap();
+        let result = result.expect("the capture must time out while display is blocked");
+        assert!(result.timed_out);
+        assert_eq!(result.output, "visible");
     }
 
     #[tokio::test]
