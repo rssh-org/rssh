@@ -79,7 +79,7 @@ pub fn all_tools() -> Vec<ToolSchema> {
                 Do not use screen-redrawing commands (top / htop / watch / tail -f); \
                 repeat sampling must carry an explicit count (vmstat 1 5, not vmstat 1). \
                 Use bounded, non-interactive commands that terminate on their own. \
-                A timeout ends output collection and does not guarantee that the command stopped. Do not automatically repeat a command after a timeout or lost response. \
+                A timeout ends output collection and does not guarantee that the command stopped. Do not automatically repeat a command after a timeout or lost response, The impact caused by the failed command should be evaluated first. \
                 The output of the command should be readable text content, rather than binary output. ".into(),
             input_schema: json!({
                 "type": "object",
