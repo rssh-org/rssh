@@ -75,7 +75,7 @@ pub fn all_tools() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: TOOL_RUN_COMMAND.into(),
-            description: "Run a single command on the remote (or local shell), The output is sanitized locally before being returned to you. \
+            description: "Run a single-line command on the remote (or local shell), do not submit multi-line commands. The output is sanitized locally before being returned to you. \
                 Users will decide whether to execute this command based on `explain` and `side_effect`, so please describe `explain` and `side_effect` accurately and clearly. For example, `jmap -histo:live` shows 'Causes a Full GC, business is paused for 100-300ms'. \
                 Do not use screen-redrawing commands (top / htop / watch / tail -f); \
                 repeat sampling must carry an explicit count (vmstat 1 5, not vmstat 1). \
