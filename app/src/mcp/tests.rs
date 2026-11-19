@@ -212,7 +212,7 @@ async fn concurrent_gui_and_cli_starts_reuse_the_same_endpoint() {
 }
 
 #[tokio::test]
-async fn streamable_http_initializes_and_exposes_only_terminal_tools() {
+async fn streamable_http_initializes_and_exposes_supported_tools() {
     let fixture = Fixture::new().await;
     let session = fixture.initialize().await;
     let response = fixture
@@ -224,30 +224,49 @@ async fn streamable_http_initializes_and_exposes_only_terminal_tools() {
         .await
         .unwrap();
     let result = read_result(response).await;
-    let names: Vec<_> = result["result"]["tools"]
+    let mut names: Vec<_> = result["result"]["tools"]
         .as_array()
         .unwrap()
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
+    names.sort_unstable();
     assert_eq!(
         names,
         [
+            "analyze_locally",
+            "download_file",
             "list_sessions",
+            "load_skill",
+            "match_file",
             "open_session",
-            "run_command",
-            "download_file"
+            "patch_file",
+            "run_command"
         ]
     );
-    assert!(result["result"]["tools"][2]["inputSchema"]["properties"]
+    let tool = |name| {
+        result["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap()
+    };
+    assert!(tool("run_command")["inputSchema"]["properties"]
         .get("request_id")
         .is_none());
-    for (index, name) in [(2, "run_command"), (3, "download_file")] {
+    for name in [
+        "run_command",
+        "download_file",
+        "load_skill",
+        "match_file",
+        "patch_file",
+    ] {
         let canonical = rssh_core::ai::tools::all_tools()
             .into_iter()
             .find(|tool| tool.name == name)
             .unwrap();
-        let exposed = &result["result"]["tools"][index];
+        let exposed = tool(name);
         assert_eq!(exposed["description"], canonical.description);
         let mut expected_schema = canonical.input_schema;
         expected_schema["properties"]["session_id"] = json!({
@@ -260,6 +279,19 @@ async fn streamable_http_initializes_and_exposes_only_terminal_tools() {
         expected_schema["additionalProperties"] = json!(false);
         assert_eq!(exposed["inputSchema"], expected_schema);
     }
+    let analyze = tool("analyze_locally");
+    let mut expected_schema = rssh_core::ai::tools::all_tools()
+        .into_iter()
+        .find(|tool| tool.name == "analyze_locally")
+        .unwrap()
+        .input_schema;
+    expected_schema["additionalProperties"] = json!(false);
+    assert_eq!(analyze["inputSchema"], expected_schema);
+    assert!(analyze["description"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("agent"));
     let response = fixture
         .request(
             json!({"jsonrpc":"2.0", "id":3, "method":"tools/call",
@@ -284,6 +316,73 @@ async fn streamable_http_initializes_and_exposes_only_terminal_tools() {
         .await
         .unwrap();
     assert_eq!(read_result(response).await["result"]["isError"], true);
+}
+
+#[tokio::test]
+async fn skill_and_file_tools_require_session_acceptance_and_strict_arguments() {
+    let fixture = Fixture::new().await;
+    let session = fixture.initialize().await;
+    let inputs = [
+        ("load_skill", json!({"id":"user-test"})),
+        ("match_file", json!({"path":"/tmp/test", "find":"old"})),
+        (
+            "patch_file",
+            json!({"path":"/tmp/test", "find":"old", "replace":"new", "expected_count":1}),
+        ),
+    ];
+    for (name, mut arguments) in inputs {
+        let call = |arguments| {
+            fixture.request(
+                json!({"jsonrpc":"2.0", "id":2, "method":"tools/call",
+                    "params":{"name":name, "arguments":arguments}}),
+                Some(&session),
+            )
+        };
+        let missing = read_result(call(arguments.clone()).send().await.unwrap()).await;
+        assert_eq!(missing["error"]["code"], -32602, "{name}: {missing}");
+        arguments["session_id"] = json!("not-shared");
+        let denied = read_result(call(arguments.clone()).send().await.unwrap()).await;
+        assert_eq!(denied["result"]["isError"], true, "{name}: {denied}");
+        assert_eq!(
+            denied["result"]["structuredContent"]["code"], "agent_session_unavailable",
+            "{name}: {denied}"
+        );
+        arguments["unexpected"] = json!(true);
+        let unknown = read_result(call(arguments).send().await.unwrap()).await;
+        assert_eq!(unknown["error"]["code"], -32602, "{name}: {unknown}");
+    }
+}
+
+#[tokio::test]
+async fn analyze_locally_directs_the_calling_agent_to_analyze_without_rssh() {
+    let fixture = Fixture::new().await;
+    let session = fixture.initialize().await;
+    let response = fixture
+        .request(
+            json!({"jsonrpc":"2.0", "id":2, "method":"tools/call",
+            "params":{"name":"analyze_locally", "arguments":{
+                "local_path":"/tmp/profile.pprof", "task":"Analyze this profile"
+            }}}),
+            Some(&session),
+        )
+        .send()
+        .await
+        .unwrap();
+    let result = read_result(response).await;
+    assert_eq!(result["result"]["isError"], true);
+    assert_eq!(
+        result["result"]["structuredContent"]["code"],
+        "mcp_analyze_locally_in_agent"
+    );
+    let message = result["result"]["structuredContent"]["message"]
+        .as_str()
+        .unwrap();
+    assert!(message.to_lowercase().contains("agent"), "{message}");
+    assert!(message.contains("RSSH"), "{message}");
+    assert!(fixture.state.ai_sessions.lock().unwrap().is_empty());
+    assert!(agent::pending_sessions(&fixture.state, &fixture.owner)
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -637,6 +736,183 @@ async fn download_requires_acceptance_and_copies_a_local_target_file() {
     while let Ok((event, _)) = events.try_recv() {
         assert!(!event.starts_with("ai:download_proposed:"));
     }
+}
+
+#[tokio::test]
+async fn load_skill_uses_the_catalog_and_content_snapshot_from_session_acceptance() {
+    let fixture = Fixture::new().await;
+    let mut skill = rssh_core::ai::skills::SkillRecord {
+        id: "user-mcp-test".into(),
+        name: "Inspect service".into(),
+        description: "A saved inspection workflow".into(),
+        content: "Original workflow content".into(),
+        builtin: false,
+    };
+    rssh_core::ai::skills::save_user(&fixture.state.db, &skill).unwrap();
+    let (id, host, mut events) = terminal(&fixture, "tab-skill");
+    let session = fixture.initialize().await;
+    open_terminal(&fixture, &session, &id, host, &mut events).await;
+
+    skill.name = "Changed name".into();
+    skill.description = "Changed description".into();
+    skill.content = "Changed workflow content".into();
+    rssh_core::ai::skills::save_user(&fixture.state.db, &skill).unwrap();
+    let reopened = fixture
+        .request(
+            json!({"jsonrpc":"2.0", "id":3, "method":"tools/call",
+            "params":{"name":"open_session", "arguments":{
+                "session_id":id, "title":"Reuse accepted session"
+            }}}),
+            Some(&session),
+        )
+        .send()
+        .await
+        .unwrap();
+    let reopened = read_result(reopened).await;
+    assert_eq!(
+        reopened["result"]["structuredContent"]["available_skills"],
+        json!([{
+            "id":"user-mcp-test", "name":"Inspect service",
+            "description":"A saved inspection workflow"
+        }])
+    );
+    let call = |request_id, skill_id| {
+        fixture.request(
+            json!({"jsonrpc":"2.0", "id":request_id, "method":"tools/call",
+            "params":{"name":"load_skill", "arguments":{
+                "session_id":id, "id":skill_id
+            }}}),
+            Some(&session),
+        )
+    };
+    let loaded = read_result(call(4, "user-mcp-test").send().await.unwrap()).await;
+    assert_eq!(loaded["result"]["isError"], false, "{loaded}");
+    assert_eq!(loaded["result"]["structuredContent"]["session_id"], id);
+    assert_eq!(loaded["result"]["structuredContent"]["ok"], true);
+    let content = loaded["result"]["structuredContent"]["content"]
+        .as_str()
+        .unwrap();
+    assert!(content.contains("Original workflow content"), "{content}");
+    assert!(!content.contains("Changed"), "{content}");
+    let event = next_event(&mut events, "ai:skill_loaded:").await;
+    assert_eq!(event["id"], "user-mcp-test");
+
+    let missing = read_result(call(5, "user-missing").send().await.unwrap()).await;
+    assert_eq!(missing["result"]["isError"], true, "{missing}");
+    assert_eq!(missing["result"]["structuredContent"]["ok"], false);
+    assert!(missing["result"]["structuredContent"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Unknown skill id"));
+}
+
+#[cfg(any(macos, linux))]
+#[tokio::test]
+async fn file_tools_use_the_existing_terminal_and_require_each_patch_approval() {
+    let fixture = Fixture::new().await;
+    let (id, host, mut events) = terminal(&fixture, "tab-files");
+    let session = fixture.initialize().await;
+    let info = open_terminal(&fixture, &session, &id, host, &mut events).await;
+    let source = fixture._dir.path().join("source with spaces.txt");
+    let original = "old value 10.0.0.7\nold value\n";
+    std::fs::write(&source, original).unwrap();
+    let request = fixture
+        .request(
+            json!({"jsonrpc":"2.0", "id":3, "method":"tools/call",
+            "params":{"name":"match_file", "arguments":{
+                "session_id":id, "path":source, "find":"old value", "before":0, "after":9
+            }}}),
+            Some(&session),
+        )
+        .timeout(std::time::Duration::from_secs(15));
+    let matching = tokio::spawn(async move { read_result(request.send().await.unwrap()).await });
+    let probe = next_event(&mut events, "ai:internal_command:").await;
+    rssh_core::ai::commands::ai_terminal_command(
+        fixture.owner.clone(),
+        &fixture.state,
+        info.tab_id.clone(),
+        info.instance_id.clone(),
+        probe["id"].as_str().unwrap().into(),
+        id.clone(),
+        rssh_core::ai::session::TerminalCommandAction::Approve {
+            bracketed_paste: false,
+        },
+    )
+    .await
+    .unwrap();
+    let card = next_event(&mut events, "ai:match_proposed:").await;
+    assert!(!matching.is_finished());
+    approve(&fixture, &info, &id, &card).await;
+    let matched = matching.await.unwrap();
+    assert_eq!(matched["result"]["isError"], false, "{matched}");
+    let content: Value = serde_json::from_str(
+        matched["result"]["structuredContent"]["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(content["count"], 2);
+    assert!(content["matches"][0]["context"]
+        .as_str()
+        .unwrap()
+        .contains("<REDACTED:ip-10>"));
+    assert!(!matched.to_string().contains("10.0.0.7"));
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+
+    let patch_call = |request_id, find, replace| {
+        fixture
+            .request(
+                json!({"jsonrpc":"2.0", "id":request_id, "method":"tools/call",
+                "params":{"name":"patch_file", "arguments":{
+                    "session_id":id, "path":source, "find":find,
+                    "replace":replace, "expected_count":2
+                }}}),
+                Some(&session),
+            )
+            .timeout(std::time::Duration::from_secs(15))
+    };
+    let request = patch_call(4, "old value", "new value");
+    let patching = tokio::spawn(async move { read_result(request.send().await.unwrap()).await });
+    for step in ["cp", "modify", "diff", "mv"] {
+        let card = next_event(&mut events, "ai:patch_proposed:").await;
+        assert_eq!(card["step"], step);
+        assert!(!patching.is_finished());
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+        if step == "mv" {
+            assert!(card["diff"].as_str().unwrap().contains("+new value"));
+        }
+        approve(&fixture, &info, &id, &card).await;
+    }
+    let patched = patching.await.unwrap();
+    assert_eq!(patched["result"]["isError"], false, "{patched}");
+    let content: Value = serde_json::from_str(
+        patched["result"]["structuredContent"]["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(content["changed"], 2);
+    let expected = "new value 10.0.0.7\nnew value\n";
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), expected);
+
+    let request = patch_call(5, "new value", "rejected value");
+    let patching = tokio::spawn(async move { read_result(request.send().await.unwrap()).await });
+    let card = next_event(&mut events, "ai:patch_proposed:").await;
+    rssh_core::ai::commands::ai_command_reject_impl(
+        &fixture.state,
+        &info.tab_id,
+        &fixture.owner,
+        card["id"].as_str().unwrap().into(),
+        "Keep 10.0.0.7 unchanged".into(),
+        Some(&info.instance_id),
+    )
+    .await
+    .unwrap();
+    let rejected = patching.await.unwrap();
+    assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    assert_eq!(rejected["result"]["structuredContent"]["ok"], false);
+    assert!(!rejected.to_string().contains("10.0.0.7"));
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), expected);
 }
 
 #[tokio::test]

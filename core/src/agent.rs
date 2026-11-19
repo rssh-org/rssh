@@ -58,6 +58,7 @@ pub struct OpenSessionResult {
     pub session_id: String,
     pub conversation_id: String,
     pub instance_id: String,
+    pub available_skills: Vec<crate::ai::skills::SkillSummary>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -658,7 +659,7 @@ pub async fn accept_session(
         "ssm" => crate::ai::commands::AiTarget::Ssm(request.session_id.clone()),
         _ => return Err(error("agent_session_unsupported")),
     };
-    let info = match crate::ai::commands::ai_mcp_session_start_impl(
+    let (info, available_skills) = match crate::ai::commands::ai_mcp_session_start_impl(
         state,
         host,
         owner.clone(),
@@ -708,6 +709,7 @@ pub async fn accept_session(
                         session_id: request.session_id,
                         conversation_id: info.conversation_id.clone(),
                         instance_id: info.instance_id.clone(),
+                        available_skills,
                     },
                     shutdown,
                 });
@@ -809,12 +811,6 @@ pub async fn run_mcp_command(
     token: &str,
     input: RunCommandInput,
 ) -> AppResult<CommandResult> {
-    if input.cmd.len() > MAX_COMMAND_BYTES
-        || input.explain.len() > 4096
-        || input.side_effect.len() > 4096
-    {
-        return Err(error("agent_invalid_command"));
-    }
     let command = crate::ai::tools::RunCommandInput {
         cmd: input.cmd,
         explain: input.explain,
@@ -864,13 +860,21 @@ pub async fn download_mcp_file(
     })
 }
 
-async fn call_mcp_tool(
+pub async fn call_mcp_tool(
     state: &AppState,
     owner: &SessionOwner,
     token: &str,
     session_id: &str,
     input: ExternalToolInput,
 ) -> AppResult<ExternalToolResult> {
+    if let ExternalToolInput::RunCommand(command) = &input {
+        if command.cmd.len() > MAX_COMMAND_BYTES
+            || command.explain.len() > 4096
+            || command.side_effect.len() > 4096
+        {
+            return Err(error("agent_invalid_command"));
+        }
+    }
     let (id, tab_id, instance_id, mut receiver) = {
         let registry = locked(&state.lifecycle_sessions)?;
         let mut inner = locked(&state.agent_bridge.inner)?;

@@ -15,6 +15,24 @@ pub struct SkillRecord {
     pub builtin: bool,
 }
 
+/// Metadata advertised to an MCP agent before it requests the skill body.
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
+impl From<&SkillRecord> for SkillSummary {
+    fn from(skill: &SkillRecord) -> Self {
+        Self {
+            id: skill.id.clone(),
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+        }
+    }
+}
+
 fn user_record(user: ai_skill::UserSkill) -> SkillRecord {
     SkillRecord {
         id: user.id,

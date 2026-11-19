@@ -657,14 +657,17 @@ impl Actor {
         let mut proposal =
             self.terminal_commands
                 .propose(&cmd_id, &self.cfg.target_id, &self.app)?;
+        self.active_file_card = Some(cmd_id.clone());
         self.emit(
             &format!("{event}_proposed"),
             serde_json::Value::Object(payload),
         );
 
-        let (outcome, ack) = self
+        let outcome = self
             .wait_terminal_outcome(&cmd_id, &mut proposal, &full_cmd, &sentinel, timeout_s)
-            .await?;
+            .await;
+        self.active_file_card = None;
+        let (outcome, ack) = outcome?;
         match outcome {
             CommandOutcome::Rejected { reason } => {
                 self.record_rejection(&cmd_id, &reason);

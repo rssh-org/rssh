@@ -73,7 +73,13 @@ mod http {
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
     use rmcp::{RoleServer, ServerHandler};
+    use rssh_core::ai::{llm::ToolSchema, session::ExternalToolInput, tools};
+    use serde::de::DeserializeOwned;
+    use serde::Deserialize;
     use serde_json::{json, Value};
+
+    const LOCAL_ANALYSIS_MESSAGE: &str =
+        "Analyze the local file yourself using your own tools. RSSH does not run local analysis for an MCP agent.";
 
     #[derive(Clone)]
     struct TerminalTools {
@@ -82,12 +88,7 @@ mod http {
         endpoint_token: Arc<str>,
     }
 
-    fn session_tool(name: &str) -> Tool {
-        // Share the complete tool contract; MCP only adds session selection.
-        let canonical = rssh_core::ai::tools::all_tools()
-            .into_iter()
-            .find(|tool| tool.name == name)
-            .expect("built-in AI tool");
+    fn session_tool(canonical: ToolSchema) -> Tool {
         let mut schema = canonical.input_schema;
         schema["properties"]["session_id"] = json!({
             "type":"string", "description":"Exact session_id returned by list_sessions and accepted through open_session."
@@ -113,18 +114,157 @@ mod http {
         ).annotate(ToolAnnotations::new().read_only(true));
         let open = Tool::new(
             "open_session",
-            "Ask the user to let this local agent control an existing terminal through an RSSH AI conversation. Waits for acceptance and returns the conversation identity. Reuses an already accepted conversation for this terminal. No model provider is required.",
+            "Ask the user to let this local agent control an existing terminal through an RSSH AI conversation. Waits for acceptance and returns the conversation identity and available_skills catalog. Pass a catalog id to load_skill to read its content. Reuses an already accepted conversation for this terminal. No model provider is required.",
             json!({"type":"object", "properties":{
                 "session_id":{"type":"string", "description":"Exact session_id returned by list_sessions."},
                 "title":{"type":"string", "minLength":1, "maxLength":512, "description":"Short title describing the debugging task."}
             }, "required":["session_id","title"], "additionalProperties":false}).as_object().unwrap().clone(),
         );
-        vec![
-            list,
-            open,
-            session_tool("run_command"),
-            session_tool("download_file"),
-        ]
+        let mut definitions = vec![list, open];
+        for canonical in tools::all_tools() {
+            match canonical.name.as_str() {
+                tools::TOOL_RUN_COMMAND
+                | tools::TOOL_DOWNLOAD_FILE
+                | tools::TOOL_LOAD_SKILL
+                | tools::TOOL_MATCH_FILE
+                | tools::TOOL_PATCH_FILE => {
+                    definitions.push(session_tool(canonical));
+                }
+                tools::TOOL_ANALYZE_LOCALLY => {
+                    let mut schema = canonical.input_schema;
+                    schema["additionalProperties"] = json!(false);
+                    definitions.push(Tool::new(
+                        canonical.name,
+                        LOCAL_ANALYSIS_MESSAGE,
+                        schema.as_object().unwrap().clone(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        definitions
+    }
+
+    fn parse_args<T: DeserializeOwned>(args: Value) -> Result<T, ErrorData> {
+        serde_json::from_value(args)
+            .map_err(|error| ErrorData::invalid_params(error.to_string(), None))
+    }
+
+    #[derive(Deserialize)]
+    struct SessionArgs<T> {
+        session_id: String,
+        #[serde(flatten)]
+        input: T,
+        #[serde(flatten)]
+        extra: serde_json::Map<String, Value>,
+    }
+
+    impl<T: DeserializeOwned> SessionArgs<T> {
+        fn parse(args: Value) -> Result<Self, ErrorData> {
+            let parsed: Self = parse_args(args)?;
+            if let Some(field) = parsed.extra.keys().next() {
+                return Err(ErrorData::invalid_params(
+                    format!("Unknown argument: {field}"),
+                    None,
+                ));
+            }
+            Ok(parsed)
+        }
+    }
+
+    impl TerminalTools {
+        async fn execute(
+            &self,
+            request: CallToolRequestParams,
+        ) -> Result<CallToolResult, ErrorData> {
+            let args = Value::Object(request.arguments.unwrap_or_default());
+            let result = match request.name.as_ref() {
+                "list_sessions" => {
+                    agent::list_mcp_sessions(&self.state, &self.owner, &self.endpoint_token)
+                        .map(|sessions| json!({"sessions":sessions}))
+                }
+                "open_session" => agent::open_mcp_session(
+                    &self.state,
+                    &self.owner,
+                    &self.endpoint_token,
+                    parse_args(args)?,
+                )
+                .await
+                .map(|result| json!(result)),
+                tools::TOOL_RUN_COMMAND => agent::run_mcp_command(
+                    &self.state,
+                    &self.owner,
+                    &self.endpoint_token,
+                    parse_args(args)?,
+                )
+                .await
+                .map(|result| json!(result)),
+                tools::TOOL_DOWNLOAD_FILE => agent::download_mcp_file(
+                    &self.state,
+                    &self.owner,
+                    &self.endpoint_token,
+                    parse_args(args)?,
+                )
+                .await
+                .map(|result| json!(result)),
+                tools::TOOL_LOAD_SKILL => {
+                    self.call_actor_tool(SessionArgs::parse(args)?, ExternalToolInput::LoadSkill)
+                        .await
+                }
+                tools::TOOL_MATCH_FILE => {
+                    self.call_actor_tool(SessionArgs::parse(args)?, ExternalToolInput::MatchFile)
+                        .await
+                }
+                tools::TOOL_PATCH_FILE => {
+                    self.call_actor_tool(SessionArgs::parse(args)?, ExternalToolInput::PatchFile)
+                        .await
+                }
+                tools::TOOL_ANALYZE_LOCALLY => Ok(json!({
+                    "ok":false, "code":"mcp_analyze_locally_in_agent", "message":LOCAL_ANALYSIS_MESSAGE
+                })),
+                _ => return Err(ErrorData::invalid_params("Unknown tool", None)),
+            };
+            Ok(match result {
+                Ok(result) => {
+                    let failed = result.get("timed_out").and_then(Value::as_bool) == Some(true)
+                        || result.get("ok").and_then(Value::as_bool) == Some(false)
+                        || result.get("early_terminated").and_then(Value::as_bool) == Some(true)
+                        || result.get("rejected").is_some_and(|value| !value.is_null())
+                        || result
+                            .get("exit_code")
+                            .and_then(Value::as_i64)
+                            .is_some_and(|code| code != 0);
+                    if failed {
+                        CallToolResult::structured_error(result)
+                    } else {
+                        CallToolResult::structured(result)
+                    }
+                }
+                Err(error) => {
+                    CallToolResult::structured_error(json!({"code":error.code(), "error":error}))
+                }
+            })
+        }
+
+        async fn call_actor_tool<T>(
+            &self,
+            args: SessionArgs<T>,
+            tool: fn(T) -> ExternalToolInput,
+        ) -> AppResult<Value> {
+            let result = agent::call_mcp_tool(
+                &self.state,
+                &self.owner,
+                &self.endpoint_token,
+                &args.session_id,
+                tool(args.input),
+            )
+            .await;
+            result.map(|result| {
+                let mut value = json!(result);
+                value["session_id"] = json!(args.session_id);
+                value
+            })
+        }
     }
 
     impl ServerHandler for TerminalTools {
@@ -153,76 +293,10 @@ mod http {
             request: CallToolRequestParams,
             context: RequestContext<RoleServer>,
         ) -> Result<CallToolResponse, ErrorData> {
-            let result = match request.name.as_ref() {
-                "list_sessions" => {
-                    agent::list_mcp_sessions(&self.state, &self.owner, &self.endpoint_token)
-                        .map(|sessions| json!({"sessions":sessions}))
-                }
-                "open_session" => {
-                    let input = serde_json::from_value::<agent::OpenSessionInput>(Value::Object(
-                        request.arguments.unwrap_or_default(),
-                    ))
-                    .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
-                    tokio::select! {
-                        _ = context.ct.cancelled() => {
-                            return Ok(CallToolResult::structured_error(json!({"code":"request_cancelled"})).into());
-                        }
-                        result = agent::open_mcp_session(&self.state, &self.owner, &self.endpoint_token, input) => {
-                            result.map(|result| serde_json::to_value(result).expect("session result serializes"))
-                        }
-                    }
-                }
-                "run_command" => {
-                    let input = serde_json::from_value::<agent::RunCommandInput>(Value::Object(
-                        request.arguments.unwrap_or_default(),
-                    ))
-                    .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
-                    tokio::select! {
-                        _ = context.ct.cancelled() => {
-                            return Ok(CallToolResult::structured_error(json!({"code":"request_cancelled"})).into());
-                        }
-                        result = agent::run_mcp_command(&self.state, &self.owner, &self.endpoint_token, input) => {
-                            result.map(|result| serde_json::to_value(result).expect("command result serializes"))
-                        }
-                    }
-                }
-                "download_file" => {
-                    let input = serde_json::from_value::<agent::DownloadFileInput>(Value::Object(
-                        request.arguments.unwrap_or_default(),
-                    ))
-                    .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
-                    tokio::select! {
-                        _ = context.ct.cancelled() => {
-                            return Ok(CallToolResult::structured_error(json!({"code":"request_cancelled"})).into());
-                        }
-                        result = agent::download_mcp_file(&self.state, &self.owner, &self.endpoint_token, input) => {
-                            result.map(|result| serde_json::to_value(result).expect("download result serializes"))
-                        }
-                    }
-                }
-                _ => return Err(ErrorData::invalid_params("Unknown tool", None)),
-            };
-            Ok(match result {
-                Ok(result) => {
-                    let failed = result.get("timed_out").and_then(Value::as_bool) == Some(true)
-                        || result.get("ok").and_then(Value::as_bool) == Some(false)
-                        || result.get("early_terminated").and_then(Value::as_bool) == Some(true)
-                        || result.get("rejected").is_some_and(|value| !value.is_null())
-                        || result
-                            .get("exit_code")
-                            .and_then(Value::as_i64)
-                            .is_some_and(|code| code != 0);
-                    if failed {
-                        CallToolResult::structured_error(result)
-                    } else {
-                        CallToolResult::structured(result)
-                    }
-                }
-                Err(error) => {
-                    CallToolResult::structured_error(json!({"code":error.code(), "error":error}))
-                }
+            tokio::select! {
+                _ = context.ct.cancelled() => Ok(CallToolResult::structured_error(json!({"code":"request_cancelled"})).into()),
+                result = self.execute(request) => result.map(Into::into),
             }
-            .into())
         }
     }
 
