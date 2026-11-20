@@ -14,7 +14,6 @@
 - cat profile.html ls折叠/展开，会出现很多clear不掉的行，调整size后clear会清理 ???
 - 移动端增加自定义键盘
 - profile/forward 自定义icon
-- 折叠的块，也要支持复制文本
 - 快捷命令块，增加占位符
 
 
