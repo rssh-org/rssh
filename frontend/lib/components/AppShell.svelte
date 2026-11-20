@@ -1131,7 +1131,7 @@
                 {
                     label: t("tab.context.snippets"),
                     shortcut: keymap.format("term.snippet"),
-                    onClick: () => { app.setActivePane(tab.id); app.openSnippetPicker(); },
+                    onClick: () => { app.setActivePane(tab.id); app.openSnippetPicker(tab.id); },
                 },
             ];
             items.push({

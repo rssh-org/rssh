@@ -10,7 +10,7 @@ export interface Snippet {
   parameters?: SnippetParameter[];
 }
 
-export interface SnippetPart {
+interface SnippetPart {
   text: string;
   parameterName?: string;
 }
