@@ -2297,7 +2297,7 @@ mod tests {
         let (_, handle) =
             crate::terminal::pty::spawn(id.clone(), 80, 24, Arc::new(|_, _| {}), None).unwrap();
         reservation.activate(ReadySession::Pty(handle)).unwrap();
-        let info = crate::ai::commands::ai_mcp_session_start_impl(
+        let (info, _) = crate::ai::commands::ai_mcp_session_start_impl(
             &state,
             headless_host(&state, &tx),
             owner.clone(),

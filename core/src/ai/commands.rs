@@ -540,6 +540,7 @@ pub async fn ai_session_start_impl(
         state, host, owner, tab_id, target, skill, provider, model, locale, resume, None, shell,
     )
     .await
+    .map(|(info, _)| info)
 }
 
 /// Start a providerless conversation after the MCP bridge has obtained consent.
@@ -551,7 +552,7 @@ pub async fn ai_mcp_session_start_impl(
     target: AiTarget,
     title: String,
     shell: Option<super::shell::ShellKind>,
-) -> AppResult<AiSessionInfo> {
+) -> AppResult<(AiSessionInfo, Vec<skills::SkillSummary>)> {
     start_session_impl(
         state,
         host,
@@ -583,7 +584,7 @@ async fn start_session_impl(
     resume: Option<String>,
     mcp_title: Option<String>,
     shell: Option<super::shell::ShellKind>,
-) -> AppResult<AiSessionInfo> {
+) -> AppResult<(AiSessionInfo, Vec<skills::SkillSummary>)> {
     let mut owner_reservation =
         crate::commands::lifecycle::reserve_ai_owner(state, tab_id.clone(), owner.clone())?;
     {
@@ -656,9 +657,16 @@ async fn start_session_impl(
     // Snapshot the editable template, response language and lazy skill catalog.
     // The actor renders placeholders using its current target shell per request.
     let _ = skill; // 前端不再选；保留参数兼容
-    let (system_prompt, user_skills_cache) = match &driver {
-        session::SessionDriver::Ai(_) => (prompts::get(&state.db)?, skills::list_user(&state.db)?),
-        session::SessionDriver::Mcp { .. } => (String::new(), Vec::new()),
+    let user_skills_cache = skills::list_user(&state.db)?;
+    let (system_prompt, available_skills) = match &driver {
+        session::SessionDriver::Ai(_) => (prompts::get(&state.db)?, Vec::new()),
+        session::SessionDriver::Mcp { .. } => (
+            String::new(),
+            user_skills_cache
+                .iter()
+                .map(skills::SkillSummary::from)
+                .collect(),
+        ),
     };
 
     // 3. Conversation identity. Resume revives a persisted history under its
@@ -743,7 +751,7 @@ async fn start_session_impl(
         is_new_conversation,
         &target_key,
     )?;
-    Ok(info)
+    Ok((info, available_skills))
 }
 
 pub(crate) fn activate_pending_ai_session(
@@ -2275,7 +2283,7 @@ mod tests {
             );
         }
         assert_eq!(conversation_target_key(state, &others[0]).unwrap(), "local");
-        let info = ai_mcp_session_start_impl(
+        let (info, _) = ai_mcp_session_start_impl(
             state,
             host.clone(),
             owner.clone(),
@@ -2426,7 +2434,7 @@ mod tests {
         let (_peer, _) = listener.accept().unwrap();
         reservation.activate(ReadySession::Telnet(handle)).unwrap();
         let target = AiTarget::Telnet(id.clone());
-        let info = ai_mcp_session_start_impl(
+        let (info, _) = ai_mcp_session_start_impl(
             state,
             host.clone(),
             owner.clone(),

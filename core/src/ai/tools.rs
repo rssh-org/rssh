@@ -3,7 +3,7 @@
 //! 决议 #6：shape validator 失败时把错误回给 LLM 让它重提（最多 2 次）。
 //! 工具的实际执行（运行命令、SFTP 下载、本地分析）在 session.rs 的循环里串接。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{llm::ToolSchema, shell::ShellKind};
@@ -59,15 +59,14 @@ pub fn all_tools() -> Vec<ToolSchema> {
     vec![
         ToolSchema {
             name: TOOL_LOAD_SKILL.into(),
-            description: "Load the full content of a skill from the system-prompt catalog. \
-                The catalog lists each lazy skill's id + one-line description; \
-                if the user's problem matches one, call this to pull the detailed workflow / rules, then follow it.".into(),
+            description: "Load a skill from this session's available skills catalog. \
+                When a skill's description matches the user's task, load its instructions by id and follow them.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "id": {
                         "type": "string",
-                        "description": "Skill id (e.g. user-xxxx). See the 'Available skills' catalog in the system prompt, if any.",
+                        "description": "Skill id from the session's available skills catalog (e.g. user-xxxx).",
                     }
                 },
                 "required": ["id"],
@@ -80,7 +79,7 @@ pub fn all_tools() -> Vec<ToolSchema> {
                 Do not use screen-redrawing commands (top / htop / watch / tail -f); \
                 repeat sampling must carry an explicit count (vmstat 1 5, not vmstat 1). \
                 Use bounded, non-interactive commands that terminate on their own. \
-                A timeout ends output collection and does not guarantee that the command stopped. Do not automatically repeat a command after a timeout or lost response. \
+                A timeout ends output collection and does not guarantee that the command stopped. Do not automatically repeat a command after a timeout or lost response, The impact caused by the failed command should be evaluated first. \
                 The output of the command should be readable text content, rather than binary output. ".into(),
             input_schema: json!({
                 "type": "object",
@@ -214,7 +213,7 @@ pub fn all_tools() -> Vec<ToolSchema> {
                     },
                     "task": {
                         "type": "string",
-                        "description": "One or two sentences telling the new window's AI what to do, e.g.: \"Analyze /var/.../heap.hprof — find top memory-leak suspects and report the top 10 objects by retained size.\"",
+                        "description": "Describe what to analyze in the local file, e.g. identify the top 10 objects by retained size in a heap dump.",
                     },
                 },
                 "required": ["local_path", "task"],
@@ -299,12 +298,12 @@ pub struct WebSearchInput {
     pub max_results: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct LoadSkillInput {
     pub id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct MatchFileInput {
     pub path: String,
     pub find: String,
@@ -312,7 +311,7 @@ pub struct MatchFileInput {
     pub after: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PatchFileInput {
     pub path: String,
     pub find: String,

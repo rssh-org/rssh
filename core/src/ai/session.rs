@@ -18,8 +18,8 @@ use super::llm::{ChatDelta, ChatMessage, ChatRequest, DeltaSink, LlmClient, Tool
 use super::sanitize::{self, Blacklist, RedactRule};
 use super::skills::SkillRecord;
 use super::tools::{
-    self, AnalyzeLocallyInput, DownloadFileInput, LoadSkillInput, RunCommandInput, WebFetchInput,
-    WebSearchInput,
+    self, AnalyzeLocallyInput, DownloadFileInput, LoadSkillInput, MatchFileInput, PatchFileInput,
+    RunCommandInput, WebFetchInput, WebSearchInput,
 };
 use super::web_fetch::WebPage;
 use super::web_search::WebSearchResponse;
@@ -68,6 +68,9 @@ pub struct RunCommandResult {
 pub enum ExternalToolInput {
     RunCommand(RunCommandInput),
     DownloadFile(DownloadFileInput),
+    LoadSkill(LoadSkillInput),
+    MatchFile(MatchFileInput),
+    PatchFile(PatchFileInput),
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +78,7 @@ pub enum ExternalToolInput {
 pub enum ExternalToolResult {
     RunCommand(RunCommandResult),
     DownloadFile(DownloadFileResult),
+    Tool { ok: bool, content: String },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -500,6 +504,7 @@ pub fn start(mut cfg: SessionConfig, app: crate::emitter::Host) -> AppResult<Pen
         app,
         cancel_slot,
         remote_caps: None,
+        active_file_card: None,
         terminal_mutations,
         context_epoch: 0,
         shell_tx,
@@ -529,6 +534,9 @@ pub(in crate::ai::session) struct Actor {
     /// None = 还没探测；Some = 已探测，结果有效到 session 结束。
     /// pub(in crate::ai::session) 给 `file_ops::Actor::ensure_remote_caps` 读写。
     pub(in crate::ai::session) remote_caps: Option<RemoteCapabilities>,
+    /// File tools have one or more approval cards distinct from the MCP request.
+    /// Retain the current card while awaiting it so cancellation closes the UI.
+    active_file_card: Option<String>,
     terminal_mutations: Arc<Mutex<Vec<AiTerminalMutation>>>,
     /// Monotonic UI/history generation. Event delivery and invoke replies use
     /// different async paths, so ordering alone cannot fence pre-clear events.
@@ -624,14 +632,23 @@ impl Actor {
                                 ExternalToolInput::DownloadFile(input) => self
                                     .execute_download_file(tool_id.clone(), input)
                                     .await.map(ExternalToolResult::DownloadFile),
+                                ExternalToolInput::LoadSkill(input) => self
+                                    .execute_external_tool(tool_id.clone(), tools::TOOL_LOAD_SKILL, json!(input))
+                                    .await,
+                                ExternalToolInput::MatchFile(input) => self
+                                    .execute_external_tool(tool_id.clone(), tools::TOOL_MATCH_FILE, json!(input))
+                                    .await,
+                                ExternalToolInput::PatchFile(input) => self
+                                    .execute_external_tool(tool_id.clone(), tools::TOOL_PATCH_FILE, json!(input))
+                                    .await,
                             }
                         } => result,
                         _ = reply.closed() => {
-                            self.record_rejection(&tool_id, "MCP request cancelled");
+                            self.reject_external_tool(&tool_id, "MCP request cancelled");
                             Err(AppError::other("ai_command_cancelled", json!({})))
                         }
                         _ = wait_for_shutdown(&mut shutdown_rx) => {
-                            self.record_rejection(&tool_id, "Session closed");
+                            self.reject_external_tool(&tool_id, "Session closed");
                             Err(AppError::other("ai_session_stopped", json!({})))
                         }
                     };
@@ -1244,6 +1261,38 @@ impl Actor {
         }
     }
 
+    /// MCP shares the same capability checks, approval steps and result format
+    /// as the built-in AI. Preserve textual errors as failed tool results.
+    async fn execute_external_tool(
+        &mut self,
+        id: String,
+        name: &str,
+        input: serde_json::Value,
+    ) -> AppResult<ExternalToolResult> {
+        let message = self
+            .handle_tool_call(ToolCall {
+                id,
+                name: name.into(),
+                input,
+            })
+            .await?;
+        let ChatMessage::ToolResult {
+            content, is_error, ..
+        } = message
+        else {
+            unreachable!("tool handlers return tool results");
+        };
+        Ok(ExternalToolResult::Tool {
+            ok: !is_error,
+            content,
+        })
+    }
+
+    fn reject_external_tool(&mut self, tool_id: &str, reason: &str) {
+        let card_id = self.active_file_card.take();
+        self.record_rejection(card_id.as_deref().unwrap_or(tool_id), reason);
+    }
+
     fn finish_web_tool_card(
         &self,
         id: &str,
@@ -1572,9 +1621,10 @@ impl Actor {
     /// on patch_file sub-cards). Centralising it here means no caller can
     /// forget. `id` is the proposal/card id, not the tool_call id.
     pub(in crate::ai::session) fn record_rejection(&self, id: &str, reason: &str) {
+        let reason = sanitize::redact(reason, &self.cfg.redact_rules);
         self.audit_push(AuditKind::CommandRejected {
             id: id.to_string(),
-            reason: reason.to_string(),
+            reason: reason.clone(),
         });
         self.emit("command_rejected", json!({ "id": id, "reason": reason }));
     }
@@ -2178,19 +2228,21 @@ impl Actor {
     /// commits to history once per turn so tool_use/tool_result pairing is
     /// preserved even when a handler bails out mid-way.
     ///
-    /// `pre_redacted: true` because errors are rssh-generated strings (no
-    /// sensitive remote content) and double-redacting them is wasted work.
+    /// Errors may contain target output or user rejection text. Redact before
+    /// returning them to either a model or an external agent, and mark the
+    /// result to avoid a second pass.
     pub(in crate::ai::session) fn make_tool_error(
         &self,
         tool_call_id: &str,
         msg: &str,
     ) -> ChatMessage {
+        let msg = sanitize::redact(msg, &self.cfg.redact_rules);
         self.audit_push(AuditKind::Note {
             message: format!("[tool_error {tool_call_id}] {msg}"),
         });
         ChatMessage::ToolResult {
             tool_call_id: tool_call_id.to_string(),
-            content: msg.to_string(),
+            content: msg,
             is_error: true,
             pre_redacted: true,
         }
@@ -2558,6 +2610,115 @@ mod tests {
     fn mcp_session() -> (DiagnoseSession, TestEvents, Arc<crate::db::Db>) {
         let (pending, events, db) = pending_mcp_session();
         (pending.launch(uuid::Uuid::new_v4()), events, db)
+    }
+
+    fn request_tool(
+        session: &DiagnoseSession,
+        id: &str,
+        input: ExternalToolInput,
+    ) -> oneshot::Receiver<AppResult<ExternalToolResult>> {
+        let (reply, rx) = oneshot::channel();
+        session
+            .action_tx
+            .send(UserAction::ExternalTool {
+                tool_id: id.into(),
+                input,
+                reply,
+            })
+            .unwrap();
+        rx
+    }
+
+    async fn tool_result(
+        reply: oneshot::Receiver<AppResult<ExternalToolResult>>,
+    ) -> (bool, String) {
+        let ExternalToolResult::Tool { ok, content } =
+            tokio::time::timeout(std::time::Duration::from_secs(3), reply)
+                .await
+                .expect("external tool must finish")
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected shared tool result");
+        };
+        (ok, content)
+    }
+
+    fn match_input(path: &std::path::Path) -> ExternalToolInput {
+        ExternalToolInput::MatchFile(MatchFileInput {
+            path: path.to_string_lossy().into_owned(),
+            find: "old".into(),
+            before: Some(80),
+            after: Some(80),
+        })
+    }
+
+    fn patch_input(path: &std::path::Path, expected_count: u32) -> ExternalToolInput {
+        ExternalToolInput::PatchFile(PatchFileInput {
+            path: path.to_string_lossy().into_owned(),
+            find: "old".into(),
+            replace: "new".into(),
+            expected_count,
+        })
+    }
+
+    #[tokio::test]
+    async fn mcp_file_tools_reject_raw_devices_before_any_terminal_command() {
+        for shell in [
+            super::super::shell::ShellKind::Serial,
+            super::super::shell::ShellKind::Telnet,
+        ] {
+            let (mut pending, mut events, _) = pending_mcp_session();
+            pending.actor.cfg.shell_kind = shell;
+            let session = pending.launch(uuid::Uuid::new_v4());
+            for input in [
+                match_input(std::path::Path::new("file")),
+                patch_input(std::path::Path::new("file"), 1),
+            ] {
+                let (ok, content) = tool_result(request_tool(&session, "unsupported", input)).await;
+                assert!(!ok);
+                assert!(content.contains("unavailable"));
+            }
+            assert!(events.try_recv().is_err());
+            session.stop().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_file_tool_cancellation_rejects_actual_card_and_releases_actor() {
+        let (mut pending, mut events, _) = pending_mcp_session();
+        pending.actor.remote_caps = Some(RemoteCapabilities {
+            python3: true,
+            perl: false,
+            diff: true,
+        });
+        let session = pending.launch(uuid::Uuid::new_v4());
+        for (input, event) in [
+            (match_input(std::path::Path::new("file")), "match_proposed"),
+            (
+                patch_input(std::path::Path::new("file"), 1),
+                "patch_proposed",
+            ),
+        ] {
+            let reply = request_tool(&session, "outer-mcp-id", input);
+            let proposal = next_event(&mut events, event).await;
+            let card_id = proposal["id"].as_str().unwrap();
+            assert_ne!(card_id, "outer-mcp-id");
+            drop(reply);
+            assert_eq!(
+                next_event(&mut events, "command_rejected").await["id"],
+                card_id
+            );
+        }
+        let reply = request_tool(
+            &session,
+            "after-cancel",
+            ExternalToolInput::LoadSkill(LoadSkillInput {
+                id: "missing".into(),
+            }),
+        );
+        assert!(!tool_result(reply).await.0);
+        session.stop().await;
     }
 
     #[tokio::test]

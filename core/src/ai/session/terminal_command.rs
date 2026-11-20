@@ -390,7 +390,7 @@ mod tests {
         .await
         .unwrap();
         let (mut device, _) = listener.accept().await.unwrap();
-        let session = ai_mcp_session_start_impl(
+        let (session, _) = ai_mcp_session_start_impl(
             state,
             host.clone(),
             owner.clone(),
