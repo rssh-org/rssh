@@ -15,14 +15,24 @@
  */
 import type { Terminal, IBufferLine } from "@xterm/xterm";
 import type { CommandBlock } from "./command-blocks";
+import type { Fold, FoldStore } from "./folds";
+import { redactCommandBlockTexts, type CommandBlockRedactionSettings } from "./command-block-redaction";
 
-/** 折叠仓库的最小接口，只用 getFold 查 saved body。
- *  避免直接 import FoldStore，让本模块对 folds.ts 的依赖只剩"读"语义。 */
+type FoldInfo = Pick<Fold, "kind" | "count">;
+
 export interface FoldLookup {
-  getFold(blockId: number): {
-    kind?: "full" | "prefix";
-    savedLines: unknown[];
-  } | undefined;
+  getFold(blockId: number): FoldInfo | undefined;
+}
+
+export function formatFoldLabel(count: number): string {
+  return `⋯ ${count} ${count === 1 ? "line" : "lines"}`;
+}
+
+/** Full folding disposes the end marker and leaves only the command row.
+ *  For a prefix fold the live end marker (or cursor) still bounds the tail. */
+export function visibleBlockEndLine(block: CommandBlock, cursorAbs: number, fold?: FoldInfo): number {
+  if (fold?.kind === "full") return block.start.line;
+  return block.end && !block.end.isDisposed ? block.end.line : cursorAbs;
 }
 
 /** 一个块的可视行号范围。end 缺失时 fallback 到 cursor 绝对行（块还在写）。 */
@@ -32,10 +42,6 @@ export interface BlockRange {
   endLine: number;
 }
 
-/** 把活动块的行号范围解析出来。已 disposed 的块跳过。
- *  注意：这个函数不感知折叠——折叠块返回的 endLine 仍是 cursorAbs（fallback），
- *  会包含远超块本身的内容。**复制路径请用 resolveBlockLines 代替**，它感知折叠。
- *  本函数保留为 BlockRect 渲染兜底（视图层只关心可见行）。 */
 export function resolveBlockRanges(
   term: Terminal,
   blocks: ReadonlyArray<CommandBlock>,
@@ -45,8 +51,7 @@ export function resolveBlockRanges(
   const out: BlockRange[] = [];
   for (const b of blocks) {
     if (b.start.isDisposed) continue;
-    const endLine =
-      b.end && !b.end.isDisposed ? b.end.line : cursorAbs;
+    const endLine = visibleBlockEndLine(b, cursorAbs);
     if (endLine < b.start.line) continue;
     out.push({ id: b.id, startLine: b.start.line, endLine });
   }
@@ -54,88 +59,92 @@ export function resolveBlockRanges(
   return out;
 }
 
-/** 块 → 逻辑行序列（IBufferLine 数组）。**复制管线用这条**。
- *  - 未折叠：从 buffer 取 [start..end] 行（end 缺失时 fallback 到 cursorAbs）
- *  - 已折叠：prompt 行还在 buffer，body 在 fold.savedLines；拼回完整内容
- *
- *  这是修 #5 (folded 块复制拉到 cursorAbs) 的关键——不感知折叠的话，
- *  fold 把 block.end disposed 后，旧路径会 fallback 到 cursorAbs，把
- *  之后所有命令的输出全收进来。 */
-export function resolveBlockLines(
+export function resolveVisibleBlock(
   term: Terminal,
   block: CommandBlock,
   foldStore?: FoldLookup,
-): IBufferLine[] {
-  if (block.start.isDisposed) return [];
+): { lines: IBufferLine[]; foldedLineCount: number } {
+  const lines: IBufferLine[] = [];
+  if (block.start.isDisposed) return { lines, foldedLineCount: 0 };
   const buf = term.buffer.active;
   const fold = foldStore?.getFold(block.id);
-  if (fold) {
-    const prompt = buf.getLine(block.start.line);
-    const body = fold.savedLines as unknown as IBufferLine[];
-    const out = prompt ? [prompt, ...body] : [...body];
-    if (fold.kind !== "prefix") return out;
-
-    const cursorAbs = buf.baseY + buf.cursorY;
-    const endLine = block.end && !block.end.isDisposed ? block.end.line : cursorAbs;
-    for (let y = block.start.line + 1; y <= endLine; y++) {
-      const line = buf.getLine(y);
-      if (line) out.push(line);
-    }
-    return out;
-  }
-  const cursorAbs = buf.baseY + buf.cursorY;
-  const endLine = block.end && !block.end.isDisposed ? block.end.line : cursorAbs;
-  if (endLine < block.start.line) return [];
-  const out: IBufferLine[] = [];
+  const endLine = visibleBlockEndLine(block, buf.baseY + buf.cursorY, fold);
   for (let y = block.start.line; y <= endLine; y++) {
-    const l = buf.getLine(y);
-    if (l) out.push(l);
+    const line = buf.getLine(y);
+    if (line) lines.push(line);
   }
-  return out;
+  return { lines, foldedLineCount: fold?.count ?? 0 };
 }
 
-/** 抽取若干块的纯文本。块间一个 `\n` 分隔，零装饰。
- *  传 foldStore 让折叠块也能正确复制内容（否则会被拉到 cursorAbs）。 */
-export function extractBlocksText(
+function sortedLiveBlocks(blocks: ReadonlyArray<CommandBlock>): CommandBlock[] {
+  return blocks.filter((block) => !block.start.isDisposed).sort((a, b) => a.id - b.id);
+}
+
+interface BlockText {
+  text: string;
+  foldedLineCount: number;
+}
+
+/** Snapshot visible text before asynchronous policy or clipboard access. */
+export function snapshotBlockTextsForCopy(
   term: Terminal,
   blocks: ReadonlyArray<CommandBlock>,
   foldStore?: FoldLookup,
+): BlockText[] {
+  return sortedLiveBlocks(blocks).map((block) => {
+    const { lines, foldedLineCount } = resolveVisibleBlock(term, block, foldStore);
+    // The visible tail can start in the middle of a hidden soft-wrapped line.
+    // Keep that new first line separate from the command.
+    const logicalLines = foldedLineCount && lines.length
+      ? [lines[0].translateToString().trimEnd(), ...linesToLogicalText(lines.slice(1))]
+      : linesToLogicalText(lines);
+    return { text: logicalLines.join("\n"), foldedLineCount };
+  });
+}
+
+/** Apply policy to the terminal text before adding the fold annotation. */
+export function formatBlockClipboardText(
+  blocks: ReadonlyArray<BlockText>,
+  redaction: CommandBlockRedactionSettings,
 ): string {
-  return extractBlockTexts(term, blocks, foldStore).join("\n");
+  const texts = redactCommandBlockTexts(blocks.map((block) => block.text), redaction);
+  return texts.map((text, i) => {
+    const count = blocks[i].foldedLineCount;
+    if (!count) return text;
+    const label = formatFoldLabel(count);
+    return text.replace(/^[^\n]*/, (command) => command ? `${command} ${label}` : label);
+  }).join("\n");
 }
 
-/** 抽取纯文本但保留块边界，供需要逐块处理 Prompt 的复制策略使用。 */
-export function extractBlockTexts(
+// The AI prefill includes folded output. xterm's private saved rows and
+// public buffer views both implement translateToString and isWrapped.
+type TextLine = Pick<IBufferLine, "translateToString" | "isWrapped">;
+
+export function extractBlockTextForAi(
   term: Terminal,
   blocks: ReadonlyArray<CommandBlock>,
-  foldStore?: FoldLookup,
-): string[] {
-  const sorted = [...blocks]
-    .filter((b) => !b.start.isDisposed)
-    .sort((a, b) => a.id - b.id);
-  if (sorted.length === 0) return [];
-  const parts: string[] = [];
-  for (const block of sorted) {
-    const lines = resolveBlockLines(term, block, foldStore);
-    parts.push(linesToLogicalText(lines).join("\n"));
-  }
-  return parts;
+  foldStore?: Pick<FoldStore, "getFold">,
+): string {
+  return sortedLiveBlocks(blocks).map((block) => {
+    const { lines } = resolveVisibleBlock(term, block, foldStore);
+    const saved = foldStore?.getFold(block.id)?.savedLines as TextLine[] | undefined;
+    const allLines = saved && lines.length ? [lines[0], ...saved, ...lines.slice(1)] : lines;
+    return linesToLogicalText(allLines).join("\n");
+  }).join("\n");
 }
 
-/** IBufferLine 数组 → 逻辑行字符串数组。处理软换行合并、CJK、行末 trim。 */
-export function linesToLogicalText(lines: ReadonlyArray<IBufferLine>): string[] {
+/** Soft-wrapped rows retain trailing spaces until their logical line is complete. */
+export function linesToLogicalText(lines: ReadonlyArray<TextLine>): string[] {
   const result: string[] = [];
   for (const line of lines) {
-    const raw = extractLineRaw(line);
+    const raw = line.translateToString();
     if (line.isWrapped && result.length > 0) {
-      // 软换行：拼到上一逻辑行尾，**不**插换行符
       result[result.length - 1] += raw;
     } else {
       result.push(raw);
     }
   }
-  // 只 trimEnd 逻辑行（不是视觉行），保住中间软换行边界的真实空格
-  return result.map((l) => l.trimEnd());
+  return result.map((line) => line.trimEnd());
 }
 
 /** 行号范围 → 逻辑行数组。保留为 buf-shaped 输入的便利封装（测试用）。 */
@@ -150,17 +159,4 @@ export function extractRangeLines(
     if (line) lines.push(line);
   }
   return linesToLogicalText(lines);
-}
-
-/** 单行 cell → 字符串。宽字符 continuation 跳过，空 cell 补空格。 */
-function extractLineRaw(line: IBufferLine): string {
-  let s = "";
-  for (let x = 0; x < line.length; x++) {
-    const cell = line.getCell(x);
-    if (!cell) continue;
-    if (cell.getWidth() === 0) continue;
-    const ch = cell.getChars();
-    s += ch || " ";
-  }
-  return s;
 }

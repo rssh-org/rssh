@@ -215,12 +215,16 @@ function fakeTerm(lines: ReturnType<typeof fakeLine>[]): any {
   };
 }
 
+function textLine(text: string, isWrapped = false) {
+  return fakeLine(Array.from(text, (ch) => ({ ch, width: 1 })), isWrapped);
+}
+
 function fakeBlock(id: number, color: string, startLine: number, endLine: number | null): CommandBlock {
   return {
     id,
     color,
     start: { line: startLine, isDisposed: false } as any,
-    end: endLine === null ? null : ({ line: endLine, isDisposed: false } as any),
+    end: endLine === null ? null : ({ line: endLine, isDisposed: endLine < 0 } as any),
   };
 }
 
@@ -301,41 +305,66 @@ describe("extractImageRows", () => {
     const rows = extractImageRows(term, [fakeBlock(1, "#abc", 0, 1)]);
     expect(rows.map((row) => row.isWrapped)).toEqual([false, true]);
   });
+
+  it("breaks prompt recognition at a folded prefix but preserves later soft wraps", () => {
+    const term = fakeTerm([textLine("alice@prod:~/"), textLine("src$ id", true), textLine("!", true)]);
+    const rows = extractImageRows(term, [fakeBlock(1, "#abc", 0, null)], {
+      getFold: () => ({ kind: "prefix", count: 9 }),
+    });
+    expect(rows.map(row => row.isWrapped)).toEqual([false, false, true]);
+    expect(redactImageRows(rows, {
+      promptEnabled: true, promptReplacement: "anonymous", rules: [],
+    }).map(imageText)).toEqual(["alice@prod:~/", "src$ id", "!"]);
+  });
 });
 
-describe("renderBlocksToBlob theme", () => {
+describe("renderBlocksToBlob", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it.each([false, true])("paints opaque defaults, inverse text and underline (override: %s)", async (override) => {
+  function stubCanvas() {
     const rectangles: { color: string; height: number }[] = [];
-    const text: { color: string; text: string }[] = [];
+    const text: { color: string; value: string; x: number; y: number; align: string }[] = [];
+    const bars: { color: string; dashed: boolean }[] = [];
     const blob = new Blob(["png"], { type: "image/png" });
     const context = {
       fillStyle: "",
+      strokeStyle: "",
+      textAlign: "left",
       font: "",
       textBaseline: "",
-      measureText: () => ({ width: 8 }),
+      measureText: (value: string) => ({ width: value.length * 8 }),
       scale() {},
       beginPath() {},
       moveTo() {},
       lineTo() {},
       quadraticCurveTo() {},
       closePath() {},
-      fill() {},
+      save() {},
+      restore() { this.textAlign = "left"; },
+      setLineDash: vi.fn(),
+      stroke() { bars.push({ color: this.strokeStyle, dashed: true }); },
+      fill() { bars.push({ color: this.fillStyle, dashed: false }); },
       fillRect(_x: number, _y: number, _width: number, height: number) {
         rectangles.push({ color: this.fillStyle, height });
       },
-      fillText(value: string) {
-        text.push({ color: this.fillStyle, text: value });
+      fillText(value: string, x: number, y: number) {
+        text.push({ color: this.fillStyle, value, x, y, align: this.textAlign });
       },
+    };
+    const canvas = {
+      width: 0, height: 0,
+      getContext: () => context,
+      toBlob: (callback: BlobCallback) => callback(blob),
     };
     vi.stubGlobal("document", {
       fonts: { ready: Promise.resolve() },
-      createElement: () => ({
-        getContext: () => context,
-        toBlob: (callback: BlobCallback) => callback(blob),
-      }),
+      createElement: () => canvas,
     });
+    return { rectangles, text, bars, context, canvas, blob };
+  }
+
+  it.each([false, true])("paints opaque defaults, inverse text and underline (override: %s)", async (override) => {
+    const { rectangles, text, blob } = stubCanvas();
     const sourceTheme = Object.freeze({
       ...THEME,
       background: override ? "#11111100" : THEME.background,
@@ -354,16 +383,55 @@ describe("renderBlocksToBlob theme", () => {
 
     expect(rectangles[0].color).toBe(THEME.background);
     expect(rectangles.some(rect => rect.color === THEME.foreground && rect.height > 1)).toBe(true);
-    expect(text).toEqual([
-      { text: "N", color: THEME.foreground },
-      { text: "I", color: THEME.background },
-      { text: "C", color: "rgb(255,0,0)" },
+    expect(text.map(({ value, color }) => [value, color])).toEqual([
+      ["N", THEME.foreground],
+      ["I", THEME.background],
+      ["C", "rgb(255,0,0)"],
     ]);
     expect(rectangles.filter(rect => rect.height === 1)).toEqual([
       { color: THEME.background, height: 1 },
     ]);
     expect(term.options).toBe(sourceOptions);
     expect(term.options.theme).toBe(sourceTheme);
+  });
+
+  it("draws dashed folded bars and right-aligned counts beside the captured visible rows", async () => {
+    const { canvas, context, text, bars, blob } = stubCanvas();
+    const lines = ["secret", "P", "tail", "Z", "next command"].map(s => textLine(s));
+    const term = fakeTerm(lines);
+    const full = fakeBlock(1, "#111", 0, -1);
+    const blocks = [fakeBlock(3, "#333", 3, 3), full, fakeBlock(2, "#222", 1, 2)];
+    let unfolded = false;
+    const foldStore = {
+      getFold: (id: number) => {
+        if (unfolded) return undefined;
+        if (id === 1) return { kind: "full" as const, count: 1 };
+        if (id === 2) return { kind: "prefix" as const, count: 12 };
+      },
+    };
+
+    expect(await renderBlocksToBlob(term, blocks, {}, foldStore, async () => {
+      unfolded = true;
+      lines[1] = textLine("new output");
+      return {
+        promptEnabled: false, promptReplacement: "",
+        rules: [{ pattern: "secret|lines?", replacement: "anonymous" }],
+      };
+    })).toBe(blob);
+
+    expect(bars).toEqual([
+      { color: "#111", dashed: true }, { color: "#222", dashed: true }, { color: "#333", dashed: false },
+    ]);
+    expect(context.setLineDash.mock.calls).toEqual([[[2, 2]], [[2, 2]]]);
+    const labels = text.filter(item => item.align === "right");
+    expect(labels.map(item => item.value)).toEqual(["⋯ 1 line", "⋯ 12 lines"]);
+    expect(labels.map(item => item.x)).toEqual([canvas.width - 14, canvas.width - 14]);
+    const glyphs = text.filter(item => item.align === "left");
+    expect(glyphs.map(item => item.value).join("")).toBe("anonymousPtailZ");
+    // Reserve enough room for the label even when redaction widens the command.
+    expect(labels[0].x - context.measureText(labels[0].value).width).toBeGreaterThan(glyphs[8].x + 8);
+    expect(labels[0].y).toBeLessThan(glyphs[9].y);
+    expect(labels[1].y).toBeLessThan(glyphs[10].y);
   });
 });
 

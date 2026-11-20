@@ -1,9 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
-  extractBlockTexts,
-  extractBlocksText,
+  snapshotBlockTextsForCopy,
+  extractBlockTextForAi,
   extractRangeLines,
-  resolveBlockLines,
+  formatBlockClipboardText,
+  resolveVisibleBlock,
   resolveBlockRanges,
 } from "./block-content.ts";
 import type { CommandBlock } from "./command-blocks.ts";
@@ -36,6 +37,9 @@ function lineFromSpec(spec: string, wrapped = false) {
   return {
     length: cells.length,
     isWrapped: wrapped,
+    translateToString() {
+      return cells.filter((cell) => cell.width !== 0).map((cell) => cell.ch || " ").join("");
+    },
     getCell(x: number) {
       const c = cells[x];
       if (!c) return undefined;
@@ -193,12 +197,12 @@ describe("resolveBlockRanges", () => {
   });
 });
 
-/* ───────────────────────── extractBlocksText ───────────────────────── */
+/* ───────────────────────── extractBlockTextForAi ───────────────────────── */
 
-describe("extractBlocksText", () => {
+describe("extractBlockTextForAi", () => {
   it("returns empty string for empty input", () => {
     const term = fakeTerm([lineFromSpec("a")]);
-    expect(extractBlocksText(term, [])).toBe("");
+    expect(extractBlockTextForAi(term, [])).toBe("");
   });
 
   it("single block — outputs its trimmed lines joined by \\n", () => {
@@ -207,7 +211,7 @@ describe("extractBlocksText", () => {
       lineFromSpec("a.txt b.txt    "),
       lineFromSpec("$              "),
     ]);
-    expect(extractBlocksText(term, [fakeBlock(1, 0, 1)])).toBe("$ ls\na.txt b.txt");
+    expect(extractBlockTextForAi(term, [fakeBlock(1, 0, 1)])).toBe("$ ls\na.txt b.txt");
   });
 
   it("multi block — id-ascending, single \\n between blocks, no decoration", () => {
@@ -217,7 +221,7 @@ describe("extractBlocksText", () => {
       lineFromSpec("$ whoami  "),
       lineFromSpec("linus     "),
     ]);
-    const text = extractBlocksText(term, [
+    const text = extractBlockTextForAi(term, [
       fakeBlock(2, 2, 3), // 故意倒序传入 — 函数内部应排序
       fakeBlock(1, 0, 1),
     ]);
@@ -231,11 +235,14 @@ describe("extractBlocksText", () => {
       lineFromSpec("$ whoami  "),
       lineFromSpec("linus     "),
     ]);
-    const texts = extractBlockTexts(term, [
+    const texts = snapshotBlockTextsForCopy(term, [
       fakeBlock(2, 2, 3),
       fakeBlock(1, 0, 1),
     ]);
-    expect(texts).toEqual(["$ pwd\n/tmp", "$ whoami\nlinus"]);
+    expect(texts).toEqual([
+      { text: "$ pwd\n/tmp", foldedLineCount: 0 },
+      { text: "$ whoami\nlinus", foldedLineCount: 0 },
+    ]);
   });
 
   it("merges wrapped output within a block", () => {
@@ -244,7 +251,7 @@ describe("extractBlocksText", () => {
       lineFromSpec("aaaaaa"),
       lineFromSpec("bbbbbb", true), // wrapped
     ]);
-    expect(extractBlocksText(term, [fakeBlock(1, 0, 2)])).toBe("$ echo aaaa\naaaaaabbbbbb");
+    expect(extractBlockTextForAi(term, [fakeBlock(1, 0, 2)])).toBe("$ echo aaaa\naaaaaabbbbbb");
   });
 
   it("preserves CJK wide chars across blocks", () => {
@@ -252,111 +259,62 @@ describe("extractBlocksText", () => {
       lineFromSpec("$ echo {w2}你{w2}好     "),
       lineFromSpec("{w2}你{w2}好           "),
     ]);
-    expect(extractBlocksText(term, [fakeBlock(1, 0, 1)])).toBe("$ echo 你好\n你好");
+    expect(extractBlockTextForAi(term, [fakeBlock(1, 0, 1)])).toBe("$ echo 你好\n你好");
   });
 });
 
-/* ───────────────────────── resolveBlockLines + folded path ───────────────────────── */
+const copyPolicy = { promptEnabled: false, promptReplacement: "", rules: [] };
 
-describe("resolveBlockLines (folded blocks)", () => {
-  it("without foldStore: returns lines from buffer [start..end]", () => {
-    const term = fakeTerm([
-      lineFromSpec("$ ls"),
-      lineFromSpec("a.txt"),
-      lineFromSpec("b.txt"),
-    ]);
-    const lines = resolveBlockLines(term as any, fakeBlock(1, 0, 2));
-    expect(lines).toHaveLength(3);
-  });
-
-  it("with foldStore: folded block returns prompt + savedLines", () => {
-    // Folded 状态：fold() disposed 了 block.end，buffer 里只剩 prompt 行
-    // 没 foldStore 时旧路径会 fallback 到 cursorAbs 把后续命令也卷进来 (#5 bug)
-    const promptLine = lineFromSpec("$ npm install   ");
-    const savedBody1 = lineFromSpec("added 234 packages");
-    const savedBody2 = lineFromSpec("done in 3.2s");
-    const term = fakeTerm([
-      promptLine,
-      lineFromSpec("$ ls"),                // 后续命令——不该被卷进来
-      lineFromSpec("a.txt"),
-    ]);
-    // folded block: end disposed, body 在 fold.savedLines
-    const block: CommandBlock = {
-      id: 7,
-      color: "#abc",
-      start: { line: 0, isDisposed: false } as any,
-      end: { line: 99, isDisposed: true } as any, // disposed by fold()
-    };
+describe("folded block text", () => {
+  it("copies the command and hidden-line count without reading the saved rows or the next command", () => {
+    const command = lineFromSpec("$ install   ");
+    const term = fakeTerm([command, lineFromSpec("$ next"), lineFromSpec("next output")]);
+    const block = fakeBlock(1, 0, 1);
+    block.end = fakeMarker(-1, true) as any;
     const foldStore = {
-      getFold: (id: number) =>
-        id === 7 ? { savedLines: [savedBody1, savedBody2] } : undefined,
+      getFold: () => ({
+        kind: "full" as const,
+        count: 2,
+        get savedLines(): never { throw new Error("clipboard read hidden rows"); },
+      }),
     };
-    const lines = resolveBlockLines(term as any, block, foldStore);
-    expect(lines).toHaveLength(3); // prompt + 2 saved body lines
-    expect(lines[0]).toBe(promptLine);
-    expect(lines[1]).toBe(savedBody1);
-    expect(lines[2]).toBe(savedBody2);
+
+    expect(resolveVisibleBlock(term, block, foldStore)).toEqual({ lines: [command], foldedLineCount: 2 });
+    const blocks = snapshotBlockTextsForCopy(term, [block], foldStore);
+    expect(formatBlockClipboardText(blocks, copyPolicy)).toBe("$ install ⋯ 2 lines");
   });
 
-  it("with foldStore but block not folded: falls back to buffer range", () => {
+  it.each([true, false])("retains a prefix-folded tail including wrapped rows (active=%s)", (active) => {
     const term = fakeTerm([
-      lineFromSpec("$ ls"),
-      lineFromSpec("a.txt"),
+      lineFromSpec("$ build     "),
+      lineFromSpec("visible ", true),
+      lineFromSpec("tail  ", true),
+      lineFromSpec("finished  "),
+      ...(active ? [] : [lineFromSpec("$ next")]),
     ]);
-    const foldStore = { getFold: () => undefined };
-    const lines = resolveBlockLines(term as any, fakeBlock(1, 0, 1), foldStore);
-    expect(lines).toHaveLength(2);
+    const block = fakeBlock(9, 0, active ? null : 3);
+    const foldStore = { getFold: () => ({ kind: "prefix" as const, count: 1 }) };
+    const blocks = snapshotBlockTextsForCopy(term, [block], foldStore);
+    expect(formatBlockClipboardText(blocks, copyPolicy)).toBe("$ build ⋯ 1 line\nvisible tail\nfinished");
   });
 
-  it("prefix fold returns cached oldest rows followed by the visible newest rows", () => {
-    const promptLine = lineFromSpec("$ build");
-    const cached1 = lineFromSpec("step 1");
-    const cached2 = lineFromSpec("step 2");
-    const visible3 = lineFromSpec("step 3");
-    const visible4 = lineFromSpec("step 4");
-    const term = fakeTerm([promptLine, visible3, visible4]);
-    const foldStore = {
-      getFold: (id: number) => id === 9
-        ? { kind: "prefix" as const, savedLines: [cached1, cached2] }
-        : undefined,
-    };
-
-    const lines = resolveBlockLines(term as any, fakeBlock(9, 0, null), foldStore);
-
-    expect(lines).toEqual([promptLine, cached1, cached2, visible3, visible4]);
+  it("redacts visible text before adding the annotation, preserving order in a mixed selection", () => {
+    const term = fakeTerm([lineFromSpec("$ show 123"), lineFromSpec("$ ls"), lineFromSpec("123.txt")]);
+    const foldStore = { getFold: (id: number) => id === 1 ? { kind: "full" as const, count: 123 } : undefined };
+    const blocks = snapshotBlockTextsForCopy(term, [fakeBlock(3, 1, 2), fakeBlock(1, 0, null)], foldStore);
+    const policy = { ...copyPolicy, rules: [{ pattern: "\\d+", replacement: "x" }] };
+    expect(formatBlockClipboardText(blocks, policy)).toBe("$ show x ⋯ 123 lines\n$ ls\nx.txt");
   });
-});
 
-describe("extractBlocksText with foldStore", () => {
-  it("folded block: copies prompt + saved body, NOT cursorAbs fallback", () => {
-    // 这是 PR #24 reviewer 报的真 bug：折叠块复制会拉到 cursorAbs，
-    // 把后续命令的输出全卷进来。foldStore-aware 修了这个
-    const term = fakeTerm([
-      lineFromSpec("$ npm install     "),
-      lineFromSpec("$ ls              "),     // 后续命令，不该出现在复制结果
-      lineFromSpec("a.txt b.txt       "),
-    ]);
-    const block: CommandBlock = {
-      id: 1,
-      color: "#abc",
-      start: { line: 0, isDisposed: false } as any,
-      end: { line: 99, isDisposed: true } as any,
+  it("still provides the saved output and wrapped continuations for AI prefill", () => {
+    const term = fakeTerm([lineFromSpec("$ build"), lineFromSpec("tail", true), lineFromSpec("$ next")]);
+    // xterm caches private BufferLine instances. Like the public API, they
+    // implement translateToString, but they do not have a public getCell(x).
+    const fold = {
+      id: 1, blockId: 1, kind: "prefix" as const, count: 1, pushedBlankRefs: [],
+      savedLines: [{ isWrapped: false, translateToString: () => "hidden " }],
     };
-    const foldStore = {
-      getFold: (id: number) =>
-        id === 1
-          ? {
-              savedLines: [
-                lineFromSpec("added 234 packages"),
-                lineFromSpec("done in 3.2s"),
-              ],
-            }
-          : undefined,
-    };
-    const text = extractBlocksText(term as any, [block], foldStore);
-    expect(text).toBe("$ npm install\nadded 234 packages\ndone in 3.2s");
-    // 没卷进 "$ ls" 也没卷进 "a.txt b.txt"
-    expect(text).not.toContain("ls");
-    expect(text).not.toContain("a.txt");
+    const foldStore = { getFold: () => fold };
+    expect(extractBlockTextForAi(term, [fakeBlock(1, 0, 1)], foldStore)).toBe("$ build\nhidden tail");
   });
 });
