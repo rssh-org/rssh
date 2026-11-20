@@ -20,7 +20,7 @@
  */
 import type { Terminal, ITheme, IBufferCell } from "@xterm/xterm";
 import type { CommandBlock } from "./command-blocks";
-import { resolveBlockLines, type FoldLookup } from "./block-content";
+import { formatFoldLabel, resolveVisibleBlock, type FoldLookup } from "./block-content";
 import {
   commandBlockPromptEnd,
   compileCommandBlockRedaction,
@@ -57,6 +57,8 @@ export interface ImageCell {
 export interface ImageRow {
   blockId: number;
   blockColor: string;
+  /** Command row annotation, kept outside terminal cells and redaction rules. */
+  foldLabel?: string;
   /** xterm soft-wrap continuation; true means this row continues the previous. */
   isWrapped: boolean;
   cells: ImageCell[];
@@ -64,26 +66,26 @@ export interface ImageRow {
 
 /* ───────────────────────── 入口 ───────────────────────── */
 
-/** 渲染选中块到 PNG Blob。空集合 / 渲染失败 / 非 DOM 环境 → null。
- *  传 foldStore 让折叠块走 saved body 路径——否则会拉到 cursorAbs。 */
+/** Render the selected blocks as they appeared when copy was requested. */
 export async function renderBlocksToBlob(
   term: Terminal,
   blocks: ReadonlyArray<CommandBlock>,
   opts: RenderOptions = {},
   foldStore?: FoldLookup,
-  redaction?: CommandBlockRedactionSettings,
+  redaction?: CommandBlockRedactionSettings | (() => Promise<CommandBlockRedactionSettings>),
 ): Promise<Blob | null> {
   if (blocks.length === 0) return null;
   // 非 DOM 环境（vitest node / SSR）→ null。否则下方 createElement 会 throw，
   // 跟函数契约（"失败返回 null"）不符。
   if (typeof document === "undefined") return null;
-  // 字体未 ready 时 measureText 会拿 fallback 字宽，整图错位。必等。
-  if (document.fonts?.ready) {
-    await document.fonts.ready;
-  }
+  // Snapshot the buffer and fold state before policy or font loading yields.
   const extracted = extractImageRows(term, blocks, foldStore, opts.theme);
-  const rows = redaction ? redactImageRows(extracted, redaction) : extracted;
-  if (rows.length === 0) return null;
+  if (extracted.length === 0) return null;
+  const [policy] = await Promise.all([
+    typeof redaction === "function" ? redaction() : redaction,
+    document.fonts?.ready,
+  ]);
+  const rows = policy ? redactImageRows(extracted, policy) : extracted;
   return renderRowsToBlob(rows, term, opts);
 }
 
@@ -266,8 +268,7 @@ export function redactImageRows(
 
 /* ───────────────────────── 数据抽取（纯函数，可测） ───────────────────────── */
 
-/** 选中块 → 视觉行序列。视觉行不合并软换行（图片是"截图"，要保留视觉布局）。
- *  传 foldStore 让折叠块用 saved body 而非 buffer cursorAbs。 */
+/** 选中块 → 可见行序列。图片保留终端的视觉换行。 */
 export function extractImageRows(
   term: Terminal,
   blocks: ReadonlyArray<CommandBlock>,
@@ -280,8 +281,8 @@ export function extractImageRows(
   if (sorted.length === 0) return [];
   const out: ImageRow[] = [];
   for (const block of sorted) {
-    const lines = resolveBlockLines(term, block, foldStore);
-    for (const line of lines) {
+    const { lines, foldedLineCount } = resolveVisibleBlock(term, block, foldStore);
+    for (const [i, line] of lines.entries()) {
       const cells: ImageCell[] = [];
       for (let x = 0; x < line.length; x++) {
         const cell = line.getCell(x);
@@ -298,7 +299,9 @@ export function extractImageRows(
       out.push({
         blockId: block.id,
         blockColor: block.color,
-        isWrapped: line.isWrapped,
+        foldLabel: i === 0 && foldedLineCount > 0 ? formatFoldLabel(foldedLineCount) : undefined,
+        // After a folded prefix this row's original predecessor is hidden.
+        isWrapped: line.isWrapped && !(i === 1 && foldedLineCount > 0),
         cells,
       });
     }
@@ -439,18 +442,20 @@ async function renderRowsToBlob(
   mctx.font = `${fontSize}px ${fontFamily}`;
   const cellWidth = Math.max(1, Math.ceil(mctx.measureText("M").width));
 
-  // 最长行字符数（宽字符算 2）
-  let maxCells = 0;
-  for (const r of rows) {
-    let w = 0;
-    for (const c of r.cells) w += c.width;
-    if (w > maxCells) maxCells = w;
+  const labelFontSize = Math.max(1, Math.round(fontSize * 0.85));
+  const labelFont = `${labelFontSize}px ${fontFamily}`;
+  mctx.font = labelFont;
+  let contentWidth = cellWidth;
+  for (const row of rows) {
+    let width = 0;
+    for (const cell of row.cells) width += cell.width * cellWidth;
+    if (row.foldLabel) width += cellWidth + Math.ceil(mctx.measureText(row.foldLabel).width);
+    contentWidth = Math.max(contentWidth, width);
   }
-  if (maxCells === 0) maxCells = 1;
 
   const groups = groupRows(rows);
 
-  const canvasW = outerPad * 2 + barWidth + gutter + maxCells * cellWidth;
+  const canvasW = outerPad * 2 + barWidth + gutter + contentWidth;
   const canvasH = outerPad * 2 + rows.length * lineHeight;
 
   const dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 1;
@@ -474,9 +479,25 @@ async function renderRowsToBlob(
     const barX = outerPad;
     const barY = outerPad + grp.startRow * lineHeight;
     const barH = grp.rowCount * lineHeight;
-    ctx.fillStyle = grp.color;
     roundRect(ctx, barX, barY, barWidth, barH, barWidth / 2);
-    ctx.fill();
+    const label = rows[grp.startRow].foldLabel;
+    if (label) {
+      ctx.save();
+      ctx.strokeStyle = grp.color;
+      ctx.setLineDash([2, 2]);
+      ctx.stroke();
+
+      ctx.font = labelFont;
+      ctx.fillStyle = defaultFg(theme);
+      ctx.globalAlpha = 0.75;
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, canvasW - outerPad, barY + lineHeight / 2);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = grp.color;
+      ctx.fill();
+    }
 
     for (let i = 0; i < grp.rowCount; i++) {
       const row = rows[grp.startRow + i];

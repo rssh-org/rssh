@@ -39,8 +39,13 @@
     import {decodeStreamChunk} from "../terminal/stream-decode.ts";
     import {terminalRowHeight} from "../terminal/row-height.ts";
 
-    import {extractBlockTexts, extractBlocksText} from "../terminal/block-content.ts";
-    import {redactCommandBlockTexts} from "../terminal/command-block-redaction.ts";
+    import {
+        extractBlockTextForAi,
+        formatBlockClipboardText,
+        formatFoldLabel,
+        snapshotBlockTextsForCopy,
+        visibleBlockEndLine,
+    } from "../terminal/block-content.ts";
     import {setupTouchScroll} from "../terminal/touch-scroll.ts";
     import {setupTerminalSoftKeyboard} from "../terminal/soft-keyboard.ts";
     import {registerBracketedPasteProvider, unregisterBracketedPasteProvider} from "../terminal/bracketed-paste.ts";
@@ -365,9 +370,7 @@
             // Full fold leaves only the command row. An automatic prefix fold
             // keeps the newest output rows visible, so its bar still spans them.
             const startLine = b.start.line;
-            const endLine = fold?.kind === "full"
-                ? b.start.line
-                : b.end && !b.end.isDisposed ? b.end.line : cursorAbs;
+            const endLine = visibleBlockEndLine(b, cursorAbs, fold);
             const top = Math.max(startLine, viewportY);
             const bot = Math.min(endLine, viewportY + rows - 1);
             if (top > bot) continue;
@@ -488,16 +491,14 @@
 
     async function copyBlocksAsText(blocks: CommandBlock[]) {
         if (!terminal || blocks.length === 0) return;
-        // 传 foldStore：折叠块走 saved body，否则会被拉到 cursorAbs 把后续
-        // 命令输出全卷进来（PR #24 reviewer 发现的 bug）
-        const blockTexts = extractBlockTexts(terminal, blocks, foldStore);
-        if (blockTexts.length === 0) return;
         // arboard (not navigator.clipboard) so this process — not WebKitGTK —
         // owns the X11 CLIPBOARD selection. Otherwise a later arboard-based
         // paste (clipboard_read) deadlocks on its own WebView and times out.
         try {
+            const blockTexts = snapshotBlockTextsForCopy(terminal, blocks, foldStore);
+            if (blockTexts.length === 0) return;
             const redaction = await app.loadCommandBlockRedaction(true);
-            const text = redactCommandBlockTexts(blockTexts, redaction).join("\n");
+            const text = formatBlockClipboardText(blockTexts, redaction);
             if (!text) return;
             await writeClipboard(text);
             clearBlockSelection();
@@ -518,19 +519,17 @@
         // 关键：clipboard.write 必须**同步**地在 click handler 里调用，
         // ClipboardItem 接受 Promise<Blob> 由浏览器自己等。中间任何 await
         // 都会让 user gesture 失效 → NotAllowedError。
-        const term = terminal;
-        const fs = foldStore;
         try {
             // Re-read the policy for each copy. This is infrequent, keeps sync
             // imports immediately visible, and fails closed if DB/regex loading
             // fails. ClipboardItem receives the promise while the user gesture
             // is still active, so the async read does not break clipboard access.
-            const pngPromise = app.loadCommandBlockRedaction(true)
-                .then((redaction) => renderBlocksToBlob(term, blocks, { theme: baseTermTheme }, fs, redaction))
-                .then((blob) => {
-                    if (!blob) throw new Error("render produced no blob");
-                    return blob;
-                });
+            const pngPromise = renderBlocksToBlob(
+                terminal, blocks, { theme: baseTermTheme }, foldStore, () => app.loadCommandBlockRedaction(true),
+            ).then((blob) => {
+                if (!blob) throw new Error("render produced no blob");
+                return blob;
+            });
             navigator.clipboard
                 .write([new ClipboardItem({ "image/png": pngPromise })])
                 .then(() => clearBlockSelection())
@@ -545,7 +544,7 @@
      *  面板绑定 activeTabId，而右键的终端就是 activeTab，所以 tabId 必然对得上。 */
     function sendBlocksToAi(blocks: CommandBlock[]) {
         if (!terminal || blocks.length === 0) return;
-        const text = extractBlocksText(terminal, blocks, foldStore);
+        const text = extractBlockTextForAi(terminal, blocks, foldStore);
         if (!text) return;
         app.openAiPanel(tabId);
         ai.prefillInput(tabId, text);
@@ -1938,7 +1937,7 @@
             {#each blockRects as r (r.id)}
                 {#if r.folded}
                     <div class="fold-label" style="top: calc({r.y}px + 4px);">
-                        ⋯ {r.foldCount} {r.foldCount === 1 ? "line" : "lines"}
+                        {formatFoldLabel(r.foldCount)}
                     </div>
                 {/if}
             {/each}
