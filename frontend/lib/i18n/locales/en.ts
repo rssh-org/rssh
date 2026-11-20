@@ -1261,7 +1261,7 @@ const en = {
   "snippet.editor.add": "Add parameter",
   "snippet.editor.duplicate": "Each parameter needs different matching text",
   "snippet.editor.default": "Default value",
-  "snippet.editor.required_hint": "Leave empty to require a value",
+  "snippet.editor.required_hint": "Ask each time",
   "snippet.editor.reload": "Reload snippets",
   "snippet.picker.search": "Search snippets",
   "snippet.picker.no_matches": "No matching snippets",
