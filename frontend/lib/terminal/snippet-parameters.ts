@@ -16,7 +16,7 @@ export interface SnippetPart {
 }
 
 export function snippetPreview(snippet: Snippet, values?: ReadonlyMap<string, string>): SnippetPart[] {
-  const names = snippet.parameters?.map(parameter => parameter.name);
+  const names = snippet.parameters?.map(parameter => parameter.name).filter(name => name.length > 0);
   if (!names?.length) return [{ text: snippet.command }];
 
   // At the same starting character the longest name wins. Escape every name so

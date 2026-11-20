@@ -16,8 +16,22 @@ function button(label: string) {
 }
 
 async function click(label: string) {
-  button(label).click();
+  const element = button(label);
+  element.focus();
+  element.click();
   await tick();
+}
+
+async function selectCommandText(field: HTMLTextAreaElement, start: number, end: number) {
+  field.focus();
+  field.setSelectionRange(start, end);
+  field.dispatchEvent(new Event("select"));
+  await tick();
+}
+
+function highlighted() {
+  return Array.from(document.querySelectorAll('.command-highlights[aria-hidden="true"] .parameter-match'),
+    match => match.textContent);
 }
 
 function input(selector: string, index = 0) {
@@ -48,20 +62,25 @@ afterEach(async () => {
   document.body.replaceChildren();
 });
 
-it("registers the selected literal once, keeping both occurrences and an explicit null default", async () => {
+it("uses the same add button to register a selection and underline both occurrences", async () => {
   const original = { name: "test", command: "echo yyy xxx zzz xxx" };
   const textarea = await edit(original);
   const first = original.command.indexOf("xxx");
-  textarea.setSelectionRange(first, first + 3);
-  textarea.dispatchEvent(new Event("select"));
-  await tick();
-  await click(t("snippet.editor.mark"));
+  const buttonCount = document.querySelectorAll("button").length;
+  const add = button(t("snippet.editor.add"));
+  await selectCommandText(textarea, first, first + 3);
+  expect(document.querySelectorAll("button")).toHaveLength(buttonCount);
+  expect(button(t("snippet.editor.add"))).toBe(add);
+  await click(t("snippet.editor.add"));
   expect(input(".parameter-name").value).toBe("xxx");
   expect(input(".parameter-default").value).toBe("");
   expect(textarea.value).toBe(original.command);
+  expect(highlighted()).toEqual(["xxx", "xxx"]);
 
-  await click(t("snippet.editor.mark"));
+  await selectCommandText(textarea, original.command.lastIndexOf("xxx"), original.command.length);
+  await click(t("snippet.editor.add"));
   expect(document.querySelectorAll(".parameter-row")).toHaveLength(1);
+  expect(document.activeElement).toBe(input(".parameter-default"));
   await click(t("common.save"));
   expect(updateSnippet).toHaveBeenCalledExactlyOnceWith({
     ...original, parameters: [{ name: "xxx", defaultValue: null }],
@@ -73,6 +92,7 @@ it("allows manual literal names and distinct defaults, rejects duplicates and ke
   await edit(original);
   await click(t("snippet.editor.add"));
   expect(button(t("common.save")).disabled).toBe(true);
+  expect(highlighted()).toEqual([]);
   typeInto(input(".parameter-name"), " a, ");
   typeInto(input(".parameter-default"), " optional ");
   await click(t("snippet.editor.add"));
@@ -88,6 +108,36 @@ it("allows manual literal names and distinct defaults, rejects duplicates and ke
   }, { index: 0, previous: original });
 });
 
+it("uses the command selection only while registering from the command field", async () => {
+  const textarea = await edit({ name: "Service", command: "status nginx" });
+  await selectCommandText(textarea, 7, 12);
+  document.querySelector<HTMLInputElement>(".inline-form input")!.focus();
+  await click(t("snippet.editor.add"));
+  expect(input(".parameter-name").value).toBe("");
+  expect(document.activeElement).toBe(input(".parameter-name"));
+  expect(highlighted()).toEqual([]);
+
+  textarea.focus();
+  await click(t("snippet.editor.add"));
+  expect(input(".parameter-name", 1).value).toBe("nginx");
+  expect(highlighted()).toEqual(["nginx"]);
+});
+
+it("underlines the effective literal matches as the command and overlapping parameters change", async () => {
+  const textarea = await edit({
+    name: "Service", command: "echo nginx nginx.conf NGINX",
+    parameters: ["nginx", "nginx.conf"].map(name => ({ name, defaultValue: null })),
+  });
+  expect(highlighted()).toEqual(["nginx", "nginx.conf"]);
+  typeInto(input(".parameter-name", 1), "{host}");
+  expect(highlighted()).toEqual(["nginx", "nginx"]);
+  typeInto(textarea, "echo {host} nginx {host}");
+  expect(highlighted()).toEqual(["{host}", "nginx", "{host}"]);
+  await click("Delete · {host}");
+  expect(highlighted()).toEqual(["nginx"]);
+  expect(textarea.value).toBe("echo {host} nginx {host}");
+});
+
 it("registers a cross-line selection from the original mixed line endings and edits its multi-line default", async () => {
   const match = "🌙first\r\nsecond\rthird";
   const original = { name: "Mixed endings", command: "prefix\r\n" + match + "\nsuffix" };
@@ -95,11 +145,11 @@ it("registers a cross-line selection from the original mixed line endings and ed
   const displayed = textarea.value;
   expect(displayed).toBe("prefix\n🌙first\nsecond\nthird\nsuffix");
   const start = displayed.indexOf("🌙");
-  textarea.setSelectionRange(start, displayed.indexOf("\nsuffix"));
-  textarea.dispatchEvent(new Event("select"));
-  await tick();
-  await click(t("snippet.editor.mark"));
+  await selectCommandText(textarea, start, displayed.indexOf("\nsuffix"));
+  await click(t("snippet.editor.add"));
   expect(input(".parameter-name").value).toBe("🌙first\nsecond\nthird");
+  expect(highlighted()).toEqual(["🌙first\nsecond\nthird"]);
+  expect(document.querySelector(".command-highlights")?.textContent).toBe(displayed);
   expect(Number(input(".parameter-name").rows)).toBe(1);
   expect(Number(input(".parameter-default").rows)).toBe(1);
   typeInto(input(".parameter-default"), "line 1\nline 2\n");
@@ -129,6 +179,7 @@ it("unregisters the last parameter without rewriting the command or emitting an 
   const original = { name: "Log", command: "echo {group} {group}", parameters: [{ name: "{group}", defaultValue: "one" }] };
   await edit(original);
   await click("Delete · {group}");
+  expect(highlighted()).toEqual([]);
   await click(t("common.save"));
   expect(updateSnippet).toHaveBeenCalledExactlyOnceWith(
     { name: original.name, command: original.command }, { index: 0, previous: original },
