@@ -59,20 +59,26 @@ pub fn update_highlight(
 }
 
 #[tauri::command]
-pub fn load_snippets(state: State<'_, Arc<AppState>>) -> Result<Vec<Snippet>, AppError> {
-    let runtime = tauri::async_runtime::handle();
-    let _guard = runtime.inner().enter();
-    rssh_core::commands::settings::load_snippets(state.inner().as_ref())
+pub async fn load_snippets(state: State<'_, Arc<AppState>>) -> Result<Vec<Snippet>, AppError> {
+    rssh_core::commands::settings::load_snippets(&state).await
 }
 
 #[tauri::command]
-pub fn save_snippets(
+pub async fn save_snippets(
     state: State<'_, Arc<AppState>>,
     snippets: Vec<Snippet>,
 ) -> Result<(), AppError> {
-    let runtime = tauri::async_runtime::handle();
-    let _guard = runtime.inner().enter();
-    rssh_core::commands::settings::save_snippets(state.inner().as_ref(), snippets)
+    rssh_core::commands::settings::save_snippets(&state, snippets).await
+}
+
+#[tauri::command]
+pub async fn update_snippet(
+    state: State<'_, Arc<AppState>>,
+    index: Option<usize>,
+    previous: Option<Snippet>,
+    snippet: Option<Snippet>,
+) -> AppResult<Vec<Snippet>> {
+    rssh_core::commands::settings::update_snippet(&state, index, previous, snippet).await
 }
 
 #[tauri::command]

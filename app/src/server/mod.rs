@@ -25,7 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::error::{locked, AppError, AppResult};
 use crate::models::{
-    Credential, Forward, Group, HighlightRule, Profile, SerialProfile, Snippet, TelnetProfile,
+    Credential, Forward, Group, HighlightRule, Profile, SerialProfile, TelnetProfile,
 };
 use crate::state::{AppState, SessionKind, SessionOwner};
 use crate::terminal::pty::{self, PtyOut, PtySink};
@@ -465,11 +465,6 @@ fn dispatch(
             &arg::<HighlightRule>(&args, "rule")?,
         )),
         "reset_highlights" => ok(crate::db::highlight::reset_defaults(&state.db)),
-        "load_snippets" => ok(crate::db::snippet::load(&state.data_dir)),
-        "save_snippets" => ok(crate::db::snippet::save(
-            &state.data_dir,
-            &arg::<Vec<Snippet>>(&args, "snippets")?,
-        )),
         "secret_backend" => Ok(json!(state.secret_store.backend_name())),
 
         // ---- local PTY ----
@@ -722,6 +717,17 @@ async fn dispatch_async(
     tx: &mpsc::UnboundedSender<Message>,
 ) -> Result<Value, Value> {
     match cmd {
+        "load_snippets" => ok(crate::commands::settings::load_snippets(state).await),
+        "save_snippets" => {
+            ok(crate::commands::settings::save_snippets(state, arg(&args, "snippets")?).await)
+        }
+        "update_snippet" => ok(crate::commands::settings::update_snippet(
+            state,
+            arg(&args, "index")?,
+            arg(&args, "previous")?,
+            arg(&args, "snippet")?,
+        )
+        .await),
         "save_dynamic_discovery_sources" => ok(
             crate::commands::discovery::save_dynamic_discovery_sources_for_owner(
                 state.clone(),
@@ -2068,6 +2074,60 @@ mod tests {
             data_dir: dir.path().into(),
         };
         (Arc::new(state), dir)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn snippet_updates_yield_on_lock_contention_and_reject_stale_rows() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let update = |args| dispatch_async(&state, &owner, "update_snippet", args, &tx);
+        let first = json!({"name": "logs", "command": "echo old"});
+        let edited = json!({
+            "name": "logs",
+            "command": "echo yyy xxx zzz xxx",
+            "parameters": [{"name": "xxx", "defaultValue": "nginx"}],
+        });
+        let lock = std::fs::File::create(state.data_dir.join("snippets.lock")).unwrap();
+        lock.lock().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // Watchdog prevents a broken synchronous dispatch hanging the suite.
+            let woke = release_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok();
+            drop(lock);
+            woke
+        });
+        let release = async {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let _ = release_tx.send(());
+        };
+        let (added, ()) = tokio::join!(biased; update(json!({"snippet": first})), release);
+        assert!(holder.join().unwrap(), "file lock wait blocked the runtime");
+        assert_eq!(added.unwrap(), json!([first]));
+        assert_eq!(
+            update(json!({"index": 0, "previous": first, "snippet": edited}))
+                .await
+                .unwrap(),
+            json!([edited])
+        );
+        assert_eq!(
+            update(json!({"index": 0, "previous": first}))
+                .await
+                .unwrap_err(),
+            err_value(AppError::config("snippet_changed", json!({})))
+        );
+        assert_eq!(
+            update(json!({"index": 0})).await.unwrap_err(),
+            err_value(AppError::config("snippet_update_invalid", json!({})))
+        );
+        assert_eq!(
+            update(json!({"index": 0, "previous": edited, "snippet": null}))
+                .await
+                .unwrap(),
+            json!([])
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

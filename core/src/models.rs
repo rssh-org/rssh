@@ -573,10 +573,20 @@ pub struct HighlightRule {
 
 // --- Snippet ---
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snippet {
     pub name: String,
     pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<SnippetParameter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetParameter {
+    /// Literal text to replace in the original command.
+    pub name: String,
+    pub default_value: Option<String>,
 }
 
 // --- Plugin ---

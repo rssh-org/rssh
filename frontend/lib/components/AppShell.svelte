@@ -1109,11 +1109,9 @@
                 disabled: !trimmed,
                 onClick: async () => {
                     if (!trimmed) return;
-                    const name = trimmed.slice(0, 10);
+                    const name = Array.from(trimmed).slice(0, 10).join("");
                     try {
-                        const all = await app.loadSnippets();
-                        all.push({ name, command: trimmed });
-                        await invoke("save_snippets", { snippets: all });
+                        await app.updateSnippet({ name, command: trimmed });
                         toast.success(`${t("tab.context.add_to_snippets")}: ${name}`);
                     } catch (e) {
                         toast.error(`${t("toast.error.save")}: ${errMsg(e)}`);

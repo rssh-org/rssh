@@ -1622,10 +1622,12 @@ mod tests {
                 Snippet {
                     name: "a".into(),
                     command: "old".into(),
+                    parameters: vec![],
                 },
                 Snippet {
                     name: "local-only".into(),
                     command: "gone".into(),
+                    parameters: vec![],
                 },
             ],
         )
@@ -1634,7 +1636,8 @@ mod tests {
             "version": 1,
             "snippets": [
                 {"name": "a", "command": "new"},
-                {"name": "b", "command": "bcmd"},
+                {"name": "test", "command": "echo yyy xxx zzz xxx",
+                 "parameters": [{"name": "xxx", "defaultValue": null}]},
             ],
         });
         merge_import(&db, &ss, dir.path(), &data).unwrap();
@@ -1646,7 +1649,14 @@ mod tests {
             "new",
             "same name overwritten"
         );
-        assert!(snips.iter().any(|s| s.name == "b"), "new name added");
+        assert!(snips.iter().any(|s| s.name == "test"), "new name added");
+        for mode in [
+            ExportMode::LocalBackup,
+            ExportMode::RemotePush(read_sync_prefs(&db).unwrap()),
+        ] {
+            let payload = build_payload(&db, &ss, dir.path(), &mode).unwrap();
+            assert_eq!(payload["snippets"], data["snippets"]);
+        }
     }
 
     #[test]

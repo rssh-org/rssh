@@ -277,6 +277,7 @@ pub fn run_with(
             commands::settings::update_highlight,
             commands::settings::load_snippets,
             commands::settings::save_snippets,
+            commands::settings::update_snippet,
             commands::settings::reset_highlights,
             commands::settings::list_recordings,
             commands::settings::read_recording,

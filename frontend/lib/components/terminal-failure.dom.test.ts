@@ -171,6 +171,23 @@ it("opens native AWS without a local PTY and routes input, output, errors, and c
 });
 
 describe("native terminal selection handle context menus", () => {
+  it("quick-adds selected text as a plain snippet without opening the parameter editor", async () => {
+    const command = "echo view😀 \"${HOME}\" '{{.Names}}'";
+    vi.spyOn(mocks.Terminal.instances[0], "getSelection").mockReturnValue(command);
+    await app.setRightClickAction("menu");
+    const pane = target.querySelector<HTMLElement>(".terminal-split-layout > .pane")!;
+    pane.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+    await settle();
+    const add = [...target.querySelectorAll<HTMLButtonElement>(".ctx-item")]
+      .find(button => button.textContent?.includes(t("tab.context.add_to_snippets")))!;
+    add.click();
+    await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("update_snippet", {
+      snippet: { name: "echo view😀", command },
+    }));
+    expect(app.settingsActive()).toBe(false);
+    expect(app.snippetPickerOpen()).toBe(false);
+  });
+
   it.each(["terminal output", "pane"])("keeps handle drags on %s native, then accepts mouse and keyboard menus", async (area) => {
     await app.setRightClickAction("menu");
     const output = mocks.Terminal.instances[0].output;

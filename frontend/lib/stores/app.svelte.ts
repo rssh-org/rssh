@@ -10,6 +10,7 @@ import type {
   CommandBlockRedactionSettings as RedactionSettings,
 } from "../terminal/command-block-redaction.ts";
 import type { CommandBlockSplitMode } from "../terminal/command-blocks.ts";
+import type { Snippet } from "../terminal/snippet-parameters.ts";
 import {
   COMMAND_BLOCK_MAX_LINES_DEFAULT,
   normalizeCommandBlockMaxLines,
@@ -183,7 +184,7 @@ export interface DynamicDiscoverySnapshot {
   targets: DynamicDiscoveredTarget[];
   errors: DynamicDiscoveryError[];
 }
-export interface Snippet { name: string; command: string; }
+export type { Snippet } from "../terminal/snippet-parameters.ts";
 export interface HighlightRule { keyword: string; name: string; color: string; enabled: boolean; is_regex: boolean; is_case_sensitive: boolean; }
 export interface RemoteEntry {
     name: string;
@@ -811,9 +812,7 @@ export function terminalGetSelection(tabId: string): string {
 export function terminalPaste(tabId: string, text: string) {
   _terminalControls.get(tabId)?.paste(text);
 }
-/** Snippet picker (and any "run this text" action): send user text to the
- *  active terminal honoring its EOL. Distinct from sendToTerminal, which is for
- *  raw control sequences and must never transform line endings. */
+/** Send user text to the active terminal honoring its EOL. */
 export function sendTextToActiveTerminal(text: string) {
   _terminalControls.get(_activeTabId)?.sendText(text);
 }
@@ -916,10 +915,22 @@ export function broadcastToSessions(tabIds: string[], text: string) {
 }
 
 /* ─── Snippet picker ─── */
-let _snippetPickerOpen = $state(false);
-export function snippetPickerOpen() { return _snippetPickerOpen; }
-export function openSnippetPicker() { _snippetPickerOpen = true; }
-export function closeSnippetPicker() { _snippetPickerOpen = false; }
+let _snippetPickerTargetId = $state<string | null>(null);
+export function snippetPickerOpen() { return _snippetPickerTargetId !== null; }
+export function snippetPickerTargetId() { return _snippetPickerTargetId; }
+export function openSnippetPicker(targetId = _activeTabId) { _snippetPickerTargetId = targetId; }
+export function closeSnippetPicker() { _snippetPickerTargetId = null; }
+export function sendSnippetToTerminal(targetId: string, text: string): boolean {
+  const tab = _tabs.find(candidate => candidate.id === targetId);
+  const controls = _terminalControls.get(targetId);
+  if (!tab || !controls || terminalConnectionStatus(targetId) !== "connected") return false;
+  // The picker returns keyboard focus to the active pane when it closes.
+  const workspaceId = tab.workspaceId ?? tab.id;
+  if (_activeWorkspaceId !== workspaceId) setActiveWorkspace(workspaceId);
+  setActivePane(targetId);
+  controls.sendText(text);
+  return true;
+}
 
 /** Open a terminal tab from a saved serial profile (Home cards + the manager
  *  use this). meta carries the config in snake_case — TerminalPane feeds it to
@@ -1460,6 +1471,10 @@ export async function loadDynamicDiscoveryContexts(platform: DynamicPlatform): P
 }
 export async function loadSnippets(): Promise<Snippet[]> {
   return invoke<Snippet[]>("load_snippets");
+}
+
+export function updateSnippet(snippet: Snippet | null, edit?: { index: number; previous: Snippet }): Promise<Snippet[]> {
+  return invoke<Snippet[]>("update_snippet", { ...edit, snippet });
 }
 export async function loadHighlights(): Promise<HighlightRule[]> {
   return invoke<HighlightRule[]>("list_highlights");
