@@ -1455,7 +1455,10 @@
                     {#snippet pane(p)}
                         {@const tab = sftpTabs.find((entry) => entry.id === p.id)}
                         {#if tab}
-                            <SftpBrowser meta={{...tab.meta ?? {}, sessionId: app.sessionIdForTab(tab.id) ?? ''}}/>
+                            {@const sessionId = app.sessionIdForTab(tab.id) ?? ''}
+                            {#key sessionId}
+                                <SftpBrowser meta={{...tab.meta ?? {}, tabId: tab.id, sessionId}}/>
+                            {/key}
                         {/if}
                     {/snippet}
                 </SidePanel>

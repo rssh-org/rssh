@@ -1304,6 +1304,10 @@ pub async fn reconcile_owner(
     active_ids: Vec<String>,
 ) -> AppResult<usize> {
     let active: HashSet<String> = active_ids.into_iter().collect();
+    // The frontend's transfer queue starts empty after a WebView reload.
+    if active.is_empty() {
+        locked(&state.transfers)?.close_owner(owner);
+    }
     let (closed, removed, cleanups) = remove_owned_resources(state, owner, Some(&active))?;
     close_removed(removed);
     // The application owns recovery even if the requesting WebView disappears.
@@ -1318,6 +1322,9 @@ pub async fn reconcile_owner(
 }
 
 pub fn close_owner(state: &AppState, owner: &SessionOwner) {
+    if let Ok(mut transfers) = state.transfers.lock() {
+        transfers.close_owner(owner);
+    }
     if let Err(error) = state.agent_bridge.stop_endpoint(owner) {
         log::warn!("close owner agent bridge failed: {error}");
     }
@@ -1495,7 +1502,7 @@ mod tests {
             serial_backend: crate::terminal::serial::native_backend().unwrap(),
             telnet_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
-            transfer_cancels: Mutex::new(HashMap::new()),
+            transfers: Default::default(),
             active_forwards: Mutex::new(HashMap::new()),
             auth_waiters: Mutex::new(HashMap::new()),
             passphrase_waiters: Mutex::new(HashMap::new()),

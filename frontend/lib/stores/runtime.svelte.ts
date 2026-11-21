@@ -23,6 +23,7 @@ export interface RuntimeCapabilities {
   windowPin: boolean;
   fileMultiSelect: boolean;
   directoryTransfer: boolean;
+  sftpDownloadExport: boolean;
   plugins: boolean;
   nativeClipboard: boolean;
   releaseUpdateCheck: boolean;
@@ -49,6 +50,7 @@ let _capabilities = $state<Readonly<RuntimeCapabilities>>({
   windowPin: false,
   fileMultiSelect: false,
   directoryTransfer: false,
+  sftpDownloadExport: false,
   plugins: false,
   nativeClipboard: false,
   releaseUpdateCheck: false,

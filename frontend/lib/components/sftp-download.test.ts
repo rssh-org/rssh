@@ -17,7 +17,7 @@ describe("SFTP context-menu download", () => {
   it("picks a target path and queues the file through the transfer store", () => {
     const downloadEntry = functionSource("downloadEntry", "confirmDelete");
 
-    expect(downloadEntry).toContain("fileAccess.pickSavePath(entry.name)");
+    expect(downloadEntry).toContain("fileAccess.pickSavePath(name)");
     expect(downloadEntry).toContain("transfers.startDownload");
     expect(downloadEntry).not.toContain('"sftp_save_file"');
   });
@@ -27,13 +27,13 @@ describe("SFTP context-menu download", () => {
 describe("SFTP batch download isolation", () => {
   function loadQueueDownloads(mocks: { resolvePaths: ReturnType<typeof vi.fn>; invoke?: ReturnType<typeof vi.fn> }) {
     const start = source.indexOf("async function queueDownloads");
-    const end = source.indexOf("async function downloadEntry", start);
+    const end = source.indexOf("function requestDownload", start);
     const startDownload = vi.fn().mockResolvedValue(undefined);
     const code = ts.transpileModule(source.slice(start, end), {
       compilerOptions: { target: ts.ScriptTarget.ES2022 },
     }).outputText;
     const queueDownloads = runInNewContext(code + "\nqueueDownloads", {
-      cwd: "/remote", sftpId: "sftp-test", meta: { sessionId: "ssh-test" },
+      cwd: "/remote", sftpId: "sftp-test", transferOrigin: { sessionId: "ssh-test", tabId: "origin" },
       joinRemote: (dir: string, name: string) => `${dir}/${name}`,
       fileAccess: { resolvePaths: mocks.resolvePaths }, invoke: mocks.invoke,
       transfers: { startDownload }, errMsg: String,

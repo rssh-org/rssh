@@ -52,7 +52,7 @@ pub(crate) mod test_support {
             telnet_sessions: Mutex::new(HashMap::new()),
             ssm_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
-            transfer_cancels: Mutex::new(HashMap::new()),
+            transfers: Default::default(),
             active_forwards: Mutex::new(HashMap::new()),
             auth_waiters: Mutex::new(HashMap::new()),
             passphrase_waiters: Mutex::new(HashMap::new()),

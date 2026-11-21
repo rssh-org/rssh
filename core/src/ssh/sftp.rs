@@ -1,19 +1,20 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::{AppError, AppResult};
 use crate::models::Credential;
 use crate::ssh::client;
 
+mod publish;
+pub(crate) use publish::backup_path;
+pub use publish::RemoteStamp;
+
 /// i18n code returned when the user cancels a transfer. The frontend
-/// (transfers.svelte.ts) matches this literal via `errStr.includes(...)` to
-/// flip the status to "cancelled". Keep the constant in sync across both ends.
+/// uses the coded error to mark its queue entry as cancelled.
 pub const CANCELLED_CODE: &str = "transfer_cancelled";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,37 +59,6 @@ pub struct WalkEntry {
 /// pathological server-side trees.
 const WALK_DEPTH_CAP: u32 = 32;
 
-/// Owns an AI download's deterministic `.part` path. Dropping the future at
-/// any await point drops this guard after the open file, so cancellation cannot
-/// leave a partial artifact behind.
-struct PartialDownloadGuard {
-    path: PathBuf,
-    committed: bool,
-}
-
-impl PartialDownloadGuard {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            committed: false,
-        }
-    }
-
-    fn commit(mut self, local_path: &Path) -> std::io::Result<()> {
-        std::fs::rename(&self.path, local_path)?;
-        self.committed = true;
-        Ok(())
-    }
-}
-
-impl Drop for PartialDownloadGuard {
-    fn drop(&mut self) {
-        if !self.committed {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-}
-
 /// Join a remote path segment. Special-cases dir == "/" so the result never
 /// contains "//foo"; matches the convention used by the existing callers.
 fn join_remote(dir: &str, name: &str) -> String {
@@ -104,6 +74,7 @@ pub struct SftpHandle {
     /// 父 SSH 会话 id；None 表示这条 SFTP 走的是独立 TCP（`SftpHandle::connect`）。
     /// SSH 关闭时会按这个字段反向找到所有 children 并清理。
     parent_ssh_id: Option<String>,
+    pub(crate) peer: client::SshPeer,
 }
 
 impl SftpHandle {
@@ -140,6 +111,7 @@ impl SftpHandle {
         Ok(Self {
             sftp,
             parent_ssh_id: Some(parent_ssh_id),
+            peer: ssh_handle.peer.clone(),
         })
     }
 
@@ -157,7 +129,14 @@ impl SftpHandle {
             log: crate::ssh::client::null_logger(),
             prompt_ctx: None,
         };
-        let mut handle = client::ssh_connect(dial, host, port).await?;
+        let (mut handle, _, fingerprint) =
+            client::ssh_connect_with_forward(dial, host.clone(), port).await?;
+        let peer = client::SshPeer {
+            host,
+            port,
+            fingerprint,
+            username: credential.username.clone(),
+        };
 
         client::authenticate(&mut handle, credential, None).await?;
 
@@ -182,6 +161,7 @@ impl SftpHandle {
         Ok(Self {
             sftp,
             parent_ssh_id: None,
+            peer,
         })
     }
 
@@ -301,12 +281,15 @@ impl SftpHandle {
     }
 
     pub async fn upload(&self, remote_path: &str, data: &[u8]) -> AppResult<()> {
-        self.sftp.write(remote_path, data).await.map_err(|e| {
-            AppError::sftp(
-                "sftp_io_failed",
-                json!({ "op": "write", "err": e.to_string() }),
-            )
-        })
+        let target = self.canonical_remote_target(remote_path).await?;
+        let expected = self.remote_destination_stamp(&target).await?;
+        let (part, mut file) = self.create_remote_part(&target).await?;
+        file.write_all(data)
+            .await
+            .map_err(|e| publish::io_error("write", &part, e))?;
+        let uploaded = self.close_remote_part(file, &part).await?;
+        self.commit_remote_part(&part, &target, &expected, &uploaded)
+            .await
     }
 
     pub async fn mkdir(&self, path: &str) -> AppResult<()> {
@@ -431,7 +414,7 @@ impl SftpHandle {
     /// 优先用 metadata.size 早期 bail；metadata.size=None 或服务器撒谎时，
     /// 流式 cap 也会在超限的瞬间中止下载。
     ///
-    /// 原子性：下载先写入 `<local_path>.part`，全部成功后 rename 到 local_path。
+    /// 原子性：下载先写入本次传输独占的同目录 `.part`，全部成功后 rename 到 local_path。
     /// 任何失败路径（size cap、IO error、metadata 错误）都会清理 .part，
     /// **不会污染 local_path**。无前端进度事件——AI 排障流程用。
     pub async fn download_to_path(
@@ -458,30 +441,13 @@ impl SftpHandle {
             }
         }
 
-        // tmp_path = "<local_path>.part"。用 with_file_name 保留目录前缀。
-        let file_name = local_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| {
-                AppError::sftp(
-                    "sftp_io_failed",
-                    json!({ "op": "create", "err": "invalid local path" }),
-                )
-            })?;
-        let tmp_path = local_path.with_file_name(format!("{file_name}.part"));
-        let partial = PartialDownloadGuard::new(tmp_path.clone());
         let mut remote_file = self.sftp.open(remote_path).await.map_err(|e| {
             AppError::sftp(
                 "sftp_io_failed",
                 json!({ "op": "open", "err": e.to_string() }),
             )
         })?;
-        // `tokio::fs::File::create` runs on the blocking pool; dropping its
-        // future cannot cancel an already-started create, so it could recreate
-        // `.part` after the guard had removed it. The syscall is tiny: perform
-        // it in this poll, then hand the open descriptor to Tokio for writes.
-        let local_file = std::fs::File::create(&tmp_path)?;
-        let mut local_file = tokio::fs::File::from_std(local_file);
+        let (mut partial, mut writer) = crate::files::atomic::LocalPartial::create(local_path)?;
 
         let mut transferred: u64 = 0;
         let mut buf = vec![0u8; 32768];
@@ -506,7 +472,7 @@ impl SftpHandle {
                     json!({ "path": remote_path, "size": next, "limit": max_bytes }),
                 ));
             }
-            local_file.write_all(&buf[..n]).await?;
+            writer.write_all(&buf[..n]).await?;
             transferred = next;
         }
 
@@ -516,126 +482,9 @@ impl SftpHandle {
                 json!({ "op": "close", "err": e.to_string() }),
             )
         })?;
-        local_file.shutdown().await?;
-        drop(local_file);
-        partial.commit(local_path)?;
-        Ok(transferred)
-    }
-
-    /// Stream-download a remote file to a local path, emitting progress events.
-    ///
-    /// `cancel` 是用户取消的旗子；streaming 循环每个 chunk 之间查一次。
-    /// 命中即提前返回 `Sftp(CANCELLED_MSG)`，下游靠这条文本识别"取消"和"出错"。
-    pub async fn download_streaming(
-        &self,
-        remote_path: &str,
-        local_path: &Path,
-        host: &crate::emitter::Host,
-        transfer_id: &str,
-        cancel: Arc<AtomicBool>,
-    ) -> AppResult<u64> {
-        // Get file size for progress
-        let meta = self.sftp.metadata(remote_path).await.map_err(|e| {
-            AppError::sftp(
-                "sftp_io_failed",
-                json!({ "op": "metadata", "err": e.to_string() }),
-            )
-        })?;
-        let total = meta.size.unwrap_or(0);
-
-        let mut remote_file = self.sftp.open(remote_path).await.map_err(|e| {
-            AppError::sftp(
-                "sftp_io_failed",
-                json!({ "op": "open", "err": e.to_string() }),
-            )
-        })?;
-
-        let event = format!("sftp:progress:{transfer_id}");
-        let transferred = copy_atomic_download(
-            &mut remote_file,
-            local_path,
-            |transferred| {
-                let _ = host.emit(
-                    &event,
-                    json!({ "transferred": transferred, "total": total }),
-                );
-            },
-            &cancel,
-        )
-        .await?;
-        let _ = remote_file.shutdown().await;
-        Ok(transferred)
-    }
-
-    /// A document provider grants only a single writer, not sibling creation or
-    /// rename. Open it lazily, after the remote file has opened successfully.
-    /// Mid-write provider failures can still leave a partial document; directory
-    /// destinations always use the transactional path above instead.
-    pub async fn download_streaming_to_writer<W, F, Fut>(
-        &self,
-        remote_path: &str,
-        open_destination: F,
-        host: &crate::emitter::Host,
-        transfer_id: &str,
-        cancel: Arc<AtomicBool>,
-    ) -> AppResult<u64>
-    where
-        W: AsyncWrite + Unpin,
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = AppResult<W>>,
-    {
-        let event = format!("sftp:progress:{transfer_id}");
-        self.copy_to_writer(
-            remote_path,
-            open_destination,
-            |transferred, total| {
-                let _ = host.emit(
-                    &event,
-                    json!({ "transferred": transferred, "total": total }),
-                );
-            },
-            &cancel,
-        )
-        .await
-    }
-
-    async fn copy_to_writer<W, F, Fut>(
-        &self,
-        remote_path: &str,
-        open_destination: F,
-        mut on_progress: impl FnMut(u64, u64),
-        cancel: &AtomicBool,
-    ) -> AppResult<u64>
-    where
-        W: AsyncWrite + Unpin,
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = AppResult<W>>,
-    {
-        let meta = self.sftp.metadata(remote_path).await.map_err(|e| {
-            AppError::sftp(
-                "sftp_io_failed",
-                json!({ "op": "metadata", "err": e.to_string() }),
-            )
-        })?;
-        let total = meta.size.unwrap_or(0);
-        let mut remote_file = self.sftp.open(remote_path).await.map_err(|e| {
-            AppError::sftp(
-                "sftp_io_failed",
-                json!({ "op": "open", "err": e.to_string() }),
-            )
-        })?;
-        if cancel.load(Ordering::Relaxed) {
-            return Err(AppError::sftp(CANCELLED_CODE, json!({})));
-        }
-        let mut destination = open_destination().await?;
-        let transferred = stream_download(
-            &mut remote_file,
-            &mut destination,
-            |transferred| on_progress(transferred, total),
-            cancel,
-        )
-        .await?;
-        let _ = remote_file.shutdown().await;
+        writer.shutdown().await?;
+        drop(writer.into_std().await);
+        partial.commit()?;
         Ok(transferred)
     }
 
@@ -649,7 +498,7 @@ impl SftpHandle {
     /// SFTP round-trips on the cold path for race-freeness — `mkdir_p` is
     /// already off the hot single-file path because callers short-circuit
     /// when the parent already exists.
-    async fn mkdir_p(&self, path: &str) -> AppResult<()> {
+    pub(crate) async fn mkdir_p(&self, path: &str) -> AppResult<()> {
         if path.is_empty() || path == "/" {
             return Ok(());
         }
@@ -664,8 +513,12 @@ impl SftpHandle {
             }
             return Ok(());
         }
-        let mut current = String::new();
-        for part in path.split('/').filter(|s| !s.is_empty()) {
+        let mut current = if path.starts_with('/') {
+            String::new()
+        } else {
+            ".".to_owned()
+        };
+        for part in path.split('/').filter(|s| !s.is_empty() && *s != ".") {
             current.push('/');
             current.push_str(part);
             if let Err(create_err) = self.sftp.create_dir(&current).await {
@@ -682,458 +535,5 @@ impl SftpHandle {
             }
         }
         Ok(())
-    }
-
-    /// Stream-upload from a caller-supplied reader to a remote path, emitting
-    /// progress. The local end is just a reader, so desktop (a file path) and
-    /// mobile (a SAF `content://` handle) share this one path — only how the
-    /// caller opens the reader differs. `total` is the source size for progress
-    /// (0 if unknown).
-    ///
-    /// Atomicity (remote-side, platform-independent): stream to
-    /// `<remote_path>.part`, then rename on full success. Cancel / read-error /
-    /// write-error leave only a partial `.part` (cleaned up below) — never a
-    /// truncated file at the real path, and never a *destroyed* pre-existing
-    /// remote file (raw `create(remote_path)` truncates the target the instant
-    /// it opens, so a mid-transfer failure on an overwrite lost the original
-    /// irrecoverably).
-    pub async fn upload_streaming<R>(
-        &self,
-        reader: &mut R,
-        total: u64,
-        remote_path: &str,
-        host: &crate::emitter::Host,
-        transfer_id: &str,
-        cancel: Arc<AtomicBool>,
-    ) -> AppResult<u64>
-    where
-        R: AsyncRead + Unpin,
-    {
-        // When uploading a folder via multi-select, remote_path may live in a
-        // remote subdirectory we haven't created yet. For a single-file upload
-        // the parent already exists, so mkdir_p hits the hot-path early return.
-        if let Some((parent, _)) = remote_path.rsplit_once('/') {
-            if !parent.is_empty() {
-                self.mkdir_p(parent).await?;
-            }
-        }
-
-        let tmp_path = format!("{remote_path}.part");
-        let event = format!("sftp:progress:{transfer_id}");
-        let result = async {
-            let mut remote_file = self.sftp.create(&tmp_path).await.map_err(|e| {
-                AppError::sftp(
-                    "sftp_io_failed",
-                    json!({ "op": "create", "err": e.to_string() }),
-                )
-            })?;
-            let n = stream_upload(
-                reader,
-                &mut remote_file,
-                |t| {
-                    let _ = host.emit(
-                        &event,
-                        serde_json::json!({ "transferred": t, "total": total }),
-                    );
-                },
-                &cancel,
-            )
-            .await?;
-            remote_file.shutdown().await.map_err(|e| {
-                AppError::sftp(
-                    "sftp_io_failed",
-                    json!({ "op": "close", "err": e.to_string() }),
-                )
-            })?;
-            Ok(n)
-        }
-        .await;
-
-        match result {
-            Ok(transferred) => {
-                // SFTP rename fails on many servers if the destination exists, so
-                // remove the old file first (best-effort — an absent target, the
-                // common create-new case, is fine to ignore).
-                let _ = self.sftp.remove_file(remote_path).await;
-                self.sftp
-                    .rename(&tmp_path, remote_path)
-                    .await
-                    .map_err(|e| {
-                        AppError::sftp(
-                            "sftp_io_failed",
-                            json!({ "op": "rename", "err": e.to_string() }),
-                        )
-                    })?;
-                Ok(transferred)
-            }
-            Err(e) => {
-                // Best-effort cleanup; even if unlink fails we just leak `.part`.
-                let _ = self.sftp.remove_file(&tmp_path).await;
-                Err(e)
-            }
-        }
-    }
-}
-
-async fn copy_atomic_download<R: AsyncRead + Unpin>(
-    source: &mut R,
-    destination: &Path,
-    on_progress: impl FnMut(u64),
-    cancel: &AtomicBool,
-) -> AppResult<u64> {
-    let mut target = crate::files::atomic::AtomicDownload::create(destination)?;
-    match stream_download(source, target.stream(), on_progress, cancel).await {
-        Ok(transferred) if !cancel.load(Ordering::Relaxed) => {
-            target.commit().await?;
-            Ok(transferred)
-        }
-        result => {
-            target.abort().await;
-            match result {
-                Err(error) => Err(error),
-                Ok(_) => Err(AppError::sftp(CANCELLED_CODE, json!({}))),
-            }
-        }
-    }
-}
-
-/// Pure download copy loop: read from `src` (remote), write to `dst` (local),
-/// 32 KiB at a time. Reports cumulative bytes via `on_progress` and checks
-/// `cancel` between chunks. No Tauri/Host dependency — progress is injected — so
-/// it's unit-testable over in-memory `Cursor`/`Vec`. `read` errors are the
-/// remote side (`sftp_io_failed` op:read); `write` errors are the local side
-/// (bare IO error, e.g. disk full or a SAF `content://` write fault). Success
-/// includes flushing the destination, so buffered writes and their errors
-/// cannot outlive the transfer's completion or the atomic rename.
-async fn stream_download<R, W>(
-    src: &mut R,
-    dst: &mut W,
-    mut on_progress: impl FnMut(u64),
-    cancel: &AtomicBool,
-) -> AppResult<u64>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let mut transferred: u64 = 0;
-    let mut buf = vec![0u8; 32768];
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(AppError::sftp(CANCELLED_CODE, json!({})));
-        }
-        let n = src.read(&mut buf).await.map_err(|e| {
-            AppError::sftp(
-                "sftp_io_failed",
-                json!({ "op": "read", "err": e.to_string() }),
-            )
-        })?;
-        if n == 0 {
-            break;
-        }
-        dst.write_all(&buf[..n]).await?;
-        transferred += n as u64;
-        on_progress(transferred);
-    }
-    dst.flush().await?;
-    Ok(transferred)
-}
-
-/// Pure upload copy loop: read from `src` (local), write to `dst` (remote).
-/// Mirror of `stream_download` with the remote side on the write end, so the
-/// error mapping is flipped: `read` errors are local (bare IO), `write` errors
-/// are remote (`sftp_io_failed` op:write).
-async fn stream_upload<R, W>(
-    src: &mut R,
-    dst: &mut W,
-    mut on_progress: impl FnMut(u64),
-    cancel: &AtomicBool,
-) -> AppResult<u64>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let mut transferred: u64 = 0;
-    let mut buf = vec![0u8; 32768];
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(AppError::sftp(CANCELLED_CODE, json!({})));
-        }
-        let n = src.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        dst.write_all(&buf[..n]).await.map_err(|e| {
-            AppError::sftp(
-                "sftp_io_failed",
-                json!({ "op": "write", "err": e.to_string() }),
-            )
-        })?;
-        transferred += n as u64;
-        on_progress(transferred);
-    }
-    Ok(transferred)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    #[test]
-    fn dropping_partial_download_removes_the_temporary_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let tmp_path = dir.path().join("artifact.part");
-        std::fs::write(&tmp_path, b"partial").unwrap();
-
-        {
-            let _partial = PartialDownloadGuard::new(tmp_path.clone());
-        }
-
-        assert!(!tmp_path.exists());
-    }
-
-    #[test]
-    fn committing_partial_download_replaces_the_existing_target() {
-        let dir = tempfile::tempdir().unwrap();
-        let local_path = dir.path().join("artifact");
-        let tmp_path = dir.path().join("artifact.part");
-        std::fs::write(&local_path, b"old").unwrap();
-        std::fs::write(&tmp_path, b"new").unwrap();
-
-        PartialDownloadGuard::new(tmp_path.clone())
-            .commit(&local_path)
-            .unwrap();
-
-        assert_eq!(std::fs::read(&local_path).unwrap(), b"new");
-        assert!(!tmp_path.exists());
-    }
-
-    // Exercise the real SFTP metadata/open protocol without an SSH server,
-    // network port or application state. A successful stat followed by a denied
-    // open is the case that previously destroyed the user's local file.
-    struct DeniedDownload;
-    impl russh_sftp::server::Handler for DeniedDownload {
-        type Error = russh_sftp::protocol::StatusCode;
-        fn unimplemented(&self) -> Self::Error {
-            russh_sftp::protocol::StatusCode::PermissionDenied
-        }
-        async fn stat(
-            &mut self,
-            id: u32,
-            _: String,
-        ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
-            Ok(russh_sftp::protocol::Attrs {
-                id,
-                attrs: Default::default(),
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn remote_open_failure_never_opens_or_truncates_the_provider() {
-        let (client, server) = tokio::io::duplex(4096);
-        russh_sftp::server::run(server, DeniedDownload).await;
-        let handle = SftpHandle {
-            sftp: russh_sftp::client::SftpSession::new(client).await.unwrap(),
-            parent_ssh_id: None,
-        };
-        let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("existing");
-        std::fs::write(&target, b"existing contents").unwrap();
-        let mut opened = false;
-        let result = handle
-            .copy_to_writer(
-                "/denied",
-                || {
-                    opened = true;
-                    async {
-                        tokio::fs::File::create(&target)
-                            .await
-                            .map_err(AppError::from)
-                    }
-                },
-                |_, _| {},
-                &AtomicBool::new(false),
-            )
-            .await;
-        assert!(result.is_err());
-        assert!(!opened);
-        assert_eq!(std::fs::read(&target).unwrap(), b"existing contents");
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
-    }
-
-    #[tokio::test]
-    async fn atomic_download_cancellation_keeps_existing_target_and_cleans_temporary_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("中文 %2F.txt");
-        std::fs::write(&target, b"keep old bytes").unwrap();
-        // A user's unrelated .part file must not be borrowed as our temporary.
-        std::fs::write(directory.path().join("中文 %2F.txt.part"), b"unrelated").unwrap();
-        let cancel = AtomicBool::new(false);
-        let mut source = Cursor::new(vec![1_u8; 100_000]);
-        let error = copy_atomic_download(
-            &mut source,
-            &target,
-            |_| {
-                cancel.store(true, Ordering::Relaxed);
-            },
-            &cancel,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.code(), CANCELLED_CODE);
-        assert_eq!(std::fs::read(&target).unwrap(), b"keep old bytes");
-        assert_eq!(
-            std::fs::read(directory.path().join("中文 %2F.txt.part")).unwrap(),
-            b"unrelated"
-        );
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
-    }
-
-    #[tokio::test]
-    async fn atomic_download_read_failure_keeps_old_file_after_partial_write() {
-        let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("existing");
-        std::fs::write(&target, b"old bytes").unwrap();
-        let mut source = Cursor::new(b"a partial new download".to_vec()).chain(FailingReader);
-        assert!(
-            copy_atomic_download(&mut source, &target, |_| {}, &AtomicBool::new(false))
-                .await
-                .is_err()
-        );
-        assert_eq!(std::fs::read(&target).unwrap(), b"old bytes");
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
-    }
-
-    struct FailingReader;
-    impl AsyncRead for FailingReader {
-        fn poll_read(
-            self: std::pin::Pin<&mut Self>,
-            _: &mut std::task::Context<'_>,
-            _: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("remote read failed")))
-        }
-    }
-
-    #[tokio::test]
-    async fn atomic_download_success_replaces_existing_file_with_exact_bytes() {
-        let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("literal%25 中文.txt");
-        std::fs::write(&target, b"old bytes").unwrap();
-        let expected = vec![42_u8; 100_000];
-        let mut source = Cursor::new(expected.clone());
-        let transferred =
-            copy_atomic_download(&mut source, &target, |_| {}, &AtomicBool::new(false))
-                .await
-                .unwrap();
-        assert_eq!(transferred, expected.len() as u64);
-        assert_eq!(std::fs::read(&target).unwrap(), expected);
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
-    }
-
-    #[tokio::test]
-    async fn atomic_download_failed_replace_keeps_existing_directory_and_cleans_temporary() {
-        let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("conflict");
-        std::fs::create_dir(&target).unwrap();
-        std::fs::write(target.join("important"), b"keep me").unwrap();
-        let mut source = Cursor::new(b"new bytes");
-        assert!(
-            copy_atomic_download(&mut source, &target, |_| {}, &AtomicBool::new(false))
-                .await
-                .is_err()
-        );
-        assert_eq!(std::fs::read(target.join("important")).unwrap(), b"keep me");
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
-    }
-
-    /// Both copy loops must move every byte intact and report monotonic progress
-    /// ending at the total. Driven over in-memory buffers — no SSH, no Tauri.
-    #[tokio::test]
-    async fn stream_download_copies_all_bytes_with_progress() {
-        let data: Vec<u8> = (0..100_000u32).map(|i| i as u8).collect();
-        let mut src = Cursor::new(data.clone());
-        let mut dst: Vec<u8> = Vec::new();
-        let mut ticks: Vec<u64> = Vec::new();
-        let cancel = AtomicBool::new(false);
-        let n = stream_download(&mut src, &mut dst, |t| ticks.push(t), &cancel)
-            .await
-            .unwrap();
-        assert_eq!(n, data.len() as u64);
-        assert_eq!(dst, data);
-        assert_eq!(*ticks.last().unwrap(), data.len() as u64);
-        assert!(ticks.windows(2).all(|w| w[0] < w[1]));
-    }
-
-    #[tokio::test]
-    async fn stream_download_finishes_buffered_writes_before_success() {
-        let data = b"the last chunk must reach the destination";
-        let mut src = Cursor::new(data);
-        let mut dst = tokio::io::BufWriter::with_capacity(128, Vec::new());
-        let cancel = AtomicBool::new(false);
-
-        let transferred = stream_download(&mut src, &mut dst, |_| {}, &cancel)
-            .await
-            .unwrap();
-
-        assert_eq!(transferred, data.len() as u64);
-        assert_eq!(dst.get_ref().as_slice(), data);
-    }
-
-    #[tokio::test]
-    async fn stream_download_propagates_errors_from_the_final_buffered_write() {
-        let (output, input) = tokio::io::duplex(64);
-        drop(input);
-        let mut src = Cursor::new(b"buffered until flush");
-        let mut dst = tokio::io::BufWriter::with_capacity(128, output);
-        let cancel = AtomicBool::new(false);
-
-        let error = stream_download(&mut src, &mut dst, |_| {}, &cancel)
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.code(), "io_error");
-    }
-
-    #[tokio::test]
-    async fn stream_upload_copies_all_bytes_with_progress() {
-        let data: Vec<u8> = (0..100_000u32).map(|i| (i * 7) as u8).collect();
-        let mut src = Cursor::new(data.clone());
-        let mut dst: Vec<u8> = Vec::new();
-        let mut ticks: Vec<u64> = Vec::new();
-        let cancel = AtomicBool::new(false);
-        let n = stream_upload(&mut src, &mut dst, |t| ticks.push(t), &cancel)
-            .await
-            .unwrap();
-        assert_eq!(n, data.len() as u64);
-        assert_eq!(dst, data);
-        assert_eq!(*ticks.last().unwrap(), data.len() as u64);
-    }
-
-    /// A pre-raised cancel flag must bail before writing a single byte, and the
-    /// error must carry CANCELLED_CODE so the frontend can tell cancel from fault.
-    #[tokio::test]
-    async fn stream_download_cancels_before_writing() {
-        let mut src = Cursor::new(vec![1u8; 100_000]);
-        let mut dst: Vec<u8> = Vec::new();
-        let cancel = AtomicBool::new(true);
-        let err = stream_download(&mut src, &mut dst, |_| {}, &cancel)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), CANCELLED_CODE);
-        assert!(dst.is_empty());
-    }
-
-    #[tokio::test]
-    async fn stream_upload_cancels_before_writing() {
-        let mut src = Cursor::new(vec![2u8; 100_000]);
-        let mut dst: Vec<u8> = Vec::new();
-        let cancel = AtomicBool::new(true);
-        let err = stream_upload(&mut src, &mut dst, |_| {}, &cancel)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), CANCELLED_CODE);
-        assert!(dst.is_empty());
     }
 }

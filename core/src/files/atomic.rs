@@ -1,5 +1,7 @@
 //! A download owns its temporary file until it commits or aborts.
 
+pub use super::partial::{local_file_id, normalized_destination, FileId, LocalPartial};
+
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 

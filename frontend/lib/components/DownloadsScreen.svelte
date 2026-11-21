@@ -2,7 +2,10 @@
     import { onMount } from "svelte";
     import * as transfers from "../stores/transfers.svelte.ts";
     import * as app from "../stores/app.svelte.ts";
-    import { t } from "../i18n/index.svelte.ts";
+    import { writeText } from "../clipboard.ts";
+    import SavedDownloads from "./SavedDownloads.svelte";
+    import { toast } from "../stores/toast.svelte.ts";
+    import { errMsg, t } from "../i18n/index.svelte.ts";
     import { createScopedBackHandler } from "../stores/back.svelte.ts";
 
     const registerBack = createScopedBackHandler();
@@ -37,6 +40,7 @@
     }
 
     function pct(t: transfers.Transfer): number {
+        if (t.status === "done") return 100;
         if (t.total <= 0) return 0;
         return Math.min(100, (t.transferred / t.total) * 100);
     }
@@ -88,17 +92,19 @@
         </div>
     </header>
 
-    {#if list.length === 0}
+    <div class="contents">
+    {#if list.length === 0 && !app.capabilities().sftpDownloadExport}
         <p class="empty">{t("downloads.empty")}</p>
-    {:else}
+    {:else if list.length}
         <ul class="list">
             {#each list as item (item.id)}
-                {@const showError = !!(item.error && item.status === "failed")}
+                {@const partialPath = item.kind === "upload" && (item.status === "failed" || item.status === "cancelled") ? item.partialPath : undefined}
+                {@const showError = !!item.error && item.status !== "cancelled"}
                 <li class="row surface-pressed"
                     class:failed={item.status === "failed"}
                     class:done={item.status === "done"}
                     class:cancelled={item.status === "cancelled"}
-                    class:has-error={showError}>
+                    class:has-error={showError || !!partialPath}>
                     <span class="kind" title={item.kind}>{item.kind === "download" ? "↓" : "↑"}</span>
 
                     <div class="name" title={item.kind === "download" ? item.remotePath : item.localPath}>
@@ -119,15 +125,19 @@
                         {formatSize(item.transferred)}{item.total > 0 ? ` / ${formatSize(item.total)}` : ""}
                     </div>
 
-                    <span class="status status-{item.status}">{t(`downloads.status.${item.status}`)}</span>
+                    <span class="status status-{item.status}">
+                        {#if item.status === "running" && item.phase === "verifying"}{t("downloads.verifying")}
+                        {:else if item.status === "running" && item.phase === "publishing"}{t("downloads.publishing")}
+                        {:else}{t(`downloads.status.${item.status}`)}{/if}
+                    </span>
 
                     <div class="row-actions">
                         {#if item.status === "running" || item.status === "queued"}
-                            <button class="btn btn-sm btn-ghost" onclick={() => transfers.cancel(item.id)}>
+                            <button class="btn btn-sm btn-ghost" disabled={item.cancelRequested || item.phase === "publishing"} onclick={() => transfers.cancel(item.id)}>
                                 {t("downloads.cancel")}
                             </button>
                         {/if}
-                        {#if item.status === "failed" || item.status === "cancelled"}
+                        {#if transfers.canRetry(item)}
                             <button class="btn btn-sm" onclick={() => transfers.retry(item.id)}>
                                 {t("downloads.retry")}
                             </button>
@@ -139,13 +149,28 @@
                         {/if}
                     </div>
 
-                    {#if showError}
-                        <div class="error">{item.error}</div>
+                    {#if showError || partialPath}
+                        <div class="details">
+                            {#if showError}<div class="error">{errMsg(item.error)}</div>{/if}
+                            {#if partialPath}
+                                <div>
+                                    {t("downloads.partial_path", { path: partialPath })}
+                                    <button class="btn btn-sm btn-ghost"
+                                        onclick={() => writeText(partialPath).catch(e => toast.error(errMsg(e)))}>
+                                        {t("sftp.ctx.copy_path")}
+                                    </button>
+                                </div>
+                            {/if}
+                        </div>
                     {/if}
                 </li>
             {/each}
         </ul>
     {/if}
+    {#if app.capabilities().sftpDownloadExport}
+        <SavedDownloads {formatSize}/>
+    {/if}
+    </div>
 </div>
 
 <style>
@@ -240,7 +265,9 @@
         display: flex;
         flex-direction: column;
         gap: 8px;
-        /* Popover height is bounded, so the list area scrolls independently. */
+    }
+
+    .contents {
         flex: 1 1 auto;
         overflow-y: auto;
         min-height: 0;
@@ -363,17 +390,21 @@
         display: flex;
         gap: 6px;
         justify-content: flex-end;
-        flex-wrap: nowrap;
+        flex-wrap: wrap;
     }
 
-    .error {
+    .details {
         grid-area: error;
+        user-select: text;
+        -webkit-user-select: text;
+        color: var(--text-sub);
         font-size: 11px;
-        color: var(--error);
         word-break: break-all;
         font-family: var(--term-font);
         padding-top: 4px;
     }
+
+    .error { color: var(--error); }
 
     .btn-ghost {
         background: transparent;

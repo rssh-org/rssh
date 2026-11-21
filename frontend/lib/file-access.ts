@@ -29,6 +29,22 @@ export function pickSavePath(defaultName: string): Promise<string | null> {
   return invoke("sftp_pick_save_path", { defaultName });
 }
 
+export interface SavedDownload {
+  name: string;
+  localPath: string;
+  size: number;
+  identity: string;
+  isBackup: boolean;
+}
+
+export function listDownloads(): Promise<SavedDownload[]> {
+  return invoke("sftp_list_downloads");
+}
+
+export function exportDownload({ localPath, identity }: SavedDownload): Promise<void> {
+  return invoke("sftp_export_download", { localPath, identity });
+}
+
 export function walkDirectory(localRoot: string): Promise<LocalWalkEntry[]> {
   return invoke("walk_local_dir", { localRoot });
 }

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::ai::session::DiagnoseSession;
@@ -127,10 +126,7 @@ pub struct AppState {
     /// Telnet is plain TCP — available on every platform, no mobile gate.
     pub telnet_sessions: Mutex<HashMap<String, TelnetHandle>>,
     pub sftp_sessions: Mutex<HashMap<String, Arc<SftpHandle>>>,
-    /// 进行中的 SFTP 传输 cancel flag：transfer_id → AtomicBool。
-    /// 用户在传输页点"取消"会把对应位置 1，streaming 循环每个 chunk 查一次，
-    /// 命中即提前 Err 退出。传输结束（成功 / 失败 / 取消）都从 map 里移除。
-    pub transfer_cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    pub transfers: Mutex<crate::commands::sftp::transfer::Transfers>,
     pub active_forwards: Mutex<HashMap<String, ForwardHandle>>,
     /// Keyboard-interactive prompt：prompt_id → owner/nonce/sender。
     pub auth_waiters: Mutex<HashMap<String, OwnedWaiter<Vec<String>>>>,
@@ -197,7 +193,7 @@ impl AppState {
             serial_backend: services.serial,
             telnet_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
-            transfer_cancels: Mutex::new(HashMap::new()),
+            transfers: Default::default(),
             active_forwards: Mutex::new(HashMap::new()),
             auth_waiters: Mutex::new(HashMap::new()),
             passphrase_waiters: Mutex::new(HashMap::new()),

@@ -33,6 +33,7 @@
 
     let {meta}: { meta: Record<string, string> } = $props();
 
+    const transferOrigin = $derived({ sessionId: meta.sessionId, tabId: meta.tabId, profileId: meta.profileId });
     let sftpId = $state<string | null>(null);
     let destroyed = false;
     let cwd = $state("/");
@@ -70,6 +71,9 @@
         return registerBack({ enabled: () => uploadMenuOpen, handle: closeUploadMenu });
     });
 
+    let appDownload = $state<RemoteEntry | null>(null);
+    let downloadName = $state("");
+
     /** Properties dialog state. */
     let propsStat = $state<FileStat | null>(null);
     let propsLoading = $state(false);
@@ -96,6 +100,10 @@
             if (meta.sessionId) {
                 // Reuse existing SSH connection — no re-authentication needed
                 id = await invoke<string>("sftp_connect_session", { sessionId: meta.sessionId });
+            } else if (meta.tabId) {
+                error = t("sftp.reconnect");
+                loading = false;
+                return;
             } else {
                 id = await invoke<string>("sftp_connect", {
                     host: meta.host, port: Number(meta.port),
@@ -182,7 +190,7 @@
         if (e.is_dir) { listDir(joinRemote(cwd, e.name)); return; }
         // Hosts without directory transfer have no batch-download toolbar;
         // clicking a file provides the single-file download affordance.
-        if (!canTransferDirectories) downloadEntry(e);
+        if (!canTransferDirectories) requestDownload(e);
     }
 
     /** Join a remote path: always '/'-separated, empty segments filtered,
@@ -347,7 +355,7 @@
                 }
                 const file = filesByName.get(path.relative_path)!;
                 await transfers.startDownload({
-                    sessionId: meta.sessionId,
+                    ...transferOrigin,
                     remotePath: file.remotePath,
                     localPath: path.location,
                     sizeHint: file.size,
@@ -395,11 +403,28 @@
         return { queued, walkErrors };
     }
 
-    async function downloadEntry(entry: RemoteEntry) {
+    function requestDownload(entry: RemoteEntry) {
+        closeCtxMenu();
+        if (!entry.is_dir && app.capabilities().sftpDownloadExport) {
+            downloadName = entry.name;
+            appDownload = entry;
+        } else {
+            void downloadEntry(entry);
+        }
+    }
+
+    function saveAppDownload() {
+        if (!appDownload || !downloadName.trim()) return;
+        const entry = appDownload;
+        appDownload = null;
+        void downloadEntry(entry, downloadName);
+    }
+
+    async function downloadEntry(entry: RemoteEntry, name = entry.name) {
         closeCtxMenu();
         error = "";
         notice = "";
-        if (!meta.sessionId) { error = "Missing SSH session"; return; }
+        if (!meta.sessionId) { error = t("sftp.reconnect"); return; }
         try {
             if (entry.is_dir) {
                 const dir = await fileAccess.pickDirectory(true);
@@ -408,10 +433,10 @@
                 if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
                 if (queued > 0) notice = t("sftp.queued_n", { n: queued });
             } else {
-                const localPath = await fileAccess.pickSavePath(entry.name);
+                const localPath = await fileAccess.pickSavePath(name);
                 if (!localPath) return;
                 await transfers.startDownload({
-                    sessionId: meta.sessionId,
+                    ...transferOrigin,
                     remotePath: entryPath(entry),
                     localPath,
                     sizeHint: entry.size,
@@ -481,7 +506,7 @@
     async function downloadSelected() {
         error = "";
         notice = "";
-        if (!meta.sessionId) { error = "Missing SSH session"; return; }
+        if (!meta.sessionId) { error = t("sftp.reconnect"); return; }
         if (selected.size === 0) return;
         const items = entries.filter(e => selected.has(e.name));
         try {
@@ -505,13 +530,13 @@
     async function uploadFiles() {
         error = "";
         notice = "";
-        if (!meta.sessionId) { error = "Missing SSH session"; return; }
+        if (!meta.sessionId) { error = t("sftp.reconnect"); return; }
         try {
             const files = await fileAccess.pickFiles();
             if (!files || files.length === 0) return;
             for (const file of files) {
                 await transfers.startUpload({
-                    sessionId: meta.sessionId,
+                    ...transferOrigin,
                     localPath:  file.location,
                     remotePath: joinRemote(cwd, uploadName(file)),
                 });
@@ -525,7 +550,7 @@
     async function uploadFolder() {
         error = "";
         notice = "";
-        if (!meta.sessionId) { error = "Missing SSH session"; return; }
+        if (!meta.sessionId) { error = t("sftp.reconnect"); return; }
         try {
             const dir = await fileAccess.pickDirectory(false);
             if (!dir) return;
@@ -534,7 +559,7 @@
             const folderName = uploadName(dir);
             for (const w of walked) {
                 await transfers.startUpload({
-                    sessionId: meta.sessionId,
+                    ...transferOrigin,
                     localPath:  w.local_path,
                     remotePath: joinRemote(cwd, folderName, w.rel_path),
                 });
@@ -550,12 +575,12 @@
     async function uploadFile() {
         error = "";
         notice = "";
-        if (!meta.sessionId) { error = "Missing SSH session"; return; }
+        if (!meta.sessionId) { error = t("sftp.reconnect"); return; }
         try {
             const src = await fileAccess.pickFile();
             if (!src) return;
             await transfers.startUpload({
-                sessionId: meta.sessionId,
+                ...transferOrigin,
                 localPath:  src.location,
                 remotePath: joinRemote(cwd, uploadName(src)),
             });
@@ -678,7 +703,7 @@
          bind:this={ctxMenuEl}
          style="left: {ctxMenu.x + ctxDx}px; top: {ctxMenu.y + ctxDy}px;">
         {#if !ctxMenu.entry.is_dir || canTransferDirectories}
-            <button class="ctx-item" onclick={() => downloadEntry(ctxMenu!.entry)}>{t("sftp.ctx.download")}</button>
+            <button class="ctx-item" onclick={() => requestDownload(ctxMenu!.entry)}>{t("sftp.ctx.download")}</button>
         {/if}
         <button class="ctx-item" onclick={() => confirmDelete(ctxMenu!.entry)}>{t("sftp.ctx.delete")}</button>
         <button class="ctx-item" onclick={() => startRename(ctxMenu!.entry)}>{t("sftp.ctx.rename")}</button>
@@ -688,6 +713,19 @@
         <div class="ctx-sep"></div>
         <button class="ctx-item" onclick={() => showProperties(ctxMenu!.entry)}>{t("sftp.ctx.properties")}</button>
     </div>
+{/if}
+
+{#if appDownload}
+    <Modal onClose={() => { appDownload = null; }}>
+        <label class="modal-title" for={`sftp-download-name-${meta.tabId}`}>{t("sftp.save_to_app")}</label>
+        <input id={`sftp-download-name-${meta.tabId}`} class="modal-input" bind:value={downloadName}
+            onkeydown={(e) => { if (e.key === "Enter") saveAppDownload(); }}/>
+        <p class="modal-text">{t("sftp.export_after_download")}</p>
+        <div class="modal-actions">
+            <button class="btn btn-sm" onclick={() => { appDownload = null; }}>{t("common.cancel")}</button>
+            <button class="btn btn-sm" disabled={!downloadName.trim()} onclick={saveAppDownload}>{t("sftp.ctx.download")}</button>
+        </div>
+    </Modal>
 {/if}
 
 {#if deleteEntry}

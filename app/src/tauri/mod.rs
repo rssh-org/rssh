@@ -386,11 +386,16 @@ pub fn run_with(
             commands::sftp::sftp_download_to,
             commands::sftp::sftp_upload_from,
             commands::sftp::sftp_pick_save_path,
+            #[cfg(any(android, ios, ohos))]
+            commands::sftp::sftp_list_downloads,
+            #[cfg(any(android, ios, ohos))]
+            commands::sftp::sftp_export_download,
             commands::sftp::sftp_pick_open_path,
             #[cfg(any(windows, macos, linux, ohos))]
             commands::sftp::sftp_pick_folder,
             commands::sftp::sftp_pick_open_files,
             commands::sftp::sftp_cancel_transfer,
+            commands::sftp::sftp_forget_transfer,
             commands::files::save_text_file,
             commands::sftp::sftp_remove,
             commands::sftp::sftp_rename,

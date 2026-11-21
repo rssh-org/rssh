@@ -1,8 +1,17 @@
 //! File access contract shared by commands and native backends.
 //! Locations stay opaque; the selected backend owns picker, authorization and I/O mechanics.
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
+#[cfg(any(
+    all(feature = "tauri", any(android, ios, ohos)),
+    all(test, any(linux, macos))
+))]
+pub(crate) mod download_library;
+#[cfg(all(feature = "tauri", ios))]
+mod ios_export;
+#[cfg(all(feature = "tauri", any(android, ios, ohos)))]
+pub(crate) mod mobile_download;
 #[cfg(not(ohos))]
 pub(crate) mod native;
 #[cfg(feature = "tauri")]
@@ -80,6 +89,10 @@ pub async fn download_target(
     app: &tauri::AppHandle,
     location: String,
 ) -> AppResult<DownloadTarget> {
+    #[cfg(any(android, ios, ohos))]
+    if let Some(path) = mobile_download::owned_destination(app, std::path::Path::new(&location))? {
+        return Ok(DownloadTarget::AtomicPath(path));
+    }
     platform(app).download_target(app, location).await
 }
 
@@ -170,7 +183,7 @@ pub enum ResolvedPath {
     },
     Failed {
         relative_path: String,
-        error: String,
+        error: AppError,
     },
 }
 
@@ -183,7 +196,7 @@ impl ResolvedPath {
             },
             Err(error) => Self::Failed {
                 relative_path,
-                error: error.to_string(),
+                error,
             },
         }
     }

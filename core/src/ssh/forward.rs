@@ -300,7 +300,7 @@ async fn connect_authed(
         timeout_secs,
     } = target;
     let log: LogFn = StdArc::new(|_: String| ());
-    let (mut handle, fwd_sender) = client::establish_via_chain(
+    let (mut handle, fwd_sender, _) = client::establish_via_chain(
         bastion_chain,
         profile,
         known_hosts_path,

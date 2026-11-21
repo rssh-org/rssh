@@ -3463,11 +3463,20 @@ mod tests {
             log: null_logger(),
             prompt_ctx: None,
         };
-        let (mut handle, _) = ssh_connect_stream(ctx, client, "download-test".into(), 22)
-            .await
-            .unwrap();
+        let (mut handle, _, fingerprint) =
+            ssh_connect_stream(ctx, client, "download-test".into(), 22)
+                .await
+                .unwrap();
         assert!(handle.authenticate_none("test").await.unwrap().success());
-        std::sync::Arc::new(tokio::sync::Mutex::new(handle))
+        crate::ssh::client::SshHandle::new(
+            handle,
+            crate::ssh::client::SshPeer {
+                host: "download-test".into(),
+                port: 22,
+                username: "test".into(),
+                fingerprint,
+            },
+        )
     }
 
     fn request_download(
@@ -3593,9 +3602,16 @@ mod tests {
                 ack: None,
             })
             .unwrap();
-        let partial_path = pending_path.with_extension("log.part");
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !partial_path.exists() {
+        let partial_path = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let mut entries = tokio::fs::read_dir(pending_path.parent().unwrap())
+                    .await
+                    .unwrap();
+                while let Some(entry) = entries.next_entry().await.unwrap() {
+                    if entry.path().extension().is_some_and(|ext| ext == "part") {
+                        return entry.path();
+                    }
+                }
                 tokio::task::yield_now().await;
             }
         })
@@ -3606,7 +3622,13 @@ mod tests {
             next_event(&mut events, "command_rejected").await["id"],
             "download-transferring"
         );
-        assert!(!partial_path.exists());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while partial_path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(std::fs::read(&pending_path).unwrap(), b"existing artifact");
 
         let shutdown = request_download(&session, "download-shutdown", "~/artifact.log");

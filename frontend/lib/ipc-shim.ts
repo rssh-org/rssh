@@ -190,6 +190,7 @@ export function installTauriShim(): void {
                 ...capabilities,
                 fileMultiSelect: capabilities.fileMultiSelect && hasPicker,
                 directoryTransfer: capabilities.directoryTransfer && hasPicker,
+                sftpDownloadExport: false,
                 nativeClipboard: false,
                 systemBack: false,
                 statusBarHidden: false,

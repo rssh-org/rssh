@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicBool;
+pub mod transfer;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -8,35 +8,6 @@ use crate::models::{Credential, CredentialType};
 use crate::ssh::sftp::{FileStat, RemoteEntry, SftpHandle, WalkEntry};
 use crate::state::AppState;
 use crate::state::SessionKind;
-
-/// RAII：注册 cancel flag 并在 drop 时自动 unregister，无论 streaming 正常返回、
-/// 早 `?`、还是 panic。替代旧的手写 register/unregister 配对。
-pub struct CancelGuard<'a> {
-    state: &'a AppState,
-    transfer_id: String,
-}
-
-impl<'a> CancelGuard<'a> {
-    /// 注册 flag。返回 (guard, flag)：guard 控生命周期，flag 喂给 streaming 函数。
-    /// `pub` 让 headless server 复用同一套 RAII 清理（drop 时 unregister，覆盖
-    /// 正常返回 / 早 `?` / panic 三种路径），避免手写 register/remove 漏删。
-    pub fn register(
-        state: &'a AppState,
-        transfer_id: String,
-    ) -> AppResult<(Self, Arc<AtomicBool>)> {
-        let flag = Arc::new(AtomicBool::new(false));
-        locked(&state.transfer_cancels)?.insert(transfer_id.clone(), flag.clone());
-        Ok((Self { state, transfer_id }, flag))
-    }
-}
-
-impl Drop for CancelGuard<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut m) = locked(&self.state.transfer_cancels) {
-            m.remove(&self.transfer_id);
-        }
-    }
-}
 
 pub async fn sftp_connect(
     owner: crate::state::SessionOwner,
@@ -178,12 +149,6 @@ pub fn local_open_error(error: AppError) -> AppError {
     }
 }
 
-/// Stream-download to a caller-supplied local target. transfer_id is used as the
-/// `sftp:progress:{transfer_id}` event suffix (R1) so the frontend listens
-/// per-transfer instead of multiplexing one global stream.
-
-/// Stream-upload from a caller-supplied local source. transfer_id mirrors above.
-
 pub async fn sftp_remove(state: &AppState, sftp_id: String, path: String) -> AppResult<()> {
     let h = get_sftp(&state, &sftp_id)?;
     h.remove(&path).await
@@ -202,16 +167,6 @@ pub async fn sftp_rename(
 pub async fn sftp_stat(state: &AppState, sftp_id: String, path: String) -> AppResult<FileStat> {
     let h = get_sftp(&state, &sftp_id)?;
     h.stat(&path).await
-}
-
-/// 用户在传输页点"取消"调用：把 transfer_id 对应的 cancel flag 置 1，
-/// streaming 循环下一次 chunk 检查时退出。
-pub fn sftp_cancel_transfer(state: &AppState, transfer_id: String) -> AppResult<()> {
-    use std::sync::atomic::Ordering;
-    if let Some(flag) = locked(&state.transfer_cancels)?.get(&transfer_id) {
-        flag.store(true, Ordering::SeqCst);
-    }
-    Ok(())
 }
 
 #[cfg(test)]

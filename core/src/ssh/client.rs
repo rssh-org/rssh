@@ -149,7 +149,32 @@ fn client_config_for_algorithms(
 }
 
 /// Shared SSH connection handle for opening new channels (SFTP, forwarding).
-pub type SshHandle = Arc<tokio::sync::Mutex<client::Handle<SshHandler>>>;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SshPeer {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub fingerprint: String,
+}
+
+#[derive(Clone)]
+pub struct SshHandle {
+    inner: Arc<tokio::sync::Mutex<client::Handle<SshHandler>>>,
+    pub(crate) peer: SshPeer,
+}
+
+impl SshHandle {
+    pub(crate) fn new(handle: client::Handle<SshHandler>, peer: SshPeer) -> Self {
+        Self {
+            inner: Arc::new(tokio::sync::Mutex::new(handle)),
+            peer,
+        }
+    }
+
+    pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, client::Handle<SshHandler>> {
+        self.inner.lock().await
+    }
+}
 
 // ---------------------------------------------------------------------------
 // SSH handler — known_hosts 验证（OpenSSH 标准格式）
@@ -160,6 +185,7 @@ pub struct SshHandler {
     port: u16,
     known_hosts_path: PathBuf,
     key_mismatch: Arc<StdMutex<bool>>,
+    handshake_key: Arc<OnceLock<String>>,
     /// Remote listening port -> consumer for forwarded channels on that port.
     forwarded_channels: ForwardedChannelRouter,
     /// Surface TOFU fingerprints / known_hosts write errors back to the user.
@@ -227,6 +253,8 @@ impl client::Handler for SshHandler {
         let path = self.known_hosts_path.clone();
         let alg = server_public_key.algorithm().as_str().to_string();
         let fp = server_public_key.fingerprint(HashAlg::Sha256).to_string();
+        // Consumed only after the handshake (including host verification) succeeds.
+        self.handshake_key.get_or_init(|| fp.clone());
         let pubkey = server_public_key.clone();
         let log = self.log.clone();
         let ctx = self.prompt_ctx.clone();
@@ -454,6 +482,7 @@ fn new_handler(
         port,
         known_hosts_path,
         key_mismatch: mismatch.clone(),
+        handshake_key: Arc::default(),
         forwarded_channels: fwd_channels.clone(),
         log,
         prompt_ctx,
@@ -488,27 +517,7 @@ pub async fn ssh_connect(
     host: String,
     port: u16,
 ) -> AppResult<client::Handle<SshHandler>> {
-    let DialCtx {
-        config,
-        known_hosts_path,
-        timeout_secs,
-        log,
-        prompt_ctx,
-    } = ctx;
-    let connect_timeout = Duration::from_secs(timeout_secs);
-    let (handler, mismatch, _fwd) = new_handler(&host, port, known_hosts_path, log, prompt_ctx);
-    match timeout(
-        connect_timeout,
-        client::connect(config, (host.as_str(), port), handler),
-    )
-    .await
-    {
-        Ok(result) => result.map_err(|e| map_connect_error(e, &host, port, &mismatch)),
-        Err(_) => Err(AppError::ssh(
-            "ssh_connect_timeout",
-            json!({ "host": host, "port": port, "secs": timeout_secs }),
-        )),
-    }
+    Ok(ssh_connect_with_forward(ctx, host, port).await?.0)
 }
 
 /// SSH connect that also returns the forwarded channel sender (for remote forwarding).
@@ -516,7 +525,7 @@ pub async fn ssh_connect_with_forward(
     ctx: DialCtx,
     host: String,
     port: u16,
-) -> AppResult<(client::Handle<SshHandler>, ForwardedChannelRouter)> {
+) -> AppResult<(client::Handle<SshHandler>, ForwardedChannelRouter, String)> {
     let DialCtx {
         config,
         known_hosts_path,
@@ -526,6 +535,7 @@ pub async fn ssh_connect_with_forward(
     } = ctx;
     let connect_timeout = Duration::from_secs(timeout_secs);
     let (handler, mismatch, fwd) = new_handler(&host, port, known_hosts_path, log, prompt_ctx);
+    let handshake_key = handler.handshake_key.clone();
     let handle = match timeout(
         connect_timeout,
         client::connect(config, (host.as_str(), port), handler),
@@ -540,7 +550,13 @@ pub async fn ssh_connect_with_forward(
             ))
         }
     };
-    Ok((handle, fwd))
+    let key = handshake_key.get().ok_or_else(|| {
+        AppError::ssh(
+            "ssh_connect_failed",
+            json!({"err": "missing handshake host key"}),
+        )
+    })?;
+    Ok((handle, fwd, key.clone()))
 }
 
 /// 在已有 stream 上建立 SSH 连接（用于堡垒机隧道）。同时返回 forward channel sender，
@@ -550,7 +566,7 @@ pub async fn ssh_connect_stream<S>(
     stream: S,
     host: String,
     port: u16,
-) -> AppResult<(client::Handle<SshHandler>, ForwardedChannelRouter)>
+) -> AppResult<(client::Handle<SshHandler>, ForwardedChannelRouter, String)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -563,6 +579,7 @@ where
     } = ctx;
     let connect_timeout = Duration::from_secs(timeout_secs);
     let (handler, mismatch, fwd) = new_handler(&host, port, known_hosts_path, log, prompt_ctx);
+    let handshake_key = handler.handshake_key.clone();
     let handle = match timeout(
         connect_timeout,
         client::connect_stream(config, stream, handler),
@@ -577,7 +594,13 @@ where
             ))
         }
     };
-    Ok((handle, fwd))
+    let key = handshake_key.get().ok_or_else(|| {
+        AppError::ssh(
+            "ssh_connect_failed",
+            json!({"err": "missing handshake host key"}),
+        )
+    })?;
+    Ok((handle, fwd, key.clone()))
 }
 
 /// 通过堡垒机链建立到 target 的 SSH 连接。链空则直连 target。
@@ -596,7 +619,7 @@ pub async fn establish_via_chain(
     timeout_secs: u64,
     log: LogFn,
     ctx: Option<&AuthCtx>,
-) -> AppResult<(client::Handle<SshHandler>, ForwardedChannelRouter)> {
+) -> AppResult<(client::Handle<SshHandler>, ForwardedChannelRouter, String)> {
     if bastion_chain.is_empty() {
         let target_host = target_profile.host.clone();
         let target_port = target_profile.port;
@@ -604,14 +627,14 @@ pub async fn establish_via_chain(
             "TCP connecting to {}:{} ...",
             target_host, target_port
         ));
-        let (h, fwd) = ssh_connect_with_forward(
+        let connection = ssh_connect_with_forward(
             dial_ctx_for_profile(&target_profile, &known_hosts_path, timeout_secs, &log, ctx),
             target_host,
             target_port,
         )
         .await?;
         log("TCP connected. SSH handshake OK.".to_owned());
-        return Ok((h, fwd));
+        return Ok(connection);
     }
 
     let mut hops = bastion_chain.into_iter();
@@ -655,7 +678,7 @@ pub async fn establish_via_chain(
             format!("{} → {}", prev_name, next_name),
         )
         .await?;
-        let (new_hop, _) = ssh_connect_stream(
+        let (new_hop, _, _) = ssh_connect_stream(
             dial_ctx_for_profile(&next_p, &known_hosts_path, timeout_secs, &log, ctx),
             tunnel.into_stream(),
             next_host,
@@ -1127,7 +1150,7 @@ pub async fn connect(params: ConnectParams) -> AppResult<ConnectResult> {
         owner: owner.clone(),
     });
 
-    let (mut handle, _fwd) = establish_via_chain(
+    let (mut handle, _fwd, fingerprint) = establish_via_chain(
         bastion_chain,
         profile.clone(),
         known_hosts_path,
@@ -1142,6 +1165,12 @@ pub async fn connect(params: ConnectParams) -> AppResult<ConnectResult> {
         credential.username,
         credential.credential_type.as_str()
     ));
+    let peer = SshPeer {
+        host: profile.host.clone(),
+        port: profile.port,
+        username: credential.username.clone(),
+        fingerprint,
+    };
     authenticate(&mut handle, credential, ctx.as_ref()).await?;
     log("Authenticated.".to_owned());
 
@@ -1169,7 +1198,7 @@ pub async fn connect(params: ConnectParams) -> AppResult<ConnectResult> {
     log("Shell ready.\r\n".to_owned());
 
     // Now wrap for downstream multiplexing (SFTP / forwarding share the conn).
-    let ssh_handle: SshHandle = Arc::new(tokio::sync::Mutex::new(handle));
+    let ssh_handle = SshHandle::new(handle, peer);
 
     let (tx, rx) = mpsc::unbounded_channel();
 

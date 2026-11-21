@@ -72,6 +72,14 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 [target.'cfg(not(any(target_os = "android", target_os = "ios", target_env = "ohos")))'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream", "system-proxy"] }
 
+# Exclusive rename is part of the local SFTP replacement protocol.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[target.'cfg(target_os = "windows")'.dependencies.windows-sys]
+version = "0.61"
+features = ["Win32_Storage_FileSystem"]
+
 # Raw termios access for the serial `xany` (IXANY) flag — the serialport crate
 # doesn't expose it. Only the Unix desktop targets compile the serial module.
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]

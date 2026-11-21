@@ -1197,16 +1197,14 @@ async fn dispatch_async(
             Ok(Value::Null)
         }
         "sftp_cancel_transfer" => {
-            use std::sync::atomic::Ordering;
-            let tid: String = arg(&args, "transferId")?;
-            if let Some(flag) = locked(&state.transfer_cancels)
+            locked(&state.transfers)
                 .map_err(err_value)?
-                .get(&tid)
-            {
-                flag.store(true, Ordering::SeqCst);
-            }
+                .cancel(owner, &arg::<String>(&args, "transferId")?);
             Ok(Value::Null)
         }
+        "sftp_forget_transfer" => ok(locked(&state.transfers)
+            .map_err(err_value)?
+            .forget(owner, &arg::<String>(&args, "transferId")?)),
         "sftp_remove" => {
             let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
             ok(h.remove(&arg::<String>(&args, "path")?).await)
@@ -1223,47 +1221,38 @@ async fn dispatch_async(
             let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
             ok(h.stat(&arg::<String>(&args, "path")?).await)
         }
-        "sftp_download_to" => {
-            let sftp = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
-            let remote_path: String = arg(&args, "remotePath")?;
+        "sftp_download_to" | "sftp_upload_from" => {
+            use crate::commands::sftp::transfer::{Attempt, Direction, Request};
             let local_path: String = arg(&args, "localPath")?;
-            let transfer_id: String = arg(&args, "transferId")?;
-            // RAII: unregisters the cancel flag on return / `?` / panic (matches desktop).
-            let (_guard, flag) =
-                crate::commands::sftp::CancelGuard::register(state, transfer_id.clone())
-                    .map_err(err_value)?;
+            let direction = if cmd == "sftp_download_to" {
+                Direction::Download
+            } else {
+                Direction::Upload
+            };
+            let request = Request {
+                transfer_id: arg(&args, "transferId")?,
+                original_session_id: args
+                    .get("originalSessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                remote_path: arg(&args, "remotePath")?,
+                local_path: local_path.clone(),
+                direction,
+            };
+            let attempt = Attempt::begin(state, owner, &arg::<String>(&args, "sftpId")?, request)
+                .map_err(err_value)?;
             let host = headless_host(state, tx);
-            ok(sftp
-                .download_streaming(
-                    &remote_path,
-                    std::path::Path::new(&local_path),
-                    &host,
-                    &transfer_id,
-                    flag,
-                )
-                .await
-                .map(|_| ()))
-        }
-        "sftp_upload_from" => {
-            let sftp = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
-            let local_path: String = arg(&args, "localPath")?;
-            let remote_path: String = arg(&args, "remotePath")?;
-            let transfer_id: String = arg(&args, "transferId")?;
-            let (_guard, flag) =
-                crate::commands::sftp::CancelGuard::register(state, transfer_id.clone())
-                    .map_err(err_value)?;
-            let host = headless_host(state, tx);
-            // Headless server runs on a real host filesystem (never Android), so
-            // open the local path directly as the upload reader. `upload_streaming`
-            // now takes (reader, total, …) — mirror of commands::sftp::sftp_upload_from.
-            let mut reader = tokio::fs::File::open(&local_path)
-                .await
-                .map_err(|e| err_value(AppError::from(e)))?;
-            let total = reader.metadata().await.map(|m| m.len()).unwrap_or(0);
-            ok(sftp
-                .upload_streaming(&mut reader, total, &remote_path, &host, &transfer_id, flag)
-                .await
-                .map(|_| ()))
+            match direction {
+                Direction::Download => ok(attempt
+                    .download(&host, std::path::Path::new(&local_path))
+                    .await),
+                Direction::Upload => {
+                    let mut source = tokio::fs::File::open(local_path).await.map_err(|e| {
+                        err_value(crate::commands::sftp::local_open_error(e.into()))
+                    })?;
+                    ok(attempt.upload(&host, &mut source).await)
+                }
+            }
         }
 
         // ---- AI (settings + models + sessions + messaging + skills + audit) ----
@@ -2062,7 +2051,7 @@ mod tests {
             telnet_sessions: Mutex::new(HashMap::new()),
             ssm_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
-            transfer_cancels: Mutex::new(HashMap::new()),
+            transfers: Default::default(),
             active_forwards: Mutex::new(HashMap::new()),
             auth_waiters: Mutex::new(HashMap::new()),
             passphrase_waiters: Mutex::new(HashMap::new()),

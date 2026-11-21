@@ -10,9 +10,12 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { errMsg } from "../i18n/index.svelte.ts";
+import * as app from "./app.svelte.ts";
+import { toast } from "./toast.svelte.ts";
+import { errCoded, errMsg, t } from "../i18n/index.svelte.ts";
 
 export type TransferKind = "download" | "upload";
+type TransferPhase = "verifying" | "transferring" | "publishing";
 export type TransferStatus = "queued" | "running" | "done" | "failed" | "cancelled";
 
 /// Global concurrency cap: at most N running transfers at a time; the rest
@@ -69,35 +72,61 @@ export async function setMaxConcurrent(n: number): Promise<void> {
   }
 }
 
-/// 后端用这个 i18n code 标记"用户主动取消"。errStr 包含 `__rssh_err__|{"code":"transfer_cancelled",...}`
-/// 时识别为 cancelled。对应 core/src/ssh/sftp.rs::CANCELLED_CODE，前后端必须保持一致。
-const CANCELLED_TAG = "transfer_cancelled";
+interface TransferOrigin {
+  sessionId: string;
+  tabId?: string;
+  profileId?: string;
+}
 
-export interface Transfer {
+interface TransferFiles extends TransferOrigin {
+  localPath: string;
+  remotePath: string;
+}
+
+export interface Transfer extends TransferFiles {
   id: string;
   kind: TransferKind;
-  sessionId: string;
-  remotePath: string;
-  localPath: string;
+  attempt: number;
+  cancelRequested?: boolean;
   total: number;
   transferred: number;
   status: TransferStatus;
+  phase?: TransferPhase;
+  partialPath?: string;
+  backupPath?: string;
   error?: string;
   startedAt: number;
   finishedAt?: number;
 }
 
 let _list = $state<Transfer[]>([]);
+let _downloadRevision = $state(0);
+
+/** A download attempt may publish a file or leave a backup, even on failure. */
+export function downloadRevision(): number { return _downloadRevision; }
 
 interface ProgressPayload {
+  phase?: TransferPhase;
+  partialPath?: string;
+  backupPath?: string;
   transferred: number;
   total: number;
 }
 
-async function attachProgressListener(id: string): Promise<UnlistenFn> {
+async function attachProgressListener(id: string, attempt: number): Promise<UnlistenFn> {
+  let firstProgress = true;
   return await listen<ProgressPayload>(`sftp:progress:${id}`, (ev) => {
     const t = _list.find((x) => x.id === id);
-    if (!t) return;
+    if (t?.status !== "running" || t.attempt !== attempt) return;
+    if (firstProgress) {
+      firstProgress = false;
+      // Independent IPC calls may deliver Cancel before the backend registers
+      // this attempt. Its first progress event acknowledges registration.
+      if (t.cancelRequested && ev.payload.phase !== "publishing") void sendCancel(t);
+    }
+    if (ev.payload.backupPath) t.backupPath = ev.payload.backupPath;
+    if (ev.payload.partialPath) t.partialPath = ev.payload.partialPath;
+    t.phase = ev.payload.phase ?? "transferring";
     t.transferred = ev.payload.transferred;
     t.total = ev.payload.total;
   });
@@ -146,119 +175,120 @@ function promoteNextQueued(): void {
   }
 }
 
-async function runTransfer(id: string): Promise<void> {
-  const snap = find(id);
-  if (!snap) return;
-  let mySftpId: string | null = null;
-  // listener 必须先 attach 后再 invoke：避免后端 emit 早于前端 listen 时丢首批事件。
-  // 如果 listen() 本身就失败（事件系统没就绪等罕见情况），把 transfer 标 failed
-  // 并退出 —— 不能让 attachProgressListener 抛出未捕获 rejection（caller 只 void 了）。
-  let unlisten: UnlistenFn;
-  try {
-    unlisten = await attachProgressListener(id);
-  } catch (e) {
-    const cur = find(id);
-    if (cur) {
-      cur.status = "failed";
-      cur.error = errMsg(e);
-      cur.finishedAt = Date.now();
+// A queued first attempt stays bound to the selected SSH connection. On
+// retry the backend compares the new session's authenticated peer and account
+// with the transfer checkpoint before it permits any file access.
+function sessionForAttempt(item: Transfer): string {
+  if (item.attempt === 1 || !item.tabId) return item.sessionId;
+  const current = app.sessionIdForTab(item.tabId);
+  if (current) return current;
+  if (item.profileId) {
+    for (const tab of app.tabs()) {
+      if (tab.type !== "ssh" || tab.meta?.profileId !== item.profileId) continue;
+      const session = app.sessionIdForTab(tab.id);
+      if (session) return session;
     }
-    // This early-return bypasses the try/finally below, so we must promote
-    // the next queued transfer here — otherwise this slot stays "taken" by
-    // a failed transfer and the queue stalls until something else finishes.
-    promoteNextQueued();
-    return;
   }
+  throw new Error(t("sftp.reconnect"));
+}
+
+async function runTransfer(id: string): Promise<void> {
+  const item = find(id);
+  if (!item) return;
+  let sftpId: string | undefined;
+  let unlisten: UnlistenFn | undefined;
   try {
-    mySftpId = await invoke<string>("sftp_connect_session", { sessionId: snap.sessionId });
-    if (snap.kind === "download") {
-      await invoke("sftp_download_to", {
-        sftpId: mySftpId,
-        remotePath: snap.remotePath,
-        localPath: snap.localPath,
-        transferId: id,
+    unlisten = await attachProgressListener(id, item.attempt);
+    if (!item.cancelRequested) {
+      sftpId = await invoke<string>("sftp_connect_session", { sessionId: sessionForAttempt(item) });
+    }
+    if (item.cancelRequested) {
+      item.status = "cancelled";
+      return;
+    }
+    const command = item.kind === "download" ? "sftp_download_to" : "sftp_upload_from";
+    const bytes = await invoke<number>(command, {
+      sftpId,
+      remotePath: item.remotePath,
+      localPath: item.localPath,
+      transferId: id,
+      originalSessionId: item.sessionId,
+    });
+    item.transferred = bytes;
+    item.total = bytes;
+    item.status = "done";
+  } catch (error) {
+    const code = errCoded(error)?.code;
+    if (!code && item.phase === "publishing" && item.backupPath) {
+      const path = item.kind === "download" ? item.localPath : item.remotePath;
+      item.error = "__rssh_err__|" + JSON.stringify({
+        code: "sftp_commit_uncertain", params: { path, backup: item.backupPath },
       });
     } else {
-      await invoke("sftp_upload_from", {
-        sftpId: mySftpId,
-        localPath: snap.localPath,
-        remotePath: snap.remotePath,
-        transferId: id,
-      });
+      item.error = error instanceof Error ? error.message : String(error);
     }
-    const cur = find(id);
-    if (cur) {
-      cur.status = "done";
-      if (cur.total > 0) cur.transferred = cur.total;
-      cur.finishedAt = Date.now();
-    }
-  } catch (e) {
-    // 先用裸 String(e) 识别 cancel 标记（协议串），再用 errMsg(e) 翻译展示。
-    const rawStr = String(e);
-    const cur = find(id);
-    if (cur) {
-      cur.status = rawStr.includes(CANCELLED_TAG) ? "cancelled" : "failed";
-      cur.error = errMsg(e);
-      cur.finishedAt = Date.now();
-    }
+    if (code === "transfer_cancelled") item.status = "cancelled";
+    else if (code === "sftp_backup_cleanup_failed") item.status = "done";
+    else item.status = "failed";
   } finally {
-    unlisten();
-    if (mySftpId) invoke("sftp_close", { sftpId: mySftpId }).catch(() => {});
+    item.finishedAt = Date.now();
+    if (item.kind === "download") _downloadRevision++;
+    unlisten?.();
+    if (sftpId) void invoke("sftp_close", { sftpId }).catch((error) => {
+      console.warn("[sftp] close transfer connection:", error);
+    });
     promoteNextQueued();
   }
 }
 
-export async function startDownload(args: {
-  sessionId: string;
-  remotePath: string;
-  localPath: string;
-  sizeHint?: number;
-}): Promise<string> {
+function enqueue(kind: TransferKind, files: TransferFiles, sizeHint: number): string {
   const id = crypto.randomUUID();
-  const t: Transfer = {
+  _list.unshift({
     id,
-    kind: "download",
-    sessionId: args.sessionId,
-    remotePath: args.remotePath,
-    localPath: args.localPath,
-    total: args.sizeHint ?? 0,
+    kind,
+    sessionId: files.sessionId,
+    tabId: files.tabId,
+    profileId: files.profileId,
+    localPath: files.localPath,
+    remotePath: files.remotePath,
+    attempt: 1,
+    total: sizeHint,
     transferred: 0,
     status: "queued",
     startedAt: Date.now(),
-  };
-  _list.unshift(t);
+  });
   tryDispatch(id);
   return id;
 }
 
-export async function startUpload(args: {
-  sessionId: string;
-  localPath: string;
-  remotePath: string;
-}): Promise<string> {
-  const id = crypto.randomUUID();
-  const t: Transfer = {
-    id,
-    kind: "upload",
-    sessionId: args.sessionId,
-    remotePath: args.remotePath,
-    localPath: args.localPath,
-    total: 0,
-    transferred: 0,
-    status: "queued",
-    startedAt: Date.now(),
-  };
-  _list.unshift(t);
-  tryDispatch(id);
-  return id;
+export async function startDownload(args: TransferFiles & { sizeHint?: number }): Promise<string> {
+  return enqueue("download", args, args.sizeHint ?? 0);
+}
+
+export async function startUpload(args: TransferFiles): Promise<string> {
+  return enqueue("upload", args, 0);
+}
+
+// Once publication has an uncertain outcome the reported paths are needed
+// for recovery. Re-running the copy could overwrite the only original.
+const inspectBeforeRetry = new Set([
+  "sftp_publish_failed", "sftp_backup_failed", "sftp_replace_failed",
+  "sftp_commit_uncertain", "sftp_backup_changed", "sftp_transfer_reconnect_required",
+]);
+
+export function canRetry(item: Transfer): boolean {
+  return item.status === "cancelled" ||
+    (item.status === "failed" && !inspectBeforeRetry.has(errCoded(item.error)?.code ?? ""));
 }
 
 export async function retry(id: string): Promise<void> {
   const t = find(id);
-  if (!t || t.status === "running" || t.status === "queued") return;
+  if (!t || !canRetry(t)) return;
   t.status = "queued";
   t.error = undefined;
-  t.transferred = 0;
+  t.attempt++;
+  t.cancelRequested = false;
+  t.phase = undefined;
   t.startedAt = Date.now();
   t.finishedAt = undefined;
   tryDispatch(id);
@@ -276,18 +306,42 @@ export async function cancel(id: string): Promise<void> {
     t.finishedAt = Date.now();
     return;
   }
-  if (t.status !== "running") return;
+  if (t.status !== "running" || t.cancelRequested || t.phase === "publishing") return;
+  t.cancelRequested = true;
+  await sendCancel(t);
+}
+
+async function sendCancel(t: Transfer): Promise<void> {
+  const attempt = t.attempt;
   try {
-    await invoke("sftp_cancel_transfer", { transferId: id });
+    await invoke("sftp_cancel_transfer", { transferId: t.id });
   } catch (e) {
-    console.error("[transfers] cancel failed:", e);
+    if (t.status === "running" && t.attempt === attempt) {
+      t.cancelRequested = false;
+      toast.error(errMsg(e));
+    }
   }
 }
 
+function isFinished(item: Transfer): boolean {
+  return item.status !== "running" && item.status !== "queued";
+}
+
+function forget(id: string): void {
+  // The host discards only its in-memory checkpoint. Files retained for
+  // recovery remain at the paths shown in the transfer error.
+  void invoke("sftp_forget_transfer", { transferId: id }).catch((error) => toast.error(errMsg(error)));
+}
+
 export function remove(id: string): void {
+  const item = find(id);
+  if (!item || !isFinished(item)) return;
   _list = _list.filter((t) => t.id !== id);
+  forget(id);
 }
 
 export function clearFinished(): void {
-  _list = _list.filter((t) => t.status === "running" || t.status === "queued");
+  const finished = _list.filter(isFinished);
+  _list = _list.filter((t) => !isFinished(t));
+  for (const item of finished) forget(item.id);
 }
