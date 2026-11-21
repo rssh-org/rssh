@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 thiserror = "2"
 rusqlite = { workspace = true, features = ["bundled"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
@@ -104,4 +105,3 @@ keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [dev-dependencies]
 mockito = "1.7.2"
-tempfile = { workspace = true }

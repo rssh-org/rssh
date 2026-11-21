@@ -101,7 +101,7 @@ Add monitoring, custom tools or a terminal pet in a side panel or status strip. 
 - **Session Recording** -- asciicast v2 format, variable-speed playback
 - **Connections & Credentials** -- SQLite storage, import from `~/.ssh/config`
 - **Security & Sync** -- secrets encrypted locally with ChaCha20-Poly1305, master key in the platform keychain when available, selective remote sync, encrypted backup to your own GitHub repo or WebDAV server
-- **Snippets** -- reusable command shortcuts (Cmd+E)
+- **Snippets** -- save selected terminal text from the context menu. In Settings → Snippets, register matching text such as `nginx` and an optional default. Enter a value once to replace every exact match when sending.
 - **Responsive Layout** -- navigation follows window width; Android, iOS and HarmonyOS phones/tablets show a virtual keybar (Ctrl/Alt/arrows/Tab/Esc) at every width
 - **IDE Plugin** -- run RSSH inside JetBrains IDEs in a tool window (shared data dir)
 

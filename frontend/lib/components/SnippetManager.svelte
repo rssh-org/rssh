@@ -1,120 +1,206 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
-  import type { Snippet } from "../stores/app.svelte.ts";
+  import { onMount, tick } from "svelte";
   import * as app from "../stores/app.svelte.ts";
+  import { snippetPreview, type Snippet, type SnippetParameter } from "../terminal/snippet-parameters";
   import { toast } from "../stores/toast.svelte.ts";
-  import { t, errMsg } from "../i18n/index.svelte.ts";
+  import { t, errCoded, errMsg } from "../i18n/index.svelte.ts";
   import AppIcon from "./AppIcon.svelte";
 
   let snippets = $state<Snippet[]>([]);
-  let adding = $state(false);
-  let editIdx = $state<number | null>(null);
+  let ready = $state(false);
+  let writing = $state(false);
+  let loadError = $state("");
+  let conflict = $state("");
 
-  // Form fields
-  let formName = $state("");
-  let formCmd = $state("");
+  let editing = $state<number | "new" | null>(null);
+  let name = $state("");
+  let command = $state("");
+  let parameters = $state<SnippetParameter[]>([]);
+  let textarea: HTMLTextAreaElement;
+  let highlights: HTMLSpanElement;
+  let addButton: HTMLButtonElement;
+  let parameterRows: HTMLDivElement;
+  let useCommandSelection = false;
+  let names = $derived(parameters.map(parameter => parameter.name));
+  let commandParts = $derived.by(() => {
+    const parts = snippetPreview({ name, command, parameters });
+    return parts.map((part, index) => {
+      // The textarea shows one newline even if a match boundary splits a CRLF pair.
+      const splitCRLF = part.text.endsWith("\r") && parts[index + 1]?.text.startsWith("\n");
+      return { ...part, text: textareaValue(splitCRLF ? part.text.slice(0, -1) : part.text) };
+    });
+  });
+  let duplicate = $derived(new Set(names).size !== names.length);
+  let canSave = $derived(ready && !writing && !conflict && name.trim() && command.trim() &&
+    !duplicate && names.every(name => name.length > 0));
 
   onMount(refresh);
 
   async function refresh() {
-    snippets = await app.loadSnippets();
-  }
-
-  function startAdd() {
-    adding = true;
-    editIdx = null;
-    formName = "";
-    formCmd = "";
-  }
-
-  function startEdit(idx: number) {
-    adding = false;
-    editIdx = idx;
-    formName = snippets[idx].name;
-    formCmd = snippets[idx].command;
-  }
-
-  function cancelForm() {
-    adding = false;
-    editIdx = null;
-  }
-
-  async function saveNew() {
-    const name = formName.trim();
-    const cmd = formCmd.trim();
-    if (!name || !cmd) return;
-    const next = [...snippets, { name, command: cmd }];
+    ready = false;
+    loadError = "";
     try {
-      await invoke("save_snippets", { snippets: next });
-      adding = false;
-      await refresh();
-    } catch (e: any) { toast.error(`${t("toast.error.save")}: ${errMsg(e)}`); }
+      snippets = await app.loadSnippets();
+      ready = true;
+      conflict = "";
+      editing = null;
+    } catch (error) {
+      loadError = errMsg(error);
+    }
   }
 
-  async function saveEdit() {
-    if (editIdx === null) return;
-    const name = formName.trim();
-    const cmd = formCmd.trim();
-    if (!name || !cmd) return;
-    const next = [...snippets];
-    next[editIdx] = { name, command: cmd };
-    try {
-      await invoke("save_snippets", { snippets: next });
-      editIdx = null;
-      await refresh();
-    } catch (e: any) { toast.error(`${t("toast.error.save")}: ${errMsg(e)}`); }
+  function startEdit(index: number | "new") {
+    const original = index === "new" ? undefined : snippets[index];
+    name = original?.name ?? "";
+    command = original?.command ?? "";
+    parameters = (original?.parameters ?? []).map(parameter => ({ ...parameter }));
+    useCommandSelection = false;
+    editing = index;
   }
 
-  async function remove(idx: number) {
-    const next = snippets.filter((_, i) => i !== idx);
+  // Textarea values and selections use LF even when an imported snippet uses CRLF or CR.
+  function textareaValue(text: string): string {
+    return text.replace(/\r\n?/g, "\n");
+  }
+
+  function sourceOffset(text: string, displayOffset: number): number {
+    let offset = displayOffset;
+    for (let crlf = text.indexOf("\r\n"); crlf >= 0 && crlf < offset; crlf = text.indexOf("\r\n", crlf + 2)) {
+      offset++;
+    }
+    return offset;
+  }
+
+  function editedText(previous: string, value: string): string {
+    if (!previous.includes("\r")) return value;
+    const display = textareaValue(previous);
+    if (display === value) return previous;
+
+    // Splice the edit into the source, preserving untouched line endings and
+    // literal match texts even when the user edits another part of the command.
+    let start = 0;
+    while (start < display.length && start < value.length && display[start] === value[start]) start++;
+    let oldEnd = display.length;
+    let newEnd = value.length;
+    while (oldEnd > start && newEnd > start && display[oldEnd - 1] === value[newEnd - 1]) {
+      oldEnd--;
+      newEnd--;
+    }
+    return previous.slice(0, sourceOffset(previous, start)) + value.slice(start, newEnd) +
+      previous.slice(sourceOffset(previous, oldEnd));
+  }
+
+  function syncHighlightScroll() {
+    highlights.scrollTop = textarea.scrollTop;
+    highlights.scrollLeft = textarea.scrollLeft;
+  }
+
+  async function addParameter() {
+    const { selectionStart, selectionEnd } = textarea;
+    const text = useCommandSelection && selectionStart !== selectionEnd
+      ? command.slice(sourceOffset(command, selectionStart), sourceOffset(command, selectionEnd))
+      : "";
+    let index = parameters.findIndex(parameter => parameter.name === text);
+    if (index < 0) {
+      index = parameters.length;
+      parameters.push({ name: text, defaultValue: null });
+    }
+    await tick();
+    const row = parameterRows.children[index];
+    const input = row?.querySelector<HTMLTextAreaElement>(text ? ".parameter-default" : ".parameter-name");
+    input?.focus();
+    input?.select();
+  }
+
+  async function update(snippet: Snippet | null, index?: number) {
+    if (!ready || writing || conflict) return;
+    writing = true;
     try {
-      await invoke("save_snippets", { snippets: next });
-      if (editIdx === idx) editIdx = null;
-      else if (editIdx !== null && editIdx > idx) editIdx -= 1;
-      await refresh();
-    } catch (e: any) { toast.error(`${t("toast.error.delete")}: ${errMsg(e)}`); }
+      const target = index === undefined ? undefined : { index, previous: snippets[index] };
+      snippets = await app.updateSnippet(snippet, target);
+      editing = null;
+    } catch (error) {
+      if (errCoded(error)?.code === "snippet_changed") conflict = errMsg(error);
+      else toast.error(errMsg(error));
+    } finally {
+      writing = false;
+    }
+  }
+
+  function save() {
+    if (!canSave || editing === null) return;
+    void update({ name: name.trim(), command, ...(parameters.length ? { parameters } : {}) },
+      editing === "new" ? undefined : editing);
   }
 </script>
 
+{#snippet editor()}
+  <div class="card inline-form" onfocusin={event => {
+    if (event.target !== addButton) useCommandSelection = event.target === textarea;
+  }}>
+    <label>
+      <span>{t("common.name")}</span>
+      <input type="text" bind:value={name} placeholder={t("snippet.name_placeholder")} />
+    </label>
+    <label>
+      <span>{t("snippet.command")}</span>
+      <span class="command-editor">
+        <textarea rows="3" spellcheck={false} bind:this={textarea} value={textareaValue(command)}
+          onscroll={syncHighlightScroll}
+          oninput={event => { command = editedText(command, event.currentTarget.value); }}
+          placeholder={t("snippet.command_placeholder")}></textarea>
+        <span class="command-highlights" aria-hidden="true" bind:this={highlights}>{#each commandParts as part}<span class:parameter-match={!!part.parameterName}>{part.text}</span>{/each}</span>
+      </span>
+    </label>
+    <div class="parameter-header">
+      <span>{t("snippet.editor.parameters")}</span>
+      <button class="btn btn-sm" bind:this={addButton} onclick={addParameter}>{t("snippet.editor.add")}</button>
+    </div>
+    <p class="hint">{t("snippet.editor.hint")}</p>
+    <div class="parameter-rows" bind:this={parameterRows}>
+      {#each parameters as parameter, index (index)}
+        <div class="parameter-row">
+          <label>
+            <span>{t("snippet.editor.name")}</span>
+            <textarea class="parameter-name" rows="1" spellcheck={false} value={textareaValue(parameter.name)}
+              oninput={event => { parameter.name = editedText(parameter.name, event.currentTarget.value); }}></textarea>
+          </label>
+          <label>
+            <span>{t("snippet.editor.default")}</span>
+            <textarea class="parameter-default" rows="1" spellcheck={false} value={textareaValue(parameter.defaultValue ?? "")}
+              oninput={event => { parameter.defaultValue = editedText(parameter.defaultValue ?? "", event.currentTarget.value) || null; }}
+              placeholder={t("snippet.editor.required_hint")}></textarea>
+          </label>
+          <button class="btn btn-sm btn-icon" title={t("common.delete")}
+            aria-label={t("common.delete") + " · " + (parameter.name || t("snippet.editor.name"))}
+            onclick={() => parameters.splice(index, 1)}><AppIcon name="trash" size={16} /></button>
+        </div>
+      {/each}
+    </div>
+    {#if duplicate}<span class="hint" role="alert">{t("snippet.editor.duplicate")}</span>{/if}
+    <div class="actions">
+      <button class="btn btn-accent btn-sm" disabled={!canSave} onclick={save}>{t("common.save")}</button>
+      <button class="btn btn-sm" disabled={writing} onclick={() => { editing = null; }}>{t("common.cancel")}</button>
+    </div>
+  </div>
+{/snippet}
+
 <div class="page">
   <div class="toolbar">
-    <button class="btn btn-accent btn-sm" onclick={startAdd}>{t("snippet.new")}</button>
+    <button class="btn btn-accent btn-sm" onclick={() => startEdit("new")} disabled={!ready || writing || !!conflict}>{t("snippet.new")}</button>
   </div>
-
-  {#if adding}
-    <div class="card inline-form">
-      <label>
-        <span class="label-text">{t("common.name")}</span>
-        <input type="text" bind:value={formName} placeholder={t("snippet.name_placeholder")} />
-      </label>
-      <label>
-        <span class="label-text">{t("snippet.command")}</span>
-        <textarea bind:value={formCmd} placeholder={t("snippet.command_placeholder")} rows="2"></textarea>
-      </label>
-      <div class="form-actions">
-        <button class="btn btn-accent btn-sm" onclick={saveNew} disabled={!formName.trim() || !formCmd.trim()}>{t("common.save")}</button>
-        <button class="btn btn-sm" onclick={cancelForm}>{t("common.cancel")}</button>
-      </div>
+  {#if loadError || conflict}
+    <div class="actions" role="alert">
+      <span>{loadError || conflict}</span>
+      <button class="btn btn-sm" onclick={refresh} disabled={!ready && !loadError}>
+        {conflict ? t("snippet.editor.reload") : t("common.retry")}
+      </button>
     </div>
   {/if}
-
+  {#if editing === "new"}{@render editor()}{/if}
   {#each snippets as s, i (i)}
-    {#if editIdx === i}
-      <div class="card inline-form">
-        <label>
-          <span class="label-text">{t("common.name")}</span>
-          <input type="text" bind:value={formName} />
-        </label>
-        <label>
-          <span class="label-text">{t("snippet.command")}</span>
-          <textarea bind:value={formCmd} rows="2"></textarea>
-        </label>
-        <div class="form-actions">
-          <button class="btn btn-accent btn-sm" onclick={saveEdit} disabled={!formName.trim() || !formCmd.trim()}>{t("common.save")}</button>
-          <button class="btn btn-sm" onclick={cancelForm}>{t("common.cancel")}</button>
-        </div>
-      </div>
+    {#if editing === i}
+      {@render editor()}
     {:else}
       <div class="card item-row">
         <div class="item-info">
@@ -122,27 +208,17 @@
           <div class="item-sub" title={s.command}>{s.command}</div>
         </div>
         <div class="item-actions">
-          <button
-            class="btn btn-sm btn-icon"
-            title={t("common.edit")}
-            aria-label={`${t("common.edit")} ${s.name}`}
-            onclick={() => startEdit(i)}
-          >
-            <AppIcon name="edit" size={16} />
-          </button>
-          <button
-            class="btn btn-sm btn-icon btn-danger"
-            title={t("common.delete")}
-            aria-label={`${t("common.delete")} ${s.name}`}
-            onclick={() => remove(i)}
-          >
-            <AppIcon name="trash" size={16} />
-          </button>
+          <button class="btn btn-sm btn-icon" title={t("common.edit")} aria-label={t("common.edit") + " " + s.name}
+            onclick={() => startEdit(i)} disabled={writing || !!conflict}><AppIcon name="edit" size={16} /></button>
+          <button class="btn btn-sm btn-icon btn-danger" title={t("common.delete")} aria-label={t("common.delete") + " " + s.name}
+            onclick={() => update(null, i)} disabled={writing || !!conflict || editing !== null}><AppIcon name="trash" size={16} /></button>
         </div>
       </div>
     {/if}
   {:else}
-    {#if !adding}
+    {#if !ready && !loadError}
+      <p class="empty">{t("common.loading")}</p>
+    {:else if ready && editing !== "new"}
       <p class="empty">{t("snippet.empty")}</p>
     {/if}
   {/each}
@@ -150,47 +226,51 @@
 
 <style>
   .page { padding: 24px; }
-  .toolbar { display: flex; justify-content: flex-end; margin-bottom: 16px; }
-  .item-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 16px;
-    gap: 12px;
-  }
+  .toolbar, .item-row, .item-actions, .actions, .parameter-header { display: flex; align-items: center; gap: 8px; }
+  .toolbar { justify-content: flex-end; margin-bottom: 16px; }
+  .item-row, .inline-form { margin-bottom: 16px; }
   .item-info { min-width: 0; flex: 1; }
-  /* Single line + ellipsis like every other list row; the full command
-     stays available on hover via the title attribute. */
-  .item-name {
-    font-weight: 600;
-    font-size: 14px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .item-name, .item-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item-name { font-weight: 600; font-size: 14px; }
+  .item-sub { font: 12px var(--term-font); color: var(--text-sub); margin-top: 2px; }
+  .inline-form, .parameter-rows { display: grid; gap: 10px; }
+  .inline-form { min-width: 0; padding: 16px; }
+  .inline-form label { display: grid; gap: 4px; min-width: 0; }
+  .inline-form input, .inline-form textarea { width: 100%; min-width: 0; }
+  textarea {
+    font-family: var(--term-font); text-transform: none; letter-spacing: normal;
+    resize: vertical; -webkit-user-select: text; user-select: text;
   }
-  .item-sub {
-    font-size: 12px;
-    color: var(--text-sub);
-    font-family: var(--term-font);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    margin-top: 2px;
+  .command-editor {
+    display: block; position: relative; min-width: 0;
+    font: 400 13px/1.5 var(--term-font); text-transform: none; letter-spacing: normal;
   }
-  .item-actions { display: flex; gap: 10px; flex-shrink: 0; }
-  .inline-form {
-    display: flex; flex-direction: column; gap: 8px;
-    padding: 14px; margin-bottom: 10px;
+  .command-editor textarea, .command-highlights {
+    display: block; font: inherit; padding: calc(10px * var(--density)) calc(14px * var(--density));
+    white-space: pre-wrap; overflow-wrap: break-word; scrollbar-gutter: stable;
   }
-  .inline-form label { display: flex; flex-direction: column; gap: 4px; }
-  .label-text { font-size: 13px; color: var(--text); }
-  .inline-form input,
-  .inline-form textarea {
-    width: 100%; box-sizing: border-box; font: inherit; font-size: 13px;
+  .command-editor textarea { overflow-y: auto; }
+  /* Only the underline is painted here. The native control owns text, selection and the caret. */
+  .command-highlights {
+    position: absolute; inset: 0; overflow: hidden; border: 1.5px solid transparent;
+    color: transparent; pointer-events: none; user-select: none; forced-color-adjust: none;
   }
-  .inline-form textarea {
-    font-family: var(--term-font); resize: vertical; min-height: 36px;
+  .command-highlights::after { content: "\200b"; } /* Keep a final empty line scrollable. */
+  .parameter-match { text-decoration: underline 1px var(--accent); text-underline-offset: 2px; text-decoration-skip-ink: none; }
+  @media (forced-colors: active) {
+    .parameter-match { text-decoration-color: Highlight; }
   }
-  .form-actions { display: flex; gap: 10px; margin-top: 4px; }
-  .empty { text-align: center; color: var(--text-dim); padding: 32px; }
+  .parameter-header { justify-content: space-between; }
+  .parameter-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+  .parameter-rows:empty { display: none; }
+  .hint, .empty { color: var(--text-sub); font-size: 12px; }
+  .empty { padding: 32px; text-align: center; }
+  .actions { flex-wrap: wrap; }
+  @media (max-width: 600px) {
+    .page { padding: 12px; }
+    .parameter-row { grid-template-columns: minmax(0, 1fr) auto; }
+    .parameter-row > label { grid-column: 1; }
+    .parameter-row > button { grid-row: 1; grid-column: 2; }
+    .inline-form input, .inline-form textarea, .command-editor { font-size: 16px; }
+  }
 </style>

@@ -1584,7 +1584,7 @@
             switch (id) {
                 case "term.search": openSearch(); break;
                 case "term.sftp": app.navigate("sftp"); break;
-                case "term.snippet": app.openSnippetPicker(); break;
+                case "term.snippet": app.openSnippetPicker(tabId); break;
                 case "term.paste": readClipboard().then(pasteText).catch((error) => toast.error(errMsg(error))); break;
                 case "term.copy": void copySelection(); break;
             }

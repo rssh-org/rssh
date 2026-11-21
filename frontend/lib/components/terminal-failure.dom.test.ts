@@ -4,6 +4,7 @@ import AppShell from "./AppShell.svelte";
 import * as app from "../stores/app.svelte.ts";
 import * as layout from "../stores/layout.svelte.ts";
 import * as runtime from "../stores/runtime.svelte.ts";
+import { isMac } from "../stores/keymap.svelte.ts";
 import { setLocale, t } from "../i18n/index.svelte.ts";
 import { installInputTracking } from "../input.ts";
 import { toasts, dismiss } from "../stores/toast.svelte.ts";
@@ -171,6 +172,57 @@ it("opens native AWS without a local PTY and routes input, output, errors, and c
 });
 
 describe("native terminal selection handle context menus", () => {
+  it("opens snippets for the right-clicked terminal after a workspace shortcut", async () => {
+    const other = "ssh:other-workspace";
+    const invoke = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "load_snippets") return [{ name: "Location", command: "pwd" }];
+      if (command === "ssh_connect" && args.logSessionId === other) return args.sessionId;
+      return invoke(command, args);
+    });
+    app.addTab({ id: other, type: "ssh", label: "Other", meta: { profileId: "profile:other" } });
+    await vi.waitFor(() => expect(app.terminalConnectionStatus(other)).toBe("connected"));
+    app.setActiveWorkspace(rootId);
+    await app.setRightClickAction("menu");
+    const pane = mocks.Terminal.instances[0].output.closest<HTMLElement>(".pane")!;
+    pane.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+    await settle();
+
+    const digit = app.workspaceTabs().findIndex(tab => tab.id === other) + 1;
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      code: "Digit" + digit, metaKey: isMac, altKey: !isMac, cancelable: true,
+    }));
+    await settle();
+    expect(app.activeWorkspaceId()).toBe(other);
+    const snippets = [...target.querySelectorAll<HTMLButtonElement>(".ctx-item")]
+      .find(button => button.querySelector(".ctx-label")?.textContent === t("tab.context.snippets"))!;
+    snippets.click();
+    await vi.waitFor(() => expect(target.querySelector(".picker-item")).not.toBeNull());
+    expect(app.snippetPickerTargetId()).toBe(rootId);
+    target.querySelector<HTMLButtonElement>(".picker-item")!.click();
+    await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("ssh_write", {
+      sessionId: app.sessionIdForTab(rootId), data: Array.from(new TextEncoder().encode("pwd")),
+    }));
+    expect(app.activeWorkspaceId()).toBe(rootId);
+  });
+
+  it("quick-adds selected text as a plain snippet without opening the parameter editor", async () => {
+    const command = "echo view😀 \"${HOME}\" '{{.Names}}'";
+    vi.spyOn(mocks.Terminal.instances[0], "getSelection").mockReturnValue(command);
+    await app.setRightClickAction("menu");
+    const pane = target.querySelector<HTMLElement>(".terminal-split-layout > .pane")!;
+    pane.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+    await settle();
+    const add = [...target.querySelectorAll<HTMLButtonElement>(".ctx-item")]
+      .find(button => button.textContent?.includes(t("tab.context.add_to_snippets")))!;
+    add.click();
+    await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("update_snippet", {
+      snippet: { name: "echo view😀", command },
+    }));
+    expect(app.settingsActive()).toBe(false);
+    expect(app.snippetPickerOpen()).toBe(false);
+  });
+
   it.each(["terminal output", "pane"])("keeps handle drags on %s native, then accepts mouse and keyboard menus", async (area) => {
     await app.setRightClickAction("menu");
     const output = mocks.Terminal.instances[0].output;
