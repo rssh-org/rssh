@@ -17,7 +17,7 @@ describe("SFTP context-menu download", () => {
   it("picks a target path and queues the file through the transfer store", () => {
     const downloadEntry = functionSource("downloadEntry", "confirmDelete");
 
-    expect(downloadEntry).toContain("fileAccess.pickSavePath(name)");
+    expect(downloadEntry).toContain("fileAccess.pickSavePath(entry.name)");
     expect(downloadEntry).toContain("transfers.startDownload");
     expect(downloadEntry).not.toContain('"sftp_save_file"');
   });
@@ -27,7 +27,7 @@ describe("SFTP context-menu download", () => {
 describe("SFTP batch download isolation", () => {
   function loadQueueDownloads(mocks: { resolvePaths: ReturnType<typeof vi.fn>; invoke?: ReturnType<typeof vi.fn> }) {
     const start = source.indexOf("async function queueDownloads");
-    const end = source.indexOf("function requestDownload", start);
+    const end = source.indexOf("async function downloadEntry", start);
     const startDownload = vi.fn().mockResolvedValue(undefined);
     const code = ts.transpileModule(source.slice(start, end), {
       compilerOptions: { target: ts.ScriptTarget.ES2022 },

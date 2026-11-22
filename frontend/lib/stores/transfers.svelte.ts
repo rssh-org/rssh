@@ -100,10 +100,6 @@ export interface Transfer extends TransferFiles {
 }
 
 let _list = $state<Transfer[]>([]);
-let _downloadRevision = $state(0);
-
-/** A download attempt may publish a file or leave a backup, even on failure. */
-export function downloadRevision(): number { return _downloadRevision; }
 
 interface ProgressPayload {
   phase?: TransferPhase;
@@ -232,7 +228,6 @@ async function runTransfer(id: string): Promise<void> {
     else item.status = "failed";
   } finally {
     item.finishedAt = Date.now();
-    if (item.kind === "download") _downloadRevision++;
     unlisten?.();
     if (sftpId) void invoke("sftp_close", { sftpId }).catch((error) => {
       console.warn("[sftp] close transfer connection:", error);
@@ -277,8 +272,10 @@ const inspectBeforeRetry = new Set([
 ]);
 
 export function canRetry(item: Transfer): boolean {
-  return item.status === "cancelled" ||
-    (item.status === "failed" && !inspectBeforeRetry.has(errCoded(item.error)?.code ?? ""));
+  if (item.status !== "failed") return item.status === "cancelled";
+  const error = errCoded(item.error);
+  if (error?.code === "sftp_provider_siblings_unavailable" && error.params?.action === "reselect") return false;
+  return !inspectBeforeRetry.has(error?.code ?? "");
 }
 
 export async function retry(id: string): Promise<void> {

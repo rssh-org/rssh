@@ -1,8 +1,8 @@
 //! Standard Tauri file backend: desktop paths, Android provider URIs and iOS scopes.
 
-use super::LocalWalkEntry;
 #[cfg(feature = "tauri")]
-use super::{DownloadTarget, FileFilter};
+use super::FileFilter;
+use super::LocalWalkEntry;
 use crate::error::{AppError, AppResult};
 use serde_json::json;
 use std::{
@@ -213,20 +213,15 @@ impl Drop for OpenedFile {
 }
 
 #[cfg(feature = "tauri")]
-pub async fn download_target(
-    app: &tauri::AppHandle,
-    location: String,
-) -> AppResult<DownloadTarget> {
-    // Ordinary paths retain sibling .part + rename. Provider URIs retain the
-    // selected-file authorization and provider open operation.
-    if let tauri_plugin_fs::FilePath::Path(path) = location
+pub(crate) fn download_target(location: &str) -> AppResult<PathBuf> {
+    // A document URI never grants access to create or rename its siblings.
+    match location
         .parse::<tauri_plugin_fs::FilePath>()
         .expect("FilePath::from_str is infallible")
     {
-        return Ok(DownloadTarget::AtomicPath(path));
+        tauri_plugin_fs::FilePath::Path(path) => Ok(path),
+        tauri_plugin_fs::FilePath::Url(_) => Err(super::download_siblings_unavailable()),
     }
-    let _ = app;
-    Ok(DownloadTarget::Provider(location))
 }
 
 #[cfg(feature = "tauri")]
@@ -262,6 +257,26 @@ pub async fn open_file(app: &tauri::AppHandle, path: String, write: bool) -> App
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "tauri")]
+    #[test]
+    fn downloads_accept_paths_and_reject_single_document_urls_without_touching_them() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("report");
+        std::fs::write(&target, b"original").unwrap();
+        let file_url = url::Url::from_file_path(&target).unwrap();
+        assert_eq!(download_target(target.to_str().unwrap()).unwrap(), target);
+        for uri in [file_url.as_str(), "content://provider/document/report"] {
+            assert!(matches!(
+                download_target(uri),
+                Err(AppError::Sftp(error)) if error.code == "sftp_provider_siblings_unavailable"
+                    && error.params["action"] == "reselect"
+            ));
+        }
+        assert_eq!(std::fs::read(target).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
     struct AccessProbe {
         released: std::sync::mpsc::Sender<Vec<u8>>,
         path: std::path::PathBuf,

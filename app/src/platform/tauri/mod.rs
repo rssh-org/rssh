@@ -7,7 +7,7 @@ mod external;
 pub(crate) mod navigation;
 
 use crate::error::{AppError, AppResult};
-use crate::files::{self, DownloadTarget, FileFilter, LocalWalkEntry, OpenedFile, ResolvedPath};
+use crate::files::{self, FileFilter, LocalWalkEntry, OpenedFile, ResolvedPath};
 use crate::platform::host::{AppWindowPurpose, NativePlatform};
 use crate::platform::runtime::RuntimeCapabilities;
 use tauri::AppHandle;
@@ -118,6 +118,19 @@ impl NativePlatform for TauriPlatform {
         files::native::pick_save(app, name, filters).await
     }
 
+    async fn pick_download_path(&self, app: &AppHandle, name: String) -> AppResult<Option<String>> {
+        #[cfg(any(windows, macos, linux))]
+        {
+            self.pick_save(app, name, Vec::new()).await
+        }
+        #[cfg(any(android, ios))]
+        {
+            // These save pickers create/export a document before returning its URI.
+            let _ = (app, name);
+            Err(files::download_folder_picker_unavailable())
+        }
+    }
+
     async fn open_file(
         &self,
         app: &AppHandle,
@@ -129,12 +142,8 @@ impl NativePlatform for TauriPlatform {
             .map(OpenedFile::from_native)
     }
 
-    async fn download_target(
-        &self,
-        app: &AppHandle,
-        location: String,
-    ) -> AppResult<DownloadTarget> {
-        files::native::download_target(app, location).await
+    async fn download_target(&self, location: String) -> AppResult<std::path::PathBuf> {
+        files::native::download_target(&location)
     }
 
     async fn resolve_paths(

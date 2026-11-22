@@ -41,12 +41,6 @@ tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-fs = { version = "2", optional = true }
 
-# Export the completed sandbox file using the iOS system document picker.
-[target.'cfg(target_os = "ios")'.dependencies]
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSURL"] }
-objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "block2", "UIDocumentPickerViewController", "UIViewController", "UIResponder"] }
-
 [features]
 default = []
 tauri = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-opener", "dep:tauri-plugin-dialog", "dep:tauri-plugin-fs"]

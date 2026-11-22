@@ -375,6 +375,39 @@ async fn openssh_new_replace_and_reconnect_in_both_directions() {
     }
 }
 
+#[cfg(any(macos, linux))]
+#[tokio::test]
+#[ignore = "requires OpenSSH sftp-server and an unprivileged account"]
+async fn openssh_download_requires_permission_on_the_parent_folder() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("downloads");
+    std::fs::create_dir(&folder).unwrap();
+    let mut transfer = Transfer::new(dir.path(), Direction::Download);
+    transfer.local = folder.join("report");
+    std::fs::write(&transfer.remote, b"updated").unwrap();
+    std::fs::write(&transfer.local, b"original").unwrap();
+    let (host, mut events) = crate::ssh::test_support::headless_host();
+    let connection = connect(&host, dir.path(), 1, None).await;
+
+    let writable = std::fs::metadata(&folder).unwrap().permissions();
+    for mode in [0o555, 0o000] {
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(mode)).unwrap();
+        let result = transfer.run(&host, &connection).await;
+        std::fs::set_permissions(&folder, writable.clone()).unwrap();
+        assert_eq!(
+            result.unwrap_err().code(),
+            "sftp_provider_siblings_unavailable"
+        );
+        assert_eq!(std::fs::read(&transfer.local).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+        assert!(progress(&mut events, &transfer).iter().all(|n| *n == 0));
+    }
+    assert_eq!(transfer.run(&host, &connection).await.unwrap(), 7);
+    assert_eq!(std::fs::read(&transfer.local).unwrap(), b"updated");
+}
+
 #[tokio::test]
 #[ignore = "requires an installed OpenSSH sftp-server"]
 async fn openssh_late_publish_failure_retains_original_at_reported_backup() {

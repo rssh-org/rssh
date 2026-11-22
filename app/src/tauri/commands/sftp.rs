@@ -123,33 +123,12 @@ pub async fn sftp_close(
 
 #[tauri::command]
 pub async fn sftp_pick_save_path(
-    _window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     default_name: String,
 ) -> AppResult<Option<String>> {
-    #[cfg(any(windows, macos, linux))]
-    return crate::files::pick_save(&app, default_name, Vec::new()).await;
-    #[cfg(any(android, ios, ohos))]
-    return crate::files::mobile_download::destination(&app, &_window, default_name).await;
-}
-
-#[cfg(any(android, ios, ohos))]
-#[tauri::command]
-pub async fn sftp_list_downloads(
-    app: tauri::AppHandle,
-) -> AppResult<Vec<crate::files::download_library::SavedDownload>> {
-    crate::files::mobile_download::list(&app).await
-}
-
-#[cfg(any(android, ios, ohos))]
-#[tauri::command]
-pub async fn sftp_export_download(
-    app: tauri::AppHandle,
-    window: tauri::WebviewWindow,
-    local_path: String,
-    identity: String,
-) -> AppResult<()> {
-    crate::files::mobile_download::export(&app, window, local_path, identity).await
+    crate::platform::host::platform(&app)
+        .pick_download_path(&app, default_name)
+        .await
 }
 
 #[tauri::command]
@@ -195,15 +174,10 @@ pub async fn sftp_download_to(
         direction: Direction::Download,
     };
     let attempt = Attempt::begin(&state, &owner, &sftp_id, request)?;
-    let target = crate::files::download_target(&app, local_path)
+    let path = crate::platform::host::platform(&app)
+        .download_target(local_path)
         .await
         .map_err(local_open_error)?;
-    let crate::files::DownloadTarget::AtomicPath(path) = target else {
-        return Err(rssh_core::error::AppError::sftp(
-            "sftp_provider_siblings_unavailable",
-            serde_json::json!({}),
-        ));
-    };
     attempt.download(&crate::tauri_host::host(app), &path).await
 }
 

@@ -92,6 +92,24 @@ describe("SFTP transfer queue", () => {
     expect(invoke.mock.calls.filter(([name]) => name === "sftp_download_to")).toHaveLength(1);
   });
 
+  it("retries the chosen local path after its directory permissions change", async () => {
+    const queue = await import("./transfers.svelte.ts");
+    let granted = false;
+    invoke.mockImplementation(async name => {
+      if (name === "sftp_connect_session") return "sftp";
+      if (name === "sftp_download_to") {
+        if (!granted) throw '__rssh_err__|{"code":"sftp_provider_siblings_unavailable","params":{}}';
+        return 42;
+      }
+    });
+    const id = await queue.startDownload({ sessionId: "original", ...paths });
+    await vi.waitFor(() => expect(queue.list()[0].status).toBe("failed"));
+    expect(queue.canRetry(queue.list()[0])).toBe(true);
+    granted = true;
+    await queue.retry(id);
+    await vi.waitFor(() => expect(queue.list()[0]).toMatchObject({ status: "done", transferred: 42 }));
+  });
+
   it.each(["download", "upload"] as const)("keeps a %s backup candidate if IPC closes during the final rename", async kind => {
     const queue = await import("./transfers.svelte.ts");
     const { errCoded } = await import("../i18n/index.svelte.ts");

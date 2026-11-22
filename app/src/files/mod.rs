@@ -3,15 +3,6 @@
 
 use crate::error::{AppError, AppResult};
 
-#[cfg(any(
-    all(feature = "tauri", any(android, ios, ohos)),
-    all(test, any(linux, macos))
-))]
-pub(crate) mod download_library;
-#[cfg(all(feature = "tauri", ios))]
-mod ios_export;
-#[cfg(all(feature = "tauri", any(android, ios, ohos)))]
-pub(crate) mod mobile_download;
 #[cfg(not(ohos))]
 pub(crate) mod native;
 #[cfg(feature = "tauri")]
@@ -85,15 +76,16 @@ pub async fn open_file(
 }
 
 #[cfg(feature = "tauri")]
-pub async fn download_target(
-    app: &tauri::AppHandle,
-    location: String,
-) -> AppResult<DownloadTarget> {
-    #[cfg(any(android, ios, ohos))]
-    if let Some(path) = mobile_download::owned_destination(app, std::path::Path::new(&location))? {
-        return Ok(DownloadTarget::AtomicPath(path));
-    }
-    platform(app).download_target(app, location).await
+pub fn download_siblings_unavailable() -> AppError {
+    AppError::sftp(
+        "sftp_provider_siblings_unavailable",
+        serde_json::json!({ "action": "reselect" }),
+    )
+}
+
+#[cfg(all(feature = "tauri", any(android, ios, ohos)))]
+pub fn download_folder_picker_unavailable() -> AppError {
+    AppError::sftp("sftp_folder_picker_unavailable", serde_json::json!({}))
 }
 
 #[cfg(feature = "tauri")]
@@ -116,15 +108,6 @@ pub struct LocalWalkEntry {
 pub struct FileFilter {
     pub name: String,
     pub extensions: Vec<String>,
-}
-
-/// Backends classify locations without opening or truncating the destination.
-/// Directory authorization permits a sibling temporary file and atomic replacement;
-/// a selected provider document grants access only to that document.
-#[cfg(feature = "tauri")]
-pub enum DownloadTarget {
-    AtomicPath(std::path::PathBuf),
-    Provider(String),
 }
 
 #[cfg(feature = "tauri")]
@@ -288,7 +271,7 @@ mod tests {
 
         let source = tempfile::NamedTempFile::new().unwrap();
         let mut file = OpenedFile::from_std(source.reopen().unwrap());
-        // Downloads write through OpenedFile; uploads read its same owned stream.
+        // Document saves and uploads retain the grant while using the descriptor.
         file.write_all(b"provider content").await.unwrap();
         file.flush().await.unwrap();
         assert_eq!(file.metadata().await.unwrap().len(), 16);

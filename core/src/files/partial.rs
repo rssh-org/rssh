@@ -122,6 +122,14 @@ fn snapshot(path: &Path) -> io::Result<Option<Snapshot>> {
     }))
 }
 
+fn folder_access_error(error: io::Error) -> AppError {
+    if error.kind() == ErrorKind::PermissionDenied {
+        AppError::sftp("sftp_provider_siblings_unavailable", json!({}))
+    } else {
+        error.into()
+    }
+}
+
 pub fn normalized_destination(path: &Path) -> AppResult<PathBuf> {
     let name = path
         .file_name()
@@ -130,8 +138,10 @@ pub fn normalized_destination(path: &Path) -> AppResult<PathBuf> {
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    fs::create_dir_all(parent)?;
-    Ok(fs::canonicalize(parent)?.join(name))
+    fs::create_dir_all(parent).map_err(folder_access_error)?;
+    Ok(fs::canonicalize(parent)
+        .map_err(folder_access_error)?
+        .join(name))
 }
 
 fn changed(code: &'static str, path: &Path) -> AppError {
@@ -178,7 +188,7 @@ pub struct LocalPartial {
 impl LocalPartial {
     pub fn create(destination: &Path) -> AppResult<(Self, tokio::fs::File)> {
         let destination = normalized_destination(destination)?;
-        let original = snapshot(&destination)?;
+        let original = snapshot(&destination).map_err(folder_access_error)?;
         // Generate names independently of the final name and user-supplied
         // transfer ID. CREATE_NEW is authoritative even for a UUID collision.
         let temporary =
@@ -187,7 +197,8 @@ impl LocalPartial {
             .read(true)
             .write(true)
             .create_new(true)
-            .open(&temporary)?;
+            .open(&temporary)
+            .map_err(folder_access_error)?;
         let id = local_file_id(&file)?;
         Ok((
             Self {
@@ -229,13 +240,14 @@ impl LocalPartial {
             if self.installed || snapshot(&self.destination)?.is_some() {
                 return Err(self.backup_error(backup, "Destination changed during replacement"));
             }
-        } else if snapshot(&self.destination)? != self.original {
+        } else if snapshot(&self.destination).map_err(folder_access_error)? != self.original {
             return Err(changed("sftp_target_changed", &self.destination));
         }
         let file = open_options()
             .read(true)
             .write(true)
-            .open(&self.temporary)?;
+            .open(&self.temporary)
+            .map_err(folder_access_error)?;
         if local_file_id(&file)? != self.id {
             return Err(changed("sftp_part_changed", &self.temporary));
         }
@@ -274,7 +286,7 @@ impl LocalPartial {
                         return Ok(());
                     }
                     Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
-                    Err(e) => return Err(e.into()),
+                    Err(e) => return Err(folder_access_error(e)),
                 }
                 if self.original.is_none() || snapshot(&self.destination)? != self.original {
                     return Err(changed("sftp_target_changed", &self.destination));
@@ -282,7 +294,7 @@ impl LocalPartial {
                 // A transfer-specific backup also avoids using another queued
                 // download's ordinary target (such as “report.bak”) as scratch.
                 let backup = self.backup_path();
-                rename(&self.destination, &backup)?;
+                rename(&self.destination, &backup).map_err(folder_access_error)?;
                 self.backup = Some(backup);
             }
             let backup = self.backup.as_ref().expect("original was moved");

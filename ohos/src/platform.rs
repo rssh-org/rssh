@@ -1,7 +1,10 @@
 //! HarmonyOS owns SDK-specific mechanics; the shared application owns commands.
 
 use crate::error::AppResult;
-use rssh_host::files::{DownloadTarget, FileFilter, LocalWalkEntry, OpenedFile, ResolvedPath};
+use rssh_host::files::{
+    download_folder_picker_unavailable, download_siblings_unavailable, FileFilter, LocalWalkEntry,
+    OpenedFile, ResolvedPath,
+};
 use rssh_host::platform::host::{AppWindowPurpose, NativePlatform};
 use rssh_host::platform::runtime::RuntimeCapabilities;
 use tauri::AppHandle;
@@ -82,6 +85,26 @@ impl NativePlatform for OhosPlatform {
         crate::files::pick_save(name, filters).await
     }
 
+    async fn pick_download_path(&self, app: &AppHandle, name: String) -> AppResult<Option<String>> {
+        if !crate::device::query().await?.folder_selection {
+            return Err(download_folder_picker_unavailable());
+        }
+        if !crate::file_name::valid_file_name(&name) {
+            return Err(crate::error::AppError::other(
+                "ohos_invalid_filename",
+                serde_json::json!({}),
+            ));
+        }
+        let Some(root) = self.pick_folder(app, true).await? else {
+            return Ok(None);
+        };
+        match self.resolve_paths(root, vec![name], true).await?.pop() {
+            Some(ResolvedPath::Ready { location, .. }) => Ok(Some(location)),
+            Some(ResolvedPath::Failed { error, .. }) => Err(error),
+            None => Err(crate::unavailable()),
+        }
+    }
+
     async fn open_file(
         &self,
         _app: &AppHandle,
@@ -93,15 +116,10 @@ impl NativePlatform for OhosPlatform {
             .map(OpenedFile::from_std)
     }
 
-    async fn download_target(
-        &self,
-        _app: &AppHandle,
-        location: String,
-    ) -> AppResult<DownloadTarget> {
-        match crate::files::download_path(location.clone()).await? {
-            Some(path) => Ok(DownloadTarget::AtomicPath(path)),
-            None => Ok(DownloadTarget::Provider(location)),
-        }
+    async fn download_target(&self, location: String) -> AppResult<std::path::PathBuf> {
+        crate::files::download_path(location)
+            .await?
+            .ok_or_else(download_siblings_unavailable)
     }
 
     async fn resolve_paths(

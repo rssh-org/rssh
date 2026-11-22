@@ -71,9 +71,6 @@
         return registerBack({ enabled: () => uploadMenuOpen, handle: closeUploadMenu });
     });
 
-    let appDownload = $state<RemoteEntry | null>(null);
-    let downloadName = $state("");
-
     /** Properties dialog state. */
     let propsStat = $state<FileStat | null>(null);
     let propsLoading = $state(false);
@@ -190,7 +187,7 @@
         if (e.is_dir) { listDir(joinRemote(cwd, e.name)); return; }
         // Hosts without directory transfer have no batch-download toolbar;
         // clicking a file provides the single-file download affordance.
-        if (!canTransferDirectories) requestDownload(e);
+        if (!canTransferDirectories) downloadEntry(e);
     }
 
     /** Join a remote path: always '/'-separated, empty segments filtered,
@@ -403,24 +400,7 @@
         return { queued, walkErrors };
     }
 
-    function requestDownload(entry: RemoteEntry) {
-        closeCtxMenu();
-        if (!entry.is_dir && app.capabilities().sftpDownloadExport) {
-            downloadName = entry.name;
-            appDownload = entry;
-        } else {
-            void downloadEntry(entry);
-        }
-    }
-
-    function saveAppDownload() {
-        if (!appDownload || !downloadName.trim()) return;
-        const entry = appDownload;
-        appDownload = null;
-        void downloadEntry(entry, downloadName);
-    }
-
-    async function downloadEntry(entry: RemoteEntry, name = entry.name) {
+    async function downloadEntry(entry: RemoteEntry) {
         closeCtxMenu();
         error = "";
         notice = "";
@@ -433,7 +413,7 @@
                 if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
                 if (queued > 0) notice = t("sftp.queued_n", { n: queued });
             } else {
-                const localPath = await fileAccess.pickSavePath(name);
+                const localPath = await fileAccess.pickSavePath(entry.name);
                 if (!localPath) return;
                 await transfers.startDownload({
                     ...transferOrigin,
@@ -703,7 +683,7 @@
          bind:this={ctxMenuEl}
          style="left: {ctxMenu.x + ctxDx}px; top: {ctxMenu.y + ctxDy}px;">
         {#if !ctxMenu.entry.is_dir || canTransferDirectories}
-            <button class="ctx-item" onclick={() => requestDownload(ctxMenu!.entry)}>{t("sftp.ctx.download")}</button>
+            <button class="ctx-item" onclick={() => downloadEntry(ctxMenu!.entry)}>{t("sftp.ctx.download")}</button>
         {/if}
         <button class="ctx-item" onclick={() => confirmDelete(ctxMenu!.entry)}>{t("sftp.ctx.delete")}</button>
         <button class="ctx-item" onclick={() => startRename(ctxMenu!.entry)}>{t("sftp.ctx.rename")}</button>
@@ -713,19 +693,6 @@
         <div class="ctx-sep"></div>
         <button class="ctx-item" onclick={() => showProperties(ctxMenu!.entry)}>{t("sftp.ctx.properties")}</button>
     </div>
-{/if}
-
-{#if appDownload}
-    <Modal onClose={() => { appDownload = null; }}>
-        <label class="modal-title" for={`sftp-download-name-${meta.tabId}`}>{t("sftp.save_to_app")}</label>
-        <input id={`sftp-download-name-${meta.tabId}`} class="modal-input" bind:value={downloadName}
-            onkeydown={(e) => { if (e.key === "Enter") saveAppDownload(); }}/>
-        <p class="modal-text">{t("sftp.export_after_download")}</p>
-        <div class="modal-actions">
-            <button class="btn btn-sm" onclick={() => { appDownload = null; }}>{t("common.cancel")}</button>
-            <button class="btn btn-sm" disabled={!downloadName.trim()} onclick={saveAppDownload}>{t("sftp.ctx.download")}</button>
-        </div>
-    </Modal>
 {/if}
 
 {#if deleteEntry}

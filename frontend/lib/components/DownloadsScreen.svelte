@@ -3,7 +3,6 @@
     import * as transfers from "../stores/transfers.svelte.ts";
     import * as app from "../stores/app.svelte.ts";
     import { writeText } from "../clipboard.ts";
-    import SavedDownloads from "./SavedDownloads.svelte";
     import { toast } from "../stores/toast.svelte.ts";
     import { errMsg, t } from "../i18n/index.svelte.ts";
     import { createScopedBackHandler } from "../stores/back.svelte.ts";
@@ -92,10 +91,9 @@
         </div>
     </header>
 
-    <div class="contents">
-    {#if list.length === 0 && !app.capabilities().sftpDownloadExport}
+    {#if list.length === 0}
         <p class="empty">{t("downloads.empty")}</p>
-    {:else if list.length}
+    {:else}
         <ul class="list">
             {#each list as item (item.id)}
                 {@const partialPath = item.kind === "upload" && (item.status === "failed" || item.status === "cancelled") ? item.partialPath : undefined}
@@ -167,10 +165,6 @@
             {/each}
         </ul>
     {/if}
-    {#if app.capabilities().sftpDownloadExport}
-        <SavedDownloads {formatSize}/>
-    {/if}
-    </div>
 </div>
 
 <style>
@@ -265,9 +259,7 @@
         display: flex;
         flex-direction: column;
         gap: 8px;
-    }
-
-    .contents {
+        /* Popover height is bounded, so the list area scrolls independently. */
         flex: 1 1 auto;
         overflow-y: auto;
         min-height: 0;
