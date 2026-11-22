@@ -1155,6 +1155,8 @@ const zh: Messages = {
   "error.sftp_transfer_changed": "无法核实 {path} 的原文件或 SSH 连接。请检查文件和主机后重试。",
   "error.sftp_target_busy": "另一个传输正在使用 {path}，请在完成后重试。",
   "error.sftp_folder_picker_unavailable": "下载需要目标文件夹的读写权限。当前文件选择器只能授权单个文件，无法授权整个文件夹。",
+  "error.sftp_folder_picker_busy": "请先关闭当前对话框，再选择下载文件夹。",
+  "error.sftp_folder_operations_unsupported": "所选文件夹的提供器不支持安全替换文件。请选择其他文件夹，例如设备本地文件夹。",
   "error.sftp_provider_siblings_unavailable": "下载需要目标文件夹的读写权限，以便创建临时文件和备份。请在支持文件夹授权的位置授予 RSSH 该权限，再重新选择下载位置。",
   "error.sftp_commit_uncertain": "无法确认 {path} 是否已保存。请先检查目标文件和可能的备份 {backup}，再发起传输。",
   "error.sftp_transfer_reconnect_required": "传输尚未记录目标，原 SSH 会话就已关闭。请在重新连接的主机上重新选择文件。",

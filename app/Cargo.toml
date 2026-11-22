@@ -41,6 +41,13 @@ tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-fs = { version = "2", optional = true }
 
+[target.'cfg(target_os = "ios")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSFileCoordinator", "NSFilePresenter", "NSString", "NSURL", "block2"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "UIDocumentPickerViewController", "UIResponder", "UIView", "UIViewController", "UIWindow", "block2", "objc2-uniform-type-identifiers"] }
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTCoreTypes"] }
+
 [features]
 default = []
 tauri = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-opener", "dep:tauri-plugin-dialog", "dep:tauri-plugin-fs"]

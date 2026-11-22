@@ -143,9 +143,22 @@ pub fn run_with(
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init());
     #[cfg(android)]
-    let builder = builder.plugin(crate::platform::tauri::navigation::init());
+    let builder = builder
+        .plugin(crate::platform::tauri::navigation::init())
+        .plugin(crate::platform::tauri::android_download::init());
     builder
         .on_page_load(|_webview, _payload| {
+            #[cfg(any(android, ios))]
+            if matches!(_payload.event(), tauri::webview::PageLoadEvent::Started) {
+                // The queue belongs to this WebView. In-flight attempts keep their
+                // own Arc until their file and authorization cleanup is complete.
+                use crate::platform::tauri::download_folder::FolderGrant;
+                let mut resources = _webview.resources_table();
+                let ids: Vec<_> = resources.names().map(|(id, _)| id).collect();
+                for id in ids {
+                    let _ = resources.take::<FolderGrant>(id);
+                }
+            }
             #[cfg(any(windows, macos, linux))]
             if matches!(_payload.event(), tauri::webview::PageLoadEvent::Started) {
                 commands::mcp::register_control_window(&_webview.window());

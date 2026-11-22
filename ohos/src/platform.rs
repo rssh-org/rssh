@@ -3,7 +3,7 @@
 use crate::error::AppResult;
 use rssh_host::files::{
     download_folder_picker_unavailable, download_siblings_unavailable, FileFilter, LocalWalkEntry,
-    OpenedFile, ResolvedPath,
+    OpenedFile, PickedDownload, ResolvedPath,
 };
 use rssh_host::platform::host::{AppWindowPurpose, NativePlatform};
 use rssh_host::platform::runtime::RuntimeCapabilities;
@@ -85,7 +85,13 @@ impl NativePlatform for OhosPlatform {
         crate::files::pick_save(name, filters).await
     }
 
-    async fn pick_download_path(&self, app: &AppHandle, name: String) -> AppResult<Option<String>> {
+    async fn pick_download_path(
+        &self,
+        window: &tauri::WebviewWindow,
+        name: String,
+    ) -> AppResult<Option<PickedDownload>> {
+        use tauri::Manager;
+        let app = window.app_handle();
         if !crate::device::query().await?.folder_selection {
             return Err(download_folder_picker_unavailable());
         }
@@ -99,7 +105,7 @@ impl NativePlatform for OhosPlatform {
             return Ok(None);
         };
         match self.resolve_paths(root, vec![name], true).await?.pop() {
-            Some(ResolvedPath::Ready { location, .. }) => Ok(Some(location)),
+            Some(ResolvedPath::Ready { location, .. }) => Ok(Some(PickedDownload::Path(location))),
             Some(ResolvedPath::Failed { error, .. }) => Err(error),
             None => Err(crate::unavailable()),
         }

@@ -3,6 +3,7 @@ import { mount, tick, unmount } from "svelte";
 import DownloadsScreen from "./DownloadsScreen.svelte";
 import * as app from "../stores/app.svelte.ts";
 import * as transfers from "../stores/transfers.svelte.ts";
+import type { SaveDestination } from "../file-access.ts";
 import { locale, setLocale, t } from "../i18n/index.svelte.ts";
 import SftpBrowser from "./SftpBrowser.svelte";
 
@@ -82,20 +83,19 @@ describe("SFTP browser connection lifetime", () => {
 
 describe("single-file download folder access", () => {
   const originalLocale = locale();
-  const permissionError = "__rssh_err__|" + JSON.stringify({
-    code: "sftp_provider_siblings_unavailable", params: { action: "reselect" },
-  });
-
   afterEach(() => setLocale(originalLocale));
 
-  async function clickRemoteFile(pickSavePath: () => string) {
+  async function clickRemoteFile(pickSavePath: () => SaveDestination, downloadError?: string) {
     vi.spyOn(app, "capabilities").mockReturnValue({ ...app.capabilities(), directoryTransfer: false });
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "sftp_connect_session") return "sftp";
       if (command === "sftp_home") return "/";
       if (command === "sftp_list") return [{ name: "report.txt", size: 12, is_dir: false }];
       if (command === "sftp_pick_save_path") return pickSavePath();
-      if (command === "sftp_download_to") throw permissionError;
+      if (command === "sftp_download_to") {
+        if (downloadError) throw downloadError;
+        return 12;
+      }
       return null;
     });
     component = mount(SftpBrowser, { target, props: { meta: { tabId: "tab", sessionId: "ssh" } } });
@@ -104,18 +104,40 @@ describe("single-file download folder access", () => {
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("sftp_pick_save_path", { defaultName: "report.txt" }));
   }
 
-  it.each(["en", "zh"] as const)("shows the picker's folder access limitation in %s without starting a transfer", async language => {
-    setLocale(language);
-    await clickRemoteFile(() => { throw '__rssh_err__|{"code":"sftp_folder_picker_unavailable","params":{}}'; });
-    await vi.waitFor(() => expect(target.querySelector(".error-banner")?.textContent)
-      .toBe(t("error.sftp_folder_picker_unavailable")));
-    expect(transfers.list()).toHaveLength(0);
-    expect(invokeMock.mock.calls.some(([command]) => command === "sftp_download_to")).toBe(false);
+  describe.each(["en", "zh"] as const)("picker errors in %s", language => {
+    it.each(["sftp_folder_picker_unavailable", "sftp_folder_operations_unsupported"] as const)("shows %s without starting a transfer", async code => {
+      setLocale(language);
+      await clickRemoteFile(() => { throw "__rssh_err__|" + JSON.stringify({ code, params: {} }); });
+      await vi.waitFor(() => expect(target.querySelector(".error-banner")?.textContent)
+        .toBe(t(`error.${code}`)));
+      expect(transfers.list()).toHaveLength(0);
+      expect(invokeMock.mock.calls.some(([command]) => command === "sftp_download_to")).toBe(false);
+    });
   });
 
-  it("shows the folder grant instructions in the queue when a selected document grants no sibling access", async () => {
+  it("shows the selected folder and filename and keeps the grant handle out of the transfer UI", async () => {
+    const picked = { location: "/Documents/Reports/report.txt", grantId: 7654321 };
+    await clickRemoteFile(() => picked);
+    await vi.waitFor(() => expect(transfers.list()[0]?.status).toBe("done"));
+    const transferId = transfers.list()[0].id;
+    expect(invokeMock).toHaveBeenCalledWith("sftp_download_to", expect.objectContaining({
+      transferId, remotePath: "/report.txt", localPath: picked.location, grantId: picked.grantId,
+    }));
+
+    await unmount(component!);
+    component = mount(DownloadsScreen, { target });
+    expect(target.querySelector(".path")?.textContent).toContain(picked.location);
+    expect(target.innerHTML).not.toContain(String(picked.grantId));
+    target.querySelector<HTMLButtonElement>(".row-actions button")!.click();
+    expect(invokeMock).toHaveBeenCalledWith("sftp_forget_transfer", { transferId, grantId: picked.grantId });
+  });
+
+  it.each([
+    ["sftp_provider_siblings_unavailable", { action: "reselect" }],
+    ["sftp_folder_operations_unsupported", {}],
+  ] as const)("explains %s in the transfer queue and requires a new location", async (code, params) => {
     const localPath = "content://provider/document/report";
-    await clickRemoteFile(() => localPath);
+    await clickRemoteFile(() => localPath, "__rssh_err__|" + JSON.stringify({ code, params }));
     await vi.waitFor(() => expect(transfers.list()[0]?.status).toBe("failed"));
     expect(invokeMock).toHaveBeenCalledWith("sftp_download_to", expect.objectContaining({
       originalSessionId: "ssh", remotePath: "/report.txt", localPath,
@@ -126,7 +148,7 @@ describe("single-file download folder access", () => {
     for (const language of ["en", "zh"] as const) {
       setLocale(language);
       await tick();
-      expect(target.querySelector(".error")?.textContent).toBe(t("error.sftp_provider_siblings_unavailable"));
+      expect(target.querySelector(".error")?.textContent).toBe(t(`error.${code}`));
       expect(target.querySelector(".row-actions")?.textContent).not.toContain(t("downloads.retry"));
     }
   });

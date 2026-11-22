@@ -13,7 +13,10 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use crate::emitter::Host;
 use crate::error::{locked, AppError, AppResult};
-use crate::files::atomic::{local_file_id, normalized_destination, FileId, LocalPartial};
+use crate::files::atomic::{
+    local_file_id, normalized_destination, DownloadDirectory, FileId, LocalPartial,
+    NativeDownloadDirectory,
+};
 use crate::ssh::client::SshPeer;
 use crate::ssh::sftp::{RemoteStamp, SftpHandle, CANCELLED_CODE};
 use crate::state::{AppState, SessionKind, SessionOwner, SessionPhase};
@@ -78,6 +81,7 @@ impl Transfers {
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum Target {
     Local(PathBuf),
+    Document(String),
     Remote(SshPeer, String),
 }
 
@@ -132,7 +136,7 @@ enum Files {
         part: String,
     },
     Download {
-        destination: PathBuf,
+        destination: Target,
         source: RemoteStamp,
         part: LocalPartial,
     },
@@ -458,51 +462,71 @@ impl Attempt {
         result
     }
 
-    pub async fn download(mut self, host: &Host, destination: &Path) -> AppResult<u64> {
+    pub async fn download(self, host: &Host, destination: &Path) -> AppResult<u64> {
+        let destination = normalized_destination(destination)?;
+        self.download_in(host, destination, Arc::new(NativeDownloadDirectory))
+            .await
+    }
+
+    /// Provider destinations carry a display path and an authorized directory.
+    /// Only the directory adapter may resolve names or open documents.
+    pub async fn download_in(
+        mut self,
+        host: &Host,
+        destination: PathBuf,
+        directory: Arc<dyn DownloadDirectory>,
+    ) -> AppResult<u64> {
         if let Some(result) = &self.checkpoint.result {
             return result.clone();
         }
         self.entry.check_cancel()?;
         let path = &self.entry.request.remote_path;
-        let destination = normalized_destination(destination)?;
+        let target = match directory.document_key() {
+            Some(key) => Target::Document(key),
+            None => Target::Local(destination.clone()),
+        };
         let _guard = TargetGuard::acquire(
             &host.state().transfers,
-            Target::Local(destination.clone()),
+            target.clone(),
             &destination.to_string_lossy(),
         )?;
         let mut source = self.sftp.open_remote_source(path).await?;
         let stamp = self.sftp.stamp_open_file(&mut source, path).await?;
         let size = stamp.size();
         let cp = &mut *self.checkpoint;
-        let mut local = match &cp.files {
+        let (mut writer, resuming) = match &cp.files {
             Some(Files::Download {
                 source: saved,
                 destination: saved_destination,
                 part,
-            }) if saved == &stamp && saved_destination == &destination => {
-                self.entry.verifying(host, cp.prefix.bytes, size);
-                let mut file = part.reopen()?;
-                let len = file.metadata().await?.len();
-                cp.prefix
-                    .validate(&mut source, &mut file, len, &self.entry)
-                    .await?;
-                file
-            }
+            }) if saved == &stamp && saved_destination == &target => (part.reopen()?, true),
             Some(_) => return Err(changed(path)),
             None => {
-                let (part, file) = LocalPartial::create(&destination)?;
+                let (part, file) = LocalPartial::create_in(destination, directory)?;
                 cp.files = Some(Files::Download {
-                    destination,
+                    destination: target,
                     source: stamp,
                     part,
                 });
-                file
+                (file, false)
             }
         };
-        let n = cp
-            .prefix
-            .copy(&mut source, &mut local, &self.entry, host, size)
-            .await?;
+        let copied = async {
+            let stream = writer.stream();
+            if resuming {
+                self.entry.verifying(host, cp.prefix.bytes, size);
+                let len = stream.metadata().await?.len();
+                cp.prefix
+                    .validate(&mut source, stream, len, &self.entry)
+                    .await?;
+            }
+            cp.prefix
+                .copy(&mut source, stream, &self.entry, host, size)
+                .await
+        }
+        .await;
+        writer.close().await?;
+        let n = copied?;
         let Some(Files::Download {
             source: stamp,
             part,
@@ -518,20 +542,21 @@ impl Attempt {
             .shutdown()
             .await
             .map_err(|e| remote_error("close", e))?;
-        local.shutdown().await?;
-        drop(local.into_std().await);
         self.entry.publishing(
             host,
             n,
             &part.path().to_string_lossy(),
             &part.backup_path().to_string_lossy(),
         )?;
-        let result = part.commit().map(|_| n);
+        let result = part.commit(n).map(|_| n);
         if result.is_ok()
             || result.as_ref().is_err_and(|e| {
                 matches!(
                     e.code(),
-                    "sftp_replace_failed" | "sftp_backup_cleanup_failed"
+                    "sftp_publish_failed"
+                        | "sftp_backup_failed"
+                        | "sftp_replace_failed"
+                        | "sftp_backup_cleanup_failed"
                 )
             })
         {

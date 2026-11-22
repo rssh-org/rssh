@@ -71,6 +71,9 @@ fn join_remote(dir: &str, name: &str) -> String {
 
 pub struct SftpHandle {
     sftp: russh_sftp::client::SftpSession,
+    // russh-sftp 2.x exposes extension requests on its raw API only. Retain
+    // the authenticated transport to negotiate them on a sibling channel.
+    transport: Option<client::SshHandle>,
     /// 父 SSH 会话 id；None 表示这条 SFTP 走的是独立 TCP（`SftpHandle::connect`）。
     /// SSH 关闭时会按这个字段反向找到所有 children 并清理。
     parent_ssh_id: Option<String>,
@@ -87,6 +90,10 @@ impl SftpHandle {
         ssh_handle: &crate::ssh::client::SshHandle,
         parent_ssh_id: String,
     ) -> AppResult<Self> {
+        Self::open(ssh_handle.clone(), Some(parent_ssh_id)).await
+    }
+
+    async fn open(ssh_handle: client::SshHandle, parent_ssh_id: Option<String>) -> AppResult<Self> {
         let channel = {
             let h = ssh_handle.lock().await;
             h.channel_open_session().await.map_err(|e| {
@@ -110,8 +117,9 @@ impl SftpHandle {
 
         Ok(Self {
             sftp,
-            parent_ssh_id: Some(parent_ssh_id),
+            parent_ssh_id,
             peer: ssh_handle.peer.clone(),
+            transport: Some(ssh_handle),
         })
     }
 
@@ -140,29 +148,7 @@ impl SftpHandle {
 
         client::authenticate(&mut handle, credential, None).await?;
 
-        let channel = handle.channel_open_session().await.map_err(|e| {
-            AppError::sftp(
-                "sftp_io_failed",
-                json!({ "op": "open channel", "err": e.to_string() }),
-            )
-        })?;
-
-        channel.request_subsystem(true, "sftp").await.map_err(|e| {
-            AppError::sftp(
-                "sftp_io_failed",
-                json!({ "op": "request_subsystem", "err": e.to_string() }),
-            )
-        })?;
-
-        let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
-            .await
-            .map_err(|e| AppError::sftp("sftp_init_failed", json!({ "err": e.to_string() })))?;
-
-        Ok(Self {
-            sftp,
-            parent_ssh_id: None,
-            peer,
-        })
+        Self::open(client::SshHandle::new(handle, peer), None).await
     }
 
     pub async fn home_dir(&self) -> AppResult<String> {
@@ -472,7 +458,7 @@ impl SftpHandle {
                     json!({ "path": remote_path, "size": next, "limit": max_bytes }),
                 ));
             }
-            writer.write_all(&buf[..n]).await?;
+            writer.stream().write_all(&buf[..n]).await?;
             transferred = next;
         }
 
@@ -482,9 +468,8 @@ impl SftpHandle {
                 json!({ "op": "close", "err": e.to_string() }),
             )
         })?;
-        writer.shutdown().await?;
-        drop(writer.into_std().await);
-        partial.commit()?;
+        writer.close().await?;
+        partial.commit(transferred)?;
         Ok(transferred)
     }
 

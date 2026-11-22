@@ -86,6 +86,7 @@ interface TransferFiles extends TransferOrigin {
 export interface Transfer extends TransferFiles {
   id: string;
   kind: TransferKind;
+  grantId?: number;
   attempt: number;
   cancelRequested?: boolean;
   total: number;
@@ -207,6 +208,7 @@ async function runTransfer(id: string): Promise<void> {
       sftpId,
       remotePath: item.remotePath,
       localPath: item.localPath,
+      ...(item.grantId === undefined ? {} : { grantId: item.grantId }),
       transferId: id,
       originalSessionId: item.sessionId,
     });
@@ -236,11 +238,12 @@ async function runTransfer(id: string): Promise<void> {
   }
 }
 
-function enqueue(kind: TransferKind, files: TransferFiles, sizeHint: number): string {
+function enqueue(kind: TransferKind, files: TransferFiles, sizeHint: number, grantId?: number): string {
   const id = crypto.randomUUID();
   _list.unshift({
     id,
     kind,
+    grantId,
     sessionId: files.sessionId,
     tabId: files.tabId,
     profileId: files.profileId,
@@ -256,26 +259,27 @@ function enqueue(kind: TransferKind, files: TransferFiles, sizeHint: number): st
   return id;
 }
 
-export async function startDownload(args: TransferFiles & { sizeHint?: number }): Promise<string> {
-  return enqueue("download", args, args.sizeHint ?? 0);
+export async function startDownload(args: TransferFiles & { sizeHint?: number; grantId?: number }): Promise<string> {
+  return enqueue("download", args, args.sizeHint ?? 0, args.grantId);
 }
 
 export async function startUpload(args: TransferFiles): Promise<string> {
   return enqueue("upload", args, 0);
 }
 
-// Once publication has an uncertain outcome the reported paths are needed
-// for recovery. Re-running the copy could overwrite the only original.
-const inspectBeforeRetry = new Set([
+// These errors require inspecting the reported paths or starting a transfer
+// with a different destination or connection.
+const nonRetryableErrors = new Set([
   "sftp_publish_failed", "sftp_backup_failed", "sftp_replace_failed",
   "sftp_commit_uncertain", "sftp_backup_changed", "sftp_transfer_reconnect_required",
+  "sftp_folder_operations_unsupported",
 ]);
 
 export function canRetry(item: Transfer): boolean {
   if (item.status !== "failed") return item.status === "cancelled";
   const error = errCoded(item.error);
   if (error?.code === "sftp_provider_siblings_unavailable" && error.params?.action === "reselect") return false;
-  return !inspectBeforeRetry.has(error?.code ?? "");
+  return !nonRetryableErrors.has(error?.code ?? "");
 }
 
 export async function retry(id: string): Promise<void> {
@@ -324,21 +328,23 @@ function isFinished(item: Transfer): boolean {
   return item.status !== "running" && item.status !== "queued";
 }
 
-function forget(id: string): void {
-  // The host discards only its in-memory checkpoint. Files retained for
-  // recovery remain at the paths shown in the transfer error.
-  void invoke("sftp_forget_transfer", { transferId: id }).catch((error) => toast.error(errMsg(error)));
+function forget(item: Transfer): void {
+  // Release the checkpoint and any folder grant without touching retained files.
+  void invoke("sftp_forget_transfer", {
+    transferId: item.id,
+    ...(item.grantId === undefined ? {} : { grantId: item.grantId }),
+  }).catch((error) => toast.error(errMsg(error)));
 }
 
 export function remove(id: string): void {
   const item = find(id);
   if (!item || !isFinished(item)) return;
   _list = _list.filter((t) => t.id !== id);
-  forget(id);
+  forget(item);
 }
 
 export function clearFinished(): void {
   const finished = _list.filter(isFinished);
   _list = _list.filter((t) => !isFinished(t));
-  for (const item of finished) forget(item.id);
+  for (const item of finished) forget(item);
 }

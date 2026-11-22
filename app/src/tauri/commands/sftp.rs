@@ -123,11 +123,12 @@ pub async fn sftp_close(
 
 #[tauri::command]
 pub async fn sftp_pick_save_path(
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     default_name: String,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<crate::files::PickedDownload>> {
     crate::platform::host::platform(&app)
-        .pick_download_path(&app, default_name)
+        .pick_download_path(&window, default_name)
         .await
 }
 
@@ -156,15 +157,18 @@ pub async fn sftp_pick_open_files(
 
 #[tauri::command]
 pub async fn sftp_download_to(
-    window: tauri::Window,
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     sftp_id: String,
     remote_path: String,
     local_path: String,
     transfer_id: String,
+    grant_id: Option<tauri::ResourceId>,
     original_session_id: Option<String>,
 ) -> AppResult<u64> {
+    #[cfg(not(any(android, ios)))]
+    let _ = grant_id;
     let owner = SessionOwner::Window(window.label().to_owned());
     let request = Request {
         transfer_id,
@@ -174,10 +178,25 @@ pub async fn sftp_download_to(
         direction: Direction::Download,
     };
     let attempt = Attempt::begin(&state, &owner, &sftp_id, request)?;
+    #[cfg(any(android, ios))]
+    {
+        use crate::platform::tauri::download_folder;
+        let grant_id = grant_id.ok_or_else(crate::files::download_siblings_unavailable)?;
+        return download_folder::download(
+            &window,
+            grant_id,
+            &local_path,
+            attempt,
+            crate::tauri_host::host(app),
+        )
+        .await;
+    }
+    #[cfg(any(macos, linux, windows, ohos))]
     let path = crate::platform::host::platform(&app)
         .download_target(local_path)
         .await
         .map_err(local_open_error)?;
+    #[cfg(any(macos, linux, windows, ohos))]
     attempt.download(&crate::tauri_host::host(app), &path).await
 }
 
@@ -251,10 +270,21 @@ pub fn sftp_cancel_transfer(
 
 #[tauri::command]
 pub fn sftp_forget_transfer(
-    window: tauri::Window,
+    window: tauri::WebviewWindow,
+    grant_id: Option<tauri::ResourceId>,
     state: State<'_, Arc<AppState>>,
     transfer_id: String,
 ) -> AppResult<()> {
+    #[cfg(not(any(android, ios)))]
+    let _ = grant_id;
     let owner = SessionOwner::Window(window.label().to_owned());
-    rssh_core::error::locked(&state.transfers)?.forget(&owner, &transfer_id)
+    rssh_core::error::locked(&state.transfers)?.forget(&owner, &transfer_id)?;
+    #[cfg(any(android, ios))]
+    if let Some(id) = grant_id {
+        use tauri::Manager;
+        let _ = window
+            .resources_table()
+            .take::<crate::platform::tauri::download_folder::FolderGrant>(id);
+    }
+    Ok(())
 }

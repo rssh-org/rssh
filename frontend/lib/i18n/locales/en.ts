@@ -1152,6 +1152,8 @@ const en = {
   "error.sftp_transfer_changed": "Could not verify the original file or SSH connection for {path}. Check the file and host before retrying.",
   "error.sftp_target_busy": "Another transfer is using {path}. Retry after it finishes.",
   "error.sftp_folder_picker_unavailable": "Downloads require read and write access to the destination folder. This file picker can only grant access to individual files.",
+  "error.sftp_folder_picker_busy": "Close the current dialog, then choose the download folder.",
+  "error.sftp_folder_operations_unsupported": "This file provider cannot safely replace files in the selected folder. Choose another folder, such as one on this device.",
   "error.sftp_provider_siblings_unavailable": "This download requires read and write access to the destination folder for temporary and backup files. Grant RSSH access to a folder that supports this, then select the download location again.",
   "error.sftp_commit_uncertain": "Could not confirm whether {path} was saved. Check the destination and the possible backup at {backup} before transferring again.",
   "error.sftp_transfer_reconnect_required": "The original SSH session closed before this transfer could record its destination. Select the file again on the reconnected host.",

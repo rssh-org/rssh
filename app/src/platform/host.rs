@@ -9,7 +9,7 @@ use tauri::{AppHandle, Manager};
 
 use super::runtime::RuntimeCapabilities;
 use crate::error::AppResult;
-use crate::files::{FileFilter, LocalWalkEntry, OpenedFile, ResolvedPath};
+use crate::files::{FileFilter, LocalWalkEntry, OpenedFile, PickedDownload, ResolvedPath};
 
 /// Stamp resets before spawning them so a late native call cannot overwrite a
 /// newer frontend update. Native adapters reject revisions older than applied.
@@ -55,7 +55,11 @@ pub trait NativePlatform: Send + Sync {
         filters: Vec<FileFilter>,
     ) -> AppResult<Option<String>>;
     /// Select a target without creating it and with authority over its siblings.
-    async fn pick_download_path(&self, app: &AppHandle, name: String) -> AppResult<Option<String>>;
+    async fn pick_download_path(
+        &self,
+        window: &tauri::WebviewWindow,
+        name: String,
+    ) -> AppResult<Option<PickedDownload>>;
     async fn open_file(
         &self,
         app: &AppHandle,

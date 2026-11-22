@@ -72,7 +72,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 [target.'cfg(not(any(target_os = "android", target_os = "ios", target_env = "ohos")))'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream", "system-proxy"] }
 
-# Exclusive rename is part of the local SFTP replacement protocol.
+# Protect backup names and destinations that were vacant at the start of a download.
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs"] }
 

@@ -1,8 +1,14 @@
 //! Standard Tauri native services for desktop, Android and iOS.
 
+#[cfg(android)]
+pub(crate) mod android_download;
 #[cfg(any(windows, macos, linux))]
 mod clipboard;
 mod external;
+#[cfg(ios)]
+pub(crate) use crate::files::ios_download as download_folder;
+#[cfg(android)]
+pub(crate) use android_download as download_folder;
 #[cfg(android)]
 pub(crate) mod navigation;
 
@@ -118,17 +124,21 @@ impl NativePlatform for TauriPlatform {
         files::native::pick_save(app, name, filters).await
     }
 
-    async fn pick_download_path(&self, app: &AppHandle, name: String) -> AppResult<Option<String>> {
+    async fn pick_download_path(
+        &self,
+        window: &tauri::WebviewWindow,
+        name: String,
+    ) -> AppResult<Option<files::PickedDownload>> {
         #[cfg(any(windows, macos, linux))]
         {
-            self.pick_save(app, name, Vec::new()).await
+            use tauri::Manager;
+            Ok(self
+                .pick_save(window.app_handle(), name, Vec::new())
+                .await?
+                .map(files::PickedDownload::Path))
         }
         #[cfg(any(android, ios))]
-        {
-            // These save pickers create/export a document before returning its URI.
-            let _ = (app, name);
-            Err(files::download_folder_picker_unavailable())
-        }
+        download_folder::pick(window, name).await
     }
 
     async fn open_file(

@@ -3,6 +3,8 @@
 
 use crate::error::{AppError, AppResult};
 
+#[cfg(all(feature = "tauri", ios))]
+pub(crate) mod ios_download;
 #[cfg(not(ohos))]
 pub(crate) mod native;
 #[cfg(feature = "tauri")]
@@ -83,9 +85,22 @@ pub fn download_siblings_unavailable() -> AppError {
     )
 }
 
-#[cfg(all(feature = "tauri", any(android, ios, ohos)))]
+#[cfg(all(feature = "tauri", ohos))]
 pub fn download_folder_picker_unavailable() -> AppError {
     AppError::sftp("sftp_folder_picker_unavailable", serde_json::json!({}))
+}
+
+#[cfg(feature = "tauri")]
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+pub enum PickedDownload {
+    Path(String),
+    #[cfg(any(android, ios))]
+    Folder {
+        location: String,
+        #[serde(rename = "grantId")]
+        grant_id: tauri::ResourceId,
+    },
 }
 
 #[cfg(feature = "tauri")]

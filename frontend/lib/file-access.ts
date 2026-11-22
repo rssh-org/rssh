@@ -25,7 +25,11 @@ export function pickDirectory(write: boolean): Promise<PickedLocation | null> {
   return invoke("sftp_pick_folder", { write });
 }
 
-export function pickSavePath(defaultName: string): Promise<string | null> {
+/** A folder grant stays in the host. Its handle can accompany retries while
+ * the selected location remains suitable for display in the transfer queue. */
+export type SaveDestination = string | { location: string; grantId: number };
+
+export function pickSavePath(defaultName: string): Promise<SaveDestination | null> {
   return invoke("sftp_pick_save_path", { defaultName });
 }
 

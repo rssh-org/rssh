@@ -110,6 +110,26 @@ describe("SFTP transfer queue", () => {
     await vi.waitFor(() => expect(queue.list()[0]).toMatchObject({ status: "done", transferred: 42 }));
   });
 
+  it("reuses a folder grant across download attempts and releases it with the finished task", async () => {
+    const queue = await import("./transfers.svelte.ts");
+    const download = vi.fn().mockRejectedValueOnce("connection closed").mockResolvedValueOnce(32);
+    invoke.mockImplementation(async (name, args) => {
+      if (name === "sftp_connect_session") return "sftp";
+      if (name === "sftp_download_to") return download(args);
+    });
+    const id = await queue.startDownload({ sessionId: "original", ...paths, grantId: 0 });
+    await vi.waitFor(() => expect(queue.list()[0].status).toBe("failed"));
+    expect(invoke.mock.calls.some(([name]) => name === "sftp_forget_transfer")).toBe(false);
+    await queue.retry(id);
+    await vi.waitFor(() => expect(queue.list()[0].status).toBe("done"));
+    expect(download).toHaveBeenCalledTimes(2);
+    for (const [args] of download.mock.calls) {
+      expect(args).toMatchObject({ transferId: id, localPath: paths.localPath, grantId: 0 });
+    }
+    queue.clearFinished();
+    expect(invoke).toHaveBeenCalledWith("sftp_forget_transfer", { transferId: id, grantId: 0 });
+  });
+
   it.each(["download", "upload"] as const)("keeps a %s backup candidate if IPC closes during the final rename", async kind => {
     const queue = await import("./transfers.svelte.ts");
     const { errCoded } = await import("../i18n/index.svelte.ts");

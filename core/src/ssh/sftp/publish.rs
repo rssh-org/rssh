@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::io::SeekFrom;
+use std::io::{self, SeekFrom};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
-use russh_sftp::client::{error::Error, fs::File};
-use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
+use russh_sftp::client::{error::Error, fs::File, RawSftpSession};
+use russh_sftp::protocol::{FileAttributes, OpenFlags, Packet, StatusCode};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -19,6 +19,7 @@ use crate::ssh::client::SshPeer;
 // and bounded content samples, and serialize RSSH publishers of the same name.
 type Publishers = HashMap<(SshPeer, String), Weak<AsyncMutex<()>>>;
 static PUBLISHERS: LazyLock<Mutex<Publishers>> = LazyLock::new(Mutex::default);
+const POSIX_RENAME: &str = "posix-rename@openssh.com";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct Attributes {
@@ -63,6 +64,47 @@ impl RemoteStamp {
 }
 
 impl SftpHandle {
+    async fn replacing_session(&self) -> Result<Option<RawSftpSession>, Error> {
+        let Some(transport) = &self.transport else {
+            return Ok(None);
+        };
+        let timeout = std::time::Duration::from_secs(10);
+        let mut channel = match tokio::time::timeout(timeout, async {
+            transport.lock().await.channel_open_session().await
+        })
+        .await?
+        {
+            Ok(channel) => channel,
+            Err(russh::Error::ChannelOpenFailure(
+                russh::ChannelOpenFailure::AdministrativelyProhibited
+                | russh::ChannelOpenFailure::ConnectFailed
+                | russh::ChannelOpenFailure::ResourceShortage,
+            )) => return Ok(None),
+            Err(error) => return Err(Error::IO(error.to_string())),
+        };
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|e| Error::IO(e.to_string()))?;
+        let reply = tokio::time::timeout(timeout, channel.wait()).await;
+        if !matches!(reply, Ok(Some(russh::ChannelMsg::Success))) {
+            // ChannelStream sends SSH_MSG_CHANNEL_CLOSE on drop even when
+            // the server denied the subsystem or didn't acknowledge it.
+            drop(channel.into_stream());
+            return match reply? {
+                Some(russh::ChannelMsg::Failure) => Ok(None),
+                _ => Err(Error::UnexpectedPacket),
+            };
+        }
+        let raw = RawSftpSession::new(channel.into_stream());
+        let version = raw.init().await?;
+        Ok(version
+            .extensions
+            .get(POSIX_RENAME)
+            .is_some_and(|v| v == "1")
+            .then_some(raw))
+    }
+
     async fn open_attributes(&self, file: &File, path: &str) -> AppResult<Attributes> {
         let meta = match file.metadata().await {
             Ok(attrs) => attrs,
@@ -86,12 +128,9 @@ impl SftpHandle {
             .stream_position()
             .await
             .map_err(|e| io_error("seek", path, e))?;
-        file.seek(SeekFrom::Start(0))
-            .await
-            .map_err(|e| io_error("seek", path, e))?;
         let digest = sample_contents(file, attrs.size)
             .await
-            .map_err(|error| io_error("read", path, error))?;
+            .map_err(|e| io_error("read", path, e))?;
         file.seek(SeekFrom::Start(position))
             .await
             .map_err(|e| io_error("seek", path, e))?;
@@ -129,7 +168,13 @@ pub(crate) fn backup_path(part: &str) -> AppResult<String> {
     let stem = part
         .strip_suffix(".part")
         .ok_or_else(|| target_changed(part))?;
-    Ok(format!("{stem}.bak"))
+    let (directory, name) = stem.split_at(stem.rfind('/').map_or(0, |slash| slash + 1));
+    let name = if name.starts_with(".rssh-") {
+        &name[1..]
+    } else {
+        name
+    };
+    Ok(format!("{directory}{name}.bak"))
 }
 
 fn sibling(path: &str, extension: &str) -> AppResult<String> {
@@ -164,27 +209,96 @@ fn may_be_collision(error: &Error) -> bool {
 
 // Small files are hashed in full. For large files the wire cost stays bounded
 // even if a user replaces a multi-gigabyte file over a slow link.
-async fn sample_contents(file: &mut File, size: Option<u64>) -> std::io::Result<[u8; 32]> {
-    const WINDOW: u64 = 32 * 1024;
-    let mut digest = Sha256::new();
-    let Some(size) = size else {
-        let mut first = Vec::new();
-        file.take(WINDOW).read_to_end(&mut first).await?;
-        return Ok(Sha256::digest(first).into());
-    };
-    if size <= WINDOW * 3 {
-        let mut bytes = vec![0; size as usize];
-        file.read_exact(&mut bytes).await?;
-        digest.update(bytes);
+const WINDOW: u64 = 32 * 1024;
+fn sample_ranges(size: Option<u64>) -> Vec<(u64, u64)> {
+    let length = size.unwrap_or(WINDOW);
+    if length <= 3 * WINDOW {
+        vec![(0, length)]
     } else {
-        let mut bytes = vec![0; WINDOW as usize];
-        for offset in [0, (size - WINDOW) / 2, size - WINDOW] {
-            file.seek(SeekFrom::Start(offset)).await?;
-            file.read_exact(&mut bytes).await?;
-            digest.update(&bytes);
+        vec![
+            (0, WINDOW),
+            ((length - WINDOW) / 2, WINDOW),
+            (length - WINDOW, WINDOW),
+        ]
+    }
+}
+
+async fn sample_contents(file: &mut File, size: Option<u64>) -> io::Result<[u8; 32]> {
+    let mut digest = Sha256::new();
+    for (offset, len) in sample_ranges(size) {
+        file.seek(SeekFrom::Start(offset)).await?;
+        let mut bytes = Vec::with_capacity(len as usize);
+        (&mut *file).take(len).read_to_end(&mut bytes).await?;
+        if size.is_some() && bytes.len() as u64 != len {
+            return Err(io::ErrorKind::UnexpectedEof.into());
         }
+        digest.update(bytes);
     }
     Ok(digest.finalize().into())
+}
+
+// SFTP subsystems on one SSH connection can expose different namespaces.
+// Verify the transfer's original stamps through the channel that will rename.
+async fn raw_matches(
+    raw: &RawSftpSession,
+    path: &str,
+    expected: &RemoteStamp,
+) -> Result<bool, Error> {
+    let matches_attrs =
+        |attrs: &FileAttributes| Attributes::regular(attrs).as_ref() == Some(&expected.attrs);
+    match raw.lstat(path).await {
+        Ok(meta) if matches_attrs(&meta.attrs) => (),
+        Ok(_) => return Ok(false),
+        Err(Error::Status(s)) if s.status_code == StatusCode::NoSuchFile => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    let handle = raw
+        .open(path, OpenFlags::READ, FileAttributes::default())
+        .await?
+        .handle;
+    let checked = async {
+        match raw.fstat(&handle).await {
+            Ok(meta) if !matches_attrs(&meta.attrs) => return Ok(false),
+            Ok(_) => (),
+            Err(Error::Status(s)) if s.status_code == StatusCode::OpUnsupported => (),
+            Err(error) => return Err(error),
+        }
+        let mut digest = Sha256::new();
+        for (mut offset, mut remaining) in sample_ranges(expected.size()) {
+            while remaining > 0 {
+                let request = remaining.min(WINDOW) as u32;
+                let bytes = match raw.read(&handle, offset, request).await {
+                    Ok(data) => data.data,
+                    Err(Error::Status(s))
+                        if s.status_code == StatusCode::Eof && expected.size().is_none() =>
+                    {
+                        break
+                    }
+                    Err(error) => return Err(error),
+                };
+                if bytes.is_empty() || bytes.len() > request as usize {
+                    return Err(Error::UnexpectedPacket);
+                }
+                remaining -= bytes.len() as u64;
+                offset += bytes.len() as u64;
+                digest.update(bytes);
+            }
+        }
+        let digest: [u8; 32] = digest.finalize().into();
+        Ok(digest == expected.digest && matches_attrs(&raw.lstat(path).await?.attrs))
+    }
+    .await;
+    raw.close(handle).await?;
+    checked
+}
+
+fn posix_rename_applied(reply: Packet) -> Result<bool, Error> {
+    match reply {
+        Packet::Status(s) if s.status_code == StatusCode::Ok => Ok(true),
+        Packet::Status(s) if s.status_code == StatusCode::OpUnsupported => Ok(false),
+        Packet::Status(s) => Err(Error::Status(s)),
+        _ => Err(Error::UnexpectedPacket),
+    }
 }
 
 impl SftpHandle {
@@ -294,6 +408,14 @@ impl SftpHandle {
         Ok(())
     }
 
+    async fn vacant_name(&self, path: &str) -> Result<bool, Error> {
+        match self.sftp.symlink_metadata(path).await {
+            Ok(_) => Ok(false),
+            Err(Error::Status(s)) if s.status_code == StatusCode::NoSuchFile => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn commit_remote_part(
         &self,
         part: &str,
@@ -317,23 +439,60 @@ impl SftpHandle {
                 }
             }
         };
+        // An initially free name must not replace a new arrival. Only request
+        // POSIX overwrite semantics for a destination the transfer identified.
+        let replacing = if expected.is_some() {
+            self.replacing_session()
+                .await
+                .map_err(|e| io_error("negotiate rename", &target, e))?
+        } else {
+            None
+        };
         let _guard = publish.lock().await;
-        if &self.remote_destination_stamp(&target).await? != expected {
-            return Err(target_changed(&target));
-        }
-
-        // The part may have changed after close or while waiting for the
-        // publication lock. Only the stamp from the owned writer is trusted.
-        self.verify_uploaded_file(part, uploaded).await?;
         let publish_error = |error: Error| {
             AppError::sftp(
                 "sftp_publish_failed",
                 json!({ "target": target, "part": part, "err": error.to_string() }),
             )
         };
-        // The v3 SSH_FXP_RENAME requires that the new name does not exist.
-        // Do not use the replacing posix-rename@openssh.com extension.
-        match self.sftp.rename(part, &target).await {
+        let mut replaced = false;
+        if let (Some(session), Some(original)) = (&replacing, expected) {
+            if !raw_matches(session, &target, original)
+                .await
+                .map_err(|e| io_error("verify", &target, e))?
+            {
+                return Err(target_changed(&target));
+            }
+            if !raw_matches(session, part, uploaded)
+                .await
+                .map_err(|e| io_error("verify", part, e))?
+            {
+                return Err(AppError::sftp("sftp_part_changed", json!({"path": part})));
+            }
+            let paths = russh_sftp::ser::to_bytes(&(part, &target))
+                .map_err(|e| io_error("encode rename", &target, e))?;
+            // Only OpUnsupported proves an advertised extension was not applied.
+            replaced = session
+                .extended(POSIX_RENAME, paths.to_vec())
+                .await
+                .and_then(posix_rename_applied)
+                .map_err(|e| match e {
+                    Error::Status(s) if s.status_code == StatusCode::PermissionDenied => {
+                        io_error("rename", &target, s.status_code)
+                    }
+                    other => publish_error(other),
+                })?;
+        }
+        let result = if replaced {
+            Ok(())
+        } else {
+            if &self.remote_destination_stamp(&target).await? != expected {
+                return Err(target_changed(&target));
+            }
+            self.verify_uploaded_file(part, uploaded).await?;
+            self.sftp.rename(part, &target).await
+        };
+        match result {
             Ok(()) => {
                 if self.verify_uploaded_file(&target, uploaded).await.is_err() {
                     return Err(AppError::sftp(
@@ -361,6 +520,18 @@ impl SftpHandle {
         // The part is an exclusively-created UUID sibling. Derive the recovery
         // name before moving the old file so a dropped future can report it.
         let backup = backup_path(part)?;
+        if !self
+            .vacant_name(&backup)
+            .await
+            .map_err(|e| io_error("lstat", &backup, e))?
+        {
+            return Err(AppError::sftp(
+                "sftp_backup_failed",
+                json!({
+                    "target": target, "backup": backup, "err": "Backup path is occupied"
+                }),
+            ));
+        }
         self.sftp.rename(&target, &backup).await.map_err(|error| {
             if matches!(&error, Error::Status(s) if s.status_code == StatusCode::PermissionDenied) {
                 return io_error("rename", &target, error);
@@ -390,6 +561,13 @@ impl SftpHandle {
             return Err(replace_error(
                 "Partial file identity could not be verified".into(),
             ));
+        }
+        if !self
+            .vacant_name(&target)
+            .await
+            .map_err(|e| replace_error(e.to_string()))?
+        {
+            return Err(replace_error("Destination name is occupied".into()));
         }
         self.sftp
             .rename(part, &target)
@@ -438,6 +616,7 @@ mod tests {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum PublishFault {
         None,
+        OverwritesBackup,
         DenyFinalRename,
         ReplacePartAfterBackup,
         ReplacePartAtFinalRename,
@@ -512,7 +691,9 @@ mod tests {
             new: String,
         ) -> Result<Status, StatusCode> {
             let mut files = self.files.lock().unwrap();
-            if files.contains_key(&new) {
+            if files.contains_key(&new)
+                && !(self.fault == PublishFault::OverwritesBackup && new.ends_with(".bak"))
+            {
                 return Err(StatusCode::Failure);
             }
             if self.fault == PublishFault::DenyFinalRename && old == PART {
@@ -561,6 +742,7 @@ mod tests {
         };
         let handle = SftpHandle {
             sftp: SftpSession::new(client).await.unwrap(),
+            transport: None,
             parent_ssh_id: None,
             peer,
         };
@@ -613,7 +795,7 @@ mod tests {
 
     #[tokio::test]
     async fn occupied_transfer_backup_is_never_replaced() {
-        let (sftp, files) = fixture(PublishFault::None).await;
+        let (sftp, files) = fixture(PublishFault::OverwritesBackup).await;
         files
             .lock()
             .unwrap()
@@ -629,6 +811,52 @@ mod tests {
         assert_eq!(files[TARGET], b"old data");
         assert_eq!(files["/owned.bak"], b"other backup");
         assert_eq!(files[PART], b"new data");
+    }
+
+    #[test]
+    fn posix_failure_does_not_authorize_the_v3_backup_protocol() {
+        for code in [
+            StatusCode::Failure,
+            StatusCode::PermissionDenied,
+            StatusCode::ConnectionLost,
+        ] {
+            let response = Packet::Status(status(1, code, "File exists"));
+            assert!(posix_rename_applied(response).is_err());
+        }
+        let unsupported = Packet::Status(status(1, StatusCode::OpUnsupported, ""));
+        assert!(!posix_rename_applied(unsupported).unwrap());
+    }
+
+    #[test]
+    fn backup_is_visible_in_the_same_remote_directory() {
+        assert_eq!(backup_path("/owned.part").unwrap(), "/owned.bak");
+        assert_eq!(
+            backup_path("/.cache/a.b/.rssh-502c19f1-4b16-4a40-b061-3e9c312d4697.part").unwrap(),
+            "/.cache/a.b/rssh-502c19f1-4b16-4a40-b061-3e9c312d4697.bak"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_extension_channel_must_see_the_files_the_primary_channel_verified() {
+        let (sftp, files) = fixture(PublishFault::None).await;
+        let expected = sftp.remote_destination_stamp(PART).await.unwrap().unwrap();
+        let (stream, server_stream) = tokio::io::duplex(4096);
+        server::run(
+            server_stream,
+            MockServer {
+                files: files.clone(),
+                fault: PublishFault::None,
+            },
+        )
+        .await;
+        let raw = RawSftpSession::new(stream);
+        raw.init().await.unwrap();
+        assert!(raw_matches(&raw, PART, &expected).await.unwrap());
+        files
+            .lock()
+            .unwrap()
+            .insert(PART.to_string(), b"stranger".to_vec());
+        assert!(!raw_matches(&raw, PART, &expected).await.unwrap());
     }
 
     #[tokio::test]

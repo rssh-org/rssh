@@ -18,8 +18,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Restriction {
+    None,
+    DenyRequest(&'static str),
+    SingleSession,
+}
+
 struct OpenSsh {
     executable: PathBuf,
+    restriction: Restriction,
+    opened: bool,
     channels: HashMap<ChannelId, Channel<server::Msg>>,
     occupy_after_backup: Option<PathBuf>,
 }
@@ -37,6 +46,11 @@ impl server::Handler for OpenSsh {
         reply: server::ChannelOpenHandle,
         _: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        if self.opened && self.restriction == Restriction::SingleSession {
+            reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+            return Ok(());
+        }
+        self.opened = true;
         self.channels.insert(channel.id(), channel);
         reply.accept().await;
         Ok(())
@@ -49,7 +63,11 @@ impl server::Handler for OpenSsh {
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
         assert_eq!(name, "sftp");
-        let mut child = tokio::process::Command::new(&self.executable)
+        let mut server = tokio::process::Command::new(&self.executable);
+        if let Restriction::DenyRequest(name) = self.restriction {
+            server.args(["-P", name]);
+        }
+        let mut child = server
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .kill_on_drop(true)
@@ -110,7 +128,13 @@ impl Drop for Connection {
 
 // Two memory pipes and an abortable relay simulate the SSH wire. Each call
 // establishes and authenticates a new SSH connection without a network listener.
-async fn connect(host: &Host, root: &Path, seed: u8, fault: Option<&Path>) -> Connection {
+async fn connect(
+    host: &Host,
+    root: &Path,
+    seed: u8,
+    restriction: Restriction,
+    fault: Option<&Path>,
+) -> Connection {
     const HOST: &str = "openssh-transfer.test";
     let key: russh::keys::PrivateKey =
         russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[seed; 32]).into();
@@ -139,6 +163,8 @@ async fn connect(host: &Host, root: &Path, seed: u8, fault: Option<&Path>) -> Co
     );
     let handler = OpenSsh {
         executable,
+        restriction,
+        opened: false,
         channels: Default::default(),
         occupy_after_backup: fault.map(Path::to_path_buf),
     };
@@ -298,7 +324,7 @@ async fn openssh_new_replace_and_reconnect_in_both_directions() {
         std::fs::write(&existing_part, b"not this transfer").unwrap();
         std::fs::write(&existing_backup, b"older backup").unwrap();
         std::fs::write(&source, b"first contents").unwrap();
-        let first = connect(&host, root, 1, None).await;
+        let first = connect(&host, root, 1, Restriction::None, None).await;
         assert_eq!(transfer.run(&host, &first).await.unwrap(), 14);
         assert_eq!(std::fs::read(&target).unwrap(), b"first contents");
 
@@ -328,12 +354,12 @@ async fn openssh_new_replace_and_reconnect_in_both_directions() {
         assert_eq!(std::fs::read(&target).unwrap(), b"first contents");
         progress(&mut events, &transfer);
         // Same user, host and port, but a different independently trusted key.
-        let other = connect(&host, root, 2, None).await;
+        let other = connect(&host, root, 2, Restriction::None, None).await;
         assert_eq!(
             transfer.run(&host, &other).await.unwrap_err().code(),
             "sftp_transfer_changed"
         );
-        let second = connect(&host, root, 1, None).await;
+        let second = connect(&host, root, 1, Restriction::None, None).await;
         let parts: Vec<_> = std::fs::read_dir(root)
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -389,7 +415,7 @@ async fn openssh_download_requires_permission_on_the_parent_folder() {
     std::fs::write(&transfer.remote, b"updated").unwrap();
     std::fs::write(&transfer.local, b"original").unwrap();
     let (host, mut events) = crate::ssh::test_support::headless_host();
-    let connection = connect(&host, dir.path(), 1, None).await;
+    let connection = connect(&host, dir.path(), 1, Restriction::None, None).await;
 
     let writable = std::fs::metadata(&folder).unwrap().permissions();
     for mode in [0o555, 0o000] {
@@ -418,15 +444,69 @@ async fn openssh_late_publish_failure_retains_original_at_reported_backup() {
     let (source, target) = transfer.endpoints();
     std::fs::write(source, b"new bytes").unwrap();
     std::fs::write(target, b"original bytes").unwrap();
-    let connection = connect(&host, root, 1, Some(target)).await;
+    let connection = connect(
+        &host,
+        root,
+        1,
+        Restriction::DenyRequest("posix-rename"),
+        Some(target),
+    )
+    .await;
     let error = transfer.run(&host, &connection).await.unwrap_err();
     let crate::error::AppError::Sftp(error) = error else {
         panic!("wrong failure: {error}")
     };
     assert_eq!(error.code, "sftp_replace_failed");
     let backup = error.params["backup"].as_str().unwrap();
-    assert!(backup.ends_with(".bak"));
+    let backup_path = Path::new(backup);
+    assert_eq!(
+        std::fs::canonicalize(backup_path.parent().unwrap()).unwrap(),
+        std::fs::canonicalize(target.parent().unwrap()).unwrap(),
+    );
+    let backup_id = backup_path
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .strip_prefix("rssh-")
+        .unwrap()
+        .strip_suffix(".bak")
+        .unwrap();
+    uuid::Uuid::parse_str(backup_id).unwrap();
     assert_eq!(std::fs::read(backup).unwrap(), b"original bytes");
     assert_eq!(std::fs::read(target).unwrap(), b"concurrent writer");
     assert_eq!(std::fs::read(source).unwrap(), b"new bytes");
+}
+
+#[tokio::test]
+#[ignore = "requires an installed OpenSSH sftp-server"]
+async fn openssh_overwrites_with_posix_rename_when_standard_rename_is_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (host, _events) = crate::ssh::test_support::headless_host();
+    let transfer = Transfer::new(root, Direction::Upload);
+    let (source, target) = transfer.endpoints();
+    std::fs::write(source, b"new contents").unwrap();
+    std::fs::write(target, b"original contents").unwrap();
+    let backup = target.with_extension("bak");
+    std::fs::write(&backup, b"prior backup").unwrap();
+    let connection = connect(&host, root, 1, Restriction::DenyRequest("rename"), None).await;
+    assert_eq!(transfer.run(&host, &connection).await.unwrap(), 12);
+    assert_eq!(std::fs::read(target).unwrap(), b"new contents");
+    assert_eq!(std::fs::read(source).unwrap(), b"new contents");
+    assert_eq!(std::fs::read(backup).unwrap(), b"prior backup");
+}
+
+#[tokio::test]
+#[ignore = "requires an installed OpenSSH sftp-server"]
+async fn openssh_replaces_over_the_original_channel_when_extra_sessions_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (host, _events) = crate::ssh::test_support::headless_host();
+    let transfer = Transfer::new(dir.path(), Direction::Upload);
+    let (source, target) = transfer.endpoints();
+    std::fs::write(source, b"updated").unwrap();
+    std::fs::write(target, b"original").unwrap();
+    let connection = connect(&host, dir.path(), 1, Restriction::SingleSession, None).await;
+    assert_eq!(transfer.run(&host, &connection).await.unwrap(), 7);
+    assert_eq!(std::fs::read(target).unwrap(), b"updated");
 }

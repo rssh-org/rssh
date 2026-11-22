@@ -413,12 +413,15 @@
                 if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
                 if (queued > 0) notice = t("sftp.queued_n", { n: queued });
             } else {
-                const localPath = await fileAccess.pickSavePath(entry.name);
-                if (!localPath) return;
+                const selected = await fileAccess.pickSavePath(entry.name);
+                if (!selected) return;
+                const destination = typeof selected === "string"
+                    ? { localPath: selected }
+                    : { localPath: selected.location, grantId: selected.grantId };
                 await transfers.startDownload({
                     ...transferOrigin,
+                    ...destination,
                     remotePath: entryPath(entry),
-                    localPath,
                     sizeHint: entry.size,
                 });
                 notice = t("sftp.queued_n", { n: 1 });
