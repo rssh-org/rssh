@@ -13,6 +13,7 @@
 //! Wired so far: local PTY + the DB-backed CRUD that populates the GUI.
 //! SSH / SFTP / AI follow the identical pattern.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
@@ -23,8 +24,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, 
 use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::commands::incident_report;
-use crate::db::Db;
+use crate::commands::{incident_report, run_data_dir_task};
 use crate::error::{locked, AppError, AppResult};
 use crate::models::{
     Credential, Forward, Group, HighlightRule, Profile, SerialProfile, TelnetProfile,
@@ -722,22 +722,22 @@ async fn dispatch_async(
         "list_incident_reports" => run_report_query(state, incident_report::list).await,
         "load_incident_report" => {
             let id: String = arg(&args, "id")?;
-            run_report_query(state, move |db| incident_report::load(db, &id)).await
+            run_report_query(state, move |dir| incident_report::load(dir, &id)).await
         }
         "select_incident_report" => {
             let id: String = arg(&args, "id")?;
-            run_report_query(state, move |db| incident_report::select(db, &id)).await
+            run_report_query(state, move |dir| incident_report::select(dir, &id)).await
         }
         "delete_incident_report" => {
             let id: String = arg(&args, "id")?;
-            run_report_query(state, move |db| incident_report::delete(db, &id)).await
+            run_report_query(state, move |dir| incident_report::delete(dir, &id)).await
         }
         "capture_incident_excerpt" => {
             let excerpt = arg(&args, "excerpt")?;
             let target = arg(&args, "target")?;
             let default_title: String = arg(&args, "defaultTitle")?;
-            run_report_query(state, move |db| {
-                incident_report::capture(db, &excerpt, target, &default_title)
+            run_report_query(state, move |dir| {
+                incident_report::capture(dir, &excerpt, target, &default_title)
             })
             .await
         }
@@ -745,8 +745,8 @@ async fn dispatch_async(
             let id: String = arg(&args, "id")?;
             let content: String = arg(&args, "content")?;
             let previous_content: String = arg(&args, "previousContent")?;
-            run_report_query(state, move |db| {
-                incident_report::update(db, &id, &content, &previous_content)
+            run_report_query(state, move |dir| {
+                incident_report::update(dir, &id, &content, &previous_content)
             })
             .await
         }
@@ -2004,21 +2004,14 @@ async fn sftp_connect_session(
     Ok(json!(id))
 }
 
-// A separate process can hold SQLite's writer lock for the full busy timeout.
-// Keep the wait and serialization of long reports off the WebSocket event loop.
+// Serialize large reports on the same blocking worker that reads them.
 async fn run_report_query<T: serde::Serialize>(
     state: &AppState,
-    work: impl FnOnce(&Db) -> AppResult<T> + Send + 'static,
+    work: impl FnOnce(&Path) -> AppResult<T> + Send + 'static,
 ) -> Result<Value, Value> {
-    let db = state.db.clone();
-    tokio::task::spawn_blocking(move || ok(work(&db)))
+    run_data_dir_task(state, move |dir| ok(work(dir)))
         .await
-        .map_err(|e| {
-            err_value(AppError::other(
-                "task_join_failed",
-                json!({ "err": e.to_string() }),
-            ))
-        })?
+        .map_err(err_value)?
 }
 
 /// Map an `AppResult<T>` into the wire's Ok(result) / Err(error) JSON.
@@ -2145,16 +2138,31 @@ mod tests {
             run("list_incident_reports", json!({})).await.unwrap(),
             json!([])
         );
-        let writer = rusqlite::Connection::open(dir.path().join("rssh.db")).unwrap();
-        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
-        // A blocking dispatch would time out on this lock before the same
-        // single-thread runtime ever gets a chance to release it.
-        let release = async {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            drop(writer);
-        };
-        let (first, ()) = tokio::join!(biased; capture(json!("current")), release);
-        let first = first.unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.path().join("incident-reports/index.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // Release even if a synchronous dispatch blocks the test runtime.
+            let released = release_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok();
+            drop(lock);
+            released
+        });
+        let first = capture(json!("current"));
+        tokio::pin!(first);
+        tokio::select! {
+            biased;
+            _ = &mut first => panic!("capture completed while the report lock was held"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+        release_tx.send(()).unwrap();
+        let first = first.await.unwrap();
+        assert!(holder.join().unwrap(), "file lock wait blocked the runtime");
         let a = &first[0]["id"];
         assert!(first[0]["createdAt"].as_i64().unwrap() > 0);
         assert_eq!(first[0]["isCurrent"], true);
@@ -2203,6 +2211,12 @@ mod tests {
                 .await
                 .unwrap(),
             json!([])
+        );
+        assert_eq!(
+            run("load_incident_report", json!({"id": a}))
+                .await
+                .unwrap_err(),
+            err_value(AppError::not_found("incident_report_not_found", json!({})))
         );
     }
 

@@ -1,5 +1,4 @@
-use std::path::Path;
-
+use super::run_data_dir_task;
 use crate::db::snippet;
 use crate::error::{AppError, AppResult};
 use crate::models::{HighlightRule, Snippet};
@@ -45,29 +44,12 @@ pub fn update_highlight(
     crate::db::highlight::update(&state.db, &old_keyword, &rule)
 }
 
-// Waiting for another host's file lock or flushing the JSON snapshot must not
-// stall the WebView IPC handler or the headless server's single runtime thread.
-async fn snippet_io<T: Send + 'static>(
-    state: &AppState,
-    work: impl FnOnce(&Path) -> AppResult<T> + Send + 'static,
-) -> AppResult<T> {
-    let dir = state.data_dir.clone();
-    tokio::task::spawn_blocking(move || work(&dir))
-        .await
-        .map_err(|e| {
-            AppError::other(
-                "task_join_failed",
-                serde_json::json!({ "err": e.to_string() }),
-            )
-        })?
-}
-
 pub async fn load_snippets(state: &AppState) -> AppResult<Vec<Snippet>> {
-    snippet_io(state, snippet::load).await
+    run_data_dir_task(state, snippet::load).await?
 }
 
 pub async fn save_snippets(state: &AppState, snippets: Vec<Snippet>) -> AppResult<()> {
-    snippet_io(state, move |dir| snippet::save(dir, &snippets)).await
+    run_data_dir_task(state, move |dir| snippet::save(dir, &snippets)).await?
 }
 
 pub async fn update_snippet(
@@ -76,10 +58,10 @@ pub async fn update_snippet(
     previous: Option<Snippet>,
     snippet: Option<Snippet>,
 ) -> AppResult<Vec<Snippet>> {
-    snippet_io(state, move |dir| {
+    run_data_dir_task(state, move |dir| {
         snippet::update(dir, index, previous, snippet)
     })
-    .await
+    .await?
 }
 
 pub fn reset_highlights(state: &AppState) -> Result<(), AppError> {

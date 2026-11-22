@@ -8,7 +8,6 @@ pub mod credential;
 pub mod forward;
 pub mod group;
 pub mod highlight;
-pub mod incident_report;
 pub mod plugin;
 pub mod profile;
 pub mod schema;

@@ -106,6 +106,7 @@ const en = {
   "settings.section.incident_reports": "Incident reports",
   "shortcuts.add_to_report": "Add terminal excerpt to incident report",
   "error.incident_report_not_found": "Report not found",
+  "error.incident_report_missing_index": "The incident report index.json file is missing. Your Markdown files are safe. Restore the index and try again.",
   "error.incident_report_empty_title": "Enter the report title on the first line.",
   "error.incident_report_empty_excerpt": "No terminal text to add",
   "error.incident_report_edit_conflict": "This report was edited in another window. Reopen it before saving.",

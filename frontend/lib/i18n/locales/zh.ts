@@ -108,6 +108,7 @@ const zh: Messages = {
   "settings.section.incident_reports": "故障报告",
   "shortcuts.add_to_report": "收录终端摘录到故障报告",
   "error.incident_report_not_found": "报告不存在",
+  "error.incident_report_missing_index": "故障报告索引 index.json 缺失。Markdown 文件已保留，请还原索引后重试。",
   "error.incident_report_empty_title": "请在首行填写报告标题。",
   "error.incident_report_empty_excerpt": "没有可收录的终端文本",
   "error.incident_report_edit_conflict": "报告已在其他窗口修改，请重新打开后再保存",
