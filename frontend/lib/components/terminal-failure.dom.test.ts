@@ -53,6 +53,7 @@ const mocks = vi.hoisted(() => {
     loadAddon() {}
     attachCustomKeyEventHandler() {}
     getSelection() { return ""; }
+    getSelectionPosition() { return undefined; }
     focus() {}
     dispose() { this.disposed = true; this.dataListeners.clear(); this.titleListeners.clear(); }
   }
@@ -172,6 +173,42 @@ it("opens native AWS without a local PTY and routes input, output, errors, and c
 });
 
 describe("native terminal selection handle context menus", () => {
+  it("captures the opening selection, switches the destination, and returns focus to the terminal", async () => {
+    const backend = mocks.invoke.getMockImplementation()!;
+    const reports = [
+      { id: "current", title: "Gateway investigation", createdAt: 10, isCurrent: true },
+      { id: "other", title: "Response timing", createdAt: 5, isCurrent: false },
+    ];
+    mocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "list_incident_reports") return reports;
+      if (command === "capture_incident_excerpt") {
+        return reports.map(r => ({ ...r, isCurrent: r.id === args.target.existing }));
+      }
+      return backend(command, args);
+    });
+    const terminal = mocks.Terminal.instances[0];
+    const text = "  request\n response  ";
+    vi.spyOn(terminal, "getSelection").mockReturnValue(text);
+    const focus = vi.spyOn(terminal, "focus");
+    await app.setRightClickAction("menu");
+    terminal.output.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+    const find = (label: string) => [...target.querySelectorAll<HTMLButtonElement>(".ctx-item")]
+      .find(btn => btn.querySelector(".ctx-label")?.textContent === label);
+    const current = t("report.add", { name: reports[0].title });
+    await vi.waitFor(() => expect(find(current)?.disabled).toBe(false));
+    const parent = find(current)!.parentElement!;
+    expect(parent.previousElementSibling).toBe(find(t("tab.context.add_to_snippets")));
+    expect(parent.querySelector(".ctx-submenu")?.lastElementChild).toBe(find(t("report.create")));
+    find("Response timing")!.click();
+    await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("capture_incident_excerpt", expect.objectContaining({
+      target: { existing: "other" },
+      excerpt: { sessionId: app.sessionIdForTab(rootId), sessionName: "Existing session", text },
+    })));
+    expect(focus).toHaveBeenCalled();
+    expect(target.querySelector(".ctx-menu")).toBeNull();
+    expect(toasts().some(item => item.message === t("report.added", { name: "Response timing", preview: "request response" }))).toBe(true);
+  });
+
   it("opens snippets for the right-clicked terminal after a workspace shortcut", async () => {
     const other = "ssh:other-workspace";
     const invoke = mocks.invoke.getMockImplementation()!;

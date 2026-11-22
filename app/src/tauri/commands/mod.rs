@@ -9,6 +9,7 @@ pub mod external;
 pub mod files;
 pub mod forward;
 pub mod group;
+pub mod incident_report;
 pub mod lifecycle;
 pub mod mcp;
 pub mod plugin;

@@ -23,6 +23,8 @@ use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, 
 use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::commands::incident_report;
+use crate::db::Db;
 use crate::error::{locked, AppError, AppResult};
 use crate::models::{
     Credential, Forward, Group, HighlightRule, Profile, SerialProfile, TelnetProfile,
@@ -717,6 +719,37 @@ async fn dispatch_async(
     tx: &mpsc::UnboundedSender<Message>,
 ) -> Result<Value, Value> {
     match cmd {
+        "list_incident_reports" => run_report_query(state, incident_report::list).await,
+        "load_incident_report" => {
+            let id: String = arg(&args, "id")?;
+            run_report_query(state, move |db| incident_report::load(db, &id)).await
+        }
+        "select_incident_report" => {
+            let id: String = arg(&args, "id")?;
+            run_report_query(state, move |db| incident_report::select(db, &id)).await
+        }
+        "delete_incident_report" => {
+            let id: String = arg(&args, "id")?;
+            run_report_query(state, move |db| incident_report::delete(db, &id)).await
+        }
+        "capture_incident_excerpt" => {
+            let excerpt = arg(&args, "excerpt")?;
+            let target = arg(&args, "target")?;
+            let default_title: String = arg(&args, "defaultTitle")?;
+            run_report_query(state, move |db| {
+                incident_report::capture(db, &excerpt, target, &default_title)
+            })
+            .await
+        }
+        "update_incident_report" => {
+            let id: String = arg(&args, "id")?;
+            let content: String = arg(&args, "content")?;
+            let previous_content: String = arg(&args, "previousContent")?;
+            run_report_query(state, move |db| {
+                incident_report::update(db, &id, &content, &previous_content)
+            })
+            .await
+        }
         "load_snippets" => ok(crate::commands::settings::load_snippets(state).await),
         "save_snippets" => {
             ok(crate::commands::settings::save_snippets(state, arg(&args, "snippets")?).await)
@@ -1971,6 +2004,23 @@ async fn sftp_connect_session(
     Ok(json!(id))
 }
 
+// A separate process can hold SQLite's writer lock for the full busy timeout.
+// Keep the wait and serialization of long reports off the WebSocket event loop.
+async fn run_report_query<T: serde::Serialize>(
+    state: &AppState,
+    work: impl FnOnce(&Db) -> AppResult<T> + Send + 'static,
+) -> Result<Value, Value> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || ok(work(&db)))
+        .await
+        .map_err(|e| {
+            err_value(AppError::other(
+                "task_join_failed",
+                json!({ "err": e.to_string() }),
+            ))
+        })?
+}
+
 /// Map an `AppResult<T>` into the wire's Ok(result) / Err(error) JSON.
 fn ok<T: serde::Serialize>(r: AppResult<T>) -> Result<Value, Value> {
     match r {
@@ -2074,6 +2124,86 @@ mod tests {
             data_dir: dir.path().into(),
         };
         (Arc::new(state), dir)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn incident_reports_dispatch_the_frontend_wire_format_without_blocking() {
+        let (state, dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let run = |cmd, args| dispatch_async(&state, &owner, cmd, args, &tx);
+        let capture = |target| {
+            run(
+                "capture_incident_excerpt",
+                json!({
+                    "excerpt": {"sessionId": "s1", "sessionName": "gateway", "text": " abc "},
+                    "defaultTitle": "2026-11-21 gateway", "target": target
+                }),
+            )
+        };
+        assert_eq!(
+            run("list_incident_reports", json!({})).await.unwrap(),
+            json!([])
+        );
+        let writer = rusqlite::Connection::open(dir.path().join("rssh.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        // A blocking dispatch would time out on this lock before the same
+        // single-thread runtime ever gets a chance to release it.
+        let release = async {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            drop(writer);
+        };
+        let (first, ()) = tokio::join!(biased; capture(json!("current")), release);
+        let first = first.unwrap();
+        let a = &first[0]["id"];
+        assert!(first[0]["createdAt"].as_i64().unwrap() > 0);
+        assert_eq!(first[0]["isCurrent"], true);
+        let second = capture(json!("new")).await.unwrap();
+        let b = &second[0]["id"];
+        assert_ne!(a, b);
+        capture(json!({"existing": a})).await.unwrap();
+        let snapshot = run("load_incident_report", json!({"id": a})).await.unwrap();
+        let before = snapshot["content"].as_str().unwrap();
+        assert_eq!(before.matches("## gateway").count(), 1);
+        assert_eq!(
+            before,
+            "2026-11-21 gateway\n\n## gateway\n\n```\n abc \n\n abc \n```"
+        );
+        let revised = before.replacen("2026-11-21 gateway", "new\n\nobservation", 1);
+        run(
+            "update_incident_report",
+            json!({"id":a,"content":revised,"previousContent":before}),
+        )
+        .await
+        .unwrap();
+        let report = run("load_incident_report", json!({"id": a})).await.unwrap();
+        assert_eq!(
+            report,
+            json!({"id":a,"title":"new","createdAt":first[0]["createdAt"],"content":revised})
+        );
+        let selected = run("select_incident_report", json!({"id": b}))
+            .await
+            .unwrap();
+        assert_eq!(selected[0]["id"], *b);
+        assert_eq!(selected[0]["isCurrent"], true);
+        let remaining = run("delete_incident_report", json!({"id": b}))
+            .await
+            .unwrap();
+        assert_eq!(remaining.as_array().unwrap().len(), 1);
+        assert_eq!(remaining[0]["id"], *a);
+        assert_eq!(remaining[0]["isCurrent"], true);
+        assert_eq!(
+            run("delete_incident_report", json!({"id": b}))
+                .await
+                .unwrap(),
+            remaining
+        );
+        assert_eq!(
+            run("delete_incident_report", json!({"id": a}))
+                .await
+                .unwrap(),
+            json!([])
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

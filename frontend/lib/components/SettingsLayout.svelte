@@ -16,6 +16,7 @@
   import HighlightManager from "./HighlightManager.svelte";
   import SyncScreen from "./SyncScreen.svelte";
   import RecordingSettings from "./RecordingSettings.svelte";
+  import IncidentReports from "./IncidentReports.svelte";
   import PlaybackScreen from "./PlaybackScreen.svelte";
   import ShortcutsScreen from "./ShortcutsScreen.svelte";
   import AboutScreen from "./AboutScreen.svelte";
@@ -56,6 +57,7 @@
     "shell-settings":     { component: ShellSettings },
     "command-blocks":     { component: CommandBlockSettings },
     "recording-settings": { component: RecordingSettings },
+    "incident-reports":   { component: IncidentReports },
     "playback":           { component: PlaybackScreen },
     "cli":                { component: CliSettings },
     "appearance":         { component: AppearanceSettings },
@@ -75,6 +77,7 @@
     { id: "groups", label: t("settings.section.groups"), section: "settings.group.connections" },
     { id: "shell-settings", label: t("settings.section.shell"), section: "settings.group.sessions" },
     { id: "recording-settings", label: t("settings.section.recording"), section: "settings.group.sessions" },
+    { id: "incident-reports", label: t("settings.section.incident_reports"), section: "settings.group.sessions" },
     { id: "appearance", label: t("settings.section.appearance"), section: "settings.group.appearance" },
     { id: "highlights", label: t("settings.section.highlights"), section: "settings.group.appearance" },
     { id: "snippets", label: t("settings.section.snippets"), section: "settings.group.appearance" },

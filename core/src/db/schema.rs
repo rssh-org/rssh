@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppResult;
 
-const SCHEMA_VERSION: u32 = 37;
+const SCHEMA_VERSION: u32 = 38;
 
 fn column_exists(conn: &Connection, table: &str, col: &str) -> AppResult<bool> {
     let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
@@ -797,6 +797,23 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
                 [],
             )?;
         }
+    }
+
+    if version < 38 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS incident_reports (
+                id TEXT PRIMARY KEY NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                is_current INTEGER NOT NULL DEFAULT 0 CHECK(is_current IN (0,1)),
+                last_session_id TEXT,
+                last_heading_offset INTEGER,
+                last_edit_bytes INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS incident_reports_current ON incident_reports(is_current)
+                WHERE is_current = 1;",
+        )?;
     }
 
     if version < SCHEMA_VERSION {

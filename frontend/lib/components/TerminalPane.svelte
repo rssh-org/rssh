@@ -25,6 +25,8 @@
     import {registerClipboardOscHandler} from "../osc/clipboard.ts";
     import {createCommandBlockTracker, type CommandBlock, type CommandBlockTracker} from "../terminal/command-blocks.ts";
     import {readViewportSnapshot, readViewportText} from "../terminal/viewport-snapshot.ts";
+    import {trackReportExcerpts} from "../terminal/report-excerpt.ts";
+    import {addToReport} from "../terminal/add-to-report.ts";
     import {createFoldStore, type FoldStore} from "../terminal/folds.ts";
     import {
         TERMINAL_SCROLLBACK_LINES,
@@ -238,6 +240,7 @@
     let fitAddon: FitAddon;
     let searchAddon: SearchAddon;
     let sessionId = $state<string | null>(null);
+    let reportCapture: ReturnType<typeof trackReportExcerpts> | undefined;
     // `connectAndWire` crosses several awaits. The generation guards the whole
     // component flow; ReservedSessionAttempt owns the finer Pending/Ready state.
     let connectGeneration = 0;
@@ -952,11 +955,11 @@
         // settings. Returns without preventDefault/stopPropagation so xterm's own
         // listener and the OS-native menu both run, identical to the "menu" path.
         const menuModifier = keymap.isMac ? e.metaKey : e.ctrlKey;
-        if (menuModifier && app.ctrlRightClickMenu() && app.rightClickAction() !== "menu") {
+        const action = app.rightClickAction();
+        if (action === "menu" || (menuModifier && app.ctrlRightClickMenu())) {
+            reportCapture?.captureMenu(e);
             return;
         }
-        const action = app.rightClickAction();
-        if (action === "menu") return; // let xterm + the native system menu through
         e.preventDefault();
         e.stopPropagation();
         if (action === "paste") {
@@ -1005,6 +1008,7 @@
      * The frontend reserves the canonical session id before spawn, so listeners
      * exist before a fast child process or peer can produce its first byte. */
     async function createSessionEventSubscription(sid: string): Promise<UnlistenFn> {
+        reportCapture?.startSession(sid);
         const listeners: UnlistenFn[] = [];
         try {
             listeners.push(await listen<string>(`${dataEvent}:${sid}`, (ev) => {
@@ -1575,6 +1579,10 @@
         // xterm/WebView handle the event). See onSelectMouseUp / onTerminalContextMenu.
         containerEl.addEventListener("mouseup", onSelectMouseUp);
         containerEl.addEventListener("contextmenu", onTerminalContextMenu, { capture: true });
+        reportCapture = trackReportExcerpts(containerEl, terminal, tabId, () => {
+            const tab = app.tabs().find(candidate => candidate.id === tabId);
+            return tab ? app.tabLabel(tab) : tabId;
+        }, keymap.isMac);
 
         // App-level terminal shortcuts (search / SFTP / snippet / copy / paste).
         // Bindings are user-customizable (lib/keyboard/keymap.ts); read live so a
@@ -1585,26 +1593,32 @@
                 case "term.search": openSearch(); break;
                 case "term.sftp": app.navigate("sftp"); break;
                 case "term.snippet": app.openSnippetPicker(tabId); break;
+                case "term.addToReport": {
+                    const excerpt = reportCapture?.forShortcut();
+                    if (excerpt) void addToReport(excerpt);
+                    else toast.info(t("report.point_to_line"));
+                    break;
+                }
                 case "term.paste": readClipboard().then(pasteText).catch((error) => toast.error(errMsg(error))); break;
                 case "term.copy": void copySelection(); break;
             }
         }
         terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
             if (e.type !== "keydown") return true;
+            for (const a of ACTIONS) {
+                if (a.surface !== "terminal") continue;
+                if (!matchBinding(e, keymap.binding(a.id))) continue;
+                // SFTP only applies to SSH sessions; other transports keep the key.
+                if (a.id === "term.sftp" && !isSsh) continue;
+                e.preventDefault();
+                runTerminalShortcut(a.id);
+                return false;
+            }
             // macOS Option+←/→ word jump — xterm 6 dropped xterm 5's rewrite to
             // Meta-b/f (upstream #4538/#5389), so inject it ourselves. input()
             // feeds the same onData → PTY path as a real keystroke.
             const wordMotion = optionArrowWordMotion(e, keymap.isMac);
             if (wordMotion) { e.preventDefault(); terminal.input(wordMotion); return false; }
-            for (const a of ACTIONS) {
-                if (a.surface !== "terminal") continue;
-                if (!matchBinding(e, keymap.binding(a.id))) continue;
-                // SFTP only applies to SSH sessions; other transports keep the key.
-                if (a.id === "term.sftp" && !isSsh) return true;
-                e.preventDefault();
-                runTerminalShortcut(a.id);
-                return false;
-            }
             return true;
         });
 
@@ -1799,6 +1813,7 @@
         window.removeEventListener("keydown", onWindowKeyDown);
         containerEl?.removeEventListener("mouseup", onSelectMouseUp);
         containerEl?.removeEventListener("contextmenu", onTerminalContextMenu, { capture: true });
+        reportCapture?.dispose();
         dataDisposable?.dispose();
         dataDisposable = undefined;
         resizeDisposable?.dispose();

@@ -98,6 +98,17 @@ const en = {
   "tab.context.paste": "Paste",
   "tab.context.copy_utc": "UTC",
   "tab.context.add_to_snippets": "Add to snippets",
+  "report.create_first": "Create incident report",
+  "report.create": "Create report",
+  "report.add": "Add to {name} report",
+  "report.added": "“{preview}” added to {name} report",
+  "report.point_to_line": "Select text or point to a log line to add it to a report",
+  "settings.section.incident_reports": "Incident reports",
+  "shortcuts.add_to_report": "Add terminal excerpt to incident report",
+  "error.incident_report_not_found": "Report not found",
+  "error.incident_report_empty_title": "Enter the report title on the first line.",
+  "error.incident_report_empty_excerpt": "No terminal text to add",
+  "error.incident_report_edit_conflict": "This report was edited in another window. Reopen it before saving.",
 
   // ── SFTP browser ──
   "sftp.up": "← Up",
@@ -1283,6 +1294,9 @@ const en = {
   // Recording
   "recording.enable": "ENABLE RECORDING",
   "recording.enable_desc": "Automatically record SSH sessions as Asciinema v2 (.cast) files.",
+  "report.content": "Report content",
+  "report.saved": "Report saved",
+  "report.empty": "To start a report, choose “Create incident report” from the terminal context menu.",
   "recording.list_title": "Recordings",
   "recording.playback": "Playback",
   // Playback

@@ -268,6 +268,12 @@ pub fn run_with(
             commands::discovery::dynamic_discovery_tool_status,
             commands::discovery::list_dynamic_discovery_contexts,
             commands::discovery::discover_dynamic_targets,
+            commands::incident_report::list_incident_reports,
+            commands::incident_report::load_incident_report,
+            commands::incident_report::select_incident_report,
+            commands::incident_report::delete_incident_report,
+            commands::incident_report::capture_incident_excerpt,
+            commands::incident_report::update_incident_report,
             // settings & snippets & highlights
             commands::settings::get_setting,
             commands::settings::set_setting,

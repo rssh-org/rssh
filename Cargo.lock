@@ -5847,6 +5847,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rmcp",
  "rssh-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",

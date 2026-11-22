@@ -4,6 +4,7 @@ pub mod command_block;
 pub mod discovery;
 pub mod forward;
 pub mod group;
+pub mod incident_report;
 pub mod lifecycle;
 pub mod plugin;
 pub mod profile;
