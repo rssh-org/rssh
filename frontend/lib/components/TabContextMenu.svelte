@@ -10,7 +10,7 @@
 </script>
 
 <script lang="ts">
-    import {onMount} from "svelte";
+    import {onMount, tick} from "svelte";
     import { createScopedBackHandler } from "../stores/back.svelte.ts";
 
     const registerBack = createScopedBackHandler();
@@ -28,28 +28,58 @@
     let dx = $state(0);
     let dy = $state(0);
     let ready = $state(false);
-    // Submenus open to the right / downward by default; flip when out of room.
-    let subFlipLeft = $state(false);
-    let subFlipUp = $state(false);
-    const SUBMENU_EST_W = 160;
-    const SUBMENU_EST_H = 160;
 
     onMount(() => {
         if (!menuEl) return;
-        const r = menuEl.getBoundingClientRect();
-        if (r.right > window.innerWidth) dx = window.innerWidth - r.right - 4;
-        if (r.bottom > window.innerHeight) dy = window.innerHeight - r.bottom - 4;
-        subFlipLeft = r.right + dx + SUBMENU_EST_W > window.innerWidth;
-        // Vertical: measure the real flyout anchor (one submenu today) rather
-        // than guess item heights. dy is about to shift the menu up, so add it.
-        // If a downward flyout would overflow the bottom, open it upward instead.
-        const wrap = menuEl.querySelector(".ctx-sub-wrap");
-        if (wrap) {
-            const wrapTop = wrap.getBoundingClientRect().top + dy;
-            subFlipUp = wrapTop + SUBMENU_EST_H > window.innerHeight;
+        async function placeMenu() {
+            const rect = menuEl!.getBoundingClientRect();
+            dx = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4)) - x;
+            dy = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4)) - y;
+            await tick();
+            placeOpenSubmenus();
         }
+        placeMenu();
+        const observer = new ResizeObserver(placeMenu);
+        observer.observe(menuEl);
+        window.addEventListener("resize", placeMenu);
         ready = true;
+        return () => {
+            observer.disconnect();
+            window.removeEventListener("resize", placeMenu);
+        };
     });
+
+    function placeOpenSubmenus() {
+        menuEl?.querySelectorAll<HTMLElement>(".ctx-sub-wrap:hover, .ctx-sub-wrap:focus-within").forEach(placeSubmenu);
+    }
+
+    function placeSubmenu(wrap: HTMLElement) {
+        const flyout = wrap.querySelector<HTMLElement>(".ctx-submenu");
+        if (!flyout) return;
+        const anchor = wrap.getBoundingClientRect();
+        const width = flyout.offsetWidth;
+        const height = flyout.scrollHeight;
+        const rightSpace = window.innerWidth - anchor.right - 4;
+        const leftSpace = anchor.left - 4;
+        const beside = width <= Math.max(rightSpace, leftSpace);
+        let left = anchor.left;
+        let top = anchor.bottom;
+        let availableHeight = window.innerHeight - 8;
+        if (beside) {
+            left = rightSpace >= width ? anchor.right : anchor.left - width;
+            top = Math.max(4, Math.min(anchor.top, window.innerHeight - height - 4));
+        } else {
+            // On narrow windows leave the clickable parent uncovered.
+            left = Math.max(4, Math.min(left, window.innerWidth - width - 4));
+            const below = window.innerHeight - anchor.bottom - 4;
+            const above = anchor.top - 4;
+            availableHeight = Math.max(above, below);
+            if (above > below) top = anchor.top - Math.min(height, above);
+        }
+        flyout.style.left = left + "px";
+        flyout.style.top = top + "px";
+        flyout.style.maxHeight = availableHeight + "px";
+    }
 
     function handleKeydown(e: KeyboardEvent) {
         if (e.key === "Escape") {
@@ -81,6 +111,7 @@
 <div class="ctx-menu surface-menu"
      class:ready
      bind:this={menuEl}
+     onscroll={placeOpenSubmenus}
      style="left: {x + dx}px; top: {y + dy}px;">
     {#each sections as section, si (si)}
         {#if si > 0}<div class="ctx-sep"></div>{/if}
@@ -88,8 +119,11 @@
             {#if item.submenu}
                 <!-- Parent stays clickable (= plain new window); hover/focus reveals
                      the flyout. Flyout is a SIBLING, not a child — <button> can't nest. -->
-                <div class="ctx-sub-wrap" class:flip-left={subFlipLeft} class:flip-up={subFlipUp}>
+                <div class="ctx-sub-wrap" role="group"
+                     onpointerenter={(event) => placeSubmenu(event.currentTarget)}
+                     onfocusin={(event) => placeSubmenu(event.currentTarget)}>
                     <button class="ctx-item"
+                            title={item.label}
                             class:disabled={item.disabled}
                             disabled={item.disabled}
                             onclick={() => handleClick(item)}>
@@ -100,6 +134,7 @@
                     <div class="ctx-submenu surface-menu">
                         {#each item.submenu ?? [] as sub, ki (ki)}
                             <button class="ctx-item"
+                                    title={sub.label}
                                     class:disabled={sub.disabled}
                                     disabled={sub.disabled}
                                     onclick={() => handleClick(sub)}>
@@ -111,6 +146,7 @@
                 </div>
             {:else}
                 <button class="ctx-item"
+                        title={item.label}
                         class:disabled={item.disabled}
                         disabled={item.disabled}
                         onclick={() => handleClick(item)}>
@@ -131,7 +167,11 @@
     .ctx-menu {
         position: fixed;
         z-index: 501;
-        min-width: 200px;
+        width: max-content;
+        min-width: min(200px, calc(100vw - 8px));
+        max-width: min(420px, calc(100vw - 8px));
+        max-height: calc(100dvh - 8px);
+        overflow-y: auto;
         padding: calc(4px * var(--density));
         display: flex;
         flex-direction: column;
@@ -167,6 +207,9 @@
     }
     .ctx-label {
         flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
         white-space: nowrap;
     }
     .ctx-shortcut {
@@ -193,26 +236,20 @@
     /* Flyout abuts the menu edge (no gap) so the pointer never crosses dead
        space on its way in — otherwise :hover drops and the submenu closes. */
     .ctx-submenu {
-        position: absolute;
-        top: 0;
-        left: 100%;
+        position: fixed;
         z-index: 502;
-        min-width: 140px;
+        width: max-content;
+        min-width: min(140px, calc(100vw - 8px));
+        max-width: min(320px, calc(100vw - 8px));
+        overflow-y: auto;
         padding: calc(4px * var(--density));
-        display: none;
+        visibility: hidden;
+        display: flex;
         flex-direction: column;
         gap: 1px;
     }
     .ctx-sub-wrap:hover > .ctx-submenu,
     .ctx-sub-wrap:focus-within > .ctx-submenu {
-        display: flex;
-    }
-    .ctx-sub-wrap.flip-left > .ctx-submenu {
-        left: auto;
-        right: 100%;
-    }
-    .ctx-sub-wrap.flip-up > .ctx-submenu {
-        top: auto;
-        bottom: 0;
+        visibility: visible;
     }
 </style>

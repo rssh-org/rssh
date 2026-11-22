@@ -33,6 +33,7 @@ export type ActionId =
   | "term.search"
   | "term.sftp"
   | "term.snippet"
+  | "term.addToReport"
   | "term.paste"
   | "term.copy";
 
@@ -62,6 +63,7 @@ export const ACTIONS: readonly ActionMeta[] = [
   { id: "term.search",       labelKey: "shortcuts.search",             surface: "terminal", mac: primary("f", true),                         other: primary("f", false) },
   { id: "term.sftp",         labelKey: "shortcuts.open_sftp",          surface: "terminal", mac: primary("o", true),                         other: primary("o", false) },
   { id: "term.snippet",      labelKey: "shortcuts.snippet",            surface: "terminal", mac: primary("s", true),                         other: primary("s", false) },
+  { id: "term.addToReport",  labelKey: "shortcuts.add_to_report",      surface: "terminal", mac: primary("y", true, { shift: true }),        other: primary("y", false, { shift: true }) },
   // Copy/paste keep the literal Ctrl+Shift convention on every platform
   // (⌘C/⌘V still reach xterm natively on mac because they don't match these).
   { id: "term.paste",        labelKey: "shortcut.term.paste",          surface: "terminal", mac: { key: "v", ctrl: true, shift: true },       other: { key: "v", ctrl: true, shift: true } },

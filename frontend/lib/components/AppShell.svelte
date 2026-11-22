@@ -11,6 +11,9 @@
     import * as updates from "../stores/updates.svelte.ts";
     import * as syncStatus from "../stores/sync.svelte.ts";
     import * as serial from "../stores/serial.svelte.ts";
+    import * as incidentReports from "../stores/incident-reports.svelte.ts";
+    import {reportCaptureForEvent, type MenuReportCapture} from "../terminal/report-excerpt.ts";
+    import {addToReport} from "../terminal/add-to-report.ts";
     import HomeScreen from "./HomeScreen.svelte";
     import TerminalSplitLayout from "./TerminalSplitLayout.svelte";
     import ForwardPane from "./ForwardPane.svelte";
@@ -75,7 +78,8 @@
     let tabCycling = $state(false);
     let profiles = $state<Profile[]>([]);
     let groups = $state<Group[]>([]);
-    let menuCtx = $state<{ x: number; y: number; tab: Tab; tabBar?: boolean } | null>(null);
+    type ReportMenu = { capture: MenuReportCapture | null; ready: boolean };
+    let menuCtx = $state<{ x: number; y: number; tab: Tab; tabBar?: boolean; report?: ReportMenu } | null>(null);
     let pinnedMenu = $state<{ x: number; y: number } | null>(null);
     let pinned = $state(false);
     const bypassStartupReconcile = !!window.__rssh_clone || !!window.__rssh_ai_handoff;
@@ -938,6 +942,15 @@
     function openCtxMenu(e: MouseEvent, tab: Tab) {
         e.preventDefault();
         menuCtx = {x: e.clientX, y: e.clientY, tab};
+        if (app.isTerminalTabType(tab.type)) {
+            menuCtx.report = {capture: reportCaptureForEvent(e), ready: false};
+            const reportMenu = menuCtx.report;
+            // Another window may have renamed or selected a report. Keep the
+            // clicked excerpt fixed while refreshing just the destination list.
+            void incidentReports.refreshReports()
+                .then(() => { reportMenu.ready = true; })
+                .catch(error => toast.error(errMsg(error)));
+        }
         if (tab.type === "serial") void loadSerialCapabilities();
     }
 
@@ -1052,7 +1065,38 @@
     }
 
 
-    function buildMenu(tab: Tab): CtxMenuItem[][] {
+    function reportMenuItem(tab: Tab, menu: ReportMenu): CtxMenuItem {
+        const current = incidentReports.currentReport();
+        const reports = incidentReports.reports();
+        const disabled = !menu.ready || !menu.capture;
+        function collect(target: string) {
+            if (!menu.capture) return;
+            menu.capture.releaseAutoSelection();
+            const workspaceId = tab.workspaceId ?? tab.id;
+            if (workspaceId !== app.activeWorkspaceId()) app.setActiveWorkspace(workspaceId);
+            app.setActivePane(tab.id);
+            app.terminalFocus(tab.id);
+            void addToReport(menu.capture.excerpt, target);
+        }
+        return {
+            label: current
+                ? t("report.add", {name: incidentReports.reportLabel(current, reports)})
+                : t("report.create_first"),
+            shortcut: keymap.format("term.addToReport"),
+            disabled,
+            onClick: () => collect(current?.id ?? "new"),
+            submenu: current ? [
+                ...reports.filter(report => report.id !== current.id).map(report => ({
+                    label: incidentReports.reportLabel(report, reports),
+                    disabled,
+                    onClick: () => collect(report.id),
+                })),
+                {label: t("report.create"), disabled, onClick: () => collect("new")},
+            ] : undefined,
+        };
+    }
+
+    function buildMenu(tab: Tab, report?: ReportMenu): CtxMenuItem[][] {
         // Serial and telnet are also text terminals — they get copy/paste/search/
         // snippets AND AI (the agent runs commands via manual-submit, no shell
         // sentinel). Serial does NOT get open-in-new-window: a serial port is
@@ -1118,6 +1162,7 @@
                     }
                 },
             });
+            if (report) copyPaste.push(reportMenuItem(tab, report));
             sections.push(copyPaste);
         }
 
@@ -1318,7 +1363,7 @@
     <TabContextMenu
         x={menuCtx.x}
         y={menuCtx.y}
-        sections={menuCtx.tabBar ? buildTabBarMenu(menuCtx.tab) : buildMenu(menuCtx.tab)}
+        sections={menuCtx.tabBar ? buildTabBarMenu(menuCtx.tab) : buildMenu(menuCtx.tab, menuCtx.report)}
         onClose={closeCtxMenu}
     />
 {/if}

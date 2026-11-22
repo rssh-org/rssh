@@ -288,12 +288,13 @@ describe("optionArrowWordMotion — restore xterm-5 macOS word jump", () => {
 });
 
 describe("ACTIONS metadata", () => {
-  it("has 10 unique actions split 5 global / 5 terminal", () => {
-    expect(ACTIONS.length).toBe(10);
+  it("keeps action ids unique and registers capture as a terminal binding", () => {
     const ids = ACTIONS.map((a) => a.id);
-    expect(new Set(ids).size).toBe(10);
+    expect(new Set(ids).size).toBe(ids.length);
     expect(ACTIONS.filter((a) => a.surface === "global").length).toBe(5);
-    expect(ACTIONS.filter((a) => a.surface === "terminal").length).toBe(5);
+    const terminal = ACTIONS.filter((a) => a.surface === "terminal");
+    expect(terminal.length).toBe(6);
+    expect(terminal.map(a => a.id)).toContain("term.addToReport");
   });
 
   it("gives every action a mac and other default plus a label key", () => {

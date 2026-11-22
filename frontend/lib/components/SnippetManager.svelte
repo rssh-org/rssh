@@ -5,6 +5,7 @@
   import { toast } from "../stores/toast.svelte.ts";
   import { t, errCoded, errMsg } from "../i18n/index.svelte.ts";
   import AppIcon from "./AppIcon.svelte";
+  import { editedText, sourceOffset, textareaValue } from "../textarea.ts";
 
   let snippets = $state<Snippet[]>([]);
   let ready = $state(false);
@@ -56,38 +57,6 @@
     parameters = (original?.parameters ?? []).map(parameter => ({ ...parameter }));
     useCommandSelection = false;
     editing = index;
-  }
-
-  // Textarea values and selections use LF even when an imported snippet uses CRLF or CR.
-  function textareaValue(text: string): string {
-    return text.replace(/\r\n?/g, "\n");
-  }
-
-  function sourceOffset(text: string, displayOffset: number): number {
-    let offset = displayOffset;
-    for (let crlf = text.indexOf("\r\n"); crlf >= 0 && crlf < offset; crlf = text.indexOf("\r\n", crlf + 2)) {
-      offset++;
-    }
-    return offset;
-  }
-
-  function editedText(previous: string, value: string): string {
-    if (!previous.includes("\r")) return value;
-    const display = textareaValue(previous);
-    if (display === value) return previous;
-
-    // Splice the edit into the source, preserving untouched line endings and
-    // literal match texts even when the user edits another part of the command.
-    let start = 0;
-    while (start < display.length && start < value.length && display[start] === value[start]) start++;
-    let oldEnd = display.length;
-    let newEnd = value.length;
-    while (oldEnd > start && newEnd > start && display[oldEnd - 1] === value[newEnd - 1]) {
-      oldEnd--;
-      newEnd--;
-    }
-    return previous.slice(0, sourceOffset(previous, start)) + value.slice(start, newEnd) +
-      previous.slice(sourceOffset(previous, oldEnd));
   }
 
   function syncHighlightScroll() {

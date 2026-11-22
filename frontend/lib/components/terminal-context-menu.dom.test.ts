@@ -44,11 +44,13 @@ function setup({
   const pasteText = vi.fn();
   const copySelection = vi.fn().mockResolvedValue(copied);
   const clearSelection = vi.fn();
+  const captureMenu = vi.fn();
   const handler = runInNewContext(handlerCode + "\nonTerminalContextMenu", {
     isTouchContextMenu,
     app: { rightClickAction: () => action, ctrlRightClickMenu: () => modifierMenu },
     keymap: { isMac },
     terminal: { hasSelection: () => selected, clearSelection },
+    reportCapture: { captureMenu },
     readClipboard, pasteText, copySelection,
     toast: { error: vi.fn() }, errMsg: String,
   }) as (event: MouseEvent) => void;
@@ -69,7 +71,7 @@ function setup({
     return event;
   }
 
-  return { row, menu, xtermHandler, readClipboard, pasteText, copySelection, clearSelection };
+  return { row, menu, xtermHandler, readClipboard, pasteText, copySelection, clearSelection, captureMenu };
 }
 
 describe("terminal native touch context menu", () => {
@@ -93,6 +95,7 @@ describe("terminal native touch context menu", () => {
       expect(ui.xtermHandler).not.toHaveBeenCalled();
       expect(ui.readClipboard).not.toHaveBeenCalled();
       expect(ui.copySelection).not.toHaveBeenCalled();
+      expect(ui.captureMenu).not.toHaveBeenCalled();
       expect(ui.clearSelection).not.toHaveBeenCalled();
       expect(selection.toString()).toBe(selectedText);
     }
@@ -145,6 +148,8 @@ describe("terminal mouse context menu", () => {
 
     expect(event.defaultPrevented).toBe(false);
     expect(ui.xtermHandler).toHaveBeenCalledExactlyOnceWith(event);
+    expect(ui.captureMenu).toHaveBeenCalledExactlyOnceWith(event);
+    expect(ui.captureMenu.mock.invocationCallOrder[0]).toBeLessThan(ui.xtermHandler.mock.invocationCallOrder[0]);
     expect(ui.readClipboard).not.toHaveBeenCalled();
   });
 
@@ -156,6 +161,7 @@ describe("terminal mouse context menu", () => {
     expect(event.defaultPrevented).toBe(true);
     expect(ui.xtermHandler).not.toHaveBeenCalled();
     expect(ui.readClipboard).toHaveBeenCalledOnce();
+    expect(ui.captureMenu).not.toHaveBeenCalled();
     expect(ui.pasteText).toHaveBeenCalledExactlyOnceWith("clipboard text");
     expect(ui.copySelection).not.toHaveBeenCalled();
   });
@@ -181,6 +187,7 @@ describe("terminal mouse context menu", () => {
 
     expect(event.defaultPrevented).toBe(false);
     expect(ui.xtermHandler).toHaveBeenCalledExactlyOnceWith(event);
+    expect(ui.captureMenu).toHaveBeenCalledExactlyOnceWith(event);
     expect(ui.readClipboard).not.toHaveBeenCalled();
   });
 

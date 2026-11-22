@@ -100,6 +100,18 @@ const zh: Messages = {
   "tab.context.paste": "粘贴",
   "tab.context.copy_utc": "复制为 UTC",
   "tab.context.add_to_snippets": "添加到命令片段",
+  "report.create_first": "创建故障报告",
+  "report.create": "创建报告",
+  "report.add": "加入 {name} 报告",
+  "report.added": "“{preview}”已加入 {name} 报告",
+  "report.point_to_line": "请先选择文字，或将指针移到要收录的日志行",
+  "settings.section.incident_reports": "故障报告",
+  "shortcuts.add_to_report": "收录终端摘录到故障报告",
+  "error.incident_report_not_found": "报告不存在",
+  "error.incident_report_missing_index": "故障报告索引 index.json 缺失。Markdown 文件已保留，请还原索引后重试。",
+  "error.incident_report_empty_title": "请在首行填写报告标题。",
+  "error.incident_report_empty_excerpt": "没有可收录的终端文本",
+  "error.incident_report_edit_conflict": "报告已在其他窗口修改，请重新打开后再保存",
 
   // ── SFTP 浏览器 ──
   "sftp.up": "← 上一级",
@@ -1286,6 +1298,9 @@ const zh: Messages = {
   // 录制
   "recording.enable": "启用录制",
   "recording.enable_desc": "自动以 Asciinema v2（.cast）格式录制 SSH 会话。",
+  "report.content": "报告正文",
+  "report.saved": "报告已保存",
+  "report.empty": "在终端正文的右键菜单中选择「创建故障报告」，即可收录第一条日志。",
   "recording.list_title": "录像",
   "recording.playback": "回放",
   // 回放

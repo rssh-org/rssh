@@ -13,6 +13,7 @@
 //! Wired so far: local PTY + the DB-backed CRUD that populates the GUI.
 //! SSH / SFTP / AI follow the identical pattern.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
@@ -23,6 +24,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, 
 use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::commands::{incident_report, run_data_dir_task};
 use crate::error::{locked, AppError, AppResult};
 use crate::models::{
     Credential, Forward, Group, HighlightRule, Profile, SerialProfile, TelnetProfile,
@@ -717,6 +719,37 @@ async fn dispatch_async(
     tx: &mpsc::UnboundedSender<Message>,
 ) -> Result<Value, Value> {
     match cmd {
+        "list_incident_reports" => run_report_query(state, incident_report::list).await,
+        "load_incident_report" => {
+            let id: String = arg(&args, "id")?;
+            run_report_query(state, move |dir| incident_report::load(dir, &id)).await
+        }
+        "select_incident_report" => {
+            let id: String = arg(&args, "id")?;
+            run_report_query(state, move |dir| incident_report::select(dir, &id)).await
+        }
+        "delete_incident_report" => {
+            let id: String = arg(&args, "id")?;
+            run_report_query(state, move |dir| incident_report::delete(dir, &id)).await
+        }
+        "capture_incident_excerpt" => {
+            let excerpt = arg(&args, "excerpt")?;
+            let target = arg(&args, "target")?;
+            let default_title: String = arg(&args, "defaultTitle")?;
+            run_report_query(state, move |dir| {
+                incident_report::capture(dir, &excerpt, target, &default_title)
+            })
+            .await
+        }
+        "update_incident_report" => {
+            let id: String = arg(&args, "id")?;
+            let content: String = arg(&args, "content")?;
+            let previous_content: String = arg(&args, "previousContent")?;
+            run_report_query(state, move |dir| {
+                incident_report::update(dir, &id, &content, &previous_content)
+            })
+            .await
+        }
         "load_snippets" => ok(crate::commands::settings::load_snippets(state).await),
         "save_snippets" => {
             ok(crate::commands::settings::save_snippets(state, arg(&args, "snippets")?).await)
@@ -1971,6 +2004,16 @@ async fn sftp_connect_session(
     Ok(json!(id))
 }
 
+// Serialize large reports on the same blocking worker that reads them.
+async fn run_report_query<T: serde::Serialize>(
+    state: &AppState,
+    work: impl FnOnce(&Path) -> AppResult<T> + Send + 'static,
+) -> Result<Value, Value> {
+    run_data_dir_task(state, move |dir| ok(work(dir)))
+        .await
+        .map_err(err_value)?
+}
+
 /// Map an `AppResult<T>` into the wire's Ok(result) / Err(error) JSON.
 fn ok<T: serde::Serialize>(r: AppResult<T>) -> Result<Value, Value> {
     match r {
@@ -2074,6 +2117,107 @@ mod tests {
             data_dir: dir.path().into(),
         };
         (Arc::new(state), dir)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn incident_reports_dispatch_the_frontend_wire_format_without_blocking() {
+        let (state, dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let run = |cmd, args| dispatch_async(&state, &owner, cmd, args, &tx);
+        let capture = |target| {
+            run(
+                "capture_incident_excerpt",
+                json!({
+                    "excerpt": {"sessionId": "s1", "sessionName": "gateway", "text": " abc "},
+                    "defaultTitle": "2026-11-21 gateway", "target": target
+                }),
+            )
+        };
+        assert_eq!(
+            run("list_incident_reports", json!({})).await.unwrap(),
+            json!([])
+        );
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.path().join("incident-reports/index.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // Release even if a synchronous dispatch blocks the test runtime.
+            let released = release_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok();
+            drop(lock);
+            released
+        });
+        let first = capture(json!("current"));
+        tokio::pin!(first);
+        tokio::select! {
+            biased;
+            _ = &mut first => panic!("capture completed while the report lock was held"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+        release_tx.send(()).unwrap();
+        let first = first.await.unwrap();
+        assert!(holder.join().unwrap(), "file lock wait blocked the runtime");
+        let a = &first[0]["id"];
+        assert!(first[0]["createdAt"].as_i64().unwrap() > 0);
+        assert_eq!(first[0]["isCurrent"], true);
+        let second = capture(json!("new")).await.unwrap();
+        let b = &second[0]["id"];
+        assert_ne!(a, b);
+        capture(json!({"existing": a})).await.unwrap();
+        let snapshot = run("load_incident_report", json!({"id": a})).await.unwrap();
+        let before = snapshot["content"].as_str().unwrap();
+        assert_eq!(before.matches("## gateway").count(), 1);
+        assert_eq!(
+            before,
+            "2026-11-21 gateway\n\n## gateway\n\n```\n abc \n\n abc \n```"
+        );
+        let revised = before.replacen("2026-11-21 gateway", "new\n\nobservation", 1);
+        run(
+            "update_incident_report",
+            json!({"id":a,"content":revised,"previousContent":before}),
+        )
+        .await
+        .unwrap();
+        let report = run("load_incident_report", json!({"id": a})).await.unwrap();
+        assert_eq!(
+            report,
+            json!({"id":a,"title":"new","createdAt":first[0]["createdAt"],"content":revised})
+        );
+        let selected = run("select_incident_report", json!({"id": b}))
+            .await
+            .unwrap();
+        assert_eq!(selected[0]["id"], *b);
+        assert_eq!(selected[0]["isCurrent"], true);
+        let remaining = run("delete_incident_report", json!({"id": b}))
+            .await
+            .unwrap();
+        assert_eq!(remaining.as_array().unwrap().len(), 1);
+        assert_eq!(remaining[0]["id"], *a);
+        assert_eq!(remaining[0]["isCurrent"], true);
+        assert_eq!(
+            run("delete_incident_report", json!({"id": b}))
+                .await
+                .unwrap(),
+            remaining
+        );
+        assert_eq!(
+            run("delete_incident_report", json!({"id": a}))
+                .await
+                .unwrap(),
+            json!([])
+        );
+        assert_eq!(
+            run("load_incident_report", json!({"id": a}))
+                .await
+                .unwrap_err(),
+            err_value(AppError::not_found("incident_report_not_found", json!({})))
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

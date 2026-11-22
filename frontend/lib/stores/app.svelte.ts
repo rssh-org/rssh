@@ -70,6 +70,7 @@ export type SettingsPage =
   | "highlights"
   | "sync"
   | "recording-settings"
+  | "incident-reports"
   | "playback"
   | "shell-settings"
   | "command-blocks"
