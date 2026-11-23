@@ -49,6 +49,7 @@ struct Reply {
     conflict: Option<bool>,
     error: Option<String>,
     recovery: Option<String>,
+    folder_required: Option<bool>,
     entries: Option<Vec<TreeEntry>>,
 }
 #[derive(Deserialize)]
@@ -63,6 +64,8 @@ fn provider_error(reply: &Reply) -> AppError {
     AppError::other(
         if reply.recovery.is_some() {
             "sftp_provider_recovery_preserved"
+        } else if reply.folder_required == Some(true) {
+            "sftp_folder_required"
         } else {
             "sftp_provider_unsupported"
         },
@@ -165,8 +168,12 @@ pub async fn file_name(app: &AppHandle, location: &str) -> AppResult<Option<Stri
 pub async fn transfer_endpoint(
     app: &AppHandle,
     location: String,
-    _write: bool,
+    write: bool,
 ) -> AppResult<(Arc<dyn TransferEndpoint>, String)> {
+    let reply = call(app, "authorize", &location, None, write, false).await?;
+    if reply.error.is_some() {
+        return Err(provider_error(&reply));
+    }
     Ok((Arc::new(AndroidTree { app: app.clone() }), location))
 }
 

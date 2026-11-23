@@ -25,15 +25,61 @@ class TreeArgs {
     var replace: Boolean = false
 }
 
-private data class TreeGrant(val uri: Uri, val write: Boolean)
-private data class TreePath(val token: String, val grant: TreeGrant, val parts: List<String>)
+internal data class TreeGrant<T>(val uri: T, val write: Boolean)
+internal class FolderAuthorizationException : SecurityException("Authorize the complete target folder for this operation")
+internal fun <T> requireTreeGrant(grants: Map<String, TreeGrant<T>>, token: String, write: Boolean): TreeGrant<T> {
+    val grant = grants[token] ?: throw FolderAuthorizationException()
+    if (write && !grant.write) throw FolderAuthorizationException()
+    return grant
+}
+private data class TreePath(val token: String, val grant: TreeGrant<Uri>, val parts: List<String>)
 private data class Document(val uri: Uri, val id: String, val name: String, val mime: String, val flags: Long, val size: Long?, val modified: Long?)
+
+internal data class RenameDocument(val uri: String, val id: String, val name: String, val size: Long?, val modified: Long?)
+internal data class RenameResult(val conflict: Boolean = false, val error: String? = null, val recovery: String? = null)
+internal interface DocumentRenameAccess {
+    fun rename(uri: String, name: String): String?
+    fun read(uri: String): RenameDocument?
+    fun original(): RenameDocument?
+    fun target(): RenameDocument?
+}
+
+/** A provider can change the document URI on either rename. Recovery means the
+ * last URI confirmed by a returned result, not proof that a failed later call
+ * left the document there. Never lose it to a subsequent metadata/query error. */
+internal fun renameWithRecovery(source: RenameDocument, targetName: String, targetBefore: RenameDocument?, access: DocumentRenameAccess): RenameResult {
+    var recovery = source.uri
+    try {
+        recovery = access.rename(source.uri, targetName)
+            ?: throw IllegalStateException("Rename outcome is unknown")
+        val renamed = access.read(recovery) ?: throw IllegalStateException("Rename outcome is unknown")
+        if (renamed.name == targetName) {
+            check(access.target()?.id == renamed.id) { "Renamed document identity is ambiguous" }
+            return RenameResult()
+        }
+        // Some providers select another display name on conflict. Restore only
+        // our staged document, and inspect both names before reporting conflict.
+        check(access.original() == null) { "Provider changed the requested name and the staged name is occupied" }
+        recovery = access.rename(recovery, source.name)
+            ?: throw IllegalStateException("Restore outcome is unknown")
+        val restored = access.read(recovery)
+        val targetAfter = access.target()
+        if (restored?.name == source.name && targetBefore != null && targetAfter?.id == targetBefore.id && targetAfter.size == targetBefore.size && targetAfter.modified == targetBefore.modified) {
+            return RenameResult(conflict = true, error = "Provider does not replace an existing same-name document")
+        }
+        throw IllegalStateException("Provider does not preserve exact rename names or the target changed")
+    } catch (error: Exception) {
+        return RenameResult(error = error.message ?: error.javaClass.simpleName, recovery = recovery)
+    }
+}
+
+private fun Document.renameDocument() = RenameDocument(uri.toString(), id, name, size, modified)
 
 /** SAF grants and provider calls stay in the native host. Names remain literal;
  * IDs returned by renameDocument are never assumed to remain stable. */
 @TauriPlugin
 class FileTreesPlugin(private val host: Activity) : Plugin(host) {
-    private val grants = java.util.concurrent.ConcurrentHashMap<String, TreeGrant>()
+    private val grants = java.util.concurrent.ConcurrentHashMap<String, TreeGrant<Uri>>()
     private val worker = Executors.newSingleThreadExecutor()
     private val resolver get() = host.contentResolver
     private val columns = arrayOf(Docs.Document.COLUMN_DOCUMENT_ID, Docs.Document.COLUMN_DISPLAY_NAME,
@@ -72,10 +118,9 @@ class FileTreesPlugin(private val host: Activity) : Plugin(host) {
     }
     private fun path(value: String, write: Boolean = false): TreePath {
         val uri = Uri.parse(value)
-        require(uri.scheme == "rssh-tree") { "Authorize the complete target folder" }
-        val token = uri.authority ?: throw IllegalArgumentException("Missing folder grant")
-        val grant = grants[token] ?: throw SecurityException("Folder authorization expired; select the folder again")
-        if (write) check(grant.write) { "Authorize the complete target folder for writing" }
+        if (uri.scheme != "rssh-tree") throw FolderAuthorizationException()
+        val token = uri.authority ?: throw FolderAuthorizationException()
+        val grant = requireTreeGrant(grants, token, write)
         val parts = uri.pathSegments
         require(parts.all { it.isNotEmpty() && it != "." && it != ".." && !it.contains('/') && !it.contains('\u0000') })
         return TreePath(token, grant, parts)
@@ -139,7 +184,10 @@ class FileTreesPlugin(private val host: Activity) : Plugin(host) {
         }
         return created
     }
-    private fun replyError(error: Exception, recovery: String? = null) = JSObject().put("error", error.message ?: error.javaClass.simpleName).put("recovery", recovery)
+    private fun replyError(error: Exception, recovery: String? = null) = JSObject()
+        .put("error", error.message ?: error.javaClass.simpleName)
+        .put("recovery", recovery)
+        .put("folderRequired", error is FolderAuthorizationException)
 
     @Command
     fun operate(invoke: Invoke) {
@@ -151,6 +199,7 @@ class FileTreesPlugin(private val host: Activity) : Plugin(host) {
     }
     private fun operation(a: TreeArgs): JSObject {
         val p = path(a.path, a.write)
+        if(a.op == "authorize") return JSObject()
         if(a.op == "resolve") {
             val parts = p.parts + segments(a.to ?: "")
             val target = TreePath(p.token, p.grant, parts)
@@ -203,29 +252,12 @@ class FileTreesPlugin(private val host: Activity) : Plugin(host) {
         if(!a.replace) throw UnsupportedOperationException("This document provider cannot guarantee a no-replace rename; the original and staged file are preserved")
         // Always attempt the provider rename first. An exception alone never
         // proves a collision, even when a same-name destination is present.
-        val renamedUri = Docs.renameDocument(resolver,doc.uri,to.parts.last()) ?: throw IllegalStateException("Rename outcome is unknown")
-        val renamed = try { read(renamedUri) }
-        catch(error: Exception) { return replyError(IllegalStateException("Rename outcome is unknown: ${error.message}"),renamedUri.toString()) }
-            ?: return replyError(IllegalStateException("Rename outcome is unknown"),renamedUri.toString())
-        if(renamed.name == to.parts.last()) {
-            val selected = try { child(to,toParent,to.parts.last()) }
-            catch(error: Exception) { return replyError(error,renamedUri.toString()) }
-            if(selected?.id == renamed.id) return JSObject()
-            return replyError(IllegalStateException("Renamed document identity is ambiguous"),renamedUri.toString())
-        }
-        // Some providers resolve a collision by selecting another display name.
-        // Restore our source first, then classify only after proving both names
-        // and the original destination identity. No old target has moved yet.
-        val recovery = location(p.token,p.parts.dropLast(1)+renamed.name)
-        if(child(p,parent,doc.name) != null) return replyError(IllegalStateException("Provider changed the requested name; source retained at $recovery"),recovery)
-        val restoredUri = try { Docs.renameDocument(resolver,renamed.uri,doc.name) }
-        catch(error: Exception) { return replyError(IllegalStateException("Could not restore staged document; retained at $recovery: ${error.message}"),recovery) }
-            ?: return replyError(IllegalStateException("Could not restore staged document; retained at $recovery"),recovery)
-        val restored = read(restoredUri)
-        val targetAfter = child(to,toParent,to.parts.last())
-        if(restored?.name == doc.name && targetBefore != null && targetAfter?.id == targetBefore.id && targetAfter.size == targetBefore.size && targetAfter.modified == targetBefore.modified) {
-            return JSObject().put("conflict",true).put("error","Provider does not replace an existing same-name document")
-        }
-        return replyError(IllegalStateException("Provider does not preserve exact rename names"), recovery)
+        val result = renameWithRecovery(doc.renameDocument(), to.parts.last(), targetBefore?.renameDocument(), object : DocumentRenameAccess {
+            override fun rename(uri: String, name: String) = Docs.renameDocument(resolver, Uri.parse(uri), name)?.toString()
+            override fun read(uri: String) = this@FileTreesPlugin.read(Uri.parse(uri))?.renameDocument()
+            override fun original() = child(p, parent, doc.name)?.renameDocument()
+            override fun target() = child(to, toParent, to.parts.last())?.renameDocument()
+        })
+        return JSObject().put("conflict", result.conflict).put("error", result.error).put("recovery", result.recovery)
     }
 }

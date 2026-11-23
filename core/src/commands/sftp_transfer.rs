@@ -106,6 +106,19 @@ impl TransferRegistry {
         Ok(lock)
     }
 
+    fn commit_lock(&self, direction: Direction) -> AppResult<Arc<tokio::sync::Mutex<()>>> {
+        // Canonical parent + basename does not resolve every filesystem alias
+        // (case, Unicode normalization, provider names). Serialize commits in
+        // the receiver namespace without guessing a platform's name rules.
+        // A remote filesystem can also be reached through different verified
+        // host keys or aliases. Serialize all remote commits conservatively;
+        // source streaming remains parallel and rebind identity stays strict.
+        self.destination(match direction {
+            Direction::Download => "commit:local".into(),
+            Direction::Upload => "commit:remote".into(),
+        })
+    }
+
     pub fn validate_rebind(
         &self,
         owner: &SessionOwner,
@@ -321,6 +334,7 @@ pub async fn run(
     let _destination = destination_lock
         .try_lock()
         .map_err(|_| AppError::sftp("transfer_target_busy", json!({})))?;
+    let commit_lock = state.sftp_transfers.commit_lock(direction)?;
     crate::ssh::transfer::transfer(
         source,
         &transfer_source,
@@ -330,6 +344,7 @@ pub async fn run(
         host,
         transfer_id,
         cancel,
+        &commit_lock,
     )
     .await
     .map(|_| ())
@@ -560,6 +575,46 @@ mod tests {
         different.host_key = "SHA256:changed".into();
         assert!(registry.validate_rebind(&owner(), &id, &different).is_err());
         assert!(registry.validate_rebind(&owner(), &id, &identity()).is_ok());
+    }
+
+    #[test]
+    fn commit_lock_is_shared_across_remote_keys_aliases_and_servers() {
+        let registry = TransferRegistry::default();
+        let local = registry.commit_lock(Direction::Download).unwrap();
+        let remote = registry.commit_lock(Direction::Upload).unwrap();
+        // One SSH server can offer several independently verified host keys.
+        // Neither its negotiated key nor its hostname identifies a filesystem.
+        let mut different_key = identity();
+        different_key.host_key = "SHA256:another-key-algorithm".into();
+        let mut alias = different_key.clone();
+        alias.username = "other-account".into();
+        alias.host = "other-alias".into();
+        let mut other_server = identity();
+        other_server.host = "other-server".into();
+        other_server.port = 2222;
+        other_server.host_key = "SHA256:other-server".into();
+        for endpoint in [different_key, alias, other_server] {
+            let id = uuid::Uuid::new_v4().to_string();
+            registry.register(&owner(), &id, &endpoint).unwrap();
+            // Broad commit exclusion must not weaken any transfer's identity.
+            assert!(registry.validate_rebind(&owner(), &id, &endpoint).is_ok());
+            assert!(registry
+                .validate_rebind(&owner(), &id, &identity())
+                .is_err());
+            assert!(Arc::ptr_eq(
+                &remote,
+                &registry.commit_lock(Direction::Upload).unwrap()
+            ));
+            assert!(Arc::ptr_eq(
+                &local,
+                &registry.commit_lock(Direction::Download).unwrap()
+            ));
+        }
+        assert!(!Arc::ptr_eq(&local, &remote));
+        assert!(!Arc::ptr_eq(
+            &local,
+            &registry.destination("local:/target".into()).unwrap()
+        ));
     }
 
     #[test]

@@ -243,7 +243,7 @@ describe("queue lifetime and recoverable errors", () => {
       const duplicateRetry = store.retry(id);
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(order).toEqual(["connect"]);
-      expect(store.list()[0].error).toContain("/local/retained.bak");
+      expect(store.list()[0].recovery?.params?.backup).toBe("/local/retained.bak");
 
       if (rejected) cancellation.reject(new Error("late cancel failure"));
       else cancellation.resolve();
@@ -290,8 +290,10 @@ describe("queue lifetime and recoverable errors", () => {
     transfer.reject(coded("sftp_transfer_backup_preserved", { backup: "/local/file.own.bak", part: "/local/file.own.part", err: "transfer_cancelled" }));
     await vi.waitFor(() => expect(store.list()[0].status).toBe("failed"));
     expect(store.list()[0]).toMatchObject({ transferred: 100, total: 100 });
-    expect(store.list()[0].error).toContain("/local/file.own.bak");
-    expect(store.list()[0].error).not.toContain("__rssh_err__");
+    expect(store.list()[0].recovery).toEqual({ code: "sftp_transfer_backup_preserved", params: {
+      backup: "/local/file.own.bak", part: "/local/file.own.part", err: "transfer_cancelled",
+    } });
+    expect(store.list()[0].error).toBeUndefined();
   });
 
   it("promotes queued work when attaching a progress listener fails", async () => {

@@ -78,6 +78,29 @@ fn check_cancel(cancel: &AtomicBool) -> AppResult<()> {
     }
 }
 
+async fn wait_for_commit<'a>(
+    lock: &'a tokio::sync::Mutex<()>,
+    cancel: &AtomicBool,
+) -> AppResult<tokio::sync::MutexGuard<'a, ()>> {
+    check_cancel(cancel)?;
+    let waiting = lock.lock();
+    tokio::pin!(waiting);
+    loop {
+        tokio::select! {
+            guard = &mut waiting => {
+                check_cancel(cancel)?;
+                return Ok(guard);
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                // Poll the atomic flag without recreating the lock future:
+                // an unrelated transfer may need a long readback or rename,
+                // and non-cancelled waiters must retain their queue position.
+                check_cancel(cancel)?;
+            }
+        }
+    }
+}
+
 fn progress(
     host: &Host,
     id: &str,
@@ -147,6 +170,8 @@ fn same_file(expected: &Snapshot, actual: &Snapshot) -> bool {
 /// Generic engine shared by both directions. The command layer serializes
 /// attempts targeting the same canonical destination, including across SFTP
 /// reconnects, and rejects changes to owner, host identity, source or target.
+/// Every destination in the same receiver namespace shares `commit_lock` so
+/// filesystem aliases cannot interleave final validation, moves or recovery.
 pub async fn transfer(
     source: &dyn TransferEndpoint,
     source_path: &str,
@@ -156,6 +181,7 @@ pub async fn transfer(
     host: &Host,
     transfer_id: &str,
     cancel: Arc<AtomicBool>,
+    commit_lock: &tokio::sync::Mutex<()>,
 ) -> AppResult<u64> {
     let result = run_transfer(
         source,
@@ -166,6 +192,7 @@ pub async fn transfer(
         host,
         transfer_id,
         cancel,
+        commit_lock,
     )
     .await;
     result.map_err(|error| recovery_error(state, error))
@@ -180,6 +207,7 @@ async fn run_transfer(
     host: &Host,
     transfer_id: &str,
     cancel: Arc<AtomicBool>,
+    commit_lock: &tokio::sync::Mutex<()>,
 ) -> AppResult<u64> {
     if state.completed() {
         return Ok(state.transferred);
@@ -225,11 +253,12 @@ async fn run_transfer(
     let total = state.source.as_ref().unwrap().identity.size;
 
     // Lost rename replies are reconciled by read-back before any further move.
-    if state.phase != CommitPhase::Receiving
-        && recover_commit(receiver, destination, state, &cancel).await?
-    {
-        progress(host, transfer_id, state, "committing", 0, 0);
-        return finish_cleanup(receiver, state).await;
+    if state.phase != CommitPhase::Receiving {
+        let _commit = wait_for_commit(commit_lock, &cancel).await?;
+        if recover_commit(receiver, destination, state, &cancel).await? {
+            progress(host, transfer_id, state, "committing", 0, 0);
+            return finish_cleanup(receiver, state).await;
+        }
     }
 
     if state.original.is_none() {
@@ -268,12 +297,25 @@ async fn run_transfer(
     if offset != 0 {
         // Strict resume reads both prefixes. This also adopts fully written
         // bytes whose write acknowledgement was lost, only after validation.
-        progress(host, transfer_id, state, "verifying", 0, offset);
+        let verification_total = offset
+            .checked_mul(2)
+            .ok_or_else(|| failure("sftp_transfer_invalid_file", &part))?;
+        progress(host, transfer_id, state, "verifying", 0, verification_total);
         let source_prefix = digest(source, source_path, offset, &cancel, |n| {
-            progress(host, transfer_id, state, "verifying", n, offset);
+            progress(host, transfer_id, state, "verifying", n, verification_total);
         })
         .await?;
-        let partial_prefix = digest(receiver, &part, offset, &cancel, |_| {}).await?;
+        let partial_prefix = digest(receiver, &part, offset, &cancel, |n| {
+            progress(
+                host,
+                transfer_id,
+                state,
+                "verifying",
+                offset + n,
+                verification_total,
+            );
+        })
+        .await?;
         if source_prefix != partial_prefix {
             return Err(failure("sftp_transfer_partial_changed", &part));
         }
@@ -316,6 +358,9 @@ async fn run_transfer(
         return Err(failure("sftp_transfer_source_changed", source_path));
     }
     progress(host, transfer_id, state, "committing", 0, 0);
+    // Stream and hash unrelated transfers concurrently; only validation of the
+    // old destination plus commit/cleanup must exclude namespace aliases.
+    let _commit = wait_for_commit(commit_lock, &cancel).await?;
     commit(receiver, destination, state, &cancel).await?;
     finish_cleanup(receiver, state).await
 }
@@ -569,6 +614,465 @@ mod tests {
     use crate::files::transfer::{NativeEndpoint, TransferStream};
     use std::sync::Mutex;
 
+    struct MemoryFile {
+        id: String,
+        bytes: Mutex<Vec<u8>>,
+    }
+
+    type ReadObserver = Arc<dyn Fn(u64) + Send + Sync>;
+
+    /// Models two directory names that the storage backend treats as aliases,
+    /// without depending on the host filesystem's case/normalization rules.
+    #[derive(Default)]
+    struct AliasedEndpoint {
+        files: Mutex<std::collections::HashMap<String, Arc<MemoryFile>>>,
+        first_rename: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        observe_partial_read: Mutex<Option<ReadObserver>>,
+        lose_rename_reply: AtomicBool,
+    }
+
+    impl AliasedEndpoint {
+        fn key(path: &str) -> &str {
+            if path == "/Target" {
+                "/target"
+            } else {
+                path
+            }
+        }
+
+        fn seed(&self, path: &str, bytes: &[u8]) {
+            self.files.lock().unwrap().insert(
+                Self::key(path).into(),
+                Arc::new(MemoryFile {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    bytes: Mutex::new(bytes.to_vec()),
+                }),
+            );
+        }
+
+        fn contents(&self, path: &str) -> Vec<u8> {
+            self.files.lock().unwrap()[Self::key(path)]
+                .bytes
+                .lock()
+                .unwrap()
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TransferEndpoint for AliasedEndpoint {
+        async fn canonicalize_target(&self, path: &str) -> AppResult<String> {
+            Ok(path.into())
+        }
+        async fn sibling(&self, _path: &str, name: &str) -> AppResult<String> {
+            Ok(format!("/{name}"))
+        }
+        async fn stat(&self, path: &str) -> AppResult<Option<FileIdentity>> {
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .get(Self::key(path))
+                .map(|file| FileIdentity {
+                    size: file.bytes.lock().unwrap().len() as u64,
+                    modified: None,
+                    stable_id: Some(file.id.clone()),
+                }))
+        }
+        async fn open(&self, path: &str, mode: TransferMode) -> AppResult<Box<dyn TransferStream>> {
+            if matches!(mode, TransferMode::CreateNew) {
+                if self.files.lock().unwrap().contains_key(Self::key(path)) {
+                    return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists).into());
+                }
+                self.seed(path, &[]);
+            }
+            let file = self
+                .files
+                .lock()
+                .unwrap()
+                .get(Self::key(path))
+                .cloned()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+            let observer = if matches!(mode, TransferMode::Read) && path.ends_with(".part") {
+                self.observe_partial_read.lock().unwrap().take()
+            } else {
+                None
+            };
+            Ok(Box::new(MemoryStream {
+                file,
+                position: 0,
+                observer,
+            }))
+        }
+        async fn rename(&self, from: &str, to: &str, replace: bool) -> Result<(), RenameError> {
+            let gate = self.first_rename.lock().unwrap().take();
+            if let Some(gate) = gate {
+                gate.await.unwrap();
+            }
+            let mut files = self.files.lock().unwrap();
+            if !replace && files.contains_key(Self::key(to)) {
+                return Err(RenameError::Conflict(
+                    std::io::Error::from(std::io::ErrorKind::AlreadyExists).into(),
+                ));
+            }
+            let file = files.remove(Self::key(from)).ok_or_else(|| {
+                RenameError::Other(std::io::Error::from(std::io::ErrorKind::NotFound).into())
+            })?;
+            files.insert(Self::key(to).into(), file);
+            if self.lose_rename_reply.swap(false, Ordering::Relaxed) {
+                return Err(RenameError::Other(
+                    std::io::Error::other("rename acknowledgement lost").into(),
+                ));
+            }
+            Ok(())
+        }
+        async fn remove(&self, path: &str) -> AppResult<()> {
+            self.files.lock().unwrap().remove(Self::key(path));
+            Ok(())
+        }
+    }
+
+    struct MemoryStream {
+        file: Arc<MemoryFile>,
+        position: u64,
+        observer: Option<ReadObserver>,
+    }
+    impl tokio::io::AsyncRead for MemoryStream {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if let Some(observer) = &self.observer {
+                observer(self.position);
+            }
+            let n = {
+                let bytes = self.file.bytes.lock().unwrap();
+                let start = (self.position as usize).min(bytes.len());
+                let n =
+                    (bytes.len() - start)
+                        .min(buf.remaining())
+                        .min(if self.observer.is_some() {
+                            1024
+                        } else {
+                            usize::MAX
+                        });
+                buf.put_slice(&bytes[start..start + n]);
+                n
+            };
+            self.position += n as u64;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+    impl tokio::io::AsyncSeek for MemoryStream {
+        fn start_seek(
+            mut self: std::pin::Pin<&mut Self>,
+            position: SeekFrom,
+        ) -> std::io::Result<()> {
+            self.position = match position {
+                SeekFrom::Start(n) => n,
+                SeekFrom::Current(n) => self.position.checked_add_signed(n).unwrap(),
+                SeekFrom::End(n) => (self.file.bytes.lock().unwrap().len() as u64)
+                    .checked_add_signed(n)
+                    .unwrap(),
+            };
+            Ok(())
+        }
+        fn poll_complete(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<u64>> {
+            std::task::Poll::Ready(Ok(self.position))
+        }
+    }
+    impl tokio::io::AsyncWrite for MemoryStream {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            {
+                let mut output = self.file.bytes.lock().unwrap();
+                let start = self.position as usize;
+                let length = output.len().max(start + bytes.len());
+                output.resize(length, 0);
+                output[start..start + bytes.len()].copy_from_slice(bytes);
+            }
+            self.position += bytes.len() as u64;
+            std::task::Poll::Ready(Ok(bytes.len()))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+    #[async_trait::async_trait]
+    impl TransferStream for MemoryStream {
+        async fn close(self: Box<Self>) -> AppResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn aliased_targets_serialize_commit_without_serializing_streams() {
+        for second_destination in ["/target", "/different"] {
+            let endpoint = AliasedEndpoint::default();
+            endpoint.seed("/first-source", b"first contents");
+            endpoint.seed("/second-source", b"second contents");
+            let (release, held) = tokio::sync::oneshot::channel();
+            *endpoint.first_rename.lock().unwrap() = Some(held);
+            let (host, _) = crate::ssh::test_support::headless_host();
+            let mut first_state = TransferState::default();
+            let mut second_state = TransferState::default();
+            let commit_lock = tokio::sync::Mutex::new(());
+            let mut first = Box::pin(transfer(
+                &endpoint,
+                "/first-source",
+                &endpoint,
+                "/Target",
+                &mut first_state,
+                &host,
+                "first",
+                Arc::new(AtomicBool::new(false)),
+                &commit_lock,
+            ));
+            let mut second = Box::pin(transfer(
+                &endpoint,
+                "/second-source",
+                &endpoint,
+                second_destination,
+                &mut second_state,
+                &host,
+                "second",
+                Arc::new(AtomicBool::new(false)),
+                &commit_lock,
+            ));
+            // All fake I/O is immediately ready except the first rename. Each
+            // poll deterministically reaches the commit boundary, with no sleep.
+            assert!(futures_util::poll!(first.as_mut()).is_pending());
+            assert!(
+                futures_util::poll!(second.as_mut()).is_pending(),
+                "another commit entered while the first rename was outstanding"
+            );
+            let staged: Vec<_> = endpoint
+                .files
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(path, _)| path.ends_with(".part"))
+                .map(|(_, file)| file.bytes.lock().unwrap().clone())
+                .collect();
+            assert!(
+                staged.contains(&b"second contents".to_vec()),
+                "unrelated data streaming must finish while commit is occupied"
+            );
+            release.send(()).unwrap();
+            first.await.unwrap();
+            let second_result = second.await;
+            if second_destination == "/target" {
+                assert_eq!(
+                    second_result.unwrap_err().code(),
+                    "sftp_transfer_target_changed"
+                );
+            } else {
+                second_result.unwrap();
+                assert_eq!(endpoint.contents("/different"), b"second contents");
+            }
+            assert_eq!(endpoint.contents("/target"), b"first contents");
+            assert_eq!(endpoint.contents("/first-source"), b"first contents");
+            assert_eq!(endpoint.contents("/second-source"), b"second contents");
+        }
+    }
+
+    #[tokio::test]
+    async fn prefix_verification_stays_incomplete_until_receiver_bytes_are_read() {
+        let endpoint = AliasedEndpoint::default();
+        endpoint.seed("/source", &vec![b'x'; 180_000]);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let (base, _) = crate::ssh::test_support::headless_host();
+        let first_host = Host::new(
+            base.weak_state().upgrade().unwrap(),
+            Arc::new(move |_, event| {
+                if event["phase"] == "transferring" && event["transferred"].as_u64().unwrap() > 0 {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                true
+            }),
+        );
+        let mut state = TransferState::default();
+        assert!(transfer(
+            &endpoint,
+            "/source",
+            &endpoint,
+            "/target",
+            &mut state,
+            &first_host,
+            "resume",
+            cancel,
+            &tokio::sync::Mutex::new(()),
+        )
+        .await
+        .is_err());
+        let offset = state.transferred();
+        let latest = Arc::new(Mutex::new(serde_json::Value::Null));
+        let ticks = latest.clone();
+        let host = Host::new(
+            base.weak_state().upgrade().unwrap(),
+            Arc::new(move |_, event| {
+                *ticks.lock().unwrap() = event;
+                true
+            }),
+        );
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let observed = observations.clone();
+        *endpoint.observe_partial_read.lock().unwrap() = Some(Arc::new(move |position| {
+            observed
+                .lock()
+                .unwrap()
+                .push((position, latest.lock().unwrap().clone()));
+        }));
+        transfer(
+            &endpoint,
+            "/source",
+            &endpoint,
+            "/target",
+            &mut state,
+            &host,
+            "resume",
+            Arc::new(AtomicBool::new(false)),
+            &tokio::sync::Mutex::new(()),
+        )
+        .await
+        .unwrap();
+        let observations = observations.lock().unwrap();
+        assert!(observations.len() > 1);
+        for (position, tick) in observations.iter() {
+            assert!(*position < offset);
+            assert!(
+                tick["verified"].as_u64().unwrap() < tick["verificationTotal"].as_u64().unwrap(),
+                "verification reported complete before receiver read at {position}: {tick}"
+            );
+        }
+        assert!(
+            observations.last().unwrap().1["verified"].as_u64().unwrap()
+                > observations[0].1["verified"].as_u64().unwrap(),
+            "receiver readback must advance verification progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn lost_rename_recovery_waits_for_the_same_commit_lock() {
+        let endpoint = AliasedEndpoint::default();
+        endpoint.seed("/source", b"replacement");
+        endpoint.lose_rename_reply.store(true, Ordering::Relaxed);
+        let (host, _) = crate::ssh::test_support::headless_host();
+        let mut state = TransferState::default();
+        let commit_lock = tokio::sync::Mutex::new(());
+        assert!(transfer(
+            &endpoint,
+            "/source",
+            &endpoint,
+            "/target",
+            &mut state,
+            &host,
+            "recover",
+            Arc::new(AtomicBool::new(false)),
+            &commit_lock,
+        )
+        .await
+        .is_err());
+        assert_eq!(state.phase, CommitPhase::DirectRename);
+        assert_eq!(endpoint.contents("/target"), b"replacement");
+        let held = commit_lock.lock().await;
+        let mut retry = Box::pin(transfer(
+            &endpoint,
+            "/source",
+            &endpoint,
+            "/target",
+            &mut state,
+            &host,
+            "recover",
+            Arc::new(AtomicBool::new(false)),
+            &commit_lock,
+        ));
+        assert!(futures_util::poll!(retry.as_mut()).is_pending());
+        drop(held);
+        retry.await.unwrap();
+        assert!(state.completed());
+    }
+
+    #[tokio::test]
+    async fn cancelling_commit_or_recovery_wait_does_not_wait_for_another_transfer() {
+        for recovering in [false, true] {
+            let endpoint = AliasedEndpoint::default();
+            endpoint.seed("/source", b"replacement");
+            let (host, _) = crate::ssh::test_support::headless_host();
+            let mut state = TransferState::default();
+            let commit_lock = tokio::sync::Mutex::new(());
+            if recovering {
+                endpoint.lose_rename_reply.store(true, Ordering::Relaxed);
+                assert!(transfer(
+                    &endpoint,
+                    "/source",
+                    &endpoint,
+                    "/target",
+                    &mut state,
+                    &host,
+                    "cancel-recovery",
+                    Arc::new(AtomicBool::new(false)),
+                    &commit_lock,
+                )
+                .await
+                .is_err());
+                assert_eq!(state.phase, CommitPhase::DirectRename);
+            }
+            let held = commit_lock.lock().await;
+            let cancel = Arc::new(AtomicBool::new(false));
+            let mut attempt = Box::pin(transfer(
+                &endpoint,
+                "/source",
+                &endpoint,
+                "/target",
+                &mut state,
+                &host,
+                "cancel-waiting",
+                cancel.clone(),
+                &commit_lock,
+            ));
+            // Fake I/O is ready: the attempt has reached the occupied commit
+            // lock. Keep that other transfer's guard for the entire assertion.
+            assert!(futures_util::poll!(attempt.as_mut()).is_pending());
+            cancel.store(true, Ordering::Relaxed);
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), attempt)
+                .await
+                .expect("cancel must finish while another transfer still holds the commit lock")
+                .unwrap_err();
+            assert_eq!(error.code(), super::super::sftp::CANCELLED_CODE);
+            assert!(commit_lock.try_lock().is_err());
+            assert!(!state.completed());
+            assert_eq!(endpoint.contents("/source"), b"replacement");
+            if recovering {
+                assert_eq!(endpoint.contents("/target"), b"replacement");
+            } else {
+                assert!(endpoint.stat("/target").await.unwrap().is_none());
+                assert_eq!(
+                    endpoint.contents(state.part_path().unwrap()),
+                    b"replacement"
+                );
+            }
+            drop(held);
+        }
+    }
+
     #[derive(Default)]
     struct FaultEndpoint {
         no_replace: bool,
@@ -759,6 +1263,7 @@ mod tests {
             &host,
             "test-transfer",
             Arc::new(AtomicBool::new(false)),
+            &tokio::sync::Mutex::new(()),
         )
         .await
     }
@@ -1023,6 +1528,7 @@ mod tests {
             &host,
             "test-transfer",
             cancel,
+            &tokio::sync::Mutex::new(()),
         )
         .await
         .unwrap_err();
@@ -1059,13 +1565,14 @@ mod tests {
             &host,
             "test-transfer",
             Arc::new(AtomicBool::new(false)),
+            &tokio::sync::Mutex::new(()),
         )
         .await
         .unwrap();
         let events = events.lock().unwrap();
         assert!(events
             .iter()
-            .any(|e| e["phase"] == "verifying" && e["verificationTotal"] == offset));
+            .any(|e| e["phase"] == "verifying" && e["verificationTotal"] == offset * 2));
         assert_eq!(
             events
                 .iter()

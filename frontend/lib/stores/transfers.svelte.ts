@@ -76,6 +76,12 @@ export async function setMaxConcurrent(n: number): Promise<void> {
 const CANCELLED_TAG = "transfer_cancelled";
 const CANCELLED_ERROR = `__rssh_err__|${JSON.stringify({ code: CANCELLED_TAG, params: {} })}`;
 
+export interface TransferRecovery {
+  code: "sftp_transfer_backup_preserved" | "sftp_transfer_backup_location_unknown"
+    | "sftp_transfer_backup_failed" | "sftp_provider_recovery_preserved";
+  params?: Record<string, string | number>;
+}
+
 export interface Transfer {
   id: string;
   kind: TransferKind;
@@ -92,6 +98,9 @@ export interface Transfer {
   transferred: number;
   status: TransferStatus;
   error?: string;
+  /** Recovery locations outlive individual attempts. Keep the coded payload
+   * so the UI can render it in the current locale until commit/cleanup succeed. */
+  recovery?: TransferRecovery;
   startedAt: number;
   finishedAt?: number;
 }
@@ -139,6 +148,22 @@ function find(id: string): Transfer | undefined {
   return _list.find((x) => x.id === id);
 }
 
+function setAttemptError(transfer: Transfer, error: unknown): void {
+  const coded = errCoded(error);
+  switch (coded?.code) {
+    case "sftp_transfer_backup_preserved":
+    case "sftp_transfer_backup_location_unknown":
+    case "sftp_transfer_backup_failed":
+    case "sftp_provider_recovery_preserved":
+      // A newer recovery result supersedes the previous state (for example,
+      // an uncertain cleanup replaces a previously confirmed backup).
+      transfer.recovery = { code: coded.code, params: coded.params };
+      transfer.error = undefined;
+      return;
+  }
+  transfer.error = errMsg(error);
+}
+
 function runningCount(): number {
   return _list.filter((t) => t.status === "running").length;
 }
@@ -184,7 +209,7 @@ async function runTransfer(id: string): Promise<void> {
     const cur = find(id);
     if (cur) {
       cur.status = "failed";
-      cur.error = errMsg(e);
+      setAttemptError(cur, e);
       cur.finishedAt = Date.now();
     }
     // This early-return bypasses the try/finally below, so we must promote
@@ -220,6 +245,7 @@ async function runTransfer(id: string): Promise<void> {
     if (cur) {
       cur.status = "done";
       cur.error = undefined;
+      cur.recovery = undefined;
       if (cur.total > 0) cur.transferred = cur.total;
       cur.finishedAt = Date.now();
     }
@@ -227,7 +253,7 @@ async function runTransfer(id: string): Promise<void> {
     const cur = find(id);
     if (cur) {
       cur.status = errCoded(e)?.code === CANCELLED_TAG ? "cancelled" : "failed";
-      cur.error = errMsg(e);
+      setAttemptError(cur, e);
       cur.finishedAt = Date.now();
     }
   } finally {

@@ -1168,7 +1168,7 @@ const zh: Messages = {
   "error.transfer_busy": "此传输正在运行。",
   "error.transfer_target_busy": "另一个传输正在使用此目标，请等它结束后重试。",
   "error.sftp_folder_required": "请授权完整目标文件夹。单个文件的权限不足以安全替换和断点续传。",
-  "error.sftp_provider_recovery_preserved": "文档提供器无法恢复原文件名。已保留内容，可在 {path} 找到。",
+  "error.sftp_provider_recovery_preserved": "文档提供器操作结果需要核对。最后确认的恢复位置：{path}。",
   "error.sftp_provider_unsupported": "此文档提供器不支持安全替换和续传所需的文件操作，请选择其他目标文件夹。",
   "error.sftp_transfer_invalid_file": "不是可传输的普通文件：{path}",
   "error.sftp_transfer_identity_changed": "源或目标位置已变化：{path}。已保留临时文件，请新建传输。",

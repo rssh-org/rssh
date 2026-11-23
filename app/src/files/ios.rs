@@ -41,6 +41,37 @@ struct Grant {
 #[derive(Default)]
 struct Grants(Mutex<Vec<Grant>>);
 
+impl Grants {
+    fn remember(&self, selected: Vec<Grant>) -> AppResult<()> {
+        let mut entries = self.0.lock().map_err(provider_error)?;
+        for grant in selected {
+            // Refresh only equivalent authority. A source-file selection or a
+            // read-only folder selection must not discard a writable tree URL.
+            entries.retain(|entry| {
+                entry.root != grant.root
+                    || entry.directory != grant.directory
+                    || entry.write != grant.write
+            });
+            entries.push(grant);
+        }
+        Ok(())
+    }
+
+    fn find(&self, path: &Path, write: bool, directory: bool) -> AppResult<Option<Grant>> {
+        let entries = self.0.lock().map_err(provider_error)?;
+        Ok(entries
+            .iter()
+            .filter(|entry| {
+                (!write || entry.write)
+                    && (!directory || entry.directory)
+                    && ((entry.directory && path.starts_with(&entry.root))
+                        || (!entry.directory && path == entry.root))
+            })
+            .max_by_key(|entry| entry.root.components().count())
+            .cloned())
+    }
+}
+
 struct Scope {
     url: Retained<NSURL>,
     active: bool,
@@ -167,13 +198,7 @@ async fn select(
     .await
     .map_err(join_error)??;
     let locations = selected.iter().map(|grant| file_url(&grant.root)).collect();
-    let state = grants(app);
-    let mut entries = state.0.lock().map_err(provider_error)?;
-    for grant in selected {
-        // Keep folder authority if selecting a source inside that folder later.
-        entries.retain(|entry| entry.root != grant.root || (entry.directory && !grant.directory));
-        entries.push(grant);
-    }
+    grants(app).remember(selected)?;
     Ok(Some(locations))
 }
 
@@ -194,18 +219,14 @@ pub async fn pick_open_files(app: &AppHandle) -> AppResult<Option<Vec<String>>> 
     select(app, false, true, false).await
 }
 
-fn find_grant(app: &AppHandle, location: &str) -> AppResult<Option<Grant>> {
+fn find_grant(
+    app: &AppHandle,
+    location: &str,
+    write: bool,
+    directory: bool,
+) -> AppResult<Option<Grant>> {
     let path = file_path(location)?;
-    let state = grants(app);
-    let entries = state.0.lock().map_err(provider_error)?;
-    Ok(entries
-        .iter()
-        .filter(|entry| {
-            (entry.directory && path.starts_with(&entry.root))
-                || (!entry.directory && path == entry.root)
-        })
-        .max_by_key(|entry| entry.root.components().count())
-        .cloned())
+    grants(app).find(&path, write, directory)
 }
 
 pub async fn transfer_endpoint(
@@ -213,7 +234,8 @@ pub async fn transfer_endpoint(
     location: String,
     write: bool,
 ) -> AppResult<(Arc<dyn TransferEndpoint>, String)> {
-    let grant = match find_grant(app, &location)? {
+    // Receivers need sibling operations; upload sources may use a file grant.
+    let grant = match find_grant(app, &location, write, write)? {
         Some(grant) => grant,
         None if write => return Err(folder_required()),
         None => {
@@ -239,7 +261,7 @@ pub async fn resolve_paths(
     paths: Vec<String>,
     write: bool,
 ) -> AppResult<Vec<ResolvedPath>> {
-    let grant = find_grant(app, &root)?.ok_or_else(folder_required)?;
+    let grant = find_grant(app, &root, write, true)?.ok_or_else(folder_required)?;
     if write && !grant.write {
         return Err(folder_required());
     }
@@ -291,7 +313,7 @@ pub async fn resolve_paths(
 }
 
 pub async fn walk_directory(app: &AppHandle, root: String) -> AppResult<Vec<LocalWalkEntry>> {
-    let grant = find_grant(app, &root)?.ok_or_else(folder_required)?;
+    let grant = find_grant(app, &root, false, true)?.ok_or_else(folder_required)?;
     let path = grant.check(&root)?;
     let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
@@ -619,6 +641,96 @@ impl Drop for CoordinatedStream {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    fn selected_grant(path: &Path, directory: bool, write: bool) -> Grant {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+        Grant::selected(url, directory, write).unwrap()
+    }
+
+    #[tokio::test]
+    async fn overlapping_grants_choose_authority_for_the_requested_operation() {
+        let dir = tempfile::tempdir_in(dirs::home_dir().unwrap()).unwrap();
+        let nested = dir.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let target = nested.join("download");
+        std::fs::write(&target, b"old contents").unwrap();
+        let registry = Grants::default();
+        registry
+            .remember(vec![selected_grant(dir.path(), true, true)])
+            .unwrap();
+        registry
+            .remember(vec![selected_grant(&nested, true, false)])
+            .unwrap();
+        registry
+            .remember(vec![selected_grant(&target, false, false)])
+            .unwrap();
+        // Reauthorizing the parent must recover the download even while the
+        // more specific source-file and read-only folder grants remain.
+        registry
+            .remember(vec![selected_grant(dir.path(), true, true)])
+            .unwrap();
+        let grant = registry.find(&target, true, true).unwrap().unwrap();
+        assert_eq!(grant.root, dir.path());
+        assert!(grant.write && grant.directory);
+        assert_eq!(
+            registry.find(&target, false, false).unwrap().unwrap().root,
+            target
+        );
+        assert_eq!(
+            registry.find(&target, false, true).unwrap().unwrap().root,
+            nested
+        );
+        let endpoint = ScopedEndpoint { grant, write: true };
+        let target = target.to_string_lossy();
+        let part = endpoint.sibling(&target, "download.part").await.unwrap();
+        let mut stream = endpoint.open(&part, TransferMode::CreateNew).await.unwrap();
+        stream.write_all(b"replacement").await.unwrap();
+        stream.close().await.unwrap();
+        endpoint.rename(&part, &target, true).await.unwrap();
+        assert_eq!(std::fs::read(target.as_ref()).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn selecting_read_only_folder_again_preserves_existing_write_authority() {
+        let dir = tempfile::tempdir_in(dirs::home_dir().unwrap()).unwrap();
+        let registry = Grants::default();
+        registry
+            .remember(vec![selected_grant(dir.path(), true, true)])
+            .unwrap();
+        registry
+            .remember(vec![selected_grant(dir.path(), true, false)])
+            .unwrap();
+        let grant = registry
+            .find(&dir.path().join("new-file"), true, true)
+            .unwrap()
+            .unwrap();
+        assert!(grant.write && grant.directory);
+    }
+
+    #[test]
+    fn read_only_and_single_file_grants_never_authorize_sibling_writes() {
+        let dir = tempfile::tempdir_in(dirs::home_dir().unwrap()).unwrap();
+        let file = dir.path().join("selected");
+        std::fs::write(&file, b"source").unwrap();
+        let registry = Grants::default();
+        registry
+            .remember(vec![selected_grant(dir.path(), true, false)])
+            .unwrap();
+        registry
+            .remember(vec![selected_grant(&file, false, true)])
+            .unwrap();
+        assert!(registry.find(&file, false, false).unwrap().is_some());
+        assert!(registry.find(&file, false, true).unwrap().is_some());
+        assert!(registry.find(&file, true, true).unwrap().is_none());
+        assert!(registry
+            .find(&dir.path().join("other"), true, false)
+            .unwrap()
+            .is_none());
+        assert!(registry
+            .find(&dir.path().with_extension("outside"), false, true)
+            .unwrap()
+            .is_none());
+    }
 
     #[tokio::test]
     async fn coordinated_stream_closes_before_sibling_replacement_and_retains_resume_bytes() {

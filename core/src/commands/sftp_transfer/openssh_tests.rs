@@ -279,6 +279,7 @@ async fn real_openssh_replaces_and_resumes_upload_and_download() {
             &host,
             &uuid::Uuid::new_v4().to_string(),
             Arc::new(AtomicBool::new(false)),
+            &tokio::sync::Mutex::new(()),
         )
         .await
         .unwrap_err();
@@ -298,6 +299,7 @@ async fn real_openssh_replaces_and_resumes_upload_and_download() {
             &host,
             &uuid::Uuid::new_v4().to_string(),
             Arc::new(AtomicBool::new(false)),
+            &tokio::sync::Mutex::new(()),
         )
         .await
         .unwrap();

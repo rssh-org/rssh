@@ -174,8 +174,15 @@ pub async fn transfer_endpoint(
     String,
 )> {
     #[cfg(android)]
-    if location.starts_with("rssh-tree:") {
-        return android::transfer_endpoint(app, location, write).await;
+    {
+        if location.starts_with("rssh-tree:") {
+            return android::transfer_endpoint(app, location, write).await;
+        }
+        // A raw filesystem path or single-document URI carries no authority
+        // to create and rename siblings on Android, even if it is writable.
+        if write {
+            return Err(folder_required());
+        }
     }
     #[cfg(ios)]
     return ios::transfer_endpoint(app, location, write).await;

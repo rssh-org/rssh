@@ -97,7 +97,7 @@
     {:else}
         <ul class="list">
             {#each list as item (item.id)}
-                {@const showError = !!item.error}
+                {@const showError = !!item.error || !!item.recovery}
                 <li class="row surface-pressed"
                     class:failed={item.status === "failed"}
                     class:done={item.status === "done"}
@@ -148,7 +148,12 @@
                     </div>
 
                     {#if showError}
-                        <div class="error">{item.error}</div>
+                        <div class="error">
+                            {#if item.recovery}
+                                <div>{t(`error.${item.recovery.code}`, item.recovery.params)}</div>
+                            {/if}
+                            {#if item.error}<div>{item.error}</div>{/if}
+                        </div>
                     {/if}
                 </li>
             {/each}

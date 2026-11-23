@@ -1165,7 +1165,7 @@ const en = {
   "error.transfer_busy": "This transfer is already running.",
   "error.transfer_target_busy": "Another transfer is using this destination. Wait for it to finish, then retry.",
   "error.sftp_folder_required": "Authorize the complete destination folder. Access to a single file is insufficient for safe replacement and resume.",
-  "error.sftp_provider_recovery_preserved": "The document provider could not restore the original filename. Preserved content is available at {path}.",
+  "error.sftp_provider_recovery_preserved": "The document provider operation needs verification. Last confirmed recovery location: {path}.",
   "error.sftp_provider_unsupported": "This document provider does not support the file operations needed for safe replacement and resume. Choose another destination folder.",
   "error.sftp_transfer_invalid_file": "Not a regular transfer file: {path}",
   "error.sftp_transfer_identity_changed": "The source or destination location changed: {path}. The partial file was preserved; start a new transfer.",

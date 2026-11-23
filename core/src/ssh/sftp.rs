@@ -837,7 +837,8 @@ mod transfer_protocol_tests {
             &mut state,
             &host,
             "denied-transfer",
-            Arc::new(AtomicBool::new(false))
+            Arc::new(AtomicBool::new(false)),
+            &tokio::sync::Mutex::new(()),
         )
         .await
         .is_err());
