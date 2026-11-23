@@ -39,13 +39,16 @@ index f3a5b35..92d794f 100644
      pub fn with_timeout_ms(mut self, timeout_ms: u32) -> Self {
          self.timeout_ms = timeout_ms.clamp(1, MAX_TIMEOUT_MS);
          self
-@@ -1487,6 +1494,18 @@ mod tests {
+@@ -1487,6 +1494,21 @@ mod tests {
          );
      }
  
 +    #[test]
 +    fn human_interaction_explicitly_disables_only_the_deadline() {
-+        assert_eq!(BridgeCallOptions::default().without_timeout().timeout_ms(), 0);
++        assert_eq!(
++            BridgeCallOptions::default().without_timeout().timeout_ms(),
++            0
++        );
 +        assert_eq!(
 +            BridgeCallOptions::default()
 +                .without_timeout()

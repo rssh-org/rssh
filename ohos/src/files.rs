@@ -271,10 +271,7 @@ pub async fn download_path(uri: String) -> AppResult<Option<std::path::PathBuf>>
     let bridge = super::app()?.bridge().map_err(super::native_error)?;
     {
         let grants = GRANTS.lock().map_err(|_| super::unavailable())?;
-        if !grants.permits(&uri, true) {
-            return Err(selection_error());
-        }
-        if !grants.creates_in_directory(&uri) {
+        if !grants.permits_download(&uri) {
             return Err(rssh_host::files::folder_required());
         }
     }
@@ -369,7 +366,7 @@ pub async fn open_file(uri: String, write: bool) -> AppResult<File> {
         if !grants.permits(&uri, write) {
             return Err(selection_error());
         }
-        write && grants.creates_in_directory(&uri)
+        write && grants.permits_download(&uri)
     };
     let opened = bridge
         .call_async::<FilesAccessPlugin, OpenRequest, OpenedFile>(

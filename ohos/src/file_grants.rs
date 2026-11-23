@@ -63,7 +63,9 @@ impl FileGrants {
         true
     }
 
-    pub fn creates_in_directory(&self, uri: &str) -> bool {
+    /// Safe downloads need a writable child resolved from a selected directory;
+    /// single-document authorization cannot create and rename sibling files.
+    pub fn permits_download(&self, uri: &str) -> bool {
         self.writable.get(uri) == Some(&WriteGrant::DirectoryChild)
     }
 
@@ -141,19 +143,22 @@ mod tests {
     }
 
     #[test]
-    fn directory_creation_is_carried_by_the_grant_not_the_uri_string() {
+    fn downloads_require_live_directory_child_authority_not_a_path_or_single_file() {
         let mut grants = FileGrants::default();
         let generation = grants.generation();
         let uri = "file://docs/storage/Users/currentUser/Download/child.txt";
+        assert!(!grants.permits_download(uri));
+        assert!(grants.grant(generation, &[uri.into()], false));
+        assert!(grants.permits(uri, false));
+        assert!(!grants.permits_download(uri));
         assert!(grants.grant(generation, &[uri.into()], true));
         assert!(grants.permits(uri, true));
-        assert!(!grants.creates_in_directory(uri));
+        assert!(!grants.permits_download(uri));
         assert!(grants.grant_directory_files(generation, &[uri.into()], true));
-        assert!(grants.creates_in_directory(uri));
-        assert!(!grants.permits(uri, false));
-        assert!(!grants.creates_in_directory(&format!("{uri}/other")));
+        assert!(grants.permits_download(uri));
+        assert!(!grants.permits_download(&format!("{uri}/other")));
         grants.clear();
-        assert!(!grants.creates_in_directory(uri));
+        assert!(!grants.permits_download(uri));
         assert!(!grants.grant_directory_files(generation, &[uri.into()], true));
         assert!(!grants.permits(uri, true));
     }
