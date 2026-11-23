@@ -10,10 +10,12 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { errMsg } from "../i18n/index.svelte.ts";
+import { errCoded, errMsg } from "../i18n/index.svelte.ts";
+import { connectedSessions, sessionIdForTab } from "./app.svelte.ts";
 
 export type TransferKind = "download" | "upload";
 export type TransferStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+export type TransferPhase = "connecting" | "verifying" | "transferring" | "committing";
 
 /// Global concurrency cap: at most N running transfers at a time; the rest
 /// stay queued. Default 10 is a pragmatic sweet spot — comfortably within
@@ -69,14 +71,21 @@ export async function setMaxConcurrent(n: number): Promise<void> {
   }
 }
 
-/// 后端用这个 i18n code 标记"用户主动取消"。errStr 包含 `__rssh_err__|{"code":"transfer_cancelled",...}`
-/// 时识别为 cancelled。对应 core/src/ssh/sftp.rs::CANCELLED_CODE，前后端必须保持一致。
+/// Only the top-level code marks cancellation. A backup-recovery error can
+/// contain a cancellation cause while still needing to remain visibly failed.
 const CANCELLED_TAG = "transfer_cancelled";
+const CANCELLED_ERROR = `__rssh_err__|${JSON.stringify({ code: CANCELLED_TAG, params: {} })}`;
 
 export interface Transfer {
   id: string;
   kind: TransferKind;
   sessionId: string;
+  /** Reconnect candidates come only from the originating tab. The backend
+   * verifies the endpoint and host key before accepting a different session. */
+  tabId?: string;
+  phase: TransferPhase;
+  verified: number;
+  verificationTotal: number;
   remotePath: string;
   localPath: string;
   total: number;
@@ -88,18 +97,32 @@ export interface Transfer {
 }
 
 let _list = $state<Transfer[]>([]);
+const cancelRequests = new Set<string>();
+// A running row also covers listener setup and connection. Only an invoked
+// upload/download owns a backend attempt that needs a cancellation request.
+const launchedTransfers = new Set<string>();
+const cancellationInFlight = new Map<string, Promise<void>>();
+const forgetting = new Set<string>();
 
 interface ProgressPayload {
   transferred: number;
   total: number;
+  phase?: Exclude<TransferPhase, "connecting">;
+  verified?: number;
+  verificationTotal?: number;
 }
 
 async function attachProgressListener(id: string): Promise<UnlistenFn> {
   return await listen<ProgressPayload>(`sftp:progress:${id}`, (ev) => {
     const t = _list.find((x) => x.id === id);
-    if (!t) return;
+    if (!t || t.status !== "running") return;
+    // A resumed transfer may report a smaller verified breakpoint after a
+    // failed write. Trust the backend rather than keeping a cosmetic maximum.
     t.transferred = ev.payload.transferred;
     t.total = ev.payload.total;
+    t.phase = ev.payload.phase ?? "transferring";
+    t.verified = ev.payload.verified ?? 0;
+    t.verificationTotal = ev.payload.verificationTotal ?? 0;
   });
 }
 
@@ -129,6 +152,7 @@ function tryDispatch(id: string): void {
   const t = find(id);
   if (!t || t.status !== "queued") return;
   t.status = "running";
+  t.phase = "connecting";
   t.startedAt = Date.now();
   void runTransfer(id);
 }
@@ -166,11 +190,17 @@ async function runTransfer(id: string): Promise<void> {
     // This early-return bypasses the try/finally below, so we must promote
     // the next queued transfer here — otherwise this slot stays "taken" by
     // a failed transfer and the queue stalls until something else finishes.
+    cancelRequests.delete(id);
     promoteNextQueued();
     return;
   }
   try {
-    mySftpId = await invoke<string>("sftp_connect_session", { sessionId: snap.sessionId });
+    if (cancelRequests.has(id)) throw CANCELLED_ERROR;
+    const sessionId = (snap.tabId && sessionIdForTab(snap.tabId)) || snap.sessionId;
+    mySftpId = await invoke<string>("sftp_connect_session", { sessionId, transferId: id });
+    snap.sessionId = sessionId;
+    if (cancelRequests.has(id)) throw CANCELLED_ERROR;
+    launchedTransfers.add(id);
     if (snap.kind === "download") {
       await invoke("sftp_download_to", {
         sftpId: mySftpId,
@@ -189,19 +219,20 @@ async function runTransfer(id: string): Promise<void> {
     const cur = find(id);
     if (cur) {
       cur.status = "done";
+      cur.error = undefined;
       if (cur.total > 0) cur.transferred = cur.total;
       cur.finishedAt = Date.now();
     }
   } catch (e) {
-    // 先用裸 String(e) 识别 cancel 标记（协议串），再用 errMsg(e) 翻译展示。
-    const rawStr = String(e);
     const cur = find(id);
     if (cur) {
-      cur.status = rawStr.includes(CANCELLED_TAG) ? "cancelled" : "failed";
+      cur.status = errCoded(e)?.code === CANCELLED_TAG ? "cancelled" : "failed";
       cur.error = errMsg(e);
       cur.finishedAt = Date.now();
     }
   } finally {
+    launchedTransfers.delete(id);
+    cancelRequests.delete(id);
     unlisten();
     if (mySftpId) invoke("sftp_close", { sftpId: mySftpId }).catch(() => {});
     promoteNextQueued();
@@ -219,6 +250,10 @@ export async function startDownload(args: {
     id,
     kind: "download",
     sessionId: args.sessionId,
+    tabId: connectedSessions().find((session) => session.type === "ssh" && session.sessionId === args.sessionId)?.tabId,
+    phase: "connecting",
+    verified: 0,
+    verificationTotal: 0,
     remotePath: args.remotePath,
     localPath: args.localPath,
     total: args.sizeHint ?? 0,
@@ -241,6 +276,10 @@ export async function startUpload(args: {
     id,
     kind: "upload",
     sessionId: args.sessionId,
+    tabId: connectedSessions().find((session) => session.type === "ssh" && session.sessionId === args.sessionId)?.tabId,
+    phase: "connecting",
+    verified: 0,
+    verificationTotal: 0,
     remotePath: args.remotePath,
     localPath: args.localPath,
     total: 0,
@@ -254,11 +293,20 @@ export async function startUpload(args: {
 }
 
 export async function retry(id: string): Promise<void> {
+  // The prior transfer can fail before its cancel IPC is handled. Wait before
+  // opening the next channel so that request cannot cancel the next attempt.
+  const cancellation = cancellationInFlight.get(id);
+  if (cancellation) await cancellation;
   const t = find(id);
-  if (!t || t.status === "running" || t.status === "queued") return;
+  if (!t || forgetting.has(id) || (t.status !== "failed" && t.status !== "cancelled")) return;
   t.status = "queued";
   t.error = undefined;
-  t.transferred = 0;
+  // The same transfer ID owns its existing .part. Keep the last confirmed
+  // bytes visible while the backend verifies the prefix on the next attempt.
+  t.phase = "connecting";
+  t.verified = 0;
+  t.verificationTotal = 0;
+  cancelRequests.delete(id);
   t.startedAt = Date.now();
   t.finishedAt = undefined;
   tryDispatch(id);
@@ -266,9 +314,12 @@ export async function retry(id: string): Promise<void> {
 
 /** Cancel a transfer.
  *  - queued: not running, mark cancelled directly without any IPC.
- *  - running: raise the backend cancel flag; runTransfer's catch branch will
- *    flip the status when the streaming loop exits. */
+ *  - connecting: stop locally once the pending setup completes.
+ *  - launched: raise the backend cancel flag; runTransfer's catch branch will
+ *    flip the status when the transfer exits. */
 export async function cancel(id: string): Promise<void> {
+  const existing = cancellationInFlight.get(id);
+  if (existing) return existing;
   const t = find(id);
   if (!t) return;
   if (t.status === "queued") {
@@ -277,17 +328,48 @@ export async function cancel(id: string): Promise<void> {
     return;
   }
   if (t.status !== "running") return;
+  cancelRequests.add(id);
+  if (!launchedTransfers.has(id)) return;
+  const request = Promise.resolve()
+    .then(() => invoke<void>("sftp_cancel_transfer", { transferId: id }))
+    .catch((e) => {
+      const current = find(id);
+      // A completed transfer stays completed. If it failed while cancel was
+      // pending, retain any recovery location in its original error.
+      if (current && current.status !== "done") {
+        const message = errMsg(e);
+        current.error = current.error ? `${current.error}\n${message}` : message;
+      }
+      console.error("[transfers] cancel failed:", e);
+    })
+    .finally(() => {
+      if (cancellationInFlight.get(id) === request) cancellationInFlight.delete(id);
+    });
+  cancellationInFlight.set(id, request);
+  await request;
+}
+
+export async function remove(id: string): Promise<void> {
+  const cancellation = cancellationInFlight.get(id);
+  if (cancellation) await cancellation;
+  const t = find(id);
+  if (!t || forgetting.has(id) || t.status === "running" || t.status === "queued") return;
+  forgetting.add(id);
   try {
-    await invoke("sftp_cancel_transfer", { transferId: id });
-  } catch (e) {
-    console.error("[transfers] cancel failed:", e);
+    // Releasing retry metadata must never delete a user's .part or backup.
+    await invoke("sftp_forget_transfer", { transferId: id });
+    _list = _list.filter((item) => item.id !== id);
+    cancelRequests.delete(id);
+  } catch (error) {
+    // Keep any backup locator visible if releasing retry metadata fails.
+    const message = errMsg(error);
+    t.error = t.error ? `${t.error}\n${message}` : message;
+  } finally {
+    forgetting.delete(id);
   }
 }
 
-export function remove(id: string): void {
-  _list = _list.filter((t) => t.id !== id);
-}
-
-export function clearFinished(): void {
-  _list = _list.filter((t) => t.status === "running" || t.status === "queued");
+export async function clearFinished(): Promise<void> {
+  const ids = _list.filter((t) => t.status !== "running" && t.status !== "queued").map((t) => t.id);
+  await Promise.all(ids.map(remove));
 }

@@ -25,7 +25,11 @@ impl<'a> CancelGuard<'a> {
         transfer_id: String,
     ) -> AppResult<(Self, Arc<AtomicBool>)> {
         let flag = Arc::new(AtomicBool::new(false));
-        locked(&state.transfer_cancels)?.insert(transfer_id.clone(), flag.clone());
+        let mut cancels = locked(&state.transfer_cancels)?;
+        if cancels.contains_key(&transfer_id) {
+            return Err(AppError::sftp("transfer_busy", json!({})));
+        }
+        cancels.insert(transfer_id.clone(), flag.clone());
         Ok((Self { state, transfer_id }, flag))
     }
 }
@@ -80,7 +84,15 @@ pub async fn sftp_connect_session(
     owner: crate::state::SessionOwner,
     state: &AppState,
     session_id: String,
+    transfer_id: Option<String>,
 ) -> AppResult<String> {
+    if let Some(transfer_id) = transfer_id {
+        let identity = super::sftp_transfer::session_identity(state, &owner, &session_id)?;
+        state
+            .sftp_transfers
+            .validate_rebind(&owner, &transfer_id, &identity)?;
+        state.sftp_transfers.begin_attempt(&owner, &transfer_id)?;
+    }
     let (reservation, ssh_handle) =
         crate::commands::lifecycle::reserve_sftp_child(&state, &session_id, &owner)?;
     let id = reservation.id().to_owned();
@@ -206,12 +218,12 @@ pub async fn sftp_stat(state: &AppState, sftp_id: String, path: String) -> AppRe
 
 /// 用户在传输页点"取消"调用：把 transfer_id 对应的 cancel flag 置 1，
 /// streaming 循环下一次 chunk 检查时退出。
-pub fn sftp_cancel_transfer(state: &AppState, transfer_id: String) -> AppResult<()> {
-    use std::sync::atomic::Ordering;
-    if let Some(flag) = locked(&state.transfer_cancels)?.get(&transfer_id) {
-        flag.store(true, Ordering::SeqCst);
-    }
-    Ok(())
+pub fn sftp_cancel_transfer(
+    state: &AppState,
+    owner: &crate::state::SessionOwner,
+    transfer_id: String,
+) -> AppResult<()> {
+    state.sftp_transfers.cancel(state, owner, &transfer_id)
 }
 
 #[cfg(test)]

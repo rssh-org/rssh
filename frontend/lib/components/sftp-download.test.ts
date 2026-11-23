@@ -14,12 +14,20 @@ function functionSource(name: string, nextName: string): string {
 }
 
 describe("SFTP context-menu download", () => {
-  it("picks a target path and queues the file through the transfer store", () => {
-    const downloadEntry = functionSource("downloadEntry", "confirmDelete");
-
-    expect(downloadEntry).toContain("fileAccess.pickSavePath(entry.name)");
-    expect(downloadEntry).toContain("transfers.startDownload");
-    expect(downloadEntry).not.toContain('"sftp_save_file"');
+  it.each([false, true])("authorizes a complete target folder for files and directories (%s)", async (isDir) => {
+    const pickDirectory = vi.fn().mockResolvedValue({ location: "content://docs/tree/authorized", name: "Downloads" });
+    const queueDownloads = vi.fn().mockResolvedValue({ queued: 1, walkErrors: [] });
+    const entry = { name: "report.txt", is_dir: isDir, size: 42 };
+    const code = ts.transpileModule(functionSource("downloadEntry", "confirmDelete"), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const downloadEntry = runInNewContext(code + "\ndownloadEntry", {
+      closeCtxMenu: vi.fn(), error: "", notice: "", meta: { sessionId: "ssh-test" },
+      fileAccess: { pickDirectory }, queueDownloads, errMsg: String, t: (key: string) => key,
+    });
+    await downloadEntry(entry);
+    expect(pickDirectory).toHaveBeenCalledExactlyOnceWith(true);
+    expect(queueDownloads).toHaveBeenCalledExactlyOnceWith([entry], "content://docs/tree/authorized");
   });
 });
 

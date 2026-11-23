@@ -967,6 +967,7 @@ mod tests {
             telnet_sessions: Default::default(),
             ssm_sessions: Default::default(),
             sftp_sessions: Default::default(),
+            sftp_transfers: Default::default(),
             transfer_cancels: Default::default(),
             active_forwards: Default::default(),
             auth_waiters: Default::default(),

@@ -185,10 +185,11 @@ export class FilesAccessPlugin extends AsyncPluginBase {
       if (typeof request.uri !== 'string' || !request.uri) throw new Error('File name requires a URI');
       return { typeName: 'rssh.files.FileName', value: new FileName(new fileUri.FileUri(request.uri).name) };
     }
-    if (action === 'download-path') {
+    if (action === 'download-path' || action === 'directory-check') {
       if (payload.typeName !== 'rssh.files.NameRequest') throw new Error('download-path requires rssh.files.NameRequest');
       const request = payload.value as NameRequest;
       if (typeof request.uri !== 'string' || !request.uri) throw new Error('Download path requires a URI');
+      if (action === 'directory-check') await requireDirectory(new fileUri.FileUri(request.uri).path);
       return { typeName: 'rssh.files.DownloadPath', value: new DownloadPath(new fileUri.FileUri(request.uri).path) };
     }
     if (action === 'open-file') {

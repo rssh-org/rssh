@@ -1495,6 +1495,7 @@ mod tests {
             serial_backend: crate::terminal::serial::native_backend().unwrap(),
             telnet_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
+            sftp_transfers: Default::default(),
             transfer_cancels: Mutex::new(HashMap::new()),
             active_forwards: Mutex::new(HashMap::new()),
             auth_waiters: Mutex::new(HashMap::new()),

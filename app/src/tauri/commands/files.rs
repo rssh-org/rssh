@@ -11,7 +11,7 @@ pub async fn resolve_local_paths(
     write: bool,
 ) -> AppResult<Vec<files::ResolvedPath>> {
     crate::platform::host::platform(&app)
-        .resolve_paths(local_root, relative_paths, write)
+        .resolve_paths(&app, local_root, relative_paths, write)
         .await
 }
 

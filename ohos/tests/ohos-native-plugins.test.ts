@@ -245,6 +245,20 @@ function directoryHarness() {
 }
 
 describe("HarmonyOS selected directory access", () => {
+  it("validates that a folder picker result actually grants a directory", async () => {
+    const h = directoryHarness();
+    const check = (uri: string) => h.plugin.invokeAsync("directory-check", {
+      typeName: "rssh.files.NameRequest", value: { uri },
+    }, h.context);
+    await expect(check(h.uri)).resolves.toEqual({
+      typeName: "rssh.files.DownloadPath", value: { path: h.directory },
+    });
+    const file = path.join(h.directory, "single-file.txt");
+    await fs.writeFile(file, "preserve");
+    await expect(check(pathToFileURL(file).toString())).rejects.toThrow("directory");
+    expect(await fs.readFile(file, "utf8")).toBe("preserve");
+  });
+
   it("keeps valid downloads when another destination is a directory", async () => {
     const h = directoryHarness();
     await fs.mkdir(path.join(h.directory, "report.txt"));

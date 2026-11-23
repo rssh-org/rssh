@@ -106,6 +106,7 @@ impl NativePlatform for OhosPlatform {
 
     async fn resolve_paths(
         &self,
+        _app: &AppHandle,
         root: String,
         paths: Vec<String>,
         write: bool,
@@ -113,7 +114,11 @@ impl NativePlatform for OhosPlatform {
         crate::files::resolve_paths(root, paths, write).await
     }
 
-    async fn walk_directory(&self, root: String) -> AppResult<Vec<LocalWalkEntry>> {
+    async fn walk_directory(
+        &self,
+        _app: &AppHandle,
+        root: String,
+    ) -> AppResult<Vec<LocalWalkEntry>> {
         crate::files::walk_directory(root).await
     }
 }

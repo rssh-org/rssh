@@ -7,6 +7,7 @@ pub mod forward;
 pub mod known_hosts;
 pub mod prompt;
 pub mod sftp;
+pub mod transfer;
 
 #[cfg(test)]
 mod auth_tests;
@@ -52,6 +53,7 @@ pub(crate) mod test_support {
             telnet_sessions: Mutex::new(HashMap::new()),
             ssm_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
+            sftp_transfers: Default::default(),
             transfer_cancels: Mutex::new(HashMap::new()),
             active_forwards: Mutex::new(HashMap::new()),
             auth_waiters: Mutex::new(HashMap::new()),

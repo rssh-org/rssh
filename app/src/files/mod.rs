@@ -3,6 +3,10 @@
 
 use crate::error::AppResult;
 
+#[cfg(all(feature = "tauri", android))]
+pub(crate) mod android;
+#[cfg(all(feature = "tauri", any(ios, all(test, macos))))]
+pub(crate) mod ios;
 #[cfg(not(ohos))]
 pub(crate) mod native;
 #[cfg(feature = "tauri")]
@@ -150,12 +154,133 @@ pub async fn pick_open_files(app: &tauri::AppHandle) -> AppResult<Option<Vec<Pic
     Ok(Some(files))
 }
 
-#[cfg(any(windows, macos, linux, ohos))]
 #[cfg(feature = "tauri")]
 pub async fn pick_folder(app: &tauri::AppHandle, write: bool) -> AppResult<Option<PickedLocation>> {
     match platform(app).pick_folder(app, write).await? {
         Some(location) => describe_location(app, location).await.map(Some),
         None => Ok(None),
+    }
+}
+
+/// Bind file access to the host's actual grant. The shared transfer engine sees
+/// the same endpoint contract for native paths and document-provider trees.
+#[cfg(feature = "tauri")]
+pub async fn transfer_endpoint(
+    app: &tauri::AppHandle,
+    location: String,
+    write: bool,
+) -> AppResult<(
+    std::sync::Arc<dyn rssh_core::files::transfer::TransferEndpoint>,
+    String,
+)> {
+    #[cfg(android)]
+    if location.starts_with("rssh-tree:") {
+        return android::transfer_endpoint(app, location, write).await;
+    }
+    #[cfg(ios)]
+    return ios::transfer_endpoint(app, location, write).await;
+    #[cfg(not(ios))]
+    {
+        if write {
+            return match download_target(app, location).await? {
+                DownloadTarget::AtomicPath(path) => Ok((
+                    std::sync::Arc::new(rssh_core::files::transfer::NativeEndpoint),
+                    path.to_string_lossy().into_owned(),
+                )),
+                DownloadTarget::Provider(_) => Err(folder_required()),
+            };
+        }
+        Ok((
+            std::sync::Arc::new(SelectedSource { app: app.clone() }),
+            location,
+        ))
+    }
+}
+
+pub fn folder_required() -> crate::error::AppError {
+    crate::error::AppError::other("sftp_folder_required", serde_json::json!({}))
+}
+
+#[cfg(feature = "tauri")]
+struct SelectedSource {
+    app: tauri::AppHandle,
+}
+
+#[cfg(feature = "tauri")]
+#[async_trait::async_trait]
+impl rssh_core::files::transfer::TransferEndpoint for SelectedSource {
+    async fn canonicalize_target(&self, path: &str) -> AppResult<String> {
+        Ok(path.to_owned())
+    }
+    async fn sibling(&self, _path: &str, _name: &str) -> AppResult<String> {
+        Err(folder_required())
+    }
+    async fn stat(
+        &self,
+        path: &str,
+    ) -> AppResult<Option<rssh_core::files::transfer::FileIdentity>> {
+        let file = open_file(&self.app, path.to_owned(), false).await?;
+        let meta = file.metadata().await?;
+        rssh_core::files::transfer::TransferStream::close(Box::new(file)).await?;
+        if !meta.is_file() {
+            return Err(crate::error::AppError::sftp(
+                "sftp_transfer_invalid_file",
+                serde_json::json!({"path":path}),
+            ));
+        }
+        #[cfg(any(linux, macos, android, ios, ohos))]
+        let stable_id = {
+            use std::os::unix::fs::MetadataExt;
+            Some(format!("{}:{}", meta.dev(), meta.ino()))
+        };
+        #[cfg(windows)]
+        let stable_id = None;
+        // A provider may materialize a fresh descriptor for the same document.
+        // Its temporary inode/mtime are not the selected document's identity;
+        // the transfer engine verifies the complete source hash separately.
+        let provider_document = path.starts_with("content://");
+        let stable_id = if provider_document {
+            Some(path.to_owned())
+        } else {
+            stable_id
+        };
+        Ok(Some(rssh_core::files::transfer::FileIdentity {
+            size: meta.len(),
+            modified: if provider_document {
+                None
+            } else {
+                meta.modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .and_then(|time| time.as_nanos().try_into().ok())
+            },
+            stable_id,
+        }))
+    }
+    async fn open(
+        &self,
+        path: &str,
+        mode: rssh_core::files::transfer::TransferMode,
+    ) -> AppResult<Box<dyn rssh_core::files::transfer::TransferStream>> {
+        if !matches!(mode, rssh_core::files::transfer::TransferMode::Read) {
+            return Err(folder_required());
+        }
+        Ok(Box::new(
+            open_file(&self.app, path.to_owned(), false).await?,
+        ))
+    }
+    async fn rename(
+        &self,
+        _from: &str,
+        _to: &str,
+        _replace: bool,
+    ) -> Result<(), rssh_core::files::transfer::RenameError> {
+        Err(rssh_core::files::transfer::RenameError::Other(
+            folder_required(),
+        ))
+    }
+    async fn remove(&self, _path: &str) -> AppResult<()> {
+        Err(folder_required())
     }
 }
 
@@ -248,6 +373,45 @@ impl tokio::io::AsyncWrite for OpenedFile {
 }
 
 #[cfg(feature = "tauri")]
+impl tokio::io::AsyncRead for OpenedFile {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(self.stream()).poll_read(cx, buf)
+    }
+}
+
+#[cfg(feature = "tauri")]
+impl tokio::io::AsyncSeek for OpenedFile {
+    fn start_seek(
+        mut self: std::pin::Pin<&mut Self>,
+        position: std::io::SeekFrom,
+    ) -> std::io::Result<()> {
+        std::pin::Pin::new(self.stream()).start_seek(position)
+    }
+    fn poll_complete(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<u64>> {
+        std::pin::Pin::new(self.stream()).poll_complete(cx)
+    }
+}
+
+#[cfg(feature = "tauri")]
+#[async_trait::async_trait]
+impl rssh_core::files::transfer::TransferStream for OpenedFile {
+    async fn close(self: Box<Self>) -> AppResult<()> {
+        match self.backend {
+            #[cfg(not(ohos))]
+            FileBackend::Native(file) => file.close().await.map_err(Into::into),
+            FileBackend::Provider(file) => Box::new(file).close().await,
+        }
+    }
+}
+
+#[cfg(feature = "tauri")]
 pub async fn save_text(
     app: &tauri::AppHandle,
     default_name: String,
@@ -322,7 +486,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(linux, macos, android, ios, ohos))]
     #[test]
     fn preserves_posix_file_names_that_are_not_path_separators() {
         for valid in ["dir/a\\b.txt", "dir/line\nbreak"] {

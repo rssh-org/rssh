@@ -130,6 +130,7 @@ pub struct AppState {
     /// 进行中的 SFTP 传输 cancel flag：transfer_id → AtomicBool。
     /// 用户在传输页点"取消"会把对应位置 1，streaming 循环每个 chunk 查一次，
     /// 命中即提前 Err 退出。传输结束（成功 / 失败 / 取消）都从 map 里移除。
+    pub sftp_transfers: crate::commands::sftp_transfer::TransferRegistry,
     pub transfer_cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub active_forwards: Mutex<HashMap<String, ForwardHandle>>,
     /// Keyboard-interactive prompt：prompt_id → owner/nonce/sender。
@@ -197,6 +198,7 @@ impl AppState {
             serial_backend: services.serial,
             telnet_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
+            sftp_transfers: Default::default(),
             transfer_cancels: Mutex::new(HashMap::new()),
             active_forwards: Mutex::new(HashMap::new()),
             auth_waiters: Mutex::new(HashMap::new()),

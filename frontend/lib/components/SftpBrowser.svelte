@@ -401,23 +401,13 @@
         notice = "";
         if (!meta.sessionId) { error = "Missing SSH session"; return; }
         try {
-            if (entry.is_dir) {
-                const dir = await fileAccess.pickDirectory(true);
-                if (!dir) return;
-                const { queued, walkErrors } = await queueDownloads([entry], dir.location);
-                if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
-                if (queued > 0) notice = t("sftp.queued_n", { n: queued });
-            } else {
-                const localPath = await fileAccess.pickSavePath(entry.name);
-                if (!localPath) return;
-                await transfers.startDownload({
-                    sessionId: meta.sessionId,
-                    remotePath: entryPath(entry),
-                    localPath,
-                    sizeHint: entry.size,
-                });
-                notice = t("sftp.queued_n", { n: 1 });
-            }
+            // A complete folder grant is required to stage, resume and rename
+            // sibling files. Single-document save grants cannot provide that.
+            const dir = await fileAccess.pickDirectory(true);
+            if (!dir) return;
+            const { queued, walkErrors } = await queueDownloads([entry], dir.location);
+            if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
+            if (queued > 0) notice = t("sftp.queued_n", { n: queued });
         } catch (err: any) {
             error = errMsg(err);
         }
