@@ -73,15 +73,92 @@ for (const kind of ["download", "upload"] as const) {
       expect(store.list()[0].transferred).toBe(1000);
       await store.retry(id);
       expect(attempt).toBe(2);
+      expect(mocks.invoke.mock.calls.filter(([name]) => name === "sftp_register_transfer")).toEqual([["sftp_register_transfer", {
+        sessionId: args.sessionId, transferId: id,
+      }]]);
     });
 
-    it("does not start streaming when the backend rejects the reconnect identity", async () => {
+    it("waits for original-session registration before publishing or dispatching the row", async () => {
+      const registration = deferred();
+      const transfer = deferred();
+      mocks.invoke.mockImplementation(async (name: string) => {
+        if (name === "sftp_register_transfer") return registration.promise;
+        if (name === "sftp_connect_session") return "sftp";
+        if (name === command) return transfer.promise;
+      });
       const store = await load();
-      mocks.invoke.mockRejectedValue(coded("transfer_identity_changed"));
+      const starting = kind === "download" ? store.startDownload(args) : store.startUpload(args);
+      expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith("sftp_register_transfer", { sessionId: args.sessionId, transferId: expect.any(String) });
+      expect(store.list()).toHaveLength(0);
+      expect(mocks.listen).not.toHaveBeenCalled();
+      // The originating tab is captured before the registration await.
+      mocks.connectedSessions.mockReturnValue([]);
+      registration.resolve();
+      const id = await starting;
+      expect(store.list()[0]).toMatchObject({ id, tabId: "ssh-tab" });
+      await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith(command, expect.objectContaining({ transferId: id })));
+      transfer.resolve();
+      await vi.waitFor(() => expect(store.list()[0].status).toBe("done"));
+    });
+
+    it("rejects failed registration without publishing a row or opening a channel", async () => {
+      const error = coded("transfer_identity_changed");
+      mocks.invoke.mockRejectedValue(error);
+      const store = await load();
+      await expect(kind === "download" ? store.startDownload(args) : store.startUpload(args)).rejects.toBe(error);
+      expect(store.list()).toHaveLength(0);
+      expect(mocks.listen).not.toHaveBeenCalled();
+      expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith("sftp_register_transfer", { sessionId: args.sessionId, transferId: expect.any(String) });
+    });
+
+    it("retains its original registration when the tab changes host while waiting for a queue slot", async () => {
+      const running = deferred();
+      const registered = new Map<string, string>();
+      mocks.invoke.mockImplementation(async (name: string, params: { sessionId?: string; transferId: string }) => {
+        if (name === "sftp_register_transfer") registered.set(params.transferId, params.sessionId!);
+        if (name === "sftp_connect_session") {
+          if (registered.get(params.transferId) !== params.sessionId) throw coded("transfer_identity_changed");
+          return "sftp";
+        }
+        if (name === command) return running.promise;
+      });
+      const store = await load();
+      await store.setMaxConcurrent(1);
+      const first = await (kind === "download" ? store.startDownload(args) : store.startUpload(args));
+      await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith(command, expect.objectContaining({ transferId: first })));
+      const queued = await (kind === "download" ? store.startDownload(args) : store.startUpload(args));
+      expect(store.list().find((item) => item.id === queued)?.status).toBe("queued");
+      expect(registered.get(queued)).toBe(args.sessionId);
+      mocks.sessionIdForTab.mockReturnValue("ssh-other-host");
+      running.resolve();
+      await vi.waitFor(() => expect(store.list().find((item) => item.id === queued)?.status).toBe("failed"));
+      expect(store.list().find((item) => item.id === queued)?.error).toContain("original verified host");
+      expect(mocks.invoke.mock.calls.filter(([name]) => name === command)).toHaveLength(1);
+      expect(mocks.invoke.mock.calls.filter(([name, params]) => name === "sftp_register_transfer" && params.transferId === queued)).toEqual([["sftp_register_transfer", {
+        sessionId: args.sessionId, transferId: queued,
+      }]]);
+    });
+
+    it("does not rebind to another host after an early channel failure before the first stream", async () => {
+      const registered = new Map<string, string>();
+      mocks.invoke.mockImplementation(async (name: string, params: { sessionId: string; transferId: string }) => {
+        if (name === "sftp_register_transfer") registered.set(params.transferId, params.sessionId);
+        if (name === "sftp_connect_session") {
+          if (registered.get(params.transferId) !== params.sessionId) throw coded("transfer_identity_changed");
+          throw coded("sftp_io_failed", { op: "connect", err: "disconnected" });
+        }
+      });
+      const store = await load();
       const id = await (kind === "download" ? store.startDownload(args) : store.startUpload(args));
       await vi.waitFor(() => expect(store.list()[0].status).toBe("failed"));
+      mocks.sessionIdForTab.mockReturnValue("ssh-other-host");
+      await store.retry(id);
+      await vi.waitFor(() => expect(store.list()[0].status).toBe("failed"));
       expect(store.list()[0].error).toContain("original verified host");
-      expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith("sftp_connect_session", { sessionId: args.sessionId, transferId: id });
+      expect(mocks.invoke.mock.calls.filter(([name]) => name === command)).toHaveLength(0);
+      expect(mocks.invoke.mock.calls.filter(([name]) => name === "sftp_register_transfer")).toEqual([["sftp_register_transfer", {
+        sessionId: args.sessionId, transferId: id,
+      }]]);
     });
   });
 }

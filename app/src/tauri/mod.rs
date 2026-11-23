@@ -382,6 +382,7 @@ pub fn run_with(
             // SFTP
             commands::sftp::sftp_connect,
             commands::sftp::sftp_connect_session,
+            commands::sftp::sftp_register_transfer,
             commands::sftp::sftp_home,
             commands::sftp::sftp_list,
             commands::sftp::sftp_walk_remote_dir,

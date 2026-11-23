@@ -261,6 +261,9 @@ export async function startDownload(args: {
     status: "queued",
     startedAt: Date.now(),
   };
+  // Bind the original verified connection before the row can wait for a slot
+  // or reconnect. A tab may point to another host before the first attempt.
+  await invoke<void>("sftp_register_transfer", { sessionId: args.sessionId, transferId: id });
   _list.unshift(t);
   tryDispatch(id);
   return id;
@@ -287,6 +290,7 @@ export async function startUpload(args: {
     status: "queued",
     startedAt: Date.now(),
   };
+  await invoke<void>("sftp_register_transfer", { sessionId: args.sessionId, transferId: id });
   _list.unshift(t);
   tryDispatch(id);
   return id;

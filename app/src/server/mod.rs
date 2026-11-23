@@ -1178,6 +1178,12 @@ async fn dispatch_async(
         //      the native pick dialogs that supply that path are host-provided) ----
         "sftp_connect" => sftp_connect(state, owner, args).await,
         "sftp_connect_session" => sftp_connect_session(state, owner, args).await,
+        "sftp_register_transfer" => ok(crate::commands::sftp_transfer::register(
+            state,
+            owner,
+            &arg::<String>(&args, "sessionId")?,
+            &arg::<String>(&args, "transferId")?,
+        )),
         "plugin_exec" => {
             let session_id: String = arg(&args, "sessionId")?;
             let command: String = arg(&args, "command")?;
@@ -2185,6 +2191,27 @@ mod tests {
                 .await
                 .unwrap_err(),
             err_value(AppError::not_found("incident_report_not_found", json!({})))
+        );
+    }
+
+    #[tokio::test]
+    async fn sftp_enqueue_registration_requires_a_live_verified_session() {
+        let (state, _dir) = test_state();
+        let owner = SessionOwner::Headless(uuid::Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        let error = dispatch_async(
+            &state,
+            &owner,
+            "sftp_register_transfer",
+            json!({"sessionId": uuid::Uuid::new_v4(), "transferId": transfer_id}),
+            &tx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            err_value(AppError::not_found("ssh_session_not_found_msg", json!({})))
         );
     }
 

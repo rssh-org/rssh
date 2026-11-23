@@ -168,6 +168,7 @@ async fn real_openssh_replaces_and_resumes_upload_and_download() {
             std::fs::write(&part, b"unrelated part").unwrap();
             std::fs::write(&bak, b"unrelated backup").unwrap();
             let id = uuid::Uuid::new_v4().to_string();
+            register(&state, &owner, &session, &id).unwrap();
             let channel = super::super::sftp::sftp_connect_session(
                 owner.clone(),
                 &state,
@@ -321,6 +322,7 @@ async fn real_openssh_replaces_and_resumes_upload_and_download() {
         std::fs::write(&source, &data).unwrap();
         std::os::unix::fs::symlink(&source, &link).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
+        register(&state, &owner, &session, &id).unwrap();
         let channel = super::super::sftp::sftp_connect_session(
             owner.clone(),
             &state,

@@ -21,15 +21,15 @@ pub enum Direction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Binding {
-    owner: SessionOwner,
-    identity: VerifiedSshIdentity,
     direction: Direction,
     source: String,
     destination: String,
 }
 
 struct Record {
-    binding: Binding,
+    owner: SessionOwner,
+    identity: VerifiedSshIdentity,
+    binding: Option<Binding>,
     checkpoint: Arc<tokio::sync::Mutex<TransferState>>,
 }
 
@@ -41,29 +41,58 @@ pub struct TransferRegistry {
 }
 
 impl TransferRegistry {
-    fn checkpoint(
+    fn register(
         &self,
+        owner: &SessionOwner,
         id: &str,
-        binding: Binding,
-    ) -> AppResult<Arc<tokio::sync::Mutex<TransferState>>> {
+        identity: &VerifiedSshIdentity,
+    ) -> AppResult<()> {
         uuid::Uuid::parse_str(id)
             .map_err(|_| AppError::sftp("transfer_identity_changed", json!({})))?;
         let mut records = locked(&self.records)?;
         if let Some(record) = records.get(id) {
-            if record.binding != binding {
+            if &record.owner != owner || &record.identity != identity {
                 return Err(AppError::sftp("transfer_identity_changed", json!({})));
             }
-            return Ok(record.checkpoint.clone());
+            return Ok(());
         }
-        let checkpoint = Arc::new(tokio::sync::Mutex::new(TransferState::default()));
         records.insert(
             id.to_owned(),
             Record {
-                binding,
-                checkpoint: checkpoint.clone(),
+                owner: owner.clone(),
+                identity: identity.clone(),
+                binding: None,
+                checkpoint: Arc::new(tokio::sync::Mutex::new(TransferState::default())),
             },
         );
-        Ok(checkpoint)
+        Ok(())
+    }
+
+    fn checkpoint(
+        &self,
+        owner: &SessionOwner,
+        id: &str,
+        identity: &VerifiedSshIdentity,
+        binding: Binding,
+    ) -> AppResult<Arc<tokio::sync::Mutex<TransferState>>> {
+        let mut records = locked(&self.records)?;
+        let record = records
+            .get_mut(id)
+            .ok_or_else(|| AppError::sftp("transfer_identity_changed", json!({})))?;
+        if &record.owner != owner
+            || &record.identity != identity
+            || record
+                .binding
+                .as_ref()
+                .is_some_and(|saved| saved != &binding)
+        {
+            return Err(AppError::sftp("transfer_identity_changed", json!({})));
+        }
+        // Directory authorization and file resolution may fail before this
+        // point. The queued transfer's verified SSH identity already exists;
+        // the first actual attempt fills its immutable file paths exactly once.
+        record.binding.get_or_insert(binding);
+        Ok(record.checkpoint.clone())
     }
 
     fn destination(&self, key: String) -> AppResult<Arc<tokio::sync::Mutex<()>>> {
@@ -83,23 +112,26 @@ impl TransferRegistry {
         id: &str,
         identity: &VerifiedSshIdentity,
     ) -> AppResult<()> {
-        if let Some(record) = locked(&self.records)?.get(id) {
-            if &record.binding.owner != owner || &record.binding.identity != identity {
-                return Err(AppError::sftp("transfer_identity_changed", json!({})));
-            }
+        let records = locked(&self.records)?;
+        let record = records
+            .get(id)
+            .ok_or_else(|| AppError::sftp("transfer_identity_changed", json!({})))?;
+        if &record.owner != owner || &record.identity != identity {
+            return Err(AppError::sftp("transfer_identity_changed", json!({})));
         }
         Ok(())
     }
 
     pub fn begin_attempt(&self, owner: &SessionOwner, id: &str) -> AppResult<()> {
         let records = locked(&self.records)?;
-        if let Some(record) = records.get(id) {
-            if &record.binding.owner != owner {
-                return Err(AppError::sftp("transfer_identity_changed", json!({})));
-            }
-            if Arc::strong_count(&record.checkpoint) != 1 {
-                return Err(AppError::sftp("transfer_busy", json!({})));
-            }
+        let record = records
+            .get(id)
+            .ok_or_else(|| AppError::sftp("transfer_identity_changed", json!({})))?;
+        if &record.owner != owner {
+            return Err(AppError::sftp("transfer_identity_changed", json!({})));
+        }
+        if Arc::strong_count(&record.checkpoint) != 1 {
+            return Err(AppError::sftp("transfer_busy", json!({})));
         }
         let mut pending = locked(&self.pending_cancels)?;
         if pending.get(id).is_some_and(|requester| requester != owner) {
@@ -112,10 +144,12 @@ impl TransferRegistry {
     }
 
     pub fn validate_owner(&self, owner: &SessionOwner, id: &str) -> AppResult<()> {
-        if let Some(record) = locked(&self.records)?.get(id) {
-            if &record.binding.owner != owner {
-                return Err(AppError::sftp("transfer_identity_changed", json!({})));
-            }
+        let records = locked(&self.records)?;
+        let record = records
+            .get(id)
+            .ok_or_else(|| AppError::sftp("transfer_identity_changed", json!({})))?;
+        if &record.owner != owner {
+            return Err(AppError::sftp("transfer_identity_changed", json!({})));
         }
         Ok(())
     }
@@ -159,7 +193,7 @@ impl TransferRegistry {
     pub fn forget(&self, owner: &SessionOwner, id: &str) -> AppResult<()> {
         let mut records = locked(&self.records)?;
         if let Some(record) = records.get(id) {
-            if &record.binding.owner != owner {
+            if &record.owner != owner {
                 return Err(AppError::sftp("transfer_identity_changed", json!({})));
             }
             // A caller may already hold its checkpoint but not yet have polled
@@ -182,6 +216,19 @@ impl TransferRegistry {
         records.remove(id);
         Ok(())
     }
+}
+
+/// Capture the queue entry's original, already verified SSH identity before
+/// opening an SFTP channel or preparing either file endpoint. Registration does
+/// no file I/O and never resets an existing checkpoint or path binding.
+pub fn register(
+    state: &AppState,
+    owner: &SessionOwner,
+    session_id: &str,
+    transfer_id: &str,
+) -> AppResult<()> {
+    let identity = session_identity(state, owner, session_id)?;
+    state.sftp_transfers.register(owner, transfer_id, &identity)
 }
 
 pub fn session_identity(
@@ -243,13 +290,13 @@ pub async fn run(
         Direction::Upload => (local, local_path, sftp.as_ref(), remote_path),
     };
     let binding = Binding {
-        owner: owner.clone(),
-        identity: identity.clone(),
         direction,
         source: source_path.to_owned(),
         destination: destination.to_owned(),
     };
-    let checkpoint = state.sftp_transfers.checkpoint(transfer_id, binding)?;
+    let checkpoint = state
+        .sftp_transfers
+        .checkpoint(owner, transfer_id, &identity, binding)?;
     let mut checkpoint = checkpoint
         .try_lock()
         .map_err(|_| AppError::sftp("transfer_busy", json!({})))?;
@@ -291,57 +338,206 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn owner() -> SessionOwner {
+        SessionOwner::Window("main".into())
+    }
+
+    fn identity() -> VerifiedSshIdentity {
+        VerifiedSshIdentity {
+            host: "host".into(),
+            port: 22,
+            username: "user".into(),
+            host_key: "SHA256:one".into(),
+        }
+    }
+
     fn binding() -> Binding {
         Binding {
-            owner: SessionOwner::Window("main".into()),
-            identity: VerifiedSshIdentity {
-                host: "host".into(),
-                port: 22,
-                username: "user".into(),
-                host_key: "SHA256:one".into(),
-            },
             direction: Direction::Upload,
             source: "/local".into(),
             destination: "/remote".into(),
         }
     }
 
+    #[test]
+    fn unregistered_transfers_cannot_rebind_or_create_checkpoints() {
+        let registry = TransferRegistry::default();
+        let id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            registry
+                .validate_rebind(&owner(), &id, &identity())
+                .unwrap_err()
+                .code(),
+            "transfer_identity_changed"
+        );
+        assert_eq!(
+            registry
+                .checkpoint(&owner(), &id, &identity(), binding())
+                .unwrap_err()
+                .code(),
+            "transfer_identity_changed"
+        );
+        assert!(registry.begin_attempt(&owner(), &id).is_err());
+        assert!(registry.records.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn queued_transfers_reject_changed_endpoint_account_key_or_owner() {
+        let registry = TransferRegistry::default();
+        let id = uuid::Uuid::new_v4().to_string();
+        registry.register(&owner(), &id, &identity()).unwrap();
+        for alter in 0..5 {
+            let mut changed_owner = owner();
+            let mut changed_identity = identity();
+            match alter {
+                0 => changed_owner = SessionOwner::Window("other".into()),
+                1 => changed_identity.host = "other-host".into(),
+                2 => changed_identity.port = 2222,
+                3 => changed_identity.username = "other-user".into(),
+                _ => changed_identity.host_key = "SHA256:two".into(),
+            }
+            assert_eq!(
+                registry
+                    .validate_rebind(&changed_owner, &id, &changed_identity)
+                    .unwrap_err()
+                    .code(),
+                "transfer_identity_changed"
+            );
+            assert_eq!(
+                registry
+                    .register(&changed_owner, &id, &changed_identity)
+                    .unwrap_err()
+                    .code(),
+                "transfer_identity_changed"
+            );
+            assert_eq!(
+                registry
+                    .checkpoint(&changed_owner, &id, &changed_identity, binding())
+                    .unwrap_err()
+                    .code(),
+                "transfer_identity_changed"
+            );
+        }
+        assert!(registry
+            .records
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .binding
+            .is_none());
+        registry
+            .validate_rebind(&owner(), &id, &identity())
+            .unwrap();
+    }
+
+    #[test]
+    fn failed_preparation_keeps_original_identity_until_paths_are_available() {
+        let registry = TransferRegistry::default();
+        let id = uuid::Uuid::new_v4().to_string();
+        registry.register(&owner(), &id, &identity()).unwrap();
+        registry.begin_attempt(&owner(), &id).unwrap();
+        // A folder authorization/open failure can stop the host adapter before
+        // run/checkpoint. A new verified connection still must match the queued
+        // identity even though no source/destination binding exists yet.
+        let mut changed = identity();
+        changed.username = "replacement-user".into();
+        assert!(registry.validate_rebind(&owner(), &id, &changed).is_err());
+        assert!(registry.register(&owner(), &id, &changed).is_err());
+        assert!(registry
+            .checkpoint(&owner(), &id, &changed, binding())
+            .is_err());
+        assert!(registry
+            .records
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .binding
+            .is_none());
+        registry
+            .validate_rebind(&owner(), &id, &identity())
+            .unwrap();
+        registry.begin_attempt(&owner(), &id).unwrap();
+        registry
+            .checkpoint(&owner(), &id, &identity(), binding())
+            .unwrap();
+    }
+
+    #[test]
+    fn registration_requires_an_owned_ready_verified_session() {
+        let (host, _) = crate::ssh::test_support::headless_host();
+        let state = host.state();
+        let id = uuid::Uuid::new_v4().to_string();
+        let reservation = crate::commands::lifecycle::reserve_generated_resource(
+            state,
+            SessionKind::Ssh,
+            owner(),
+        )
+        .unwrap();
+        assert_eq!(
+            register(state, &owner(), reservation.id(), &id)
+                .unwrap_err()
+                .code(),
+            "transfer_identity_changed"
+        );
+        assert!(state.sftp_transfers.records.lock().unwrap().is_empty());
+        drop(reservation);
+        assert!(register(state, &owner(), "missing-session", &id).is_err());
+        assert!(state.sftp_transfers.records.lock().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn retries_keep_checkpoint_and_reject_changed_identity_or_paths() {
         let registry = TransferRegistry::default();
         let id = uuid::Uuid::new_v4().to_string();
-        let first = registry.checkpoint(&id, binding()).unwrap();
+        registry.register(&owner(), &id, &identity()).unwrap();
+        let first = registry
+            .checkpoint(&owner(), &id, &identity(), binding())
+            .unwrap();
+        // A repeated registration cannot reset either file paths or the state
+        // retained by an active or failed transfer.
+        registry.register(&owner(), &id, &identity()).unwrap();
         assert!(Arc::ptr_eq(
             &first,
-            &registry.checkpoint(&id, binding()).unwrap()
+            &registry
+                .checkpoint(&owner(), &id, &identity(), binding())
+                .unwrap()
         ));
-        for alter in 0..5 {
+        for alter in 0..3 {
             let mut changed = binding();
             match alter {
-                0 => changed.owner = SessionOwner::Window("other".into()),
-                1 => changed.identity.host_key = "SHA256:two".into(),
-                2 => changed.identity.username = "other".into(),
-                3 => changed.source = "/other".into(),
+                0 => changed.direction = Direction::Download,
+                1 => changed.source = "/other".into(),
                 _ => changed.destination = "/other".into(),
             }
-            assert!(registry.checkpoint(&id, changed).is_err());
+            assert!(registry
+                .checkpoint(&owner(), &id, &identity(), changed)
+                .is_err());
         }
         let guard = first.lock().await;
         assert_eq!(
-            registry.forget(&binding().owner, &id).unwrap_err().code(),
+            registry.forget(&owner(), &id).unwrap_err().code(),
             "transfer_busy"
         );
         drop(guard);
         // Even an unpolled caller holding a clone prevents removal.
         assert_eq!(
-            registry.forget(&binding().owner, &id).unwrap_err().code(),
+            registry.forget(&owner(), &id).unwrap_err().code(),
             "transfer_busy"
         );
         let previous = Arc::downgrade(&first);
         drop(first);
-        registry.forget(&binding().owner, &id).unwrap();
+        registry.forget(&owner(), &id).unwrap();
         assert!(previous.upgrade().is_none());
-        registry.checkpoint(&id, binding()).unwrap();
+        assert!(registry
+            .checkpoint(&owner(), &id, &identity(), binding())
+            .is_err());
+        registry.register(&owner(), &id, &identity()).unwrap();
+        registry
+            .checkpoint(&owner(), &id, &identity(), binding())
+            .unwrap();
     }
 
     #[test]
@@ -359,15 +555,11 @@ mod tests {
             .try_lock()
             .is_err());
         let id = uuid::Uuid::new_v4().to_string();
-        registry.checkpoint(&id, binding()).unwrap();
-        let mut different = binding().identity;
+        registry.register(&owner(), &id, &identity()).unwrap();
+        let mut different = identity();
         different.host_key = "SHA256:changed".into();
-        assert!(registry
-            .validate_rebind(&binding().owner, &id, &different)
-            .is_err());
-        assert!(registry
-            .validate_rebind(&binding().owner, &id, &binding().identity)
-            .is_ok());
+        assert!(registry.validate_rebind(&owner(), &id, &different).is_err());
+        assert!(registry.validate_rebind(&owner(), &id, &identity()).is_ok());
     }
 
     #[test]
@@ -376,9 +568,11 @@ mod tests {
         let (host, _events) = crate::ssh::test_support::headless_host();
         let state = host.state();
         let registry = &state.sftp_transfers;
-        let owner = binding().owner;
+        let owner = owner();
         let other = SessionOwner::Window("other".into());
         let id = uuid::Uuid::new_v4().to_string();
+        assert!(registry.cancel(state, &owner, &id).is_err());
+        registry.register(&owner, &id, &identity()).unwrap();
         registry.cancel(state, &owner, &id).unwrap();
         let flag = AtomicBool::new(false);
         assert!(registry.apply_pending_cancel(&other, &id, &flag).is_err());

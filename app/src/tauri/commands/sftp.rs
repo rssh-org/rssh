@@ -28,6 +28,21 @@ pub async fn sftp_connect(
 }
 
 #[tauri::command]
+pub fn sftp_register_transfer(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    transfer_id: String,
+) -> AppResult<()> {
+    sftp_transfer::register(
+        state.inner().as_ref(),
+        &rssh_core::state::SessionOwner::Window(window.label().to_owned()),
+        &session_id,
+        &transfer_id,
+    )
+}
+
+#[tauri::command]
 pub async fn sftp_connect_session(
     window: tauri::Window,
     state: State<'_, Arc<AppState>>,
