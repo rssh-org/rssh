@@ -103,19 +103,17 @@ class DownloadDirectoryPlugin(activity: Activity) : Plugin(activity) {
             }
             "open", "create" -> {
                 if (writers.containsKey(key)) throw IOException("A writer is still closing: $name")
-                val file = if (op == "create") directory.create(name) else directory.child(name)
-                if (file == null) throw IOException("Document missing: $name")
-                val original = directory.descriptor(file, "rw")
-                try {
-                    // A provider may commit changes on close. Rust receives only a dup;
-                    // keep the original reliable descriptor until its stream has closed.
+                directory.openWriter(name, create = op == "create") { original ->
+                    // Keep the provider's reliable writer until Rust closes its stream.
                     val fd = original.dup().detachFd()
-                    writers[key] = original
-                    invoke.resolveObject(fd)
-                } catch (e: Exception) {
-                    writers.remove(key)
-                    original.close()
-                    throw e
+                    try {
+                        writers[key] = original
+                        invoke.resolveObject(fd)
+                    } catch (e: Exception) {
+                        writers.remove(key)
+                        ParcelFileDescriptor.adoptFd(fd).close()
+                        throw e
+                    }
                 }
             }
             "remove" -> {
@@ -147,7 +145,7 @@ class DownloadDirectoryPlugin(activity: Activity) : Plugin(activity) {
     }
 }
 
-private class LocalDirectory(private val context: Context, private val tree: Uri) {
+internal class LocalDirectory(private val context: Context, private val tree: Uri) {
     private val resolver: ContentResolver = context.contentResolver
     private val parent: Uri
     val displayName: String
@@ -219,20 +217,55 @@ private class LocalDirectory(private val context: Context, private val tree: Uri
         descriptor(file, "rw")
     }
 
-    fun create(name: String): Child {
+    fun openWriter(name: String, create: Boolean, accept: (ParcelFileDescriptor) -> Unit) {
+        if (!create) {
+            val file = child(name) ?: throw IOException("Document missing: $name")
+            val original = descriptor(file, "rw")
+            try {
+                accept(original)
+            } catch (e: Exception) {
+                original.close()
+                throw e
+            }
+            return
+        }
         if (child(name, regular = false) != null) throw NameConflict()
         val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.'))
             ?: "application/octet-stream"
         val created = DocumentsContract.createDocument(resolver, parent, mime, name)
-            ?: throw IOException("Document creation was not confirmed")
-        val file = child(name)
-        if (file == null || file.uri != created) {
-            // This URI was returned by our create. The provider can append a
-            // counter when another writer wins the name before the create.
-            throw IOException("Provider created a different document: $created")
+            ?: throw IOException("Creation was not confirmed at $displayName/$name")
+        var writer: ParcelFileDescriptor? = null
+        var initial: Identity? = null
+        var location = created.toString()
+        try {
+            // Identify the document actually returned, including a provider-numbered name.
+            val actual = displayName(created)
+            location = "$displayName/$actual"
+            val file = child(actual)?.takeIf { it.uri == created } ?: throw IOException("Document identity changed")
+            writer = descriptor(file, "rw")
+            initial = identity(writer)
+            if (actual != name) throw UnsupportedFolder("Provider changed the document name")
+            file.require(Document.FLAG_SUPPORTS_RENAME or Document.FLAG_SUPPORTS_DELETE)
+            accept(writer)
+        } catch (failure: Exception) {
+            try {
+                // A path-based document ID can now name a replacement. Keep the
+                // original inode pinned while checking what the URI resolves to.
+                writer.use {
+                    if (initial == null) throw IOException("Could not identify the created document")
+                    val actual = displayName(created)
+                    location = "$displayName/$actual"
+                    val current = child(actual)
+                    if (current == null || current.uri != created || identity(current, "rw") != initial) {
+                        throw IOException("Document identity changed")
+                    }
+                    if (!DocumentsContract.deleteDocument(resolver, created)) throw IOException("Deletion was not confirmed")
+                }
+            } catch (cleanup: Exception) {
+                throw IOException("Could not confirm removal of $location: ${cleanup.message}. ${failure.message}", failure)
+            }
+            throw failure
         }
-        file.require(Document.FLAG_SUPPORTS_WRITE or Document.FLAG_SUPPORTS_RENAME or Document.FLAG_SUPPORTS_DELETE)
-        return file
     }
 
     fun remove(name: String) {
@@ -243,10 +276,12 @@ private class LocalDirectory(private val context: Context, private val tree: Uri
 
     private data class Identity(val dev: Long, val ino: Long, val size: Long, val modified: Long)
 
-    private fun identity(file: Child, mode: String): Identity = view(file, mode).use {
-        val stat = Os.fstat(it.fileDescriptor)
+    private fun identity(file: Child, mode: String): Identity = view(file, mode).use(::identity)
+
+    private fun identity(descriptor: ParcelFileDescriptor): Identity {
+        val stat = Os.fstat(descriptor.fileDescriptor)
         if (!OsConstants.S_ISREG(stat.st_mode) || stat.st_ino == 0L) throw UnsupportedFolder()
-        Identity(stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime)
+        return Identity(stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime)
     }
 
     // Once the provider has returned a new URI, preserve that location even

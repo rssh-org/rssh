@@ -1,15 +1,16 @@
 //! Local half of a resumable SFTP download. The queue retains this ownership
 //! token between attempts, after the writer has been flushed and closed.
+use std::collections::HashMap;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::SystemTime;
 
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::error::{AppError, AppResult};
+use crate::error::{locked, AppError, AppResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileId {
@@ -274,6 +275,43 @@ pub fn normalized_destination(path: &Path) -> AppResult<PathBuf> {
         .join(name))
 }
 
+// The kernel resolves names according to the actual directory's rules, including
+// case, Unicode equivalence and short-name aliases. Serialize the target check
+// and rename in that directory without holding a lock while copying file data.
+fn publication_lock(destination: &Path) -> AppResult<Arc<Mutex<()>>> {
+    type DirectoryLocks = HashMap<(u64, u128), Weak<Mutex<()>>>;
+    static LOCKS: LazyLock<Mutex<DirectoryLocks>> = LazyLock::new(Mutex::default);
+
+    let parent = destination
+        .parent()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "Missing download directory"))?;
+    #[cfg(any(macos, ios, linux, android, ohos))]
+    let id = file_id(&fs::metadata(parent).map_err(folder_access_error)?);
+    #[cfg(windows)]
+    let id = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+        };
+        let dir = OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(parent)
+            .map_err(folder_access_error)?;
+        windows_id(&dir, &dir.metadata()?)?
+    };
+
+    let mut locks = locked(&LOCKS)?;
+    let key = (id.volume, id.index);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    locks.retain(|_, weak| weak.strong_count() > 0);
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    Ok(lock)
+}
+
 fn changed(code: &'static str, path: &Path) -> AppError {
     AppError::sftp(code, json!({ "path": path }))
 }
@@ -429,6 +467,13 @@ impl LocalPartial {
         bytes: u64,
         rename: impl Fn(&Path, &Path, bool) -> io::Result<()>,
     ) -> AppResult<()> {
+        // Document providers use their own authorized target key; their display
+        // paths need not correspond to a local filesystem directory.
+        let publication = match self.directory.document_key() {
+            None => Some(publication_lock(&self.destination)?),
+            Some(_) => None,
+        };
+        let _guard = publication.as_deref().map(locked).transpose()?;
         if !self.installed {
             if !self
                 .directory
@@ -768,5 +813,50 @@ mod tests {
         first.commit(5).unwrap();
         assert_eq!(second.commit(6).unwrap_err().code(), "sftp_target_changed");
         assert_eq!(fs::read(&dest).unwrap(), b"first");
+    }
+
+    #[tokio::test]
+    async fn concurrent_publications_follow_native_name_matching() {
+        for existing in [false, true] {
+            for second_name in ["Report", "report"] {
+                let dir = tempfile::tempdir().unwrap();
+                let first_path = dir.path().join("Report");
+                let second_path = dir.path().join(second_name);
+                fs::write(&first_path, b"old").unwrap();
+                let aliases = second_path.exists();
+                if !existing {
+                    fs::remove_file(&first_path).unwrap();
+                }
+                let mut first = downloaded(&first_path, b"first").await;
+                let mut second = downloaded(&second_path, b"second").await;
+                let (entered, at_rename) = std::sync::mpsc::channel();
+                let (release, proceed) = std::sync::mpsc::channel();
+                let (protected, second_result) = std::thread::scope(|threads| {
+                    let first_job = threads.spawn(move || {
+                        first.commit_with(5, |from, to, allow| {
+                            // Hold the first commit after it has checked the old target.
+                            entered.send(()).unwrap();
+                            proceed.recv().unwrap();
+                            NativeDownloadDirectory.rename(from, to, allow)
+                        })
+                    });
+                    at_rename.recv().unwrap();
+                    let lock = publication_lock(&second_path).unwrap();
+                    let protected = lock.try_lock().is_err();
+                    let second_job = threads.spawn(move || second.commit(6));
+                    release.send(()).unwrap();
+                    first_job.join().unwrap().unwrap();
+                    (protected, second_job.join().unwrap())
+                });
+                assert!(protected);
+                assert_eq!(fs::read(&first_path).unwrap(), b"first");
+                if aliases {
+                    assert_eq!(second_result.unwrap_err().code(), "sftp_target_changed");
+                } else {
+                    second_result.unwrap();
+                    assert_eq!(fs::read(&second_path).unwrap(), b"second");
+                }
+            }
+        }
     }
 }

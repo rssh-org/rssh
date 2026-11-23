@@ -18,7 +18,7 @@ use crate::files::atomic::{
     NativeDownloadDirectory,
 };
 use crate::ssh::client::SshPeer;
-use crate::ssh::sftp::{RemoteStamp, SftpHandle, CANCELLED_CODE};
+use crate::ssh::sftp::{RemotePart, RemoteStamp, SftpHandle, CANCELLED_CODE};
 use crate::state::{AppState, SessionKind, SessionOwner, SessionPhase};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -133,7 +133,7 @@ enum Files {
         source: LocalSource,
         destination: String,
         original: Option<RemoteStamp>,
-        part: String,
+        part: RemotePart,
     },
     Download {
         destination: Target,
@@ -416,7 +416,7 @@ impl Attempt {
         };
         let _ = host.emit(&format!("sftp:progress:{}", self.entry.request.transfer_id), json!({
             "phase": if resume_at.is_some() { "verifying" } else { "transferring" },
-            "transferred": cp.prefix.bytes, "total": stamp.size.unwrap_or(0), "partialPath": part,
+            "transferred": cp.prefix.bytes, "total": stamp.size.unwrap_or(0), "partialPath": part.path,
         }));
         if let Some(len) = resume_at {
             cp.prefix
@@ -430,7 +430,8 @@ impl Attempt {
         if &LocalSource::inspect(source).await? != stamp {
             return Err(changed(&self.entry.request.local_path));
         }
-        let uploaded = self.sftp.close_remote_part(remote, part).await?;
+        let uploaded = self.sftp.close_remote_part(remote, part, n).await?;
+        let part = &part.path;
         let backup = crate::ssh::sftp::backup_path(part)?;
         self.entry.publishing(host, n, part, &backup)?;
         cp.result = Some(Err(AppError::sftp(
@@ -568,3 +569,20 @@ impl Attempt {
 
 #[cfg(test)]
 mod openssh_tests;
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+
+    #[test]
+    fn queue_guards_the_exact_local_target_while_other_downloads_can_copy() {
+        let registry = Mutex::new(Transfers::default());
+        let acquire =
+            |name: &str| TargetGuard::acquire(&registry, Target::Local(PathBuf::from(name)), name);
+        let active = acquire("dir/report").unwrap();
+        assert!(matches!(acquire("dir/report"), Err(e) if e.code() == "sftp_target_busy"));
+        let _other = acquire("dir/other").unwrap();
+        drop(active);
+        assert!(acquire("dir/report").is_ok());
+    }
+}

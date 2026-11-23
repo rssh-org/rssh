@@ -299,6 +299,36 @@ fn progress(events: &mut Events, transfer: &Transfer) -> Vec<u64> {
     values
 }
 
+async fn disconnect_after_prefix(
+    transfer: &Transfer,
+    host: &Host,
+    connection: &Connection,
+    events: &mut Events,
+) -> u64 {
+    let event_name = format!("sftp:progress:{}", transfer.id);
+    let interrupted = transfer.run(host, connection);
+    tokio::pin!(interrupted);
+    let count = loop {
+        tokio::select! {
+            result = &mut interrupted => panic!("finished before fault: {result:?}"),
+            event = events.recv() => {
+                let (event, payload) = event.unwrap();
+                if event == event_name {
+                    let count = payload["transferred"].as_u64().unwrap();
+                    if count >= 256 * 1024 { connection.link.abort(); break count; }
+                }
+            }
+        }
+    };
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(25), interrupted)
+            .await
+            .unwrap()
+            .is_err()
+    );
+    count
+}
+
 #[tokio::test]
 #[ignore = "requires an installed OpenSSH sftp-server"]
 async fn openssh_new_replace_and_reconnect_in_both_directions() {
@@ -330,27 +360,7 @@ async fn openssh_new_replace_and_reconnect_in_both_directions() {
 
         transfer.id = uuid::Uuid::new_v4().to_string();
         std::fs::write(&source, &bytes).unwrap();
-        let event_name = format!("sftp:progress:{}", transfer.id);
-        let interrupted = transfer.run(&host, &first);
-        tokio::pin!(interrupted);
-        let interrupted_at = loop {
-            tokio::select! {
-                result = &mut interrupted => panic!("finished before fault: {result:?}"),
-                event = events.recv() => {
-                    let (event, payload) = event.unwrap();
-                    if event == event_name {
-                        let count = payload["transferred"].as_u64().unwrap();
-                        if count >= 256 * 1024 { first.link.abort(); break count; }
-                    }
-                }
-            }
-        };
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(25), interrupted)
-                .await
-                .unwrap()
-                .is_err()
-        );
+        let interrupted_at = disconnect_after_prefix(&transfer, &host, &first, &mut events).await;
         assert_eq!(std::fs::read(&target).unwrap(), b"first contents");
         progress(&mut events, &transfer);
         // Same user, host and port, but a different independently trusted key.
@@ -399,6 +409,91 @@ async fn openssh_new_replace_and_reconnect_in_both_directions() {
             bytes.len()
         );
     }
+}
+
+#[tokio::test]
+#[ignore = "requires an installed OpenSSH sftp-server"]
+async fn openssh_truncated_upload_after_last_write_ack_preserves_original() {
+    use std::sync::Mutex;
+
+    let dir = tempfile::tempdir().unwrap();
+    let transfer = Transfer::new(dir.path(), Direction::Upload);
+    let (source, target) = transfer.endpoints();
+    std::fs::write(source, b"new contents").unwrap();
+    std::fs::write(target, b"original contents").unwrap();
+    let (host, _events) = crate::ssh::test_support::headless_host();
+    let event = format!("sftp:progress:{}", transfer.id);
+    let part = Mutex::new(None::<PathBuf>);
+    let host = Host::new(
+        host.weak_state().upgrade().unwrap(),
+        Arc::new(move |name, payload| {
+            if name == event {
+                let mut part = part.lock().unwrap();
+                if let Some(path) = payload["partialPath"].as_str() {
+                    *part = Some(path.into());
+                }
+                // A transferring progress event is emitted synchronously after
+                // OpenSSH has acknowledged these bytes, before RSSH closes them.
+                if payload["phase"] == "transferring" && payload["transferred"] == 12 {
+                    let file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(part.as_ref().unwrap())
+                        .unwrap();
+                    assert_eq!(file.metadata().unwrap().len(), 12);
+                    file.set_len(0).unwrap();
+                }
+            }
+            true
+        }),
+    );
+    let connection = connect(&host, dir.path(), 1, Restriction::None, None).await;
+    assert_eq!(
+        transfer.run(&host, &connection).await.unwrap_err().code(),
+        "sftp_part_changed"
+    );
+    assert_eq!(std::fs::read(target).unwrap(), b"original contents");
+    assert_eq!(std::fs::read(source).unwrap(), b"new contents");
+}
+
+#[cfg(any(macos, linux))]
+#[tokio::test]
+#[ignore = "requires an installed OpenSSH sftp-server"]
+async fn openssh_upload_retry_rejects_an_unrelated_hard_link_with_different_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let transfer = Transfer::new(dir.path(), Direction::Upload);
+    let (source, target) = transfer.endpoints();
+    std::fs::write(source, vec![0x33; 1024 * 1024]).unwrap();
+    std::fs::write(target, b"original contents").unwrap();
+    let (host, mut events) = crate::ssh::test_support::headless_host();
+    let first = connect(&host, dir.path(), 1, Restriction::None, None).await;
+    disconnect_after_prefix(&transfer, &host, &first, &mut events).await;
+    let part = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|p| p.extension().is_some_and(|ext| ext == "part"))
+        .unwrap();
+    let unrelated = dir.path().join("independent");
+    let prefix = std::fs::read(&part).unwrap();
+    assert!(prefix.len() >= 256 * 1024 && prefix.len() < 1024 * 1024);
+    assert_ne!(
+        std::fs::metadata(&part).unwrap().permissions().mode() & 0o777,
+        0o744
+    );
+    std::fs::write(&unrelated, &prefix).unwrap();
+    std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o744)).unwrap();
+    std::fs::remove_file(&part).unwrap();
+    std::fs::hard_link(&unrelated, &part).unwrap();
+
+    let second = connect(&host, dir.path(), 1, Restriction::None, None).await;
+    assert_eq!(
+        transfer.run(&host, &second).await.unwrap_err().code(),
+        "sftp_part_changed"
+    );
+    assert_eq!(std::fs::read(&part).unwrap(), prefix);
+    assert_eq!(std::fs::read(&unrelated).unwrap(), prefix);
+    assert_eq!(std::fs::read(target).unwrap(), b"original contents");
 }
 
 #[cfg(any(macos, linux))]

@@ -10,8 +10,8 @@ use crate::models::Credential;
 use crate::ssh::client;
 
 mod publish;
-pub(crate) use publish::backup_path;
 pub use publish::RemoteStamp;
+pub(crate) use publish::{backup_path, RemotePart};
 
 /// i18n code returned when the user cancels a transfer. The frontend
 /// uses the coded error to mark its queue entry as cancelled.
@@ -272,9 +272,11 @@ impl SftpHandle {
         let (part, mut file) = self.create_remote_part(&target).await?;
         file.write_all(data)
             .await
-            .map_err(|e| publish::io_error("write", &part, e))?;
-        let uploaded = self.close_remote_part(file, &part).await?;
-        self.commit_remote_part(&part, &target, &expected, &uploaded)
+            .map_err(|e| publish::io_error("write", &part.path, e))?;
+        let uploaded = self
+            .close_remote_part(file, &part, data.len() as u64)
+            .await?;
+        self.commit_remote_part(&part.path, &target, &expected, &uploaded)
             .await
     }
 

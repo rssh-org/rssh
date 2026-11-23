@@ -24,10 +24,22 @@ const POSIX_RENAME: &str = "posix-rename@openssh.com";
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct Attributes {
     size: Option<u64>,
+    identity: PartIdentity,
+    mtime: Option<u32>,
+}
+
+// Writes change size and mtime. SFTP v3 exposes no inode, but it can
+// distinguish changes to file type, permissions and ownership across a retry.
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct PartIdentity {
     mode: Option<u32>,
     uid: Option<u32>,
     gid: Option<u32>,
-    mtime: Option<u32>,
+}
+
+pub(crate) struct RemotePart {
+    pub(crate) path: String,
+    identity: PartIdentity,
 }
 
 impl Attributes {
@@ -43,9 +55,11 @@ impl From<&FileAttributes> for Attributes {
     fn from(meta: &FileAttributes) -> Self {
         Self {
             size: meta.size,
-            mode: meta.permissions,
-            uid: meta.uid,
-            gid: meta.gid,
+            identity: PartIdentity {
+                mode: meta.permissions,
+                uid: meta.uid,
+                gid: meta.gid,
+            },
             mtime: meta.mtime,
         }
     }
@@ -54,12 +68,14 @@ impl From<&FileAttributes> for Attributes {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RemoteStamp {
     attrs: Attributes,
+    // For an upload whose server omits size, the last byte and EOF were read.
+    verified_eof: Option<u64>,
     digest: [u8; 32],
 }
 
 impl RemoteStamp {
     pub fn size(&self) -> Option<u64> {
-        self.attrs.size
+        self.attrs.size.or(self.verified_eof)
     }
 }
 
@@ -123,21 +139,57 @@ impl SftpHandle {
         file: &mut File,
         path: &str,
     ) -> AppResult<RemoteStamp> {
+        self.stamp_with_length(file, path, None).await
+    }
+
+    async fn stamp_with_length(
+        &self,
+        file: &mut File,
+        path: &str,
+        expected_len: Option<u64>,
+    ) -> AppResult<RemoteStamp> {
         let attrs = self.open_attributes(file, path).await?;
+        if let (Some(actual), Some(expected)) = (attrs.size, expected_len) {
+            if actual != expected {
+                return Err(part_changed(path));
+            }
+        }
+        let verified_eof = expected_len.filter(|_| attrs.size.is_none());
         let position = file
             .stream_position()
             .await
             .map_err(|e| io_error("seek", path, e))?;
-        let digest = sample_contents(file, attrs.size)
+        // With an expected length, the last sample ends exactly at the
+        // expected EOF (also for empty files). Check for excess bytes there.
+        let digest = sample_contents(file, attrs.size.or(verified_eof))
             .await
-            .map_err(|e| io_error("read", path, e))?;
+            .map_err(|e| {
+                if expected_len.is_some() && e.kind() == io::ErrorKind::UnexpectedEof {
+                    part_changed(path)
+                } else {
+                    io_error("read", path, e)
+                }
+            })?;
+        if verified_eof.is_some()
+            && file
+                .read(&mut [0])
+                .await
+                .map_err(|e| io_error("read", path, e))?
+                != 0
+        {
+            return Err(part_changed(path));
+        }
         file.seek(SeekFrom::Start(position))
             .await
             .map_err(|e| io_error("seek", path, e))?;
         if self.open_attributes(file, path).await? != attrs {
             return Err(target_changed(path));
         }
-        Ok(RemoteStamp { attrs, digest })
+        Ok(RemoteStamp {
+            attrs,
+            verified_eof,
+            digest,
+        })
     }
 }
 
@@ -150,6 +202,10 @@ pub(super) fn io_error(op: &str, path: &str, error: impl Display) -> AppError {
 
 fn target_changed(path: &str) -> AppError {
     AppError::sftp("sftp_target_changed", json!({ "path": path }))
+}
+
+fn part_changed(path: &str) -> AppError {
+    AppError::sftp("sftp_part_changed", json!({ "path": path }))
 }
 
 fn split_target(path: &str) -> AppResult<(&str, &str)> {
@@ -284,6 +340,14 @@ async fn raw_matches(
                 digest.update(bytes);
             }
         }
+        if let Some(end) = expected.verified_eof {
+            match raw.read(&handle, end, 1).await {
+                Err(Error::Status(s)) if s.status_code == StatusCode::Eof => (),
+                Ok(data) if data.data.is_empty() => (),
+                Ok(_) => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
         let digest: [u8; 32] = digest.finalize().into();
         Ok(digest == expected.digest && matches_attrs(&raw.lstat(path).await?.attrs))
     }
@@ -321,7 +385,7 @@ impl SftpHandle {
             .map_err(|error| io_error("open", path, error))
     }
 
-    pub async fn create_remote_part(&self, target: &str) -> AppResult<(String, File)> {
+    pub(crate) async fn create_remote_part(&self, target: &str) -> AppResult<(RemotePart, File)> {
         let part = sibling(target, "part")?;
         let flags = OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::READ | OpenFlags::WRITE;
         let file = self
@@ -329,28 +393,39 @@ impl SftpHandle {
             .open_with_flags(&part, flags)
             .await
             .map_err(|error| io_error("create", &part, error))?;
-        Ok((part, file))
+        let identity = self.open_attributes(&file, &part).await?.identity;
+        Ok((
+            RemotePart {
+                path: part,
+                identity,
+            },
+            file,
+        ))
     }
 
     pub(crate) async fn reopen_remote_part(
         &self,
-        part: &str,
+        part: &RemotePart,
         confirmed: u64,
         attempted: u64,
     ) -> AppResult<(File, u64)> {
-        let changed = || AppError::sftp("sftp_part_changed", json!({ "path": part }));
+        let path = part.path.as_str();
+        let changed = || part_changed(path);
         let before = self
             .sftp
-            .symlink_metadata(part)
+            .symlink_metadata(path)
             .await
-            .map_err(|error| io_error("lstat", part, error))?;
+            .map_err(|error| io_error("lstat", path, error))?;
         let attrs = Attributes::regular(&before).ok_or_else(changed)?;
+        if attrs.identity != part.identity {
+            return Err(changed());
+        }
         let mut file = self
             .sftp
-            .open_with_flags(part, OpenFlags::READ | OpenFlags::WRITE)
+            .open_with_flags(path, OpenFlags::READ | OpenFlags::WRITE)
             .await
-            .map_err(|error| io_error("open", part, error))?;
-        let opened = self.open_attributes(&file, part).await?;
+            .map_err(|error| io_error("open", path, error))?;
+        let opened = self.open_attributes(&file, path).await?;
         if opened != attrs {
             return Err(changed());
         }
@@ -370,6 +445,14 @@ impl SftpHandle {
     }
 
     pub async fn remote_destination_stamp(&self, path: &str) -> AppResult<Option<RemoteStamp>> {
+        self.path_stamp(path, None).await
+    }
+
+    async fn path_stamp(
+        &self,
+        path: &str,
+        expected_len: Option<u64>,
+    ) -> AppResult<Option<RemoteStamp>> {
         let meta = match self.sftp.symlink_metadata(path).await {
             Ok(meta) => meta,
             Err(Error::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
@@ -379,7 +462,9 @@ impl SftpHandle {
         };
         let attrs = Attributes::regular(&meta).ok_or_else(|| target_changed(path))?;
         let mut file = self.open_remote_source(path).await?;
-        let stamp = self.stamp_open_file(&mut file, path).await?;
+        let stamp = self
+            .stamp_with_length(&mut file, path, expected_len)
+            .await?;
         file.shutdown()
             .await
             .map_err(|error| io_error("close", path, error))?;
@@ -392,18 +477,24 @@ impl SftpHandle {
     pub(crate) async fn close_remote_part(
         &self,
         mut file: File,
-        part: &str,
+        part: &RemotePart,
+        expected_len: u64,
     ) -> AppResult<RemoteStamp> {
-        let stamp = self.stamp_open_file(&mut file, part).await?;
+        let stamp = self
+            .stamp_with_length(&mut file, &part.path, Some(expected_len))
+            .await?;
         file.shutdown()
             .await
-            .map_err(|e| io_error("close", part, e))?;
+            .map_err(|e| io_error("close", &part.path, e))?;
+        if stamp.attrs.identity != part.identity {
+            return Err(part_changed(&part.path));
+        }
         Ok(stamp)
     }
 
     async fn verify_uploaded_file(&self, path: &str, uploaded: &RemoteStamp) -> AppResult<()> {
-        if self.remote_destination_stamp(path).await?.as_ref() != Some(uploaded) {
-            return Err(AppError::sftp("sftp_part_changed", json!({"path": path})));
+        if self.path_stamp(path, uploaded.size()).await?.as_ref() != Some(uploaded) {
+            return Err(part_changed(path));
         }
         Ok(())
     }
@@ -616,6 +707,7 @@ mod tests {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum PublishFault {
         None,
+        OmitSize,
         OverwritesBackup,
         DenyFinalRename,
         ReplacePartAfterBackup,
@@ -646,7 +738,9 @@ mod tests {
             let files = self.files.lock().unwrap();
             let data = files.get(&path).ok_or(StatusCode::NoSuchFile)?;
             let mut attrs = FileAttributes::empty();
-            attrs.size = Some(data.len() as u64);
+            if self.fault != PublishFault::OmitSize {
+                attrs.size = Some(data.len() as u64);
+            }
             attrs.set_regular(true);
             Ok(Attrs { id, attrs })
         }
@@ -791,6 +885,40 @@ mod tests {
         assert_eq!(files[&format!("{TARGET}.bak")], b"prior backup");
         assert_eq!(files[&format!("{TARGET}.part")], b"prior part");
         assert_eq!(files.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn uploaded_length_without_size_metadata_requires_data_up_to_exact_eof() {
+        let (sftp, files) = fixture(PublishFault::OmitSize).await;
+        let mut file = sftp.open_remote_source(PART).await.unwrap();
+        for length in [0, 7, 9] {
+            let error = sftp
+                .stamp_with_length(&mut file, PART, Some(length))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), "sftp_part_changed");
+        }
+        let uploaded = sftp
+            .stamp_with_length(&mut file, PART, Some(8))
+            .await
+            .unwrap();
+        assert_eq!(uploaded.size(), Some(8));
+        files.lock().unwrap().get_mut(PART).unwrap().push(0);
+        assert_eq!(
+            sftp.verify_uploaded_file(PART, &uploaded)
+                .await
+                .unwrap_err()
+                .code(),
+            "sftp_part_changed"
+        );
+        files.lock().unwrap().get_mut(PART).unwrap().clear();
+        assert_eq!(
+            sftp.stamp_with_length(&mut file, PART, Some(0))
+                .await
+                .unwrap()
+                .size(),
+            Some(0)
+        );
     }
 
     #[tokio::test]
