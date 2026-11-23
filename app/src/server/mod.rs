@@ -1176,8 +1176,23 @@ async fn dispatch_async(
 
         // ---- SFTP (core ops + streaming to/from a caller-supplied local path;
         //      the native pick dialogs that supply that path are host-provided) ----
-        "sftp_connect" => sftp_connect(state, owner, args).await,
-        "sftp_connect_session" => sftp_connect_session(state, owner, args).await,
+        "sftp_connect" => ok(crate::commands::sftp::sftp_connect(
+            owner.clone(),
+            state,
+            arg(&args, "host")?,
+            checked_u16_arg(&args, "port", 22)?,
+            arg(&args, "username")?,
+            arg(&args, "authType")?,
+            arg(&args, "secret")?,
+        )
+        .await),
+        "sftp_connect_session" => ok(crate::commands::sftp::sftp_connect_session(
+            owner.clone(),
+            state,
+            arg(&args, "sessionId")?,
+            arg(&args, "transferId")?,
+        )
+        .await),
         "plugin_exec" => {
             let session_id: String = arg(&args, "sessionId")?;
             let command: String = arg(&args, "command")?;
@@ -1211,14 +1226,14 @@ async fn dispatch_async(
             let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
             ok(h.download(&arg::<String>(&args, "path")?).await)
         }
-        "sftp_upload" => {
-            let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
-            ok(h.upload(
-                &arg::<String>(&args, "path")?,
-                &arg::<Vec<u8>>(&args, "data")?,
-            )
-            .await)
-        }
+        "sftp_upload" => ok(crate::commands::sftp::sftp_upload(
+            owner,
+            state,
+            arg(&args, "sftpId")?,
+            arg(&args, "path")?,
+            arg(&args, "data")?,
+        )
+        .await),
         "sftp_mkdir" => {
             let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
             ok(h.mkdir(&arg::<String>(&args, "path")?).await)
@@ -1229,17 +1244,12 @@ async fn dispatch_async(
                 .map_err(err_value)?;
             Ok(Value::Null)
         }
-        "sftp_cancel_transfer" => {
-            use std::sync::atomic::Ordering;
-            let tid: String = arg(&args, "transferId")?;
-            if let Some(flag) = locked(&state.transfer_cancels)
-                .map_err(err_value)?
-                .get(&tid)
-            {
-                flag.store(true, Ordering::SeqCst);
-            }
-            Ok(Value::Null)
-        }
+        "sftp_cancel_transfer" => ok(state
+            .transfers
+            .cancel(owner, &arg::<String>(&args, "transferId")?)),
+        "sftp_forget_transfer" => ok(state
+            .transfers
+            .forget(owner, &arg::<String>(&args, "transferId")?)),
         "sftp_remove" => {
             let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
             ok(h.remove(&arg::<String>(&args, "path")?).await)
@@ -1256,47 +1266,36 @@ async fn dispatch_async(
             let h = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
             ok(h.stat(&arg::<String>(&args, "path")?).await)
         }
-        "sftp_download_to" => {
-            let sftp = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
-            let remote_path: String = arg(&args, "remotePath")?;
-            let local_path: String = arg(&args, "localPath")?;
-            let transfer_id: String = arg(&args, "transferId")?;
-            // RAII: unregisters the cancel flag on return / `?` / panic (matches desktop).
-            let (_guard, flag) =
-                crate::commands::sftp::CancelGuard::register(state, transfer_id.clone())
-                    .map_err(err_value)?;
+        "sftp_download_to" | "sftp_upload_from" => {
+            let request: crate::commands::sftp::queue::TransferRequest =
+                serde_json::from_value(args)
+                    .map_err(|err| json!(format!("invalid SFTP arguments: {err}")))?;
             let host = headless_host(state, tx);
-            ok(sftp
-                .download_streaming(
-                    &remote_path,
-                    std::path::Path::new(&local_path),
-                    &host,
-                    &transfer_id,
-                    flag,
-                )
-                .await
-                .map(|_| ()))
-        }
-        "sftp_upload_from" => {
-            let sftp = sftp_handle(state, &arg::<String>(&args, "sftpId")?)?;
-            let local_path: String = arg(&args, "localPath")?;
-            let remote_path: String = arg(&args, "remotePath")?;
-            let transfer_id: String = arg(&args, "transferId")?;
-            let (_guard, flag) =
-                crate::commands::sftp::CancelGuard::register(state, transfer_id.clone())
+            let path = crate::files::native::filesystem_path(request.local_path.clone())
+                .map_err(err_value)?;
+            if cmd == "sftp_download_to" {
+                let transfer = request
+                    .begin(
+                        state,
+                        owner,
+                        crate::commands::sftp::queue::Direction::Download,
+                    )
                     .map_err(err_value)?;
-            let host = headless_host(state, tx);
-            // Headless server runs on a real host filesystem (never Android), so
-            // open the local path directly as the upload reader. `upload_streaming`
-            // now takes (reader, total, …) — mirror of commands::sftp::sftp_upload_from.
-            let mut reader = tokio::fs::File::open(&local_path)
-                .await
-                .map_err(|e| err_value(AppError::from(e)))?;
-            let total = reader.metadata().await.map(|m| m.len()).unwrap_or(0);
-            ok(sftp
-                .upload_streaming(&mut reader, total, &remote_path, &host, &transfer_id, flag)
-                .await
-                .map(|_| ()))
+                let (dir, name) = crate::files::path_destination(path).map_err(err_value)?;
+                ok(transfer.download(&host, dir.as_ref(), &name).await)
+            } else {
+                let transfer = request
+                    .begin(
+                        state,
+                        owner,
+                        crate::commands::sftp::queue::Direction::Upload,
+                    )
+                    .map_err(err_value)?;
+                let mut source = tokio::fs::File::open(path).await.map_err(|err| {
+                    err_value(crate::commands::sftp::local_open_error(err.into()))
+                })?;
+                ok(transfer.upload(&host, &mut source).await)
+            }
         }
 
         // ---- AI (settings + models + sessions + messaging + skills + audit) ----
@@ -1931,79 +1930,6 @@ fn sftp_handle(
         .ok_or_else(|| json!("sftp_session_not_found"))
 }
 
-async fn sftp_connect(
-    state: &Arc<AppState>,
-    owner: &SessionOwner,
-    args: Value,
-) -> Result<Value, Value> {
-    use crate::models::{Credential, CredentialType};
-    use crate::ssh::sftp::SftpHandle;
-    let reservation = crate::commands::lifecycle::reserve_generated_resource(
-        state,
-        SessionKind::Sftp,
-        owner.clone(),
-    )
-    .map_err(err_value)?;
-    let id = reservation.id().to_owned();
-    let host: String = arg(&args, "host")?;
-    let port = args.get("port").and_then(Value::as_u64).unwrap_or(22) as u16;
-    let username: String = arg(&args, "username")?;
-    let auth_type: String = arg(&args, "authType")?;
-    let secret: Option<String> = args
-        .get("secret")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let cred = Credential {
-        id: String::new(),
-        name: String::new(),
-        username,
-        credential_type: CredentialType::from_str(&auth_type),
-        secret,
-        save_to_remote: false,
-    };
-    let timeout_secs: u64 = crate::db::settings::get(&state.db, "connect_timeout")
-        .map_err(err_value)?
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(crate::ssh::client::DEFAULT_CONNECT_TIMEOUT);
-    let known_hosts_path = crate::ssh::known_hosts::path_for(&state.data_dir);
-    let handle = crate::ssh::client::run_blocking_ssh(move || async move {
-        SftpHandle::connect(host, port, cred, known_hosts_path, timeout_secs).await
-    })
-    .await
-    .map_err(err_value)?;
-    reservation
-        .activate(crate::commands::lifecycle::ReadySession::Sftp(
-            std::sync::Arc::new(handle),
-        ))
-        .map_err(err_value)?;
-    Ok(json!(id))
-}
-
-async fn sftp_connect_session(
-    state: &Arc<AppState>,
-    owner: &SessionOwner,
-    args: Value,
-) -> Result<Value, Value> {
-    use crate::ssh::sftp::SftpHandle;
-    let session_id: String = arg(&args, "sessionId")?;
-    let (reservation, ssh_handle) =
-        crate::commands::lifecycle::reserve_sftp_child(state, &session_id, owner)
-            .map_err(err_value)?;
-    let id = reservation.id().to_owned();
-    let parent = session_id.clone();
-    let handle = crate::ssh::client::run_blocking_ssh(move || async move {
-        SftpHandle::from_handle(&ssh_handle, parent).await
-    })
-    .await
-    .map_err(err_value)?;
-    reservation
-        .activate(crate::commands::lifecycle::ReadySession::Sftp(
-            std::sync::Arc::new(handle),
-        ))
-        .map_err(err_value)?;
-    Ok(json!(id))
-}
-
 // Serialize large reports on the same blocking worker that reads them.
 async fn run_report_query<T: serde::Serialize>(
     state: &AppState,
@@ -2105,7 +2031,7 @@ mod tests {
             telnet_sessions: Mutex::new(HashMap::new()),
             ssm_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
-            transfer_cancels: Mutex::new(HashMap::new()),
+            transfers: Default::default(),
             active_forwards: Mutex::new(HashMap::new()),
             auth_waiters: Mutex::new(HashMap::new()),
             passphrase_waiters: Mutex::new(HashMap::new()),

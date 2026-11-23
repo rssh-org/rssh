@@ -64,6 +64,7 @@ pub struct ResolvedFile {
     pub relative_path: String,
     pub location: Option<String>,
     pub error: Option<String>,
+    pub directory_denied: Option<bool>,
 }
 
 #[napi(object)]
@@ -187,6 +188,9 @@ pub async fn pick_open_files() -> AppResult<Option<Vec<String>>> {
 }
 
 pub async fn pick_folder(write: bool) -> AppResult<Option<String>> {
+    if !crate::device::query().await?.folder_selection {
+        return Err(rssh_host::files::directory_required());
+    }
     let generation = GRANTS
         .lock()
         .map_err(|_| super::unavailable())?
@@ -199,6 +203,14 @@ pub async fn pick_folder(write: bool) -> AppResult<Option<String>> {
         .into_iter()
         .next();
     if let Some(uri) = &selected {
+        // Some providers return a single document even for a FOLDER request.
+        let path = provider_path(uri.clone()).await?;
+        if !tokio::fs::symlink_metadata(path)
+            .await
+            .is_ok_and(|m| m.is_dir())
+        {
+            return Err(rssh_host::files::directory_required());
+        }
         if !GRANTS
             .lock()
             .map_err(|_| super::unavailable())?
@@ -221,7 +233,7 @@ pub async fn resolve_paths(
         .call_async::<FilesAccessPlugin, DirectoryRequest, ResolvedPaths>(
             "resolve-paths",
             DirectoryRequest {
-                uri,
+                uri: uri.clone(),
                 write,
                 relative_paths,
             },
@@ -234,13 +246,16 @@ pub async fn resolve_paths(
         .iter()
         .filter_map(|file| file.location.clone())
         .collect();
-    grant_files(generation, &locations, write)?;
+    grant_files(generation, &uri, &locations, write)?;
     Ok(resolved
         .files
         .into_iter()
         .map(|file| {
             let result = match (file.location, file.error) {
                 (Some(location), None) => Ok(location),
+                _ if file.directory_denied == Some(true) => {
+                    Err(rssh_host::files::directory_required())
+                }
                 (_, error) => Err(AppError::other(
                     "file_path_invalid",
                     serde_json::json!({
@@ -255,17 +270,48 @@ pub async fn resolve_paths(
 
 /// Only an exact directory-child grant authorizes creating a sibling temporary
 /// file and replacing the target. A save-picker URI grants just that document.
-pub async fn download_path(uri: String) -> AppResult<Option<std::path::PathBuf>> {
-    let bridge = super::app()?.bridge().map_err(super::native_error)?;
-    {
-        let grants = GRANTS.lock().map_err(|_| super::unavailable())?;
-        if !grants.permits(&uri, true) {
-            return Err(selection_error());
+pub async fn download_path(uri: String) -> AppResult<std::path::PathBuf> {
+    let root_uri = GRANTS
+        .lock()
+        .map_err(|_| super::unavailable())?
+        .directory_for_child(&uri)
+        .ok_or_else(rssh_host::files::directory_required)?
+        .to_owned();
+    let root = provider_path(root_uri.clone()).await?;
+    let path = provider_path(uri.clone()).await?;
+    let relative_parent = path
+        .parent()
+        .and_then(|parent| parent.strip_prefix(&root).ok())
+        .ok_or_else(rssh_host::files::directory_required)?;
+    let mut directory = root.clone();
+    let require_directory = |path: &std::path::Path| -> AppResult<()> {
+        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+            Ok(())
+        } else {
+            Err(rssh_host::files::directory_required())
         }
-        if !grants.creates_in_directory(&uri) {
-            return Ok(None);
-        }
+    };
+    require_directory(&directory)?;
+    for part in relative_parent.components() {
+        let std::path::Component::Normal(component) = part else {
+            return Err(rssh_host::files::directory_required());
+        };
+        directory.push(component);
+        require_directory(&directory)?;
     }
+    if GRANTS
+        .lock()
+        .map_err(|_| super::unavailable())?
+        .directory_for_child(&uri)
+        != Some(root_uri.as_str())
+    {
+        return Err(rssh_host::files::directory_required());
+    }
+    Ok(path)
+}
+
+async fn provider_path(uri: String) -> AppResult<std::path::PathBuf> {
+    let bridge = super::app()?.bridge().map_err(super::native_error)?;
     let path = bridge
         .call_async::<FilesAccessPlugin, NameRequest, DownloadPath>(
             "download-path",
@@ -274,7 +320,7 @@ pub async fn download_path(uri: String) -> AppResult<Option<std::path::PathBuf>>
         )
         .await
         .map_err(super::native_error)?;
-    Ok(Some(path.path.into()))
+    Ok(path.path.into())
 }
 
 pub async fn walk_directory(uri: String) -> AppResult<Vec<rssh_host::files::LocalWalkEntry>> {
@@ -284,7 +330,7 @@ pub async fn walk_directory(uri: String) -> AppResult<Vec<rssh_host::files::Loca
         .call_async::<FilesAccessPlugin, DirectoryRequest, FileTree>(
             "walk-directory",
             DirectoryRequest {
-                uri,
+                uri: uri.clone(),
                 write: false,
                 relative_paths: Vec::new(),
             },
@@ -293,7 +339,7 @@ pub async fn walk_directory(uri: String) -> AppResult<Vec<rssh_host::files::Loca
         .await
         .map_err(super::native_error)?;
     let files: Vec<_> = tree.entries.iter().map(|entry| entry.uri.clone()).collect();
-    grant_files(generation, &files, false)?;
+    grant_files(generation, &uri, &files, false)?;
     Ok(tree
         .entries
         .into_iter()
@@ -308,16 +354,20 @@ pub async fn walk_directory(uri: String) -> AppResult<Vec<rssh_host::files::Loca
 fn directory_generation(uri: &str, write: bool) -> AppResult<u64> {
     let grants = GRANTS.lock().map_err(|_| super::unavailable())?;
     if !grants.permits_directory(uri, write) {
-        return Err(selection_error());
+        return Err(if write {
+            rssh_host::files::directory_required()
+        } else {
+            selection_error()
+        });
     }
     Ok(grants.generation())
 }
 
-fn grant_files(generation: u64, files: &[String], write: bool) -> AppResult<()> {
+fn grant_files(generation: u64, root: &str, files: &[String], write: bool) -> AppResult<()> {
     if !GRANTS
         .lock()
         .map_err(|_| super::unavailable())?
-        .grant_directory_files(generation, files, write)
+        .grant_directory_files(generation, root, files, write)
     {
         return Err(super::unavailable());
     }
@@ -357,7 +407,7 @@ pub async fn open_file(uri: String, write: bool) -> AppResult<File> {
         if !grants.permits(&uri, write) {
             return Err(selection_error());
         }
-        write && grants.creates_in_directory(&uri)
+        write && grants.directory_for_child(&uri).is_some()
     };
     let opened = bridge
         .call_async::<FilesAccessPlugin, OpenRequest, OpenedFile>(

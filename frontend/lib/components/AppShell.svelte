@@ -1500,7 +1500,14 @@
                     {#snippet pane(p)}
                         {@const tab = sftpTabs.find((entry) => entry.id === p.id)}
                         {#if tab}
-                            <SftpBrowser meta={{...tab.meta ?? {}, sessionId: app.sessionIdForTab(tab.id) ?? ''}}/>
+                            {@const sessionId = app.sessionIdForTab(tab.id)}
+                            {#if sessionId}
+                                {#key sessionId}
+                                    <SftpBrowser meta={{...tab.meta, sessionId}}/>
+                                {/key}
+                            {:else}
+                                <p>{t("downloads.reconnect")}</p>
+                            {/if}
                         {/if}
                     {/snippet}
                 </SidePanel>

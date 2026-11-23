@@ -3,6 +3,12 @@
 
 use crate::error::AppResult;
 
+#[cfg(all(android, feature = "tauri"))]
+pub(crate) mod android;
+#[cfg(all(ios, feature = "tauri"))]
+mod ios;
+#[cfg(all(any(android, ios), feature = "tauri"))]
+mod mobile;
 #[cfg(not(ohos))]
 pub(crate) mod native;
 #[cfg(feature = "tauri")]
@@ -76,10 +82,10 @@ pub async fn open_file(
 }
 
 #[cfg(feature = "tauri")]
-pub async fn download_target(
+pub async fn transfer_destination(
     app: &tauri::AppHandle,
     location: String,
-) -> AppResult<DownloadTarget> {
+) -> AppResult<TransferDestination> {
     platform(app).download_target(app, location).await
 }
 
@@ -88,6 +94,25 @@ pub async fn download_target(
 pub struct PickedLocation {
     pub location: String,
     pub name: Option<String>,
+}
+
+#[cfg(all(feature = "tauri", any(android, ios)))]
+pub(crate) use mobile::{pick_mobile_directory, resolve_mobile_targets};
+
+#[cfg(all(feature = "tauri", not(ohos)))]
+pub(crate) async fn native_transfer_destination(
+    app: &tauri::AppHandle,
+    location: String,
+) -> AppResult<TransferDestination> {
+    #[cfg(any(android, ios))]
+    {
+        mobile::destination(app, &location).await
+    }
+    #[cfg(any(macos, windows, linux))]
+    {
+        let _ = app;
+        path_destination(native::filesystem_path(location)?)
+    }
 }
 
 /// A source location and its relative destination name are separate values.
@@ -105,13 +130,27 @@ pub struct FileFilter {
     pub extensions: Vec<String>,
 }
 
-/// Backends classify locations without opening or truncating the destination.
-/// Directory authorization permits a sibling temporary file and atomic replacement;
-/// a selected provider document grants access only to that document.
-#[cfg(feature = "tauri")]
-pub enum DownloadTarget {
-    AtomicPath(std::path::PathBuf),
-    Provider(String),
+pub type TransferDestination = (
+    Box<dyn rssh_core::ssh::sftp::transfer::DownloadDirectory>,
+    String,
+);
+
+pub fn directory_required() -> crate::error::AppError {
+    crate::error::AppError::sftp("sftp_directory_required", serde_json::json!({}))
+}
+
+pub fn path_destination(path: std::path::PathBuf) -> AppResult<TransferDestination> {
+    use rssh_core::ssh::sftp::transfer::PathDirectory;
+    let name = path
+        .file_name()
+        .and_then(|p| p.to_str())
+        .ok_or_else(directory_required)?;
+    let parent = path.parent().ok_or_else(directory_required)?;
+    #[cfg(ohos)]
+    let directory = PathDirectory::granted(parent.to_owned());
+    #[cfg(not(ohos))]
+    let directory = PathDirectory::new(parent.to_owned());
+    Ok((Box::new(directory), name.to_owned()))
 }
 
 #[cfg(feature = "tauri")]
@@ -150,10 +189,15 @@ pub async fn pick_open_files(app: &tauri::AppHandle) -> AppResult<Option<Vec<Pic
     Ok(Some(files))
 }
 
-#[cfg(any(windows, macos, linux, ohos))]
 #[cfg(feature = "tauri")]
 pub async fn pick_folder(app: &tauri::AppHandle, write: bool) -> AppResult<Option<PickedLocation>> {
     match platform(app).pick_folder(app, write).await? {
+        #[cfg(any(android, ios))]
+        Some(location) => Ok(Some(PickedLocation {
+            location,
+            name: None,
+        })),
+        #[cfg(any(windows, linux, macos, ohos))]
         Some(location) => describe_location(app, location).await.map(Some),
         None => Ok(None),
     }

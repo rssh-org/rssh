@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone)]
 enum WriteGrant {
     SelectedFile,
-    DirectoryChild,
+    DirectoryChild(String),
 }
 
 /// Picker grants belong to one Ability lifetime. A late result must never
@@ -48,23 +48,32 @@ impl FileGrants {
 
     /// Only files resolved below a selected directory may use the native path
     /// creation API. A selected file itself continues through its URI provider.
-    pub fn grant_directory_files(&mut self, generation: u64, uris: &[String], write: bool) -> bool {
+    pub fn grant_directory_files(
+        &mut self,
+        generation: u64,
+        root: &str,
+        uris: &[String],
+        write: bool,
+    ) -> bool {
         if !write {
             return self.grant(generation, uris, false);
         }
-        if generation != self.generation {
+        if generation != self.generation || !self.permits_directory(root, true) {
             return false;
         }
         self.writable.extend(
             uris.iter()
                 .cloned()
-                .map(|uri| (uri, WriteGrant::DirectoryChild)),
+                .map(|uri| (uri, WriteGrant::DirectoryChild(root.to_owned()))),
         );
         true
     }
 
-    pub fn creates_in_directory(&self, uri: &str) -> bool {
-        self.writable.get(uri) == Some(&WriteGrant::DirectoryChild)
+    pub fn directory_for_child(&self, uri: &str) -> Option<&str> {
+        match self.writable.get(uri) {
+            Some(WriteGrant::DirectoryChild(root)) => Some(root),
+            _ => None,
+        }
     }
 
     pub fn permits(&self, uri: &str, write: bool) -> bool {
@@ -147,14 +156,19 @@ mod tests {
         let uri = "file://docs/storage/Users/currentUser/Download/child.txt";
         assert!(grants.grant(generation, &[uri.into()], true));
         assert!(grants.permits(uri, true));
-        assert!(!grants.creates_in_directory(uri));
-        assert!(grants.grant_directory_files(generation, &[uri.into()], true));
-        assert!(grants.creates_in_directory(uri));
+        assert!(grants.directory_for_child(uri).is_none());
+        let root = "file://docs/storage/Users/currentUser/Download";
+        assert!(!grants.grant_directory_files(generation, root, &[uri.into()], true));
+        assert!(grants.grant_directory(generation, root.into(), true));
+        assert!(grants.grant_directory_files(generation, root, &[uri.into()], true));
+        assert_eq!(grants.directory_for_child(uri), Some(root));
         assert!(!grants.permits(uri, false));
-        assert!(!grants.creates_in_directory(&format!("{uri}/other")));
+        assert!(grants
+            .directory_for_child(&format!("{uri}/other"))
+            .is_none());
         grants.clear();
-        assert!(!grants.creates_in_directory(uri));
-        assert!(!grants.grant_directory_files(generation, &[uri.into()], true));
+        assert!(grants.directory_for_child(uri).is_none());
+        assert!(!grants.grant_directory_files(generation, root, &[uri.into()], true));
         assert!(!grants.permits(uri, true));
     }
 }

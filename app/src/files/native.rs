@@ -1,8 +1,8 @@
 //! Standard Tauri file backend: desktop paths, Android provider URIs and iOS scopes.
 
-use super::LocalWalkEntry;
 #[cfg(feature = "tauri")]
-use super::{DownloadTarget, FileFilter};
+use super::FileFilter;
+use super::LocalWalkEntry;
 use crate::error::{AppError, AppResult};
 use serde_json::json;
 use std::{
@@ -95,7 +95,7 @@ pub(crate) async fn select_folder(
     .map_err(dialog_error)
 }
 
-fn filesystem_path(location: String) -> AppResult<PathBuf> {
+pub(crate) fn filesystem_path(location: String) -> AppResult<PathBuf> {
     // Match Tauri's FilePath contract without pulling a GUI plugin into the server.
     // A single-letter scheme is a Windows drive, not a URI.
     if let Ok(url) = url::Url::parse(&location) {
@@ -210,23 +210,6 @@ impl Drop for OpenedFile {
             tokio::spawn(resource.close());
         }
     }
-}
-
-#[cfg(feature = "tauri")]
-pub async fn download_target(
-    app: &tauri::AppHandle,
-    location: String,
-) -> AppResult<DownloadTarget> {
-    // Ordinary paths retain sibling .part + rename. Provider URIs retain the
-    // selected-file authorization and provider open operation.
-    if let tauri_plugin_fs::FilePath::Path(path) = location
-        .parse::<tauri_plugin_fs::FilePath>()
-        .expect("FilePath::from_str is infallible")
-    {
-        return Ok(DownloadTarget::AtomicPath(path));
-    }
-    let _ = app;
-    Ok(DownloadTarget::Provider(location))
 }
 
 #[cfg(feature = "tauri")]

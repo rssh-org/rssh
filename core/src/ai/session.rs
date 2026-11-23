@@ -3390,20 +3390,23 @@ mod tests {
         ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
             assert!(path == DOWNLOAD_REMOTE_PATH || path == "/home/test/pending.log");
             assert_eq!(flags.bits(), russh_sftp::protocol::OpenFlags::READ.bits());
-            Ok(russh_sftp::protocol::Handle { id, handle: path })
+            Ok(russh_sftp::protocol::Handle {
+                id,
+                handle: path.into(),
+            })
         }
 
         async fn read(
             &mut self,
             id: u32,
-            handle: String,
+            handle: russh_sftp::protocol::SftpHandle,
             offset: u64,
             len: u32,
         ) -> Result<russh_sftp::protocol::Data, Self::Error> {
-            if handle == "/home/test/pending.log" {
+            if handle.as_bytes() == b"/home/test/pending.log" {
                 std::future::pending::<()>().await;
             }
-            assert_eq!(handle, DOWNLOAD_REMOTE_PATH);
+            assert_eq!(handle.as_bytes(), DOWNLOAD_REMOTE_PATH.as_bytes());
             let offset = offset as usize;
             if offset >= DOWNLOAD_BYTES.len() {
                 return Err(russh_sftp::protocol::StatusCode::Eof);
@@ -3418,7 +3421,7 @@ mod tests {
         async fn close(
             &mut self,
             id: u32,
-            _: String,
+            _: russh_sftp::protocol::SftpHandle,
         ) -> Result<russh_sftp::protocol::Status, Self::Error> {
             Ok(russh_sftp::protocol::Status {
                 id,
@@ -3463,11 +3466,16 @@ mod tests {
             log: null_logger(),
             prompt_ctx: None,
         };
-        let (mut handle, _) = ssh_connect_stream(ctx, client, "download-test".into(), 22)
+        let mut connection = ssh_connect_stream(ctx, client, "download-test".into(), 22)
             .await
             .unwrap();
-        assert!(handle.authenticate_none("test").await.unwrap().success());
-        std::sync::Arc::new(tokio::sync::Mutex::new(handle))
+        assert!(connection
+            .handle
+            .authenticate_none("test")
+            .await
+            .unwrap()
+            .success());
+        SshHandle::authenticated(connection, "test".into())
     }
 
     fn request_download(

@@ -9,6 +9,7 @@ name = "rssh_lib"
 crate-type = ["staticlib", "cdylib", "lib"]
 
 [build-dependencies]
+cc = { version = "1", optional = true }
 tauri-build = { version = "2", optional = true , features = [] }
 
 [dependencies]
@@ -43,7 +44,7 @@ tauri-plugin-fs = { version = "2", optional = true }
 
 [features]
 default = []
-tauri = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-opener", "dep:tauri-plugin-dialog", "dep:tauri-plugin-fs"]
+tauri = ["dep:cc", "dep:tauri", "dep:tauri-build", "dep:tauri-plugin-opener", "dep:tauri-plugin-dialog", "dep:tauri-plugin-fs"]
 server = ["dep:tokio-tungstenite", "dep:include_dir"]
 custom-protocol = ["tauri", "tauri/custom-protocol"]
 

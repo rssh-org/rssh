@@ -93,7 +93,7 @@
     {:else}
         <ul class="list">
             {#each list as item (item.id)}
-                {@const showError = !!(item.error && item.status === "failed")}
+                {@const showError = !!item.error && item.status !== "cancelled"}
                 <li class="row surface-pressed"
                     class:failed={item.status === "failed"}
                     class:done={item.status === "done"}
@@ -104,8 +104,8 @@
                     <div class="name" title={item.kind === "download" ? item.remotePath : item.localPath}>
                         {basename(item.remotePath)}
                     </div>
-                    <div class="path" title={item.kind === "download" ? item.localPath : item.remotePath}>
-                        → {item.kind === "download" ? item.localPath : item.remotePath}
+                    <div class="path" title={item.kind === "download" ? item.localLabel ?? item.localPath : item.remotePath}>
+                        → {item.kind === "download" ? item.localLabel ?? item.localPath : item.remotePath}
                     </div>
 
                     <div class="track">
@@ -119,7 +119,7 @@
                         {formatSize(item.transferred)}{item.total > 0 ? ` / ${formatSize(item.total)}` : ""}
                     </div>
 
-                    <span class="status status-{item.status}">{t(`downloads.status.${item.status}`)}</span>
+                    <span class="status status-{item.status}">{item.status === "running" && item.checking ? t("downloads.checking") : t(`downloads.status.${item.status}`)}</span>
 
                     <div class="row-actions">
                         {#if item.status === "running" || item.status === "queued"}
@@ -127,7 +127,7 @@
                                 {t("downloads.cancel")}
                             </button>
                         {/if}
-                        {#if item.status === "failed" || item.status === "cancelled"}
+                        {#if item.canRetry !== false && (item.status === "failed" || item.status === "cancelled")}
                             <button class="btn btn-sm" onclick={() => transfers.retry(item.id)}>
                                 {t("downloads.retry")}
                             </button>

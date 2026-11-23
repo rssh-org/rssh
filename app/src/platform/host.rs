@@ -9,7 +9,7 @@ use tauri::{AppHandle, Manager};
 
 use super::runtime::RuntimeCapabilities;
 use crate::error::AppResult;
-use crate::files::{DownloadTarget, FileFilter, LocalWalkEntry, OpenedFile, ResolvedPath};
+use crate::files::{FileFilter, LocalWalkEntry, OpenedFile, ResolvedPath, TransferDestination};
 
 /// Stamp resets before spawning them so a late native call cannot overwrite a
 /// newer frontend update. Native adapters reject revisions older than applied.
@@ -60,8 +60,11 @@ pub trait NativePlatform: Send + Sync {
         location: String,
         write: bool,
     ) -> AppResult<OpenedFile>;
-    async fn download_target(&self, app: &AppHandle, location: String)
-        -> AppResult<DownloadTarget>;
+    async fn download_target(
+        &self,
+        app: &AppHandle,
+        location: String,
+    ) -> AppResult<TransferDestination>;
     async fn resolve_paths(
         &self,
         root: String,

@@ -1,7 +1,7 @@
 //! HarmonyOS owns SDK-specific mechanics; the shared application owns commands.
 
 use crate::error::AppResult;
-use rssh_host::files::{DownloadTarget, FileFilter, LocalWalkEntry, OpenedFile, ResolvedPath};
+use rssh_host::files::{FileFilter, LocalWalkEntry, OpenedFile, ResolvedPath, TransferDestination};
 use rssh_host::platform::host::{AppWindowPurpose, NativePlatform};
 use rssh_host::platform::runtime::RuntimeCapabilities;
 use tauri::AppHandle;
@@ -97,11 +97,9 @@ impl NativePlatform for OhosPlatform {
         &self,
         _app: &AppHandle,
         location: String,
-    ) -> AppResult<DownloadTarget> {
-        match crate::files::download_path(location.clone()).await? {
-            Some(path) => Ok(DownloadTarget::AtomicPath(path)),
-            None => Ok(DownloadTarget::Provider(location)),
-        }
+    ) -> AppResult<TransferDestination> {
+        let path = crate::files::download_path(location).await?;
+        rssh_host::files::path_destination(path)
     }
 
     async fn resolve_paths(

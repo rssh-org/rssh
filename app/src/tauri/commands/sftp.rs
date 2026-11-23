@@ -1,4 +1,7 @@
-use rssh_core::commands::sftp::{get_sftp, local_open_error, CancelGuard};
+use rssh_core::commands::sftp::{
+    local_open_error,
+    queue::{Direction, TransferRequest},
+};
 use rssh_core::error::AppResult;
 use rssh_core::ssh::sftp::{FileStat, RemoteEntry, WalkEntry};
 use rssh_core::state::AppState;
@@ -32,11 +35,13 @@ pub async fn sftp_connect_session(
     window: tauri::Window,
     state: State<'_, Arc<AppState>>,
     session_id: String,
+    transfer_id: Option<String>,
 ) -> AppResult<String> {
     rssh_core::commands::sftp::sftp_connect_session(
         rssh_core::state::SessionOwner::Window(window.label().to_owned()),
         state.inner().as_ref(),
         session_id,
+        transfer_id,
     )
     .await
 }
@@ -86,12 +91,20 @@ pub async fn sftp_download(
 
 #[tauri::command]
 pub async fn sftp_upload(
+    window: tauri::Window,
     state: State<'_, Arc<AppState>>,
     sftp_id: String,
     path: String,
     data: Vec<u8>,
 ) -> AppResult<()> {
-    rssh_core::commands::sftp::sftp_upload(state.inner().as_ref(), sftp_id, path, data).await
+    rssh_core::commands::sftp::sftp_upload(
+        &rssh_core::state::SessionOwner::Window(window.label().to_owned()),
+        state.inner().as_ref(),
+        sftp_id,
+        path,
+        data,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -132,7 +145,6 @@ pub async fn sftp_pick_open_path(
     crate::files::pick_open(&app).await
 }
 
-#[cfg(any(windows, macos, linux, ohos))]
 #[tauri::command]
 pub async fn sftp_pick_folder(
     app: tauri::AppHandle,
@@ -151,61 +163,53 @@ pub async fn sftp_pick_open_files(
 #[tauri::command]
 pub async fn sftp_download_to(
     app: tauri::AppHandle,
-    state: State<'_, Arc<AppState>>,
+    window: tauri::Window,
     sftp_id: String,
     remote_path: String,
     local_path: String,
     transfer_id: String,
+    original_session_id: Option<String>,
 ) -> AppResult<()> {
-    let sftp = get_sftp(&state, &sftp_id)?;
-    let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
+    let request = TransferRequest {
+        sftp_id,
+        remote_path,
+        local_path,
+        transfer_id,
+        original_session_id,
+    };
     let host = crate::tauri_host::host(app.clone());
-    match crate::files::download_target(&app, local_path)
+    let owner = rssh_core::state::SessionOwner::Window(window.label().to_owned());
+    let transfer = request.begin(host.state(), &owner, Direction::Download)?;
+    let (dir, name) = crate::files::transfer_destination(&app, request.local_path.clone())
         .await
-        .map_err(local_open_error)?
-    {
-        crate::files::DownloadTarget::AtomicPath(path) => sftp
-            .download_streaming(&remote_path, &path, &host, &transfer_id, cancel)
-            .await
-            .map(|_| ()),
-        crate::files::DownloadTarget::Provider(location) => sftp
-            .download_streaming_to_writer(
-                &remote_path,
-                || async {
-                    crate::files::open_file(&app, location, true)
-                        .await
-                        .map_err(local_open_error)
-                },
-                &host,
-                &transfer_id,
-                cancel,
-            )
-            .await
-            .map(|_| ()),
-    }
+        .map_err(local_open_error)?;
+    transfer.download(&host, dir.as_ref(), &name).await
 }
 
 #[tauri::command]
 pub async fn sftp_upload_from(
     app: tauri::AppHandle,
-    state: State<'_, Arc<AppState>>,
+    window: tauri::Window,
     sftp_id: String,
     local_path: String,
     remote_path: String,
     transfer_id: String,
+    original_session_id: Option<String>,
 ) -> AppResult<()> {
-    let sftp = get_sftp(&state, &sftp_id)?;
-    let (_guard, cancel) = CancelGuard::register(&state, transfer_id.clone())?;
+    let request = TransferRequest {
+        sftp_id,
+        remote_path,
+        local_path,
+        transfer_id,
+        original_session_id,
+    };
     let host = crate::tauri_host::host(app.clone());
-    let mut file = crate::files::open_file(&app, local_path, false)
+    let owner = rssh_core::state::SessionOwner::Window(window.label().to_owned());
+    let transfer = request.begin(host.state(), &owner, Direction::Upload)?;
+    let mut source = crate::files::open_file(&app, request.local_path.clone(), false)
         .await
         .map_err(local_open_error)?;
-    // content:// fds may not support fstat; fall back to 0 (indeterminate bar).
-    let total = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-    let reader = file.stream();
-    sftp.upload_streaming(reader, total, &remote_path, &host, &transfer_id, cancel)
-        .await
-        .map(|_| ())
+    transfer.upload(&host, source.stream()).await
 }
 
 #[tauri::command]
@@ -238,8 +242,25 @@ pub async fn sftp_stat(
 }
 
 #[tauri::command]
-pub fn sftp_cancel_transfer(state: State<'_, Arc<AppState>>, transfer_id: String) -> AppResult<()> {
-    let runtime = tauri::async_runtime::handle();
-    let _guard = runtime.inner().enter();
-    rssh_core::commands::sftp::sftp_cancel_transfer(state.inner().as_ref(), transfer_id)
+pub fn sftp_cancel_transfer(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    transfer_id: String,
+) -> AppResult<()> {
+    state.transfers.cancel(
+        &rssh_core::state::SessionOwner::Window(window.label().to_owned()),
+        &transfer_id,
+    )
+}
+
+#[tauri::command]
+pub fn sftp_forget_transfer(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    transfer_id: String,
+) -> AppResult<Option<String>> {
+    state.transfers.forget(
+        &rssh_core::state::SessionOwner::Window(window.label().to_owned()),
+        &transfer_id,
+    )
 }

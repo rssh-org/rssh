@@ -17,6 +17,7 @@ pub struct RuntimeCapabilities {
     pub window_pin: bool,
     pub file_multi_select: bool,
     pub directory_transfer: bool,
+    pub download_directory_required: bool,
     pub plugins: bool,
     pub native_clipboard: bool,
     pub release_update_check: bool,
@@ -44,6 +45,7 @@ impl RuntimeCapabilities {
             // Directory authorization remains a separate host capability.
             file_multi_select: true,
             directory_transfer: cfg!(any(windows, macos, linux)),
+            download_directory_required: cfg!(any(android, ios, ohos)),
             plugins: true,
             native_clipboard: cfg!(any(windows, macos, linux)),
             // App Store/TestFlight manages native iOS releases. Browser clients
@@ -136,6 +138,7 @@ mod tests {
             "windowPin",
             "fileMultiSelect",
             "directoryTransfer",
+            "downloadDirectoryRequired",
             "plugins",
             "nativeClipboard",
             "releaseUpdateCheck",
@@ -146,7 +149,7 @@ mod tests {
         ] {
             assert!(value[key].is_boolean(), "missing boolean capability {key}");
         }
-        assert_eq!(value.as_object().unwrap().len(), 20);
+        assert_eq!(value.as_object().unwrap().len(), 21);
         assert_eq!(value["cloudDiscovery"], true);
         assert_eq!(value["fileMultiSelect"], true);
         assert_eq!(value["releaseUpdateCheck"], !cfg!(ios));

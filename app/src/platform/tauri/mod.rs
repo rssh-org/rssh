@@ -7,7 +7,9 @@ mod external;
 pub(crate) mod navigation;
 
 use crate::error::{AppError, AppResult};
-use crate::files::{self, DownloadTarget, FileFilter, LocalWalkEntry, OpenedFile, ResolvedPath};
+use crate::files::{
+    self, FileFilter, LocalWalkEntry, OpenedFile, ResolvedPath, TransferDestination,
+};
 use crate::platform::host::{AppWindowPurpose, NativePlatform};
 use crate::platform::runtime::RuntimeCapabilities;
 use tauri::AppHandle;
@@ -101,11 +103,7 @@ impl NativePlatform for TauriPlatform {
         }
         #[cfg(any(android, ios))]
         {
-            let _ = (app, write);
-            Err(AppError::other(
-                "file_path_invalid",
-                serde_json::json!({"err":"Folder selection is unavailable on this host"}),
-            ))
+            files::pick_mobile_directory(app, write).await
         }
     }
 
@@ -133,8 +131,8 @@ impl NativePlatform for TauriPlatform {
         &self,
         app: &AppHandle,
         location: String,
-    ) -> AppResult<DownloadTarget> {
-        files::native::download_target(app, location).await
+    ) -> AppResult<TransferDestination> {
+        files::native_transfer_destination(app, location).await
     }
 
     async fn resolve_paths(
@@ -143,6 +141,10 @@ impl NativePlatform for TauriPlatform {
         paths: Vec<String>,
         write: bool,
     ) -> AppResult<Vec<ResolvedPath>> {
+        #[cfg(any(android, ios))]
+        if write {
+            return files::resolve_mobile_targets(root, paths);
+        }
         files::native::resolve_paths(root, paths, write).await
     }
 

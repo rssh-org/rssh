@@ -54,10 +54,12 @@ class ResolvedFile {
   readonly relativePath: string;
   readonly location?: string;
   readonly error?: string;
-  constructor(relativePath: string, location?: string, error?: string) {
+  readonly directoryDenied?: boolean;
+  constructor(relativePath: string, location?: string, error?: string, directoryDenied?: boolean) {
     this.relativePath = relativePath;
     this.location = location;
     this.error = error;
+    this.directoryDenied = directoryDenied;
   }
 }
 
@@ -233,7 +235,7 @@ export class FilesAccessPlugin extends AsyncPluginBase {
         } catch (error) {
           ensureActive(context);
           const cause = error as BusinessError;
-          files.push(new ResolvedFile(relativePath, undefined, cause.message));
+          files.push(new ResolvedFile(relativePath, undefined, cause.message, request.write && cause.code === 13900012));
         }
       }
       return { typeName: 'rssh.files.ResolvedPaths', value: new ResolvedPaths(files) };

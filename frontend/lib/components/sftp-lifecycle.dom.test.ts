@@ -71,3 +71,47 @@ describe("SFTP browser connection lifetime", () => {
     expect(invokeMock.mock.calls.some(([name]) => name === "sftp_list")).toBe(false);
   });
 });
+
+describe("SFTP folder grant", () => {
+  it("selects a directory for a single mobile download and passes its resolved location to the queue", async () => {
+    const app = await import("../stores/app.svelte.ts");
+    const transfers = await import("../stores/transfers.svelte.ts");
+    const capabilities = vi.spyOn(app, "capabilities").mockReturnValue({
+      ...app.capabilities(), downloadDirectoryRequired: true, directoryTransfer: false,
+    });
+    const start = vi.spyOn(transfers, "startDownload").mockResolvedValue("transfer-1");
+    try {
+      invokeMock.mockImplementation(async (command: string) => {
+        if (command === "sftp_connect_session") return "sftp-1";
+        if (command === "sftp_home") return "/home/test";
+        if (command === "sftp_list") return [{ name: "report.txt", is_dir: false, size: 13, mtime: 0 }];
+        if (command === "sftp_pick_folder") return { name: "Documents", location: "tree-token" };
+        if (command === "resolve_local_paths") return [
+          { status: "ready", relative_path: "report.txt", location: "resolved-token" },
+        ];
+      });
+      component = mount(SftpBrowser, { target, props: { meta: { sessionId: "ssh-1" } } });
+      await vi.waitFor(() => expect(target.querySelector(".file-name")).not.toBeNull());
+      const fileList = target.querySelector(".file-list")!;
+      expect(fileList.classList.contains("no-selection")).toBe(false);
+      const download = target.querySelector<HTMLButtonElement>(".header > button:last-child")!;
+      expect(download.disabled).toBe(true);
+      fileList.querySelector<HTMLInputElement>('.file-row:not(.file-header) input[type="checkbox"]')!.click();
+      await tick();
+      expect(download.disabled).toBe(false);
+      target.querySelector<HTMLButtonElement>(".file-name")!.click();
+      await vi.waitFor(() => expect(start).toHaveBeenCalledExactlyOnceWith({
+        sessionId: "ssh-1", remotePath: "/home/test/report.txt",
+        localPath: "resolved-token", localLabel: "Documents/report.txt", sizeHint: 13,
+      }));
+      expect(invokeMock).toHaveBeenCalledWith("sftp_pick_folder", { write: true });
+      expect(invokeMock).toHaveBeenCalledWith("resolve_local_paths", {
+        localRoot: "tree-token", relativePaths: ["report.txt"], write: true,
+      });
+      expect(invokeMock.mock.calls.some(([name]) => name === "sftp_pick_save_path")).toBe(false);
+    } finally {
+      capabilities.mockRestore();
+      start.mockRestore();
+    }
+  });
+});

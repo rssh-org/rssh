@@ -737,7 +737,12 @@ impl ResourceReservation<'_> {
                 serde_json::json!({ "id": self.session_id }),
             ));
         }
+        let peer = match &handle {
+            ReadySession::Ssh(session) => Some(Box::new(session.ssh_handle().peer.clone())),
+            _ => None,
+        };
         insert_ready_handle(self.state, &self.session_id, handle)?;
+        record.verified_ssh_peer = peer;
         record.state = ResourceState::Ready;
         self.armed = false;
         Ok(())
@@ -854,6 +859,7 @@ pub fn reserve_resource<'a>(
             kind,
             owner,
             state: ResourceState::Pending(None),
+            verified_ssh_peer: None,
             parent: None,
         },
     );
@@ -928,6 +934,7 @@ pub fn reserve_sftp_child<'a>(
             kind: SessionKind::Sftp,
             owner,
             state: ResourceState::Pending(None),
+            verified_ssh_peer: None,
             parent: Some(parent_id.to_owned()),
         },
     );
@@ -1305,6 +1312,9 @@ pub async fn reconcile_owner(
 ) -> AppResult<usize> {
     let active: HashSet<String> = active_ids.into_iter().collect();
     let (closed, removed, cleanups) = remove_owned_resources(state, owner, Some(&active))?;
+    if active.is_empty() {
+        state.transfers.close_owner(owner)?;
+    }
     close_removed(removed);
     // The application owns recovery even if the requesting WebView disappears.
     // The caller still waits for release before opening replacement resources.
@@ -1329,6 +1339,9 @@ pub fn close_owner(state: &AppState, owner: &SessionOwner) {
             }
         }
         Err(error) => log::warn!("close owner sessions failed: {error}"),
+    }
+    if let Err(error) = state.transfers.close_owner(owner) {
+        log::warn!("close owner transfers failed: {error}");
     }
     if let Err(error) = close_owned_ai(state, owner, None) {
         log::warn!("close owner AI sessions failed: {error}");
@@ -1495,7 +1508,7 @@ mod tests {
             serial_backend: crate::terminal::serial::native_backend().unwrap(),
             telnet_sessions: Mutex::new(HashMap::new()),
             sftp_sessions: Mutex::new(HashMap::new()),
-            transfer_cancels: Mutex::new(HashMap::new()),
+            transfers: Default::default(),
             active_forwards: Mutex::new(HashMap::new()),
             auth_waiters: Mutex::new(HashMap::new()),
             passphrase_waiters: Mutex::new(HashMap::new()),
@@ -1688,6 +1701,7 @@ mod tests {
                         kind: SessionKind::Ssm,
                         owner: owner.clone(),
                         state: resource,
+                        verified_ssh_peer: None,
                         parent: None,
                     },
                 );
@@ -1699,6 +1713,7 @@ mod tests {
                     kind: SessionKind::Ssm,
                     owner: SessionOwner::Window("other".into()),
                     state: ResourceState::Closed,
+                    verified_ssh_peer: None,
                     parent: None,
                 },
             );
@@ -3114,6 +3129,7 @@ mod tests {
                 kind: SessionKind::Telnet,
                 owner: other.clone(),
                 state: ResourceState::Ready,
+                verified_ssh_peer: None,
                 parent: None,
             },
         );

@@ -1500,6 +1500,7 @@ mod tests {
                     kind,
                     owner: fixture.owner.clone(),
                     state: phase,
+                    verified_ssh_peer: None,
                     parent: None,
                 },
             );

@@ -300,7 +300,7 @@ async fn connect_authed(
         timeout_secs,
     } = target;
     let log: LogFn = StdArc::new(|_: String| ());
-    let (mut handle, fwd_sender) = client::establish_via_chain(
+    let mut connection = client::establish_via_chain(
         bastion_chain,
         profile,
         known_hosts_path,
@@ -309,8 +309,8 @@ async fn connect_authed(
         None,
     )
     .await?;
-    client::authenticate(&mut handle, credential, None).await?;
-    Ok((handle, fwd_sender))
+    client::authenticate(&mut connection.handle, credential, None).await?;
+    Ok((connection.handle, connection.forward))
 }
 
 type SharedHandle = Arc<russh::client::Handle<client::SshHandler>>;

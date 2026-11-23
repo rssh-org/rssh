@@ -86,6 +86,8 @@
 
     const selectedCount = $derived(selected.size);
     const canTransferDirectories = $derived(app.capabilities().directoryTransfer);
+    const requiresDownloadFolder = $derived(app.capabilities().downloadDirectoryRequired);
+    const canSelectDownloads = $derived(canTransferDirectories || requiresDownloadFolder);
     const canUploadMultiple = $derived(app.capabilities().fileMultiSelect);
     const allSelected = $derived(entries.length > 0 && selected.size === entries.length);
     const someSelected = $derived(selected.size > 0 && selected.size < entries.length);
@@ -180,8 +182,7 @@
 
     function openEntry(e: RemoteEntry) {
         if (e.is_dir) { listDir(joinRemote(cwd, e.name)); return; }
-        // Hosts without directory transfer have no batch-download toolbar;
-        // clicking a file provides the single-file download affordance.
+        // A tap also downloads one file when the host has no upload-folder action.
         if (!canTransferDirectories) downloadEntry(e);
     }
 
@@ -326,7 +327,7 @@
     /** Queue downloads for a set of entries into a local directory.
      *  Walks directories, queues individual files, and collects walk errors
      *  so the caller can display them. */
-    async function queueDownloads(items: RemoteEntry[], dir: string): Promise<{ queued: number; walkErrors: string[] }> {
+    async function queueDownloads(items: RemoteEntry[], dir: string, folderLabel?: string | null): Promise<{ queued: number; walkErrors: string[] }> {
         let queued = 0;
         const batchSize = 64;
         const files: { relativePath: string; remotePath: string; size: number }[] = [];
@@ -350,6 +351,7 @@
                     sessionId: meta.sessionId,
                     remotePath: file.remotePath,
                     localPath: path.location,
+                    localLabel: folderLabel !== undefined ? [folderLabel, file.relativePath].filter(Boolean).join("/") : undefined,
                     sizeHint: file.size,
                 });
                 queued++;
@@ -401,10 +403,10 @@
         notice = "";
         if (!meta.sessionId) { error = "Missing SSH session"; return; }
         try {
-            if (entry.is_dir) {
+            if (entry.is_dir || requiresDownloadFolder) {
                 const dir = await fileAccess.pickDirectory(true);
                 if (!dir) return;
-                const { queued, walkErrors } = await queueDownloads([entry], dir.location);
+                const { queued, walkErrors } = await queueDownloads([entry], dir.location, requiresDownloadFolder ? dir.name : undefined);
                 if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
                 if (queued > 0) notice = t("sftp.queued_n", { n: queued });
             } else {
@@ -487,7 +489,7 @@
         try {
             const dir = await fileAccess.pickDirectory(true);
             if (!dir) return;
-            const { queued, walkErrors } = await queueDownloads(items, dir.location);
+            const { queued, walkErrors } = await queueDownloads(items, dir.location, requiresDownloadFolder ? dir.name : undefined);
             if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
             if (queued > 0) notice = t("sftp.queued_n", { n: queued });
             selected = new Set();
@@ -593,7 +595,7 @@
             {/if}
         </div>
         {/if}
-        {#if canTransferDirectories}
+        {#if canSelectDownloads}
         <button class="btn btn-sm" disabled={selectedCount === 0 || !sftpId} onclick={downloadSelected}>
             {selectedCount > 0 ? t("sftp.download_n", { n: selectedCount }) : t("sftp.download")}
         </button>
@@ -621,7 +623,7 @@
     {#if loading}
         <p class="loading">{t("sftp.loading")}</p>
     {:else}
-        <div class="file-list" class:no-selection={!canTransferDirectories} oncontextmenu={onSftpContextMenu}>
+        <div class="file-list" class:no-selection={!canSelectDownloads} oncontextmenu={onSftpContextMenu}>
             <div class="file-row file-header">
                 <span class="cell-check">
                     <input
@@ -677,7 +679,7 @@
          class:ready={ctxReady}
          bind:this={ctxMenuEl}
          style="left: {ctxMenu.x + ctxDx}px; top: {ctxMenu.y + ctxDy}px;">
-        {#if !ctxMenu.entry.is_dir || canTransferDirectories}
+        {#if !ctxMenu.entry.is_dir || canSelectDownloads}
             <button class="ctx-item" onclick={() => downloadEntry(ctxMenu!.entry)}>{t("sftp.ctx.download")}</button>
         {/if}
         <button class="ctx-item" onclick={() => confirmDelete(ctxMenu!.entry)}>{t("sftp.ctx.delete")}</button>
