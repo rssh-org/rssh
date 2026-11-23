@@ -323,10 +323,16 @@
         closeCtxMenu();
     }
 
+    /** One user operation keeps its original connection and directory even
+     * while pickers, walks and transfer registration allow navigation. */
+    function transferContext() {
+        return { sessionId: meta.sessionId, remoteRoot: cwd, sftpId };
+    }
+
     /** Queue downloads for a set of entries into a local directory.
      *  Walks directories, queues individual files, and collects walk errors
      *  so the caller can display them. */
-    async function queueDownloads(items: RemoteEntry[], dir: string): Promise<{ queued: number; walkErrors: string[] }> {
+    async function queueDownloads(items: RemoteEntry[], dir: string, context: ReturnType<typeof transferContext>): Promise<{ queued: number; walkErrors: string[] }> {
         let queued = 0;
         const batchSize = 64;
         const files: { relativePath: string; remotePath: string; size: number }[] = [];
@@ -347,7 +353,7 @@
                 }
                 const file = filesByName.get(path.relative_path)!;
                 await transfers.startDownload({
-                    sessionId: meta.sessionId,
+                    sessionId: context.sessionId,
                     remotePath: file.remotePath,
                     localPath: path.location,
                     sizeHint: file.size,
@@ -358,7 +364,7 @@
         }
 
         for (const e of items) {
-            const remote = joinRemote(cwd, e.name);
+            const remote = joinRemote(context.remoteRoot, e.name);
             if (e.is_dir) {
                 // Start ready files before waiting for another remote tree.
                 await flushFiles();
@@ -368,7 +374,7 @@
                 let walked: WalkEntry[];
                 try {
                     walked = await invoke<WalkEntry[]>("sftp_walk_remote_dir", {
-                        sftpId, remoteRoot: remote,
+                        sftpId: context.sftpId, remoteRoot: remote,
                     });
                 } catch (err) {
                     walkErrors.push(`${e.name}: ${errMsg(err)}`);
@@ -396,28 +402,19 @@
     }
 
     async function downloadEntry(entry: RemoteEntry) {
+        const context = transferContext();
         closeCtxMenu();
         error = "";
         notice = "";
-        if (!meta.sessionId) { error = "Missing SSH session"; return; }
+        if (!context.sessionId) { error = "Missing SSH session"; return; }
         try {
-            if (entry.is_dir) {
-                const dir = await fileAccess.pickDirectory(true);
-                if (!dir) return;
-                const { queued, walkErrors } = await queueDownloads([entry], dir.location);
-                if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
-                if (queued > 0) notice = t("sftp.queued_n", { n: queued });
-            } else {
-                const localPath = await fileAccess.pickSavePath(entry.name);
-                if (!localPath) return;
-                await transfers.startDownload({
-                    sessionId: meta.sessionId,
-                    remotePath: entryPath(entry),
-                    localPath,
-                    sizeHint: entry.size,
-                });
-                notice = t("sftp.queued_n", { n: 1 });
-            }
+            // A complete folder grant is required to stage, resume and rename
+            // sibling files. Single-document save grants cannot provide that.
+            const dir = await fileAccess.pickDirectory(true);
+            if (!dir) return;
+            const { queued, walkErrors } = await queueDownloads([entry], dir.location, context);
+            if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
+            if (queued > 0) notice = t("sftp.queued_n", { n: queued });
         } catch (err: any) {
             error = errMsg(err);
         }
@@ -479,15 +476,16 @@
     // ── Download selected ──
 
     async function downloadSelected() {
+        const context = transferContext();
         error = "";
         notice = "";
-        if (!meta.sessionId) { error = "Missing SSH session"; return; }
+        if (!context.sessionId) { error = "Missing SSH session"; return; }
         if (selected.size === 0) return;
         const items = entries.filter(e => selected.has(e.name));
         try {
             const dir = await fileAccess.pickDirectory(true);
             if (!dir) return;
-            const { queued, walkErrors } = await queueDownloads(items, dir.location);
+            const { queued, walkErrors } = await queueDownloads(items, dir.location, context);
             if (walkErrors.length > 0) error = `${t("sftp.walk_failed")}\n${walkErrors.join("\n")}`;
             if (queued > 0) notice = t("sftp.queued_n", { n: queued });
             selected = new Set();
@@ -503,17 +501,18 @@
     }
 
     async function uploadFiles() {
+        const context = transferContext();
         error = "";
         notice = "";
-        if (!meta.sessionId) { error = "Missing SSH session"; return; }
+        if (!context.sessionId) { error = "Missing SSH session"; return; }
         try {
             const files = await fileAccess.pickFiles();
             if (!files || files.length === 0) return;
             for (const file of files) {
                 await transfers.startUpload({
-                    sessionId: meta.sessionId,
+                    sessionId: context.sessionId,
                     localPath:  file.location,
-                    remotePath: joinRemote(cwd, uploadName(file)),
+                    remotePath: joinRemote(context.remoteRoot, uploadName(file)),
                 });
             }
             notice = t("sftp.queued_n", { n: files.length });
@@ -523,9 +522,10 @@
     }
 
     async function uploadFolder() {
+        const context = transferContext();
         error = "";
         notice = "";
-        if (!meta.sessionId) { error = "Missing SSH session"; return; }
+        if (!context.sessionId) { error = "Missing SSH session"; return; }
         try {
             const dir = await fileAccess.pickDirectory(false);
             if (!dir) return;
@@ -534,9 +534,9 @@
             const folderName = uploadName(dir);
             for (const w of walked) {
                 await transfers.startUpload({
-                    sessionId: meta.sessionId,
+                    sessionId: context.sessionId,
                     localPath:  w.local_path,
-                    remotePath: joinRemote(cwd, folderName, w.rel_path),
+                    remotePath: joinRemote(context.remoteRoot, folderName, w.rel_path),
                 });
             }
             notice = t("sftp.queued_n", { n: walked.length });
@@ -548,16 +548,17 @@
     /** Single-file picker fallback: stream the opaque location and use the
      *  host-supplied name, just like the multi-file path. */
     async function uploadFile() {
+        const context = transferContext();
         error = "";
         notice = "";
-        if (!meta.sessionId) { error = "Missing SSH session"; return; }
+        if (!context.sessionId) { error = "Missing SSH session"; return; }
         try {
             const src = await fileAccess.pickFile();
             if (!src) return;
             await transfers.startUpload({
-                sessionId: meta.sessionId,
+                sessionId: context.sessionId,
                 localPath:  src.location,
-                remotePath: joinRemote(cwd, uploadName(src)),
+                remotePath: joinRemote(context.remoteRoot, uploadName(src)),
             });
             notice = t("sftp.queued_n", { n: 1 });
         } catch (err: any) {

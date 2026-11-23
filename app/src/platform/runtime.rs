@@ -43,7 +43,7 @@ impl RuntimeCapabilities {
             // Native file pickers support multiple sources on desktop and mobile.
             // Directory authorization remains a separate host capability.
             file_multi_select: true,
-            directory_transfer: cfg!(any(windows, macos, linux)),
+            directory_transfer: cfg!(any(windows, macos, linux, android, ios)),
             plugins: true,
             native_clipboard: cfg!(any(windows, macos, linux)),
             // App Store/TestFlight manages native iOS releases. Browser clients

@@ -16,6 +16,9 @@ use tauri_plugin_dialog::DialogExt;
 pub(crate) async fn file_name(app: &tauri::AppHandle, location: &str) -> AppResult<Option<String>> {
     #[cfg(android)]
     {
+        if location.starts_with("rssh-tree:") {
+            return super::android::file_name(app, location).await;
+        }
         use tauri::Manager;
         let app = app.clone();
         let source = location.to_owned();
@@ -116,21 +119,39 @@ pub(crate) async fn resolve_paths(
     relative_paths: Vec<String>,
     write: bool,
 ) -> AppResult<Vec<super::ResolvedPath>> {
-    let _ = write;
     let root = filesystem_path(local_root)?;
-    Ok(relative_paths
-        .into_iter()
-        .map(|relative| {
-            let result = super::validate_relative_path(&relative).map(|()| {
-                relative
-                    .split('/')
-                    .fold(root.clone(), |path, part| path.join(part))
-                    .to_string_lossy()
-                    .into_owned()
-            });
-            super::ResolvedPath::new(relative, result)
-        })
-        .collect())
+    let mut resolved = Vec::with_capacity(relative_paths.len());
+    for relative in relative_paths {
+        let result = async {
+            super::validate_relative_path(&relative)?;
+            let mut parent = root.clone();
+            let segments: Vec<_> = relative.split('/').collect();
+            for segment in &segments[..segments.len() - 1] {
+                parent.push(segment);
+                if write {
+                    match tokio::fs::create_dir(&parent).await {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                let meta = tokio::fs::symlink_metadata(&parent).await?;
+                if !meta.is_dir() || meta.file_type().is_symlink() {
+                    return Err(AppError::other(
+                        "file_path_invalid",
+                        json!({"err":"Parent must be a directory within the selected folder"}),
+                    ));
+                }
+            }
+            Ok(parent
+                .join(segments.last().unwrap())
+                .to_string_lossy()
+                .into_owned())
+        }
+        .await;
+        resolved.push(super::ResolvedPath::new(relative, result));
+    }
+    Ok(resolved)
 }
 
 #[cfg(feature = "tauri")]
@@ -186,6 +207,17 @@ pub struct OpenedFile {
 
 #[cfg(feature = "tauri")]
 impl OpenedFile {
+    pub async fn close(mut self) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let Some(mut resource) = self.resource.take() else {
+            return Ok(());
+        };
+        let result = resource.file.flush().await;
+        drop(resource.file.into_std().await);
+        drop(resource._access);
+        result
+    }
+
     pub fn stream(&mut self) -> &mut tokio::fs::File {
         &mut self.resource.as_mut().expect("file is open").file
     }
@@ -397,7 +429,8 @@ mod tests {
 
     #[tokio::test]
     async fn desktop_resolution_preserves_root_and_nested_names() {
-        let root = std::env::temp_dir().join("rssh path test");
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_owned();
         assert_eq!(
             filesystem_path(url::Url::from_file_path(&root).unwrap().to_string()).unwrap(),
             root
@@ -425,6 +458,28 @@ mod tests {
             matches!(&resolved[2], super::super::ResolvedPath::Ready { relative_path, .. }
             if relative_path == "second.txt")
         );
+        assert!(root.join("目录").is_dir());
+        assert!(!root.join("目录/a #%.txt").exists());
+    }
+
+    #[cfg(any(linux, macos, android, ios, ohos))]
+    #[tokio::test]
+    async fn resolving_nested_targets_never_follows_a_symlink_out_of_the_grant() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
+        let resolved = resolve_paths(
+            root.path().to_string_lossy().into_owned(),
+            vec!["link/new.txt".into()],
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            &resolved[0],
+            super::super::ResolvedPath::Failed { .. }
+        ));
+        assert!(!outside.path().join("new.txt").exists());
     }
 }
 
@@ -504,7 +559,7 @@ mod local_walk_tests {
         let source = root.path().join("目录 #%");
         std::fs::create_dir_all(source.join("nested")).unwrap();
         std::fs::write(source.join("nested/file #%.txt"), b"content").unwrap();
-        #[cfg(unix)]
+        #[cfg(any(linux, macos, android, ios, ohos))]
         {
             std::os::unix::fs::symlink(&source, source.join("cycle")).unwrap();
             std::os::unix::fs::symlink(

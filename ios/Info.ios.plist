@@ -9,6 +9,8 @@
     <true/>
     <key>UIViewControllerBasedStatusBarAppearance</key>
     <false/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
     <key>NSLocalNetworkUsageDescription</key>
     <string>RSSH uses your local network to connect to SSH, SFTP, and Telnet servers that you configure.</string>
   </dict>

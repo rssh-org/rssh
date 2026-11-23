@@ -20,6 +20,7 @@ pub mod serial;
 pub mod session;
 pub mod settings;
 pub mod sftp;
+pub mod sftp_transfer;
 pub mod sync;
 pub mod telnet;
 pub mod update;

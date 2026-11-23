@@ -41,6 +41,18 @@ tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-fs = { version = "2", optional = true }
 
+# iOS provider access uses native security scopes and coordinated file operations.
+# Foundation is also available to exercise the coordinator on macOS in tests.
+[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSError", "NSFileCoordinator", "block2"] }
+block2 = "0.6"
+libc = "0.2"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "UIDocumentPickerViewController", "UIViewController", "UIResponder", "block2", "objc2-uniform-type-identifiers"] }
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType"] }
+
 [features]
 default = []
 tauri = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-opener", "dep:tauri-plugin-dialog", "dep:tauri-plugin-fs"]

@@ -14,12 +14,23 @@ function functionSource(name: string, nextName: string): string {
 }
 
 describe("SFTP context-menu download", () => {
-  it("picks a target path and queues the file through the transfer store", () => {
-    const downloadEntry = functionSource("downloadEntry", "confirmDelete");
-
-    expect(downloadEntry).toContain("fileAccess.pickSavePath(entry.name)");
-    expect(downloadEntry).toContain("transfers.startDownload");
-    expect(downloadEntry).not.toContain('"sftp_save_file"');
+  it.each([false, true])("authorizes a complete target folder for files and directories (%s)", async (isDir) => {
+    const pickDirectory = vi.fn().mockResolvedValue({ location: "content://docs/tree/authorized", name: "Downloads" });
+    const queueDownloads = vi.fn().mockResolvedValue({ queued: 1, walkErrors: [] });
+    const entry = { name: "report.txt", is_dir: isDir, size: 42 };
+    const code = ts.transpileModule(functionSource("downloadEntry", "confirmDelete"), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const downloadEntry = runInNewContext(code + "\ndownloadEntry", {
+      closeCtxMenu: vi.fn(), error: "", notice: "", meta: { sessionId: "ssh-test" },
+      transferContext: () => ({ sessionId: "ssh-test", remoteRoot: "/remote", sftpId: "sftp-test" }),
+      fileAccess: { pickDirectory }, queueDownloads, errMsg: String, t: (key: string) => key,
+    });
+    await downloadEntry(entry);
+    expect(pickDirectory).toHaveBeenCalledExactlyOnceWith(true);
+    expect(queueDownloads).toHaveBeenCalledExactlyOnceWith([entry], "content://docs/tree/authorized", {
+      sessionId: "ssh-test", remoteRoot: "/remote", sftpId: "sftp-test",
+    });
   });
 });
 
@@ -32,12 +43,13 @@ describe("SFTP batch download isolation", () => {
     const code = ts.transpileModule(source.slice(start, end), {
       compilerOptions: { target: ts.ScriptTarget.ES2022 },
     }).outputText;
-    const queueDownloads = runInNewContext(code + "\nqueueDownloads", {
-      cwd: "/remote", sftpId: "sftp-test", meta: { sessionId: "ssh-test" },
+    const queue = runInNewContext(code + "\nqueueDownloads", {
       joinRemote: (dir: string, name: string) => `${dir}/${name}`,
       fileAccess: { resolvePaths: mocks.resolvePaths }, invoke: mocks.invoke,
       transfers: { startDownload }, errMsg: String,
-    }) as (files: { name: string; is_dir: boolean; size: number }[], root: string) => Promise<{ queued: number; walkErrors: string[] }>;
+    });
+    const queueDownloads = (files: { name: string; is_dir: boolean; size: number }[], root: string): Promise<{ queued: number; walkErrors: string[] }> =>
+      queue(files, root, { sessionId: "ssh-test", remoteRoot: "/remote", sftpId: "sftp-test" });
     return { queueDownloads, startDownload };
   }
 

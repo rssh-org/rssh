@@ -160,6 +160,7 @@ pub struct SshHandler {
     port: u16,
     known_hosts_path: PathBuf,
     key_mismatch: Arc<StdMutex<bool>>,
+    verified_key: Option<Arc<StdMutex<Option<String>>>>,
     /// Remote listening port -> consumer for forwarded channels on that port.
     forwarded_channels: ForwardedChannelRouter,
     /// Surface TOFU fingerprints / known_hosts write errors back to the user.
@@ -231,9 +232,11 @@ impl client::Handler for SshHandler {
         let log = self.log.clone();
         let ctx = self.prompt_ctx.clone();
         let mismatch = self.key_mismatch.clone();
+        let verified_key = self.verified_key.clone();
+        let verified_fingerprint = fp.clone();
 
         async move {
-            match check {
+            let result = match check {
                 Ok(true) => Ok(true),
                 // 未知主机：有 ctx 走 xterm 确认，无 ctx（SFTP/Forward 后台连接）直接拒绝。
                 Ok(false) => match ctx {
@@ -260,7 +263,15 @@ impl client::Handler for SshHandler {
                         Ok(false)
                     }
                 },
+            };
+            if matches!(result, Ok(true)) {
+                if let Some(capture) = verified_key {
+                    if let Ok(mut key) = capture.lock() {
+                        *key = Some(verified_fingerprint);
+                    }
+                }
             }
+            result
         }
     }
 
@@ -438,6 +449,8 @@ pub struct DialCtx {
     pub timeout_secs: u64,
     pub log: LogFn,
     pub prompt_ctx: Option<AuthCtx>,
+    /// Captures only a key accepted by the real SSH handshake.
+    pub verified_key: Option<Arc<StdMutex<Option<String>>>>,
 }
 
 fn new_handler(
@@ -446,6 +459,7 @@ fn new_handler(
     known_hosts_path: PathBuf,
     log: LogFn,
     prompt_ctx: Option<AuthCtx>,
+    verified_key: Option<Arc<StdMutex<Option<String>>>>,
 ) -> (SshHandler, Arc<StdMutex<bool>>, ForwardedChannelRouter) {
     let mismatch = Arc::new(StdMutex::new(false));
     let fwd_channels: ForwardedChannelRouter = Arc::new(StdMutex::new(Default::default()));
@@ -454,6 +468,7 @@ fn new_handler(
         port,
         known_hosts_path,
         key_mismatch: mismatch.clone(),
+        verified_key,
         forwarded_channels: fwd_channels.clone(),
         log,
         prompt_ctx,
@@ -494,9 +509,11 @@ pub async fn ssh_connect(
         timeout_secs,
         log,
         prompt_ctx,
+        verified_key,
     } = ctx;
     let connect_timeout = Duration::from_secs(timeout_secs);
-    let (handler, mismatch, _fwd) = new_handler(&host, port, known_hosts_path, log, prompt_ctx);
+    let (handler, mismatch, _fwd) =
+        new_handler(&host, port, known_hosts_path, log, prompt_ctx, verified_key);
     match timeout(
         connect_timeout,
         client::connect(config, (host.as_str(), port), handler),
@@ -523,9 +540,11 @@ pub async fn ssh_connect_with_forward(
         timeout_secs,
         log,
         prompt_ctx,
+        verified_key,
     } = ctx;
     let connect_timeout = Duration::from_secs(timeout_secs);
-    let (handler, mismatch, fwd) = new_handler(&host, port, known_hosts_path, log, prompt_ctx);
+    let (handler, mismatch, fwd) =
+        new_handler(&host, port, known_hosts_path, log, prompt_ctx, verified_key);
     let handle = match timeout(
         connect_timeout,
         client::connect(config, (host.as_str(), port), handler),
@@ -560,9 +579,11 @@ where
         timeout_secs,
         log,
         prompt_ctx,
+        verified_key,
     } = ctx;
     let connect_timeout = Duration::from_secs(timeout_secs);
-    let (handler, mismatch, fwd) = new_handler(&host, port, known_hosts_path, log, prompt_ctx);
+    let (handler, mismatch, fwd) =
+        new_handler(&host, port, known_hosts_path, log, prompt_ctx, verified_key);
     let handle = match timeout(
         connect_timeout,
         client::connect_stream(config, stream, handler),
@@ -596,6 +617,7 @@ pub async fn establish_via_chain(
     timeout_secs: u64,
     log: LogFn,
     ctx: Option<&AuthCtx>,
+    verified_key: Option<Arc<StdMutex<Option<String>>>>,
 ) -> AppResult<(client::Handle<SshHandler>, ForwardedChannelRouter)> {
     if bastion_chain.is_empty() {
         let target_host = target_profile.host.clone();
@@ -605,7 +627,10 @@ pub async fn establish_via_chain(
             target_host, target_port
         ));
         let (h, fwd) = ssh_connect_with_forward(
-            dial_ctx_for_profile(&target_profile, &known_hosts_path, timeout_secs, &log, ctx),
+            DialCtx {
+                verified_key: verified_key.clone(),
+                ..dial_ctx_for_profile(&target_profile, &known_hosts_path, timeout_secs, &log, ctx)
+            },
             target_host,
             target_port,
         )
@@ -690,7 +715,10 @@ pub async fn establish_via_chain(
     .await?;
     log("Tunnel established. SSH handshake with target ...".to_owned());
     ssh_connect_stream(
-        dial_ctx_for_profile(&target_profile, &known_hosts_path, timeout_secs, &log, ctx),
+        DialCtx {
+            verified_key: verified_key.clone(),
+            ..dial_ctx_for_profile(&target_profile, &known_hosts_path, timeout_secs, &log, ctx)
+        },
         tunnel.into_stream(),
         target_host,
         target_port,
@@ -711,6 +739,7 @@ fn dial_ctx_for_profile(
         timeout_secs,
         log: log.clone(),
         prompt_ctx: ctx.cloned(),
+        verified_key: None,
     }
 }
 
@@ -934,6 +963,15 @@ pub enum SessionCmd {
     Close,
 }
 
+/// Immutable identity of an authenticated SSH connection, independent of profile edits.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct VerifiedSshIdentity {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub host_key: String,
+}
+
 #[derive(Clone)]
 pub struct SessionHandle {
     pub(crate) output: OutputTap,
@@ -942,6 +980,7 @@ pub struct SessionHandle {
     terminal_encoding: TerminalEncoding,
     /// 本次连接对应的 Profile.id，用于关联持久化的 AI 对话。
     profile_id: String,
+    identity: VerifiedSshIdentity,
 }
 
 impl SessionHandle {
@@ -958,6 +997,9 @@ impl SessionHandle {
     }
     pub fn ssh_handle(&self) -> &SshHandle {
         &self.ssh_handle
+    }
+    pub fn identity(&self) -> &VerifiedSshIdentity {
+        &self.identity
     }
     pub fn profile_id(&self) -> &str {
         &self.profile_id
@@ -1127,6 +1169,8 @@ pub async fn connect(params: ConnectParams) -> AppResult<ConnectResult> {
         owner: owner.clone(),
     });
 
+    let verified_key = Arc::new(StdMutex::new(None));
+    let username = credential.username.clone();
     let (mut handle, _fwd) = establish_via_chain(
         bastion_chain,
         profile.clone(),
@@ -1134,8 +1178,18 @@ pub async fn connect(params: ConnectParams) -> AppResult<ConnectResult> {
         timeout_secs,
         log.clone(),
         ctx.as_ref(),
+        Some(verified_key.clone()),
     )
     .await?;
+
+    let identity = VerifiedSshIdentity {
+        host: profile.host.clone(),
+        port: profile.port,
+        username,
+        host_key: locked(&verified_key)?
+            .clone()
+            .ok_or_else(|| AppError::ssh("transfer_identity_changed", json!({})))?,
+    };
 
     log(format!(
         "Authenticating as {} ({}) ...",
@@ -1200,6 +1254,7 @@ pub async fn connect(params: ConnectParams) -> AppResult<ConnectResult> {
             ssh_handle,
             terminal_encoding,
             profile_id: profile.id.clone(),
+            identity,
         },
     })
 }

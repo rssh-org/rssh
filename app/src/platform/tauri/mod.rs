@@ -87,10 +87,16 @@ impl NativePlatform for TauriPlatform {
     }
 
     async fn pick_open(&self, app: &AppHandle) -> AppResult<Option<String>> {
+        #[cfg(ios)]
+        return files::ios::pick_open(app).await;
+        #[cfg(not(ios))]
         files::native::select_open(app).await
     }
 
     async fn pick_open_files(&self, app: &AppHandle) -> AppResult<Option<Vec<String>>> {
+        #[cfg(ios)]
+        return files::ios::pick_open_files(app).await;
+        #[cfg(not(ios))]
         files::native::select_open_files(app).await
     }
 
@@ -99,13 +105,13 @@ impl NativePlatform for TauriPlatform {
         {
             files::native::select_folder(app, write).await
         }
-        #[cfg(any(android, ios))]
+        #[cfg(android)]
         {
-            let _ = (app, write);
-            Err(AppError::other(
-                "file_path_invalid",
-                serde_json::json!({"err":"Folder selection is unavailable on this host"}),
-            ))
+            files::android::pick_folder(app, write).await
+        }
+        #[cfg(ios)]
+        {
+            files::ios::pick_folder(app, write).await
         }
     }
 
@@ -139,15 +145,36 @@ impl NativePlatform for TauriPlatform {
 
     async fn resolve_paths(
         &self,
+        app: &AppHandle,
         root: String,
         paths: Vec<String>,
         write: bool,
     ) -> AppResult<Vec<ResolvedPath>> {
-        files::native::resolve_paths(root, paths, write).await
+        #[cfg(android)]
+        return files::android::resolve_paths(app, root, paths, write).await;
+        #[cfg(ios)]
+        return files::ios::resolve_paths(app, root, paths, write).await;
+        #[cfg(any(windows, macos, linux))]
+        {
+            let _ = app;
+            files::native::resolve_paths(root, paths, write).await
+        }
     }
 
-    async fn walk_directory(&self, root: String) -> AppResult<Vec<LocalWalkEntry>> {
-        files::native::walk_directory(root).await
+    async fn walk_directory(
+        &self,
+        app: &AppHandle,
+        root: String,
+    ) -> AppResult<Vec<LocalWalkEntry>> {
+        #[cfg(android)]
+        return files::android::walk_directory(app, root).await;
+        #[cfg(ios)]
+        return files::ios::walk_directory(app, root).await;
+        #[cfg(any(windows, macos, linux))]
+        {
+            let _ = app;
+            files::native::walk_directory(root).await
+        }
     }
 }
 

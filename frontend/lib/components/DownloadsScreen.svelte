@@ -41,6 +41,10 @@
         return Math.min(100, (t.transferred / t.total) * 100);
     }
 
+    function statusLabel(item: transfers.Transfer): string {
+        return t(item.status === "running" ? `downloads.phase.${item.phase}` : `downloads.status.${item.status}`);
+    }
+
     function basename(p: string): string {
         return p.split("/").pop() || p;
     }
@@ -93,7 +97,7 @@
     {:else}
         <ul class="list">
             {#each list as item (item.id)}
-                {@const showError = !!(item.error && item.status === "failed")}
+                {@const showError = !!item.error || !!item.recovery}
                 <li class="row surface-pressed"
                     class:failed={item.status === "failed"}
                     class:done={item.status === "done"}
@@ -116,10 +120,14 @@
                     </div>
 
                     <div class="bytes">
-                        {formatSize(item.transferred)}{item.total > 0 ? ` / ${formatSize(item.total)}` : ""}
+                        {#if item.status === "running" && item.phase === "verifying" && item.verificationTotal > 0}
+                            {t("downloads.verified_bytes", { done: formatSize(item.verified), total: formatSize(item.verificationTotal) })}
+                        {:else}
+                            {formatSize(item.transferred)}{item.total > 0 ? ` / ${formatSize(item.total)}` : ""}
+                        {/if}
                     </div>
 
-                    <span class="status status-{item.status}">{t(`downloads.status.${item.status}`)}</span>
+                    <span class="status status-{item.status}">{statusLabel(item)}</span>
 
                     <div class="row-actions">
                         {#if item.status === "running" || item.status === "queued"}
@@ -140,7 +148,12 @@
                     </div>
 
                     {#if showError}
-                        <div class="error">{item.error}</div>
+                        <div class="error">
+                            {#if item.recovery}
+                                <div>{t(`error.${item.recovery.code}`, item.recovery.params)}</div>
+                            {/if}
+                            {#if item.error}<div>{item.error}</div>{/if}
+                        </div>
                     {/if}
                 </li>
             {/each}

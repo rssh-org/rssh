@@ -64,11 +64,13 @@ pub trait NativePlatform: Send + Sync {
         -> AppResult<DownloadTarget>;
     async fn resolve_paths(
         &self,
+        app: &AppHandle,
         root: String,
         paths: Vec<String>,
         write: bool,
     ) -> AppResult<Vec<ResolvedPath>>;
-    async fn walk_directory(&self, root: String) -> AppResult<Vec<LocalWalkEntry>>;
+    async fn walk_directory(&self, app: &AppHandle, root: String)
+        -> AppResult<Vec<LocalWalkEntry>>;
 }
 
 pub(crate) fn platform(app: &AppHandle) -> Arc<dyn NativePlatform> {

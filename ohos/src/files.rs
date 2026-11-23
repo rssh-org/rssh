@@ -199,6 +199,18 @@ pub async fn pick_folder(write: bool) -> AppResult<Option<String>> {
         .into_iter()
         .next();
     if let Some(uri) = &selected {
+        // A provider may ignore a requested folder mode. A selected document
+        // never authorizes sibling operations, even if its URI looks path-like.
+        super::app()?
+            .bridge()
+            .map_err(super::native_error)?
+            .call_async::<FilesAccessPlugin, NameRequest, DownloadPath>(
+                "directory-check",
+                NameRequest { uri: uri.clone() },
+                BridgeCallOptions::default(),
+            )
+            .await
+            .map_err(|_| rssh_host::files::folder_required())?;
         if !GRANTS
             .lock()
             .map_err(|_| super::unavailable())?
@@ -259,11 +271,8 @@ pub async fn download_path(uri: String) -> AppResult<Option<std::path::PathBuf>>
     let bridge = super::app()?.bridge().map_err(super::native_error)?;
     {
         let grants = GRANTS.lock().map_err(|_| super::unavailable())?;
-        if !grants.permits(&uri, true) {
-            return Err(selection_error());
-        }
-        if !grants.creates_in_directory(&uri) {
-            return Ok(None);
+        if !grants.permits_download(&uri) {
+            return Err(rssh_host::files::folder_required());
         }
     }
     let path = bridge
@@ -357,7 +366,7 @@ pub async fn open_file(uri: String, write: bool) -> AppResult<File> {
         if !grants.permits(&uri, write) {
             return Err(selection_error());
         }
-        write && grants.creates_in_directory(&uri)
+        write && grants.permits_download(&uri)
     };
     let opened = bridge
         .call_async::<FilesAccessPlugin, OpenRequest, OpenedFile>(

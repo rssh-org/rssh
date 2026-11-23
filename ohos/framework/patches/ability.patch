@@ -39,13 +39,16 @@ index f3a5b35..92d794f 100644
      pub fn with_timeout_ms(mut self, timeout_ms: u32) -> Self {
          self.timeout_ms = timeout_ms.clamp(1, MAX_TIMEOUT_MS);
          self
-@@ -1487,6 +1494,18 @@ mod tests {
+@@ -1487,6 +1494,21 @@ mod tests {
          );
      }
  
 +    #[test]
 +    fn human_interaction_explicitly_disables_only_the_deadline() {
-+        assert_eq!(BridgeCallOptions::default().without_timeout().timeout_ms(), 0);
++        assert_eq!(
++            BridgeCallOptions::default().without_timeout().timeout_ms(),
++            0
++        );
 +        assert_eq!(
 +            BridgeCallOptions::default()
 +                .without_timeout()
@@ -2150,7 +2153,7 @@ index 7fd5709..9fbc781 100644
        ]);
        BridgeHostRegistry.configurePlugins(sessionId, moduleName, [
 diff --git a/plugins/files/src/main/ets/FilesPlugin.ets b/plugins/files/src/main/ets/FilesPlugin.ets
-index 7abd128..3f92f7a 100644
+index 7abd128..54b574b 100644
 --- a/plugins/files/src/main/ets/FilesPlugin.ets
 +++ b/plugins/files/src/main/ets/FilesPlugin.ets
 @@ -22,6 +22,7 @@ interface FileDialogOptions {
@@ -2176,6 +2179,15 @@ index 7abd128..3f92f7a 100644
    return request;
  }
  
+@@ -94,7 +103,7 @@ function pickerLocation(location: string | undefined | null): string | undefined
+ }
+ 
+ function supportsFolderSelection(): boolean {
+-  return deviceInfo.deviceType === "2in1" && canIUse(FOLDER_SELECTION_SYSCAP);
++  return canIUse(FOLDER_SELECTION_SYSCAP);
+ }
+ 
+ async function showFileDialog(
 @@ -108,6 +117,7 @@ async function showFileDialog(
    if (options.dialogType === "save-file") {
      const saveOptions = new picker.DocumentSaveOptions();
@@ -2184,6 +2196,15 @@ index 7abd128..3f92f7a 100644
      saveOptions.fileSuffixChoices = suffixFilters;
      const files = await documentPicker.save(saveOptions);
      let filter = -1;
+@@ -127,7 +137,7 @@ async function showFileDialog(
+   if (options.dialogType === "open-folder") {
+     if (!supportsFolderSelection()) {
+       throw new Error(
+-        "OpenHarmony folder selection requires a 2-in-1 device with FolderSelection capability",
++        "OpenHarmony folder selection requires FolderSelection capability",
+       );
+     }
+     selectOptions.selectMode = picker.DocumentSelectMode.FOLDER;
 @@ -150,7 +160,7 @@ export class FilesPlugin extends AsyncPluginBase {
        throw new Error(`Unsupported ohos.files action '${action}'`);
      }
