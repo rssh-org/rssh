@@ -263,6 +263,28 @@
         return registerBack({ enabled: () => showSearch && app.activePaneId() === tabId, handle: closeSearch });
     });
 
+    // Android's native selection menu belongs to read-only terminal output.
+    // Bind its paste action to this connection, including across reconnects.
+    $effect(() => {
+        const sid = sessionId;
+        if (!sid || disconnected) return;
+        const host = containerEl;
+        const eventName = `terminal:paste:${sid}`;
+        const onPaste = (event: Event) => {
+            if (destroyed || disconnected || sessionId !== sid
+                || app.settingsActive()
+                || !app.paneIdsForWorkspace(app.activeWorkspaceId()).includes(tabId)) return;
+            const { text, error } = (event as CustomEvent<{ text?: string; error?: string }>).detail ?? {};
+            if (typeof error === "string") {
+                toast.error(t("error.window_clipboard_failed", { op: "read", err: error }));
+            } else if (typeof text === "string") {
+                pasteText(text);
+            }
+        };
+        host.addEventListener(eventName, onPaste);
+        return () => host.removeEventListener(eventName, onPaste);
+    });
+
     // Command block overlay state. `paintTick` is a dumb counter we bump
     // whenever something that affects the overlay changes — scroll, render,
     // block list change. The $derived below recomputes svg rects from it.
@@ -1899,7 +1921,7 @@
     {/if}
     <div class="term-wrap" class:soft-keyboard={softKeyboardRequested} class:no-block-bar={!app.commandBlockBar()}>
         {#if waveColor}<EnvironmentWave color={waveColor} />{/if}
-        <div class="xterm-host" bind:this={containerEl}></div>
+        <div class="xterm-host" data-terminal-session={disconnected ? undefined : sessionId ?? undefined} bind:this={containerEl}></div>
         {#if backlogBytes > BACKLOG_INDICATOR_BYTES}
             <div class="backlog-badge">
                 <span>{formatBacklogBytes(backlogBytes)}</span>

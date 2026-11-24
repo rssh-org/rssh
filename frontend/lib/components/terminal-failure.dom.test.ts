@@ -173,6 +173,67 @@ it("opens native AWS without a local PTY and routes input, output, errors, and c
 });
 
 describe("native terminal selection handle context menus", () => {
+  it.each([false, true])("routes native paste to the selected session with bracketed paste=%s", async (bracketed) => {
+    const terminal = mocks.Terminal.instances[0];
+    terminal.modes.bracketedPasteMode = bracketed;
+    const host = terminal.output.closest<HTMLElement>(".xterm-host")!;
+    const sessionId = app.sessionIdForTab(rootId)!;
+    expect(host.dataset.terminalSession).toBe(sessionId);
+    const before = terminal.output.textContent;
+    mocks.invoke.mockClear();
+    host.dispatchEvent(new CustomEvent(`terminal:paste:${sessionId}`, {
+      detail: { text: "echo '你好'\r\nprintf done" },
+    }));
+    const text = "echo '你好'\rprintf done";
+    expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith("ssh_write", {
+      sessionId,
+      data: Array.from(new TextEncoder().encode(bracketed ? `\x1b[200~${text}\x1b[201~` : text)),
+    });
+    expect(terminal.output.textContent).toBe(before);
+  });
+
+  it("pastes into a visible split without requiring a preceding activation click", async () => {
+    const host = mocks.Terminal.instances[0].output.closest<HTMLElement>(".xterm-host")!;
+    const sessionId = app.sessionIdForTab(rootId)!;
+    app.addPane(rootId, "right", { id: "home:paste-split", type: "home", label: "Home", meta: {} });
+    await settle();
+    expect(app.activePaneId()).not.toBe(rootId);
+    mocks.invoke.mockClear();
+    host.dispatchEvent(new CustomEvent(`terminal:paste:${sessionId}`, { detail: { text: "selected split" } }));
+    expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith("ssh_write", {
+      sessionId, data: Array.from(new TextEncoder().encode("selected split")),
+    });
+  });
+
+  it("rejects stale-session, hidden-workspace, and disconnected native paste", async () => {
+    const host = mocks.Terminal.instances[0].output.closest<HTMLElement>(".xterm-host")!;
+    const sessionId = app.sessionIdForTab(rootId)!;
+    mocks.invoke.mockClear();
+    host.dispatchEvent(new CustomEvent("terminal:paste:old-session", { detail: { text: "old" } }));
+    app.setActiveWorkspace("home");
+    host.dispatchEvent(new CustomEvent(`terminal:paste:${sessionId}`, { detail: { text: "other workspace" } }));
+    app.setActiveWorkspace(rootId);
+    app.openSettings();
+    host.dispatchEvent(new CustomEvent(`terminal:paste:${sessionId}`, { detail: { text: "hidden" } }));
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "ssh_write")).toBe(false);
+    app.closeSettings();
+    const close = mocks.listen.mock.calls.find(([name]) => name === `ssh:close:${sessionId}`)!;
+    close[1]({ payload: null });
+    host.dispatchEvent(new CustomEvent(`terminal:paste:${sessionId}`, { detail: { text: "closed" } }));
+    await settle();
+    expect(host.dataset.terminalSession).toBeUndefined();
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "ssh_write")).toBe(false);
+  });
+
+  it("shows native clipboard failures without writing terminal input", () => {
+    const host = mocks.Terminal.instances[0].output.closest<HTMLElement>(".xterm-host")!;
+    const sessionId = app.sessionIdForTab(rootId)!;
+    mocks.invoke.mockClear();
+    host.dispatchEvent(new CustomEvent(`terminal:paste:${sessionId}`, { detail: { error: "Access denied" } }));
+    expect(toasts().some(item => item.message === t("error.window_clipboard_failed", { op: "read", err: "Access denied" }))).toBe(true);
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
   it("captures the opening selection, switches the destination, and returns focus to the terminal", async () => {
     const backend = mocks.invoke.getMockImplementation()!;
     const reports = [
