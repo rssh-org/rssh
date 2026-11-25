@@ -52,7 +52,11 @@ impl OutputTap {
             tx,
         }))));
         tap.active = Arc::downgrade(&active);
-        Ok(CommandCapture { active, rx })
+        Ok(CommandCapture {
+            tap: self.clone(),
+            active,
+            rx,
+        })
     }
 
     fn active(&self) -> Option<Arc<ActiveCapture>> {
@@ -114,8 +118,20 @@ pub struct CapturedOutput {
 }
 
 pub struct CommandCapture {
+    tap: OutputTap,
     active: Arc<ActiveCapture>,
     rx: oneshot::Receiver<Completed>,
+}
+
+impl Drop for CommandCapture {
+    fn drop(&mut self) {
+        // Reader callbacks can retain the old completion after the caller is
+        // done. Their temporary references must not keep this terminal busy.
+        let mut tap = self.tap.0.lock().expect("terminal tap lock");
+        if tap.active.ptr_eq(&Arc::downgrade(&self.active)) {
+            tap.active = Weak::new();
+        }
+    }
 }
 
 impl CommandCapture {
@@ -429,6 +445,29 @@ mod tests {
         let result = result.expect("the capture must time out while display is blocked");
         assert!(result.timed_out);
         assert_eq!(result.output, "visible");
+    }
+
+    #[tokio::test]
+    async fn dropping_capture_releases_slot_while_reader_retains_completion() {
+        let tap = OutputTap::default();
+        let mut capture = tap.start(MARKER).unwrap();
+        let mut next = None;
+        tap.publish_ref(format!("old{MARKER}:0\r\n").as_bytes(), || {
+            assert!(capture.interrupt().is_some());
+            assert!(tap.start(MARKER).is_err());
+            drop(capture);
+            next = Some(tap.start(MARKER).expect("the caller released its slot"));
+        });
+
+        let mut next = next.unwrap();
+        assert!(matches!(
+            next.rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        tap.feed(format!("new{MARKER}:7\r\n").as_bytes());
+        let result = next.wait(deadline()).await;
+        assert_eq!(result.output, "new");
+        assert_eq!(result.exit_code, 7);
     }
 
     #[tokio::test]
