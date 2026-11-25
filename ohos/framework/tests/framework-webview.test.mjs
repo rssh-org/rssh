@@ -12,7 +12,7 @@ const code = ts.transpileModule(readFileSync(sourcePath, 'utf8'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
 
-function harness() {
+function harness(editMenuFactory) {
   const callbacks = {};
   const events = [];
   const errors = [];
@@ -27,7 +27,7 @@ function harness() {
     invokeNativeSyncProcessWide: () => [{ accepted: true, schemes: [] }],
   };
   const chain = new Proxy({}, { get: (_target, key) => (value) => {
-    if (String(key).startsWith('on')) callbacks[key] = value;
+    if (String(key).startsWith('on') || key === 'editMenuOptions') callbacks[key] = value;
     return chain;
   } });
   const modules = {
@@ -35,6 +35,7 @@ function harness() {
     '@ohos.arkui.node': { BuilderNode: class {
       build(builder, data) { builder(data); callbacks.onControllerAttached(); }
       getFrameNode() { return { dispose() {} }; }
+      update() {}
     } },
     '@ohos.web.webview': { default: { WebviewController: class {
       static initializeWebEngine() {}
@@ -49,14 +50,14 @@ function harness() {
     Visibility: { Hidden: 0, Visible: 1 },
     console: { error: (...args) => errors.push(args.join(' ')), warn() {} },
   }, { filename: sourcePath });
-  const plugin = new exports.WebviewPlugin();
+  const plugin = new exports.WebviewPlugin(editMenuFactory);
   plugin.onInstall(context);
   async function create(pageLoad = true) {
     await plugin.invokeAsync('create', { typeName: 'ohos.webview.CreateRequest', value: {
       id: 'main', url: 'https://example.test', eventOptions: { pageLoad },
     } }, context);
   }
-  return { callbacks, events, errors, create, reject: () => { rejectNotification = true; } };
+  return { callbacks, events, errors, create, plugin, context, reject: () => { rejectNotification = true; } };
 }
 
 test('page begin and end forward named events with the controller identity and URL', async () => {
@@ -93,4 +94,30 @@ test('a rejected page notification is reported without throwing into ArkWeb', as
   h.reject();
   assert.doesNotThrow(() => h.callbacks.onPageEnd({ url: 'https://example.test' }));
   assert.match(h.errors.join('\n'), /page-load.*notification.*failed/i);
+});
+
+test('host edit menus receive touch events and reset on navigation and disposal', async () => {
+  const touches = [];
+  let resets = 0;
+  const options = { onCreateMenu: (items) => items, onMenuItemClick: () => false };
+  const h = harness((controller) => {
+    assert.equal(typeof controller.loadUrl, 'function');
+    return { options, onTouch: (event) => touches.push(event), reset: () => { resets += 1; } };
+  });
+  await h.create(false);
+  assert.equal(h.callbacks.editMenuOptions, options);
+  const touch = { type: 'down' };
+  h.callbacks.onTouch(touch);
+  assert.deepEqual(touches, [touch]);
+  h.callbacks.onPageBegin({ url: 'https://example.test/other' });
+  assert.equal(resets, 1);
+  h.plugin.onLifecycle({ kind: 'ui-context-destroy' }, h.context);
+  assert.equal(resets, 2);
+});
+
+test('WebViews without host edit menus retain the default SDK configuration', async () => {
+  const h = harness();
+  await h.create();
+  assert.equal(h.callbacks.editMenuOptions, undefined);
+  assert.doesNotThrow(() => h.callbacks.onTouch({ type: 'down' }));
 });

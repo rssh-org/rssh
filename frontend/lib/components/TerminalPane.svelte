@@ -53,6 +53,7 @@
     import {registerBracketedPasteProvider, unregisterBracketedPasteProvider} from "../terminal/bracketed-paste.ts";
     import {registerAlternateScreenProvider, unregisterAlternateScreenProvider} from "../terminal/alternate-screen.ts";
     import {setupXtermIme229Workaround} from "../terminal/xterm-ime-229-workaround.ts";
+    import {setupXtermNativeTouch} from "../terminal/xterm-native-touch.ts";
     import {disposeWebglAddon} from "../terminal/webgl-addon.ts";
     import {createReservedSessionAttempt} from "../terminal/reserved-session-attempt.ts";
     import {sessionCleanupScope} from "../stores/session-cleanup.svelte.ts";
@@ -261,6 +262,39 @@
         if (!showSearch) return;
         // Search is local to its focused pane; sibling Home panes keep keyboard navigation.
         return registerBack({ enabled: () => showSearch && app.activePaneId() === tabId, handle: closeSearch });
+    });
+
+    // The native selection menu belongs to read-only terminal output.
+    // Bind its paste action to this connection, including across reconnects.
+    $effect(() => {
+        const sid = sessionId;
+        if (!sid || disconnected) return;
+        const host = containerEl;
+        const eventName = `terminal:paste:${sid}`;
+        const canPaste = () => !destroyed && !disconnected && sessionId === sid
+            && !app.settingsActive()
+            && app.paneIdsForWorkspace(app.activeWorkspaceId()).includes(tabId);
+        const onPaste = async (event: Event) => {
+            if (!canPaste()) return;
+            const { text, error, readClipboard: shouldRead } = (event as CustomEvent<{
+                text?: string; error?: string; readClipboard?: boolean;
+            }>).detail ?? {};
+            if (typeof error === "string") {
+                toast.error(t("error.window_clipboard_failed", { op: "read", err: error }));
+            } else if (typeof text === "string") {
+                pasteText(text);
+            } else if (shouldRead === true) {
+                try {
+                    const value = await readClipboard();
+                    // The clipboard permission prompt can outlive this connection or pane.
+                    if (canPaste()) pasteText(value);
+                } catch (error) {
+                    if (canPaste()) toast.error(errMsg(error));
+                }
+            }
+        };
+        host.addEventListener(eventName, onPaste);
+        return () => host.removeEventListener(eventName, onPaste);
     });
 
     // Command block overlay state. `paintTick` is a dumb counter we bump
@@ -634,6 +668,7 @@
     let reconnectDisposable: IDisposable | undefined;
     let resizeObs: ResizeObserver;
     let ime229WorkaroundCleanup: (() => void) | undefined;
+    let nativeTouchCleanup: (() => void) | undefined;
     let softKeyboard = $state.raw<ReturnType<typeof setupTerminalSoftKeyboard>>();
     let softKeyboardRequested = $state(false);
     let touchScrollCleanup: (() => void) | undefined;
@@ -1539,6 +1574,7 @@
             softKeyboard = setupTerminalSoftKeyboard({
                 helper, host: containerEl, pane: paneEl, touchAvailable: supportsTouch(),
                 keybarAvailable: app.capabilities().terminalKeybar,
+                nativeTouchInput: isIOS,
                 onRequestedChange: (requested) => {
                     softKeyboardRequested = requested;
                     if (app.activeTabId() === tabId && !app.settingsActive()) {
@@ -1549,6 +1585,7 @@
         }
         // The handler consumes touch events only; mouse/wheel input keeps xterm's path.
         touchScrollCleanup = setupTouchScroll(containerEl, terminal);
+        nativeTouchCleanup = setupXtermNativeTouch({ terminal, host: containerEl, enabled: isIOS });
 
         // Metadata may resolve after activation; keep any focus the user moved meanwhile.
         if (app.activeTabId() === tabId && !app.settingsActive()
@@ -1837,6 +1874,7 @@
         resizeObs?.disconnect();
         ime229WorkaroundCleanup?.();
         ime229WorkaroundCleanup = undefined;
+        nativeTouchCleanup?.();
         if (softKeyboard) {
             app.unregisterSoftKeyboardToggle(softKeyboard.toggle);
             softKeyboard.dispose();
@@ -1899,7 +1937,7 @@
     {/if}
     <div class="term-wrap" class:soft-keyboard={softKeyboardRequested} class:no-block-bar={!app.commandBlockBar()}>
         {#if waveColor}<EnvironmentWave color={waveColor} />{/if}
-        <div class="xterm-host" bind:this={containerEl}></div>
+        <div class="xterm-host" data-terminal-session={disconnected ? undefined : sessionId ?? undefined} bind:this={containerEl}></div>
         {#if backlogBytes > BACKLOG_INDICATOR_BYTES}
             <div class="backlog-badge">
                 <span>{formatBacklogBytes(backlogBytes)}</span>

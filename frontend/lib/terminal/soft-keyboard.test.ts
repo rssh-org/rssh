@@ -54,7 +54,7 @@ describe("terminal soft keyboard", () => {
 
   afterEach(() => { dispose?.(); vi.unstubAllGlobals(); });
 
-  function setup(touchAvailable: boolean, beforeInstall?: (helper: FakeElement) => void, keybarAvailable = true) {
+  function setup(touchAvailable: boolean, beforeInstall?: (helper: FakeElement) => void, keybarAvailable = true, nativeTouchInput = false) {
     const helper = new FakeElement();
     const host = new FakeElement();
     const onRequestedChange = vi.fn();
@@ -66,6 +66,7 @@ describe("terminal soft keyboard", () => {
       pane: new FakeElement() as unknown as HTMLElement,
       touchAvailable,
       keybarAvailable,
+      nativeTouchInput,
       onRequestedChange,
     });
     dispose = controller.dispose;
@@ -152,5 +153,45 @@ describe("terminal soft keyboard", () => {
     controller.hide();
     expect(onRequestedChange).toHaveBeenLastCalledWith(false);
     expect(document.activeElement).not.toBe(helper);
+  });
+
+  it("keeps native touch input editable without requesting the soft keyboard", () => {
+    const { helper, host, controller } = setup(true, undefined, true, true);
+    expect(helper.readOnly).toBe(false);
+    expect(helper.getAttribute("inputmode")).toBe("none");
+    expect(helper.getAttribute("data-native-touch-input")).toBe("");
+    helper.focus();
+    const event = new Event("pointerdown");
+    Object.defineProperties(event, {
+      pointerType: { value: "touch" }, target: { value: helper },
+    });
+    host.dispatchEvent(event);
+    expect(document.activeElement).toBe(helper);
+    const blur = vi.spyOn(helper, "blur");
+    pointer(host, "touch");
+    expect(blur).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(helper);
+    expect(helper.readOnly).toBe(false);
+    controller.toggle();
+    expect(blur).not.toHaveBeenCalled();
+    expect(helper.getAttribute("inputmode")).toBe("text");
+    expect(helper.getAttribute("data-native-touch-input")).toBeNull();
+    controller.toggle();
+    expect(helper.readOnly).toBe(false);
+    expect(helper.getAttribute("inputmode")).toBe("none");
+    expect(helper.getAttribute("data-native-touch-input")).toBe("");
+  });
+
+  it("restores hardware input and mouse geometry after native touch input", () => {
+    const { helper, host } = setup(true, undefined, true, true);
+    const event = dispatchInput(host, helper, "compositionstart");
+    expect(event.defaultPrevented).toBe(false);
+    expect(helper.getAttribute("inputmode")).toBe("text");
+    expect(helper.getAttribute("data-native-touch-input")).toBeNull();
+    pointer(host, "touch");
+    expect(helper.getAttribute("data-native-touch-input")).toBe("");
+    pointer(host, "mouse");
+    expect(helper.getAttribute("data-native-touch-input")).toBeNull();
+    expect(helper.getAttribute("style")).toBe("left: 120px; top: 40px;");
   });
 });

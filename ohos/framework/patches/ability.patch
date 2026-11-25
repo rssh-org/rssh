@@ -2254,7 +2254,7 @@ index a33bb86..75fad70 100644
        throw new Error(`openLink failed: ${String(error)}`);
      }
 diff --git a/plugins/webview/src/main/ets/WebviewPlugin.ets b/plugins/webview/src/main/ets/WebviewPlugin.ets
-index ef07248..4cb225f 100644
+index ef07248..f878728 100644
 --- a/plugins/webview/src/main/ets/WebviewPlugin.ets
 +++ b/plugins/webview/src/main/ets/WebviewPlugin.ets
 @@ -2,6 +2,9 @@ import { WebHeader } from "@kit.ArkUI";
@@ -2291,7 +2291,25 @@ index ef07248..4cb225f 100644
    url?: string | null;
    html?: string | null;
    style?: WebviewStyle | null;
-@@ -116,10 +122,12 @@ interface ManagedWebview extends WebviewCreatePayload {
+@@ -103,7 +109,17 @@ interface ScriptPayload {
+   script: string;
+ }
+ 
++/** Optional host edit-menu behavior; the WebView retains its default menu without it. */
++export interface WebviewEditMenu {
++  readonly options: EditMenuOptions;
++  onTouch(event: TouchEvent): void;
++  reset(): void;
++}
++
++export type WebviewEditMenuFactory = (controller: webview.WebviewController) => WebviewEditMenu;
++
+ interface ManagedWebview extends WebviewCreatePayload {
++  editMenu?: WebviewEditMenu;
+   controller: WebviewController;
+   /** Process-unique ArkWeb controller tag; distinct from the module-local public ID. */
+   nativeTag: string;
+@@ -116,10 +132,12 @@ interface ManagedWebview extends WebviewCreatePayload {
    failControllerAttach: (reason: string) => void;
    onNavigationRequest: (url: string) => boolean;
    onTitleChange: (title: string) => void;
@@ -2304,7 +2322,7 @@ index ef07248..4cb225f 100644
    /** Host-internal cleanup key; WebView IDs remain opaque business identifiers. */
    mountKey: string;
  }
-@@ -320,6 +328,20 @@ class WebviewTitleChangeEvent {
+@@ -320,6 +338,20 @@ class WebviewTitleChangeEvent {
    }
  }
  
@@ -2325,7 +2343,7 @@ index ef07248..4cb225f 100644
  class WebviewEngineLifecycleEvent {
    readonly phase: string;
    readonly schemes: WebviewSchemeDeclaration[];
-@@ -496,6 +518,7 @@ function normalizeEventOptions(
+@@ -496,6 +528,7 @@ function normalizeEventOptions(
      downloadStart: optionalEventFlag(options?.downloadStart, "WebView eventOptions.downloadStart"),
      downloadEnd: optionalEventFlag(options?.downloadEnd, "WebView eventOptions.downloadEnd"),
      titleChange: optionalEventFlag(options?.titleChange, "WebView eventOptions.titleChange"),
@@ -2333,16 +2351,41 @@ index ef07248..4cb225f 100644
    };
  }
  
-@@ -772,6 +795,8 @@ function BuildWebview(data: ManagedWebview) {
+@@ -746,6 +779,8 @@ function BuildWebview(data: ManagedWebview) {
+     .domStorageAccess(data.domStorageAccess ?? false)
+     .mediaPlayGestureAccess(data.autoplay === true ? false : true)
+     .javaScriptOnDocumentStart(data.initializationScripts ?? [])
++    .editMenuOptions(data.editMenu?.options)
++    .onTouch((event: TouchEvent) => data.editMenu?.onTouch(event))
+     .onControllerAttached(() => {
+       if (!data.beginControllerAttach()) {
+         return;
+@@ -772,6 +807,11 @@ function BuildWebview(data: ManagedWebview) {
        }
      })
      .onLoadIntercept((event) => data.onNavigationRequest(event.data.getRequestUrl()))
-+    .onPageBegin((event) => data.onPageLoad(event.url, true))
++    .onPageBegin((event) => {
++      data.editMenu?.reset();
++      data.onPageLoad(event.url, true);
++    })
 +    .onPageEnd((event) => data.onPageLoad(event.url, false))
      .onTitleReceive((event) => data.onTitleChange(event.title));
  }
  
-@@ -799,12 +824,22 @@ class WebviewSurface {
+@@ -788,8 +828,11 @@ class WebviewSurface {
+   private nextMountKey = 1;
+   private readonly pluginContext: BridgePluginContext;
+ 
+-  constructor(pluginContext: BridgePluginContext) {
++  private readonly editMenuFactory?: WebviewEditMenuFactory;
++
++  constructor(pluginContext: BridgePluginContext, editMenuFactory?: WebviewEditMenuFactory) {
+     this.pluginContext = pluginContext;
++    this.editMenuFactory = editMenuFactory;
+   }
+ 
+   async create(payload: WebviewCreatePayload, callContext: BridgeCallContext): Promise<void> {
+@@ -799,12 +842,22 @@ class WebviewSurface {
      const style = normalizeStyle(payload.style, payload.transparent);
      const eventOptions = normalizeEventOptions(payload.eventOptions);
      const parentHandle = payload.parentHandle ?? null;
@@ -2365,7 +2408,7 @@ index ef07248..4cb225f 100644
        mountKey: `ohos.webview.${instanceId}`,
        nativeTag,
        url: payload.url,
-@@ -846,6 +881,21 @@ class WebviewSurface {
+@@ -846,6 +899,21 @@ class WebviewSurface {
            console.error("WebView title notification failed: " + String(error));
          }
        },
@@ -2387,7 +2430,12 @@ index ef07248..4cb225f 100644
        onDownloadStart: (url: string, tempPath: string | null): WebviewDownloadStartResponse => {
          return downloadStartDecision(this.pluginContext, payload.id, nativeTag, url, tempPath);
        },
-@@ -869,7 +919,7 @@ class WebviewSurface {
+@@ -865,11 +933,12 @@ class WebviewSurface {
+         }
+       },
+     };
++    data.editMenu = this.editMenuFactory?.(data.controller as webview.WebviewController);
+     ensureWebEngineInitialized(callContext);
      if (payload.devtools) {
        enableWebDebuggingIfAvailable();
      }
@@ -2396,7 +2444,7 @@ index ef07248..4cb225f 100644
      const entry = new WebviewEntry(data, node);
      data.beginControllerAttach = (): boolean => entry.beginControllerAttach();
      data.notifyNativeControllerAttached = (): void => {
-@@ -891,7 +941,9 @@ class WebviewSurface {
+@@ -891,7 +960,9 @@ class WebviewSurface {
        if (frameNode === null) {
          throw new Error(`Unable to build WebView '${payload.id}': no FrameNode`);
        }
@@ -2407,7 +2455,19 @@ index ef07248..4cb225f 100644
          this.pluginContext.getFrameNode(parentHandle).appendChild(frameNode);
        } else {
          this.pluginContext.appendChild(data.mountKey, frameNode, (): void => {
-@@ -1024,7 +1076,9 @@ class WebviewSurface {
+@@ -920,6 +991,7 @@ class WebviewSurface {
+     if (!entry) {
+       return false;
+     }
++    if (!visible) entry.data.editMenu?.reset();
+     entry.data.style.visible = visible;
+     entry.node.update(entry.data);
+     return true;
+@@ -1021,10 +1093,13 @@ class WebviewSurface {
+       return false;
+     }
+     this.entries.delete(id);
++    entry.data.editMenu?.reset();
      entry.failController(`WebView '${id}' was removed before its controller attached`);
      if (detachNode) {
        const parentHandle = entry.data.mountParentHandle;
@@ -2418,6 +2478,32 @@ index ef07248..4cb225f 100644
          const frameNode = entry.node.getFrameNode();
          if (frameNode !== null) {
            try {
+@@ -1103,8 +1178,15 @@ export class WebviewPlugin extends AsyncPluginBase {
+   readonly requires: BridgeContextRequirement[] = ["ui-context"];
+   private surface?: WebviewSurface;
+ 
++  private readonly editMenuFactory?: WebviewEditMenuFactory;
++
++  constructor(editMenuFactory?: WebviewEditMenuFactory) {
++    super();
++    this.editMenuFactory = editMenuFactory;
++  }
++
+   override onInstall(_context: BridgePluginHookContext): void {
+-    this.surface = new WebviewSurface(this.getContext());
++    this.surface = new WebviewSurface(this.getContext(), this.editMenuFactory);
+   }
+ 
+   override onLifecycle(event: BridgeLifecycleEvent, _context: BridgePluginHookContext): void {
+@@ -1115,7 +1197,7 @@ export class WebviewPlugin extends AsyncPluginBase {
+       return;
+     }
+     if (event.kind === "ui-context-ready" && this.surface === undefined) {
+-      this.surface = new WebviewSurface(this.getContext());
++      this.surface = new WebviewSurface(this.getContext(), this.editMenuFactory);
+     }
+   }
+ 
 diff --git a/plugins/window/src/main/ets/ManagedWindows.ets b/plugins/window/src/main/ets/ManagedWindows.ets
 new file mode 100644
 index 0000000..5d60170
@@ -2805,3 +2891,10 @@ index ca6b05b..25b9986 100644
      const windows = Array.from(this.windows.values());
      this.windows.clear();
      await Promise.all(
+diff --git a/plugins/webview/index.ets b/plugins/webview/index.ets
+index 7e5d969..6d0b138 100644
+--- a/plugins/webview/index.ets
++++ b/plugins/webview/index.ets
+@@ -1 +1 @@
+-export { WebviewPlugin } from "./src/main/ets/WebviewPlugin";
++export { WebviewPlugin, WebviewEditMenu, WebviewEditMenuFactory } from "./src/main/ets/WebviewPlugin";
