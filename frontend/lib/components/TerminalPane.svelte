@@ -53,6 +53,7 @@
     import {registerBracketedPasteProvider, unregisterBracketedPasteProvider} from "../terminal/bracketed-paste.ts";
     import {registerAlternateScreenProvider, unregisterAlternateScreenProvider} from "../terminal/alternate-screen.ts";
     import {setupXtermIme229Workaround} from "../terminal/xterm-ime-229-workaround.ts";
+    import {setupXtermNativeTouch} from "../terminal/xterm-native-touch.ts";
     import {disposeWebglAddon} from "../terminal/webgl-addon.ts";
     import {createReservedSessionAttempt} from "../terminal/reserved-session-attempt.ts";
     import {sessionCleanupScope} from "../stores/session-cleanup.svelte.ts";
@@ -667,6 +668,7 @@
     let reconnectDisposable: IDisposable | undefined;
     let resizeObs: ResizeObserver;
     let ime229WorkaroundCleanup: (() => void) | undefined;
+    let nativeTouchCleanup: (() => void) | undefined;
     let softKeyboard = $state.raw<ReturnType<typeof setupTerminalSoftKeyboard>>();
     let softKeyboardRequested = $state(false);
     let touchScrollCleanup: (() => void) | undefined;
@@ -1572,6 +1574,7 @@
             softKeyboard = setupTerminalSoftKeyboard({
                 helper, host: containerEl, pane: paneEl, touchAvailable: supportsTouch(),
                 keybarAvailable: app.capabilities().terminalKeybar,
+                nativeTouchInput: isIOS,
                 onRequestedChange: (requested) => {
                     softKeyboardRequested = requested;
                     if (app.activeTabId() === tabId && !app.settingsActive()) {
@@ -1582,6 +1585,7 @@
         }
         // The handler consumes touch events only; mouse/wheel input keeps xterm's path.
         touchScrollCleanup = setupTouchScroll(containerEl, terminal);
+        nativeTouchCleanup = setupXtermNativeTouch({ terminal, host: containerEl, enabled: isIOS });
 
         // Metadata may resolve after activation; keep any focus the user moved meanwhile.
         if (app.activeTabId() === tabId && !app.settingsActive()
@@ -1870,6 +1874,7 @@
         resizeObs?.disconnect();
         ime229WorkaroundCleanup?.();
         ime229WorkaroundCleanup = undefined;
+        nativeTouchCleanup?.();
         if (softKeyboard) {
             app.unregisterSoftKeyboardToggle(softKeyboard.toggle);
             softKeyboard.dispose();

@@ -118,7 +118,7 @@
     <button class="key" onpointerdown={prevent} onclick={() => arrow('D')}>←</button>
     <button class="key" onpointerdown={prevent} onclick={() => arrow('C')}>→</button>
     <button class="key" class:active={extOpen} title="More keys" aria-label="More keys" onpointerdown={prevent} onclick={() => extOpen = !extOpen}>⋯</button>
-    <button class="key" class:active={app.softKeyboardOpen()} title={t("terminal.keyboard")} aria-label={t("terminal.keyboard")} aria-pressed={app.softKeyboardOpen()} onpointerdown={prevent} onclick={() => app.toggleSoftKeyboard()}>
+    <button class="key" class:active={app.softKeyboardOpen()} title={t("terminal.keyboard")} aria-label={t("terminal.keyboard")} aria-pressed={app.softKeyboardOpen()} onpointerdown={prevent} onmousedown={prevent} onclick={() => app.toggleSoftKeyboard()}>
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
             <rect x="2" y="5" width="20" height="14" rx="2" />
             <path d="M5 9h2m2 0h2m2 0h2m2 0h2M5 12h2m2 0h2m2 0h2m2 0h2M7 15h10" />

@@ -6,6 +6,7 @@ interface SoftKeyboardOptions {
   pane: HTMLElement;
   touchAvailable: boolean;
   keybarAvailable: boolean;
+  nativeTouchInput?: boolean;
   onRequestedChange: (requested: boolean) => void;
 }
 
@@ -13,6 +14,7 @@ interface SoftKeyboardOptions {
  * textarea stays focusable so a hardware keyboard can unlock it on its first key. */
 export function setupTerminalSoftKeyboard({
   helper, host, pane, touchAvailable, keybarAvailable, onRequestedChange,
+  nativeTouchInput = false,
 }: SoftKeyboardOptions) {
   let unpinnedStyle: string | null | undefined;
   const originalInputMode = helper.getAttribute("inputmode");
@@ -79,13 +81,17 @@ export function setupTerminalSoftKeyboard({
   }
 
   function lock() {
-    helper.readOnly = true;
+    // WebKit needs an editable input for its native Paste menu. inputmode=none
+    // keeps the keyboard behind the explicit button without disabling Paste.
+    helper.readOnly = !nativeTouchInput;
     helper.setAttribute("inputmode", "none");
+    if (nativeTouchInput) helper.setAttribute("data-native-touch-input", "");
   }
 
   function unlock() {
     helper.readOnly = false;
     helper.setAttribute("inputmode", "text");
+    helper.removeAttribute("data-native-touch-input");
   }
 
   function hide() {
@@ -96,8 +102,9 @@ export function setupTerminalSoftKeyboard({
   }
 
   function show() {
-    // Re-focus after readonly so an already-focused helper can summon the IME.
-    helper.blur();
+    // WebKit updates a focused editable input's keyboard when inputmode changes.
+    // Blurring first loses that update; readonly inputs still need re-focusing.
+    if (!nativeTouchInput || document.activeElement !== helper) helper.blur();
     setRequested(true);
     unlock();
     pinHelper();
@@ -110,6 +117,13 @@ export function setupTerminalSoftKeyboard({
     if (!keybarAvailable) return;
     if (event.pointerType === "touch" || event.pointerType === "pen") {
       touchInput = true;
+      if (nativeTouchInput && !requested) {
+        // Blurring xterm redraws every DOM row and removes the text WebKit
+        // just hit-tested. Preserve focus so native long-press selection and
+        // the next hardware key both keep their targets.
+        lock();
+        return;
+      }
       hide();
     } else if (event.pointerType === "mouse") {
       touchInput = false;
@@ -121,7 +135,7 @@ export function setupTerminalSoftKeyboard({
 
   function onHardwareInput(event: Event) {
     if (event.target !== helper) return;
-    if (helper.readOnly) {
+    if (helper.readOnly || helper.getAttribute("data-native-touch-input") !== null) {
       unlock();
       restoreHelperStyle();
     }
@@ -171,6 +185,7 @@ export function setupTerminalSoftKeyboard({
       restoreHelperStyle();
       if (scrollResetRaf) cancelAnimationFrame(scrollResetRaf);
       helper.readOnly = originalReadOnly;
+      helper.removeAttribute("data-native-touch-input");
       if (originalInputMode === null) helper.removeAttribute("inputmode");
       else helper.setAttribute("inputmode", originalInputMode);
     },

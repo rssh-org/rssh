@@ -135,6 +135,27 @@ html, body {
 }
 /* Terminal 内恢复选择 */
 .xterm { user-select: text; -webkit-user-select: text; }
+/* Keep WebKit from zooming when the terminal input receives focus. */
+.xterm-native-touch .xterm-helper-textarea { font-size: 16px; }
+.xterm-native-touch.xterm-native-cursor .xterm-helper-textarea[data-native-touch-input] {
+  opacity: 1;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+  caret-color: transparent;
+  outline: none;
+  appearance: none;
+  pointer-events: auto;
+  min-width: 44px;
+  min-height: 32px;
+  /* xterm writes inline geometry on cursor movement; these apply only while
+     native touch input is available, never to the pinned keyboard helper. */
+  left: var(--native-cursor-left) !important;
+  top: var(--native-cursor-top) !important;
+  z-index: 10 !important;
+}
 /* AI 对话面板内恢复选择（用户要复制 LLM 输出 / 命令文本） */
 .ai-panel, .ai-panel * { user-select: text; -webkit-user-select: text; }
 #app {
