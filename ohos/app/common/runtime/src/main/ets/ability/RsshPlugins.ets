@@ -9,6 +9,7 @@ import { ClipboardPlugin } from '../plugins/ClipboardPlugin';
 import { FilesAccessPlugin } from '../plugins/FilesAccessPlugin';
 import { RuntimePlugin } from '../plugins/RuntimePlugin';
 import { SerialPlugin } from '../plugins/SerialPlugin';
+import { TerminalEditMenu } from './TerminalEditMenu';
 
 export function rsshPlugins(systemBack: boolean = false): BridgePluginFactory[] {
   return [
@@ -16,7 +17,7 @@ export function rsshPlugins(systemBack: boolean = false): BridgePluginFactory[] 
     new LazyPlugin(() => new FilesPlugin()),
     new LazyPlugin(() => new PermissionPlugin()),
     new LazyPlugin(() => new UrlPlugin()),
-    new LazyPlugin(() => new WebviewPlugin()),
+    new LazyPlugin(() => new WebviewPlugin((controller) => new TerminalEditMenu(controller))),
     new LazyPlugin(() => new WindowPlugin()),
     new LazyPlugin(() => new ClipboardPlugin()),
     new LazyPlugin(() => new FilesAccessPlugin()),

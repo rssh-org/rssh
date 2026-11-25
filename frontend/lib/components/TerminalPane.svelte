@@ -263,22 +263,33 @@
         return registerBack({ enabled: () => showSearch && app.activePaneId() === tabId, handle: closeSearch });
     });
 
-    // Android's native selection menu belongs to read-only terminal output.
+    // The native selection menu belongs to read-only terminal output.
     // Bind its paste action to this connection, including across reconnects.
     $effect(() => {
         const sid = sessionId;
         if (!sid || disconnected) return;
         const host = containerEl;
         const eventName = `terminal:paste:${sid}`;
-        const onPaste = (event: Event) => {
-            if (destroyed || disconnected || sessionId !== sid
-                || app.settingsActive()
-                || !app.paneIdsForWorkspace(app.activeWorkspaceId()).includes(tabId)) return;
-            const { text, error } = (event as CustomEvent<{ text?: string; error?: string }>).detail ?? {};
+        const canPaste = () => !destroyed && !disconnected && sessionId === sid
+            && !app.settingsActive()
+            && app.paneIdsForWorkspace(app.activeWorkspaceId()).includes(tabId);
+        const onPaste = async (event: Event) => {
+            if (!canPaste()) return;
+            const { text, error, readClipboard: shouldRead } = (event as CustomEvent<{
+                text?: string; error?: string; readClipboard?: boolean;
+            }>).detail ?? {};
             if (typeof error === "string") {
                 toast.error(t("error.window_clipboard_failed", { op: "read", err: error }));
             } else if (typeof text === "string") {
                 pasteText(text);
+            } else if (shouldRead === true) {
+                try {
+                    const value = await readClipboard();
+                    // The clipboard permission prompt can outlive this connection or pane.
+                    if (canPaste()) pasteText(value);
+                } catch (error) {
+                    if (canPaste()) toast.error(errMsg(error));
+                }
             }
         };
         host.addEventListener(eventName, onPaste);
