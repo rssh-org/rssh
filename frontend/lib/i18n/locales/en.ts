@@ -96,6 +96,7 @@ const en = {
   "tab.context.split.right": "Right",
   "terminal.pane.activate": "Activate {label}",
   "edit.select_target": "Select {label} for broadcast",
+  "edit.resize_targets": "Resize target sessions",
   "terminal.pane.close": "Close pane",
   "terminal.pane.resize": "Resize panes",
   "terminal.keyboard": "On-screen keyboard",

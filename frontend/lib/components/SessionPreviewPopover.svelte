@@ -1,10 +1,13 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import * as app from "../stores/app.svelte.ts";
+  import * as theme from "../themes/store.svelte.ts";
 
   let { tabId, anchor }: { tabId: string; anchor: DOMRect } = $props();
 
   let lines = $state<string[]>([]);
+  // Unused screen rows must not push a short terminal's output out of view.
+  let text = $derived(lines.join("\n").trimEnd());
   let timer: ReturnType<typeof setInterval> | undefined;
 
   const REFRESH_MS = 300;
@@ -23,20 +26,28 @@
   let right = $derived(Math.max(GAP, window.innerWidth - anchor.left + GAP));
   let top = $derived(Math.max(GAP, Math.min(anchor.top, window.innerHeight - measuredH - GAP)));
 
+  // Effects run after the text/font update reaches the DOM. Keep the last
+  // populated row visible when the full-size text exceeds the popover height.
+  $effect(() => {
+    text;
+    theme.termFontSize();
+    measuredH;
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+
   function pull() {
     lines = app.readTerminalViewportText(tabId) ?? [];
   }
 
   onMount(() => {
     pull();
-    measuredH = el.offsetHeight;
     timer = setInterval(pull, REFRESH_MS);
   });
   onDestroy(() => clearInterval(timer));
 </script>
 
-<div bind:this={el} class="preview-popover" style="right: {right}px; top: {top}px;">
-  <pre>{lines.join("\n")}</pre>
+<div bind:this={el} bind:offsetHeight={measuredH} class="preview-popover" style="right: {right}px; top: {top}px; width: min(560px, calc(100vw - {right + GAP}px));">
+  <pre style:font-size="{theme.termFontSize()}px">{text}</pre>
 </div>
 
 <style>
@@ -45,8 +56,6 @@
     z-index: 1000;
     /* Preview is a glance, not a mirror: clamp width to a stable band and just
        clip anything wider (overflow: hidden). min() keeps it on-screen. */
-    min-width: min(560px, calc(100vw - 220px));
-    max-width: min(560px, calc(100vw - 220px));
     max-height: calc(100vh - 200px);
     min-height: calc(100vh - 200px);
     overflow: hidden;
@@ -62,7 +71,6 @@
   .preview-popover pre {
     margin: 0;
     font-family: var(--term-font);
-    font-size: 11px;
     line-height: 1.25;
     white-space: pre;
     color: inherit;

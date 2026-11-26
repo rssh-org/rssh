@@ -1602,7 +1602,7 @@
             sendText,
             focus: () => terminal.focus(),
             readViewport: () => readViewportSnapshot(terminal),
-            readViewportText: () => readViewportText(terminal),
+            readViewportText: (recentRows) => readViewportText(terminal, recentRows),
         });
         // Expose xterm's live bracketed-paste mode so the AI store can wrap
         // AI-driven pastes the same way xterm wraps manual ones. See
