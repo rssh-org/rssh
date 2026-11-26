@@ -6,6 +6,8 @@
   let { tabId, anchor }: { tabId: string; anchor: DOMRect } = $props();
 
   let lines = $state<string[]>([]);
+  // Unused screen rows must not push a short terminal's output out of view.
+  let text = $derived(lines.join("\n").trimEnd());
   let timer: ReturnType<typeof setInterval> | undefined;
 
   const REFRESH_MS = 300;
@@ -24,20 +26,28 @@
   let right = $derived(Math.max(GAP, window.innerWidth - anchor.left + GAP));
   let top = $derived(Math.max(GAP, Math.min(anchor.top, window.innerHeight - measuredH - GAP)));
 
+  // Effects run after the text/font update reaches the DOM. Keep the last
+  // populated row visible when the full-size text exceeds the popover height.
+  $effect(() => {
+    text;
+    theme.termFontSize();
+    measuredH;
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+
   function pull() {
     lines = app.readTerminalViewportText(tabId) ?? [];
   }
 
   onMount(() => {
     pull();
-    measuredH = el.offsetHeight;
     timer = setInterval(pull, REFRESH_MS);
   });
   onDestroy(() => clearInterval(timer));
 </script>
 
-<div bind:this={el} class="preview-popover" style="right: {right}px; top: {top}px; width: min(560px, calc(100vw - {right + GAP}px));">
-  <pre style:font-size="{theme.termFontSize()}px">{lines.join("\n")}</pre>
+<div bind:this={el} bind:offsetHeight={measuredH} class="preview-popover" style="right: {right}px; top: {top}px; width: min(560px, calc(100vw - {right + GAP}px));">
+  <pre style:font-size="{theme.termFontSize()}px">{text}</pre>
 </div>
 
 <style>

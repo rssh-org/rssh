@@ -169,6 +169,55 @@ describe("broadcast editor target sessions", () => {
     expect(document.querySelector(".preview-popover")).toBeNull();
   });
 
+  it("keeps the hover preview's last output visible after refreshes and font changes", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let rows = [...Array.from({ length: 30 }, (_, index) => `output ${index + 1}`), "", "finished", "", ""];
+    let contentHeight = 900;
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("preview-popover") ? contentHeight : 0;
+    });
+    registerPreview("first", (recentRows) => recentRows ? rows.slice(-recentRows) : rows);
+    await render();
+    card("first").querySelector<HTMLButtonElement>(".session-open")!
+      .dispatchEvent(new MouseEvent("mouseenter"));
+    await settle();
+
+    const popover = document.querySelector<HTMLElement>(".preview-popover")!;
+    const text = popover.querySelector("pre")!;
+    // happy-dom does not perform scrolling layout; this checks the requested
+    // scroll position. Browser validation covers the actual visible last row.
+    expect(popover.scrollTop).toBe(900);
+    expect(text.textContent).toBe(rows.join("\n").trimEnd());
+    expect(text.textContent).toContain("output 30\n\nfinished");
+
+    rows = [...rows, "new output", "new prompt $", "", ""];
+    contentHeight = 1200;
+    await vi.advanceTimersByTimeAsync(300);
+    await settle();
+    expect(popover.scrollTop).toBe(1200);
+    expect(text.textContent).toBe(rows.join("\n").trimEnd());
+    expect(text.textContent).toMatch(/new output\nnew prompt \$$/);
+
+    contentHeight = 1500;
+    await theme.setTermFontSize(24);
+    await settle();
+    expect(text.style.fontSize).toBe("24px");
+    expect(popover.scrollTop).toBe(1500);
+  });
+
+  it("drops unused viewport rows after short output without removing interior blank lines", async () => {
+    const rows = ["  server ready", "", "shell $ ", ...Array<string>(24).fill("")];
+    registerPreview("first", () => rows);
+    await render();
+    card("first").querySelector<HTMLButtonElement>(".session-open")!
+      .dispatchEvent(new MouseEvent("mouseenter"));
+    await settle();
+
+    const popover = document.querySelector<HTMLElement>(".preview-popover")!;
+    expect(popover.querySelector("pre")!.textContent).toBe("  server ready\n\nshell $");
+    expect(popover.scrollTop).toBe(0);
+  });
+
   it("stops reading hidden or removed targets and immediately refreshes on activation", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const read = vi.fn<(...args: [number?]) => string[] | null>(() => null);
