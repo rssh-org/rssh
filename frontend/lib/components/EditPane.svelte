@@ -8,8 +8,9 @@
   import { shell } from "@codemirror/legacy-modes/mode/shell";
   import { tags as t } from "@lezer/highlight";
   import * as app from "../stores/app.svelte.ts";
-  import SessionMinimap from "./SessionMinimap.svelte";
+  import SessionPreview from "./SessionPreview.svelte";
   import SessionPreviewPopover from "./SessionPreviewPopover.svelte";
+  import { resizePanelWidth } from "./panel-widths.ts";
   import { pickBroadcastText } from "../terminal/broadcast-text.ts";
   import AppIcon from "./AppIcon.svelte";
   import { tabIconName } from "./app-icon";
@@ -19,6 +20,62 @@
 
   let editorEl: HTMLDivElement;
   let view: EditorView;
+  let paneEl: HTMLDivElement;
+  let paneWidth = $state(0);
+  let panelEl: HTMLDivElement;
+  let panelWidth = $state(320);
+  let stopResize: (() => void) | undefined;
+
+  function resizedWidth(startWidth: number, deltaX: number) {
+    const width = paneEl.getBoundingClientRect().width;
+    return resizePanelWidth({
+      startWidth, deltaX, sign: -1,
+      minWidth: Math.min(160, width * 0.7),
+      containerWidth: width, mainMinWidth: width * 0.3,
+      otherPanelVisible: false,
+    });
+  }
+
+  function startResize(event: PointerEvent) {
+    if (event.button !== 0 || stopResize) return;
+    event.preventDefault();
+    clearHover();
+    const separator = event.currentTarget as HTMLElement;
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startWidth = panelEl.getBoundingClientRect().width;
+    separator.setPointerCapture(pointerId);
+
+    function move(next: PointerEvent) {
+      if (next.pointerId !== pointerId) return;
+      next.preventDefault();
+      panelWidth = resizedWidth(startWidth, next.clientX - startX);
+    }
+    function stop(next?: PointerEvent) {
+      if (next && next.pointerId !== pointerId) return;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      window.removeEventListener("blur", cancel);
+      separator.removeEventListener("lostpointercapture", stop);
+      stopResize = undefined;
+      if (separator.hasPointerCapture(pointerId)) separator.releasePointerCapture(pointerId);
+    }
+    const cancel = () => stop();
+    stopResize = cancel;
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+    window.addEventListener("blur", cancel);
+    separator.addEventListener("lostpointercapture", stop);
+  }
+
+  function resizeWithKeyboard(event: KeyboardEvent) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    clearHover();
+    panelWidth = resizedWidth(panelEl.getBoundingClientRect().width, event.key === "ArrowLeft" ? -24 : 24);
+  }
 
   let sessions = $derived(app.connectedSessions());
   let selectedTabIds = $state<Set<string>>(new Set());
@@ -140,7 +197,7 @@
     view.focus();
   });
 
-  onDestroy(() => { view?.destroy(); });
+  onDestroy(() => { stopResize?.(); view?.destroy(); });
 
   // The pane stays mounted while hidden (AppShell toggles visibility), so
   // re-measure and focus when it becomes visible again: a display:none
@@ -150,14 +207,33 @@
     if (active) {
       view?.requestMeasure();
       view?.focus();
+    } else {
+      stopResize?.();
+      clearHover();
     }
   });
 </script>
 
-<div class="edit-pane">
+<div class="edit-pane" bind:this={paneEl} bind:clientWidth={paneWidth}>
   <div class="editor-area" bind:this={editorEl}></div>
 
-  <div class="session-panel">
+  <div class="session-panel" bind:this={panelEl} style:width="min({panelWidth}px, 70%)">
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (A focusable ARIA window splitter supports arrow-key resizing.) -->
+    <div
+      class="session-resize"
+      role="separator"
+      tabindex="0"
+      aria-label={translate("edit.resize_targets")}
+      aria-orientation="vertical"
+      aria-valuemin={Math.min(160, paneWidth * 0.7)}
+      aria-valuemax={paneWidth * 0.7}
+      aria-valuenow={Math.min(panelWidth, paneWidth * 0.7)}
+      aria-valuetext="{Math.round(Math.min(panelWidth, paneWidth * 0.7))}px"
+      title={translate("common.resize_hint")}
+      onpointerdown={startResize}
+      onkeydown={resizeWithKeyboard}
+      ondblclick={() => { panelWidth = 320; }}
+    ></div>
     <div class="panel-header">Target Sessions</div>
 
     {#if sessions.length === 0}
@@ -175,7 +251,7 @@
               aria-label={translate("terminal.pane.activate", { label: s.label })}
               title={s.label}
             >
-              <SessionMinimap tabId={s.tabId} />
+              <SessionPreview tabId={s.tabId} {active} />
               <span class="session-meta">
                 <span class="session-type"><AppIcon name={tabIconName(s.type)} size={13} /></span>
                 <span class="session-label">{s.label}</span>
@@ -218,6 +294,7 @@
     height: 100%;
     width: 100%;
     min-height: 0;
+    min-width: 0;
   }
 
   .editor-area {
@@ -231,7 +308,7 @@
   }
 
   .session-panel {
-    width: 200px;
+    position: relative;
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
@@ -240,6 +317,24 @@
     padding: 12px;
     gap: 8px;
     min-height: 0;
+    min-width: 0;
+  }
+
+  .session-resize {
+    position: absolute;
+    left: -6px;
+    top: 0;
+    width: 12px;
+    height: 100%;
+    z-index: 1;
+    cursor: col-resize;
+    touch-action: none;
+  }
+
+  .session-resize:hover,
+  .session-resize:focus-visible {
+    background: color-mix(in srgb, var(--accent) 25%, transparent);
+    outline: none;
   }
 
   .panel-header {
@@ -260,6 +355,7 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    overflow-x: hidden;
     display: flex;
     flex-direction: column;
     gap: 8px;

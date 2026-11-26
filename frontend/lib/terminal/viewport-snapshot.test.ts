@@ -112,6 +112,36 @@ describe("readViewportText", () => {
     expect(readViewportText(fakeSource(["ab"], { cols: 2, rows: 2 }))).toEqual(["ab", ""]);
   });
 
+  it("reads the newest rows while the main terminal is scrolled into history", () => {
+    const src = fakeSource(["old 0", "old 1", "old 2", "old 3", "live 0", "live 1", "live 2", "live 3", "$", ""], {
+      rows: 6, baseY: 4, cursorY: 4,
+    });
+    expect(readViewportText(src, 5)).toEqual(["live 0", "live 1", "live 2", "live 3", "$"]);
+    expect(readViewportText(src)).toEqual(["old 0", "old 1", "old 2", "old 3", "live 0", "live 1"]);
+  });
+
+  it("omits unused rows below the cursor in a newly opened terminal", () => {
+    const src = fakeSource(["welcome", "$"], { rows: 24, cursorY: 1 });
+    expect(readViewportText(src, 5)).toEqual(["welcome", "$"]);
+  });
+
+  it("keeps a blank cursor row and interior blank rows in the recent tail", () => {
+    const src = fakeSource(["old", "one", "", "three", "four", "", ""], { cursorY: 5 });
+    expect(readViewportText(src, 5)).toEqual(["one", "", "three", "four", ""]);
+  });
+
+  it("keeps output below the cursor when a full-screen program moves the cursor up", () => {
+    const src = fakeSource(["header", "one", "two", "three", "four", "status", ""], { cursorY: 0 });
+    expect(readViewportText(src, 3)).toEqual(["three", "four", "status"]);
+  });
+
+  it("reads at most the requested number of recent rows", () => {
+    const src = fakeSource(["0", "1", "2", "3", "4", "5", "6"], { cursorY: 6 });
+    expect(readViewportText(src, 5)).toEqual(["2", "3", "4", "5", "6"]);
+    expect(readViewportText(src, 0)).toEqual([]);
+    expect(readViewportText(fakeSource([], { rows: 0 }), 5)).toEqual([]);
+  });
+
   it("collapses a wide glyph's trailing cell (width 0)", () => {
     // one wide char occupies cells 0 (width 2) + 1 (width 0)
     const src: ViewportSource = {
@@ -133,6 +163,7 @@ describe("readViewportText", () => {
       },
     };
     expect(readViewportText(src)).toEqual(["中"]);
+    expect(readViewportText(src, 5)).toEqual(["中"]);
   });
 });
 

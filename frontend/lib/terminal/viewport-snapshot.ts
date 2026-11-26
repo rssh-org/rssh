@@ -70,15 +70,18 @@ export function readViewportSnapshot(src: ViewportSource): ViewportSnapshot {
  * the hover preview. Same read-only, no-new-connection contract as
  * readViewportSnapshot. Interior blanks become spaces so an equal-width <pre>
  * stays aligned; a wide glyph's trailing cell (width 0) is skipped so the glyph
- * isn't doubled. Rows are right-trimmed.
+ * isn't doubled. Rows are right-trimmed. With recentRows, read the live screen
+ * instead of the scrolled viewport and return its tail, excluding unused rows
+ * below both the cursor and the last nonblank row.
  */
-export function readViewportText(src: ViewportSource): string[] {
+export function readViewportText(src: ViewportSource, recentRows?: number): string[] {
   const { cols, rows } = src;
   const buf = src.buffer.active;
   const lines: string[] = [];
+  const startY = recentRows === undefined ? buf.viewportY : buf.baseY;
 
   for (let r = 0; r < rows; r++) {
-    const line = buf.getLine(buf.viewportY + r);
+    const line = buf.getLine(startY + r);
     if (!line) {
       lines.push("");
       continue;
@@ -97,5 +100,8 @@ export function readViewportText(src: ViewportSource): string[] {
     lines.push(s.replace(/\s+$/, ""));
   }
 
-  return lines;
+  if (recentRows === undefined) return lines;
+  let end = lines.length;
+  while (end > buf.cursorY + 1 && lines[end - 1] === "") end--;
+  return lines.slice(Math.max(0, end - Math.max(0, recentRows)), end);
 }

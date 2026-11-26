@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import * as app from "../stores/app.svelte.ts";
+  import * as theme from "../themes/store.svelte.ts";
 
   let { tabId, anchor }: { tabId: string; anchor: DOMRect } = $props();
 
@@ -35,8 +36,8 @@
   onDestroy(() => clearInterval(timer));
 </script>
 
-<div bind:this={el} class="preview-popover" style="right: {right}px; top: {top}px;">
-  <pre>{lines.join("\n")}</pre>
+<div bind:this={el} class="preview-popover" style="right: {right}px; top: {top}px; width: min(560px, calc(100vw - {right + GAP}px));">
+  <pre style:font-size="{theme.termFontSize()}px">{lines.join("\n")}</pre>
 </div>
 
 <style>
@@ -45,8 +46,6 @@
     z-index: 1000;
     /* Preview is a glance, not a mirror: clamp width to a stable band and just
        clip anything wider (overflow: hidden). min() keeps it on-screen. */
-    min-width: min(560px, calc(100vw - 220px));
-    max-width: min(560px, calc(100vw - 220px));
     max-height: calc(100vh - 200px);
     min-height: calc(100vh - 200px);
     overflow: hidden;
@@ -62,7 +61,6 @@
   .preview-popover pre {
     margin: 0;
     font-family: var(--term-font);
-    font-size: 11px;
     line-height: 1.25;
     white-space: pre;
     color: inherit;

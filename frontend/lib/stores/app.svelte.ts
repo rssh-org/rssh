@@ -789,9 +789,9 @@ interface TerminalControls {
   /** Read-only minimap projection of the visible viewport, for the broadcast
    *  editor's session previews. Optional: panes that predate it just show blank. */
   readViewport?(): ViewportSnapshot | null;
-  /** Read-only text of the visible viewport, one string per row, for the
-   *  hover preview. Optional, same as readViewport. */
-  readViewportText?(): string[] | null;
+  /** Read-only viewport text, or the live screen's tail when recentRows is
+   *  supplied. Optional, same as readViewport. */
+  readViewportText?(recentRows?: number): string[] | null;
 }
 
 const _terminalControls = new Map<string, TerminalControls>();
@@ -830,10 +830,10 @@ export function readTerminalViewport(tabId: string): ViewportSnapshot | null {
   return _terminalControls.get(tabId)?.readViewport?.() ?? null;
 }
 
-/** Read-only viewport text (one string per row) for a tab's hover preview, or
+/** Read-only viewport text, or recent live rows, for a tab's preview. Returns
  *  null if unavailable. Reuses the tab's existing terminal buffer. */
-export function readTerminalViewportText(tabId: string): string[] | null {
-  return _terminalControls.get(tabId)?.readViewportText?.() ?? null;
+export function readTerminalViewportText(tabId: string, recentRows?: number): string[] | null {
+  return _terminalControls.get(tabId)?.readViewportText?.(recentRows) ?? null;
 }
 /* ─── Session registry (for broadcast) ─── */
 interface SessionEntry {
